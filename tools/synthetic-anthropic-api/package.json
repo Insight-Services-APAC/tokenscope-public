@@ -1,0 +1,8 @@
+{
+  "name": "synthetic-anthropic-api",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Local stub for the Anthropic Admin Usage Report API. Returns deterministic per-user-per-day synthetic data so the TokenScope analytics-poller can be exercised end-to-end without a real Anthropic key.",
+  "type": "module",
+  "main": "server.js"
+}

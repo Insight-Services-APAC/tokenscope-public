@@ -1,0 +1,217 @@
+/*
+ * GET /api/v1/rollups/practice/:ouId — the rich single-practice view (AEUF "Practice · MPO"),
+ * for a cost-owning org_unit. docs/design/aeuf-region-practice-views.md.
+ *
+ * DUAL LANE (the TokenScope differentiator):
+ *   - USAGE signal — attribution_record summed over the practice SUBTREE by emit-home
+ *     `org_unit_id <@ practice.path` (the same homing the org-tree rollup uses; counts untagged
+ *     spend, NOT the project-CoU key). tool 'claude-code'/'copilot-cli' → vendor; else 'other'.
+ *   - RECONCILED bill — v_finance_bill_SHOWBACK summed by `cost_owning_unit_id <@ practice.path`
+ *     (the view already homes each teammate-day-tool to its nearest cost-owning ancestor). Same
+ *     population as the usage subtree → the two lanes reconcile. Intent: ADR-0010 rule 3 —
+ *     showback shows ALL genuine cost incl. NFR/exempt; the chargeback-exempt exclusion lives
+ *     ONLY in v_finance_bill_chargeback (the finance lane), never here.
+ *
+ * AUTHZ (RLS inert → in-query): the practice is visible iff the caller's region/subtree scope
+ * covers it (orgSubtreeScopePredicate) OR the caller is an ACTIVE owner of it (cou_owner). Every
+ * cross-practice panel (comparison) re-applies the caller's OWN scope — a pure owner never sees a
+ * sibling's numbers. Estimated/emitted usage; MTD (the 14-week trend is the exception).
+ */
+import { createError, defineEventHandler, getRouterParam } from 'h3'
+import { sql } from 'drizzle-orm'
+import { z } from 'zod'
+import { requireRole } from '../../../../auth/rbac'
+import { withRequestRls } from '../../../../db/request-rls'
+import { orgSubtreeScopePredicate } from '../../../../auth/org-subtree-scope'
+import { orgSubtreeIds } from '../../../../auth/org-subtree'
+import { monthStartIso } from '../../../../utils/period'
+import { toolToVendor, vendorCostSql } from '../../../../../shared/usage/vendor'
+
+// Flag a user when their current-week spend ≥ FLAG_MULT × their trailing weekly mean (lean
+// fixed threshold; the governance-dial version lives in the manager rollup).
+const FLAG_MULT = 2
+
+// Per-vendor MTD cost split over ar.cost_usd (shared definition — see shared/usage/vendor.ts).
+const { claude: claudeUsd, copilot: copilotUsd, other: otherUsd } = vendorCostSql('ar.cost_usd')
+
+export default defineEventHandler(async (event) => {
+  const caller = await requireRole(event, 'developer', 'manager', 'admin', 'global-finops', 'platform-admin')
+  // Only region-scoped roles get region-wide context (% of region / vs-region-avg). A manager or
+  // developer is capped at their own SUBTREE (org-tree's orgWide set), so the region-WIDE
+  // denominator spans BUs they can't see — pairing its recoverable ratio with usageUsd would leak
+  // the region total. Owners likewise get null. (Gate by role, NOT by "subtree covers this practice".)
+  const inRegionScope = caller.role === 'admin' || caller.role === 'global-finops' || caller.role === 'platform-admin'
+  const ouId = z.string().uuid().parse(getRouterParam(event, 'ouId'))
+
+  const monthStart = monthStartIso()
+
+  return await withRequestRls(event, async (tx) => {
+    // 1. Resolve + gate the practice (cost-owning, owner-aware).
+    const ownerClause = sql`EXISTS (
+      SELECT 1 FROM cou_owner co
+      WHERE co.org_unit_id = org_unit.id
+        AND co.teammate_id = NULLIF(current_setting('app.user_teammate_id', true), '')::uuid
+        AND co.revoked_at IS NULL)`
+    const pRows = await tx.execute<{ id: string; path: string; region_id: string; code: string; display_name: string; parent_id: string | null }>(sql`
+      SELECT id::text AS id, path::text AS path, region_id::text AS region_id, code, display_name, parent_id::text AS parent_id
+      FROM org_unit
+      WHERE id = ${ouId}::uuid AND retired_at IS NULL AND is_cost_owning_unit = TRUE
+        AND ( ${orgSubtreeScopePredicate('org_unit')} OR ${ownerClause} )
+      LIMIT 1`)
+    const p = [...pRows][0]
+    if (!p) throw createError({ statusCode: 403, statusMessage: 'practice not in your scope' })
+
+    // Practice usage subtree (emit-home units) and bill subtree (cost-owning units), region-clamped.
+    const usageScope = sql`ar.org_unit_id IN (${orgSubtreeIds(p.path, p.region_id)})`
+
+    // 2. Usage header + vendor split (one MTD pass).
+    const hdrRows = await tx.execute<{ usage_usd: string; tokens: string; users: number; claude: string; copilot: string; other: string }>(sql`
+      SELECT COALESCE(SUM(ar.cost_usd), 0)::text AS usage_usd, COALESCE(SUM(ar.tokens), 0)::text AS tokens,
+             COUNT(DISTINCT ar.teammate_id)::int AS users,
+             ${claudeUsd}::text AS claude, ${copilotUsd}::text AS copilot, ${otherUsd}::text AS other
+      FROM v_complete_usage ar
+      WHERE ${usageScope} AND ar.ts_event >= ${monthStart}::timestamptz`)
+    const h = [...hdrRows][0] ?? { usage_usd: '0', tokens: '0', users: 0, claude: '0', copilot: '0', other: '0' }
+    const usageUsd = Number(h.usage_usd)
+    const users = h.users
+
+    // 3. Reconciled bill (MTD) per vendor, over the cost-owning subtree.
+    const billRows = await tx.execute<{ tool: string | null; bill_usd: string; bill_tokens: string }>(sql`
+      SELECT b.tool, COALESCE(SUM(b.bill_usd), 0)::text AS bill_usd, COALESCE(SUM(b.bill_tokens), 0)::text AS bill_tokens
+      FROM v_finance_bill_showback b
+      WHERE b.cost_owning_unit_id IN (${orgSubtreeIds(p.path, p.region_id, { costOwningOnly: true })})
+        AND b.period_date >= ${monthStart}::date
+      GROUP BY b.tool`)
+    const bill = { claude: 0, copilot: 0, total: 0, tokens: 0 }
+    for (const r of billRows) {
+      const v = toolToVendor(r.tool)
+      const usd = Number(r.bill_usd)
+      bill.total += usd
+      bill.tokens += Number(r.bill_tokens)
+      if (v === 'claude') bill.claude += usd
+      else if (v === 'copilot') bill.copilot += usd
+    }
+
+    // 4. Region denominator for % of region + vs-region-avg — ONLY for callers with region/subtree
+    //    scope (a pure owner gets null, so they can't recover region totals from the ratio). Region-
+    //    clamped; ratios null when the denominator ≤ 0.
+    let pctOfRegion: number | null = null
+    let vsRegionAvgPct: number | null = null
+    if (inRegionScope) {
+      const regRows = await tx.execute<{ region_usd: string; practice_count: number }>(sql`
+        SELECT COALESCE(SUM(ar.cost_usd), 0)::text AS region_usd,
+               (SELECT COUNT(*)::int FROM org_unit WHERE region_id = ${p.region_id}::uuid AND is_cost_owning_unit = TRUE AND retired_at IS NULL) AS practice_count
+        FROM v_complete_usage ar
+        WHERE ar.region_id = ${p.region_id}::uuid AND ar.ts_event >= ${monthStart}::timestamptz`)
+      const reg = [...regRows][0] ?? { region_usd: '0', practice_count: 0 }
+      const regionUsd = Number(reg.region_usd)
+      pctOfRegion = regionUsd > 0 ? usageUsd / regionUsd : null
+      const regionAvgPerPractice = reg.practice_count > 0 ? regionUsd / reg.practice_count : null
+      vsRegionAvgPct = regionAvgPerPractice && regionAvgPerPractice > 0 ? usageUsd / regionAvgPerPractice - 1 : null
+    }
+
+    // 5. Top models.
+    const modelRows = await tx.execute<{ model: string; usage_usd: string }>(sql`
+      SELECT ar.model, COALESCE(SUM(ar.cost_usd), 0)::text AS usage_usd
+      FROM attribution_record ar
+      WHERE ${usageScope} AND ar.ts_event >= ${monthStart}::timestamptz
+      GROUP BY ar.model ORDER BY SUM(ar.cost_usd) DESC LIMIT 8`)
+
+    // 6. Users (top 25, MTD spend + vendors + velocity flag over a trailing 4-week window).
+    const userRows = await tx.execute<{ teammate_id: string; name: string; spend_usd: string; has_claude: boolean; has_copilot: boolean; flagged: boolean }>(sql`
+      WITH win AS (
+        SELECT ar.teammate_id, ar.ts_event, ar.cost_usd, ar.tool
+        FROM v_complete_usage ar
+        WHERE ${usageScope} AND ar.ts_event >= LEAST(${monthStart}::timestamptz, date_trunc('week', NOW()) - INTERVAL '3 weeks')
+      ),
+      per_user AS (
+        SELECT teammate_id,
+               COALESCE(SUM(cost_usd) FILTER (WHERE ts_event >= ${monthStart}::timestamptz), 0) AS mtd_spend,
+               bool_or(tool = 'claude-code') FILTER (WHERE ts_event >= ${monthStart}::timestamptz) AS has_claude,
+               bool_or(tool = 'copilot-cli') FILTER (WHERE ts_event >= ${monthStart}::timestamptz) AS has_copilot,
+               COALESCE(SUM(cost_usd) FILTER (WHERE ts_event >= date_trunc('week', NOW())), 0) AS cw,
+               COALESCE(SUM(cost_usd) FILTER (WHERE ts_event >= date_trunc('week', NOW()) - INTERVAL '3 weeks' AND ts_event < date_trunc('week', NOW())), 0) AS prior3
+        FROM win GROUP BY teammate_id
+      )
+      SELECT pu.teammate_id::text AS teammate_id, COALESCE(t.display_name, t.email) AS name,
+             pu.mtd_spend::text AS spend_usd, COALESCE(pu.has_claude, FALSE) AS has_claude, COALESCE(pu.has_copilot, FALSE) AS has_copilot,
+             (pu.prior3 > 0 AND pu.cw >= ${FLAG_MULT} * (pu.prior3 / 3.0)) AS flagged
+      FROM per_user pu JOIN teammate t ON t.id = pu.teammate_id
+      WHERE pu.mtd_spend > 0
+      ORDER BY pu.mtd_spend DESC LIMIT 25`)
+
+    // 7. 14-week trend (vendor-coloured). Reads v_effective_spend (hot raw + cold rollup) so the
+    //    trend survives ledger retention dropping >13-week-old raw. This is the USAGE-signal
+    //    trend, so it must include Copilot the same way the header (attribution_record) does.
+    //    Filter by the OTel SOURCE lanes (attribution + rollup), NOT spend_class='estimated':
+    //    Copilot OTel is cost_basis='telemetry-only' → spend_class='indicative' (mig 0039), so
+    //    the old 'estimated' filter hid Copilot from the trend while the header showed it
+    //    (ADR-0010 — keep the two consistent). 'reconciliation'-source deltas stay excluded.
+    const trendRows = await tx.execute<{ week_start: string; claude: string; copilot: string }>(sql`
+      SELECT date_trunc('week', es.occurred_at)::date::text AS week_start,
+             COALESCE(SUM(es.cost_usd) FILTER (WHERE es.tool = 'claude-code'), 0)::text  AS claude,
+             COALESCE(SUM(es.cost_usd) FILTER (WHERE es.tool = 'copilot-cli'), 0)::text  AS copilot
+      FROM v_effective_spend es
+      WHERE es.source IN ('attribution', 'rollup')
+        AND es.org_unit_id IN (${orgSubtreeIds(p.path, p.region_id)})
+        AND es.occurred_at >= date_trunc('week', NOW()) - INTERVAL '13 weeks'
+      GROUP BY 1 ORDER BY 1`)
+
+    // 8. Comparison — sibling practices, RE-GATED to the caller's own scope (per-panel; a pure
+    //    owner only sees practices they also own). Each sibling's subtree usage + vendor split.
+    const compRows = await tx.execute<{ id: string; display_name: string; code: string; usage_usd: string; claude: string; copilot: string }>(sql`
+      WITH sibs AS (
+        SELECT s.id, s.display_name, s.code, s.path
+        FROM org_unit s
+        WHERE s.is_cost_owning_unit = TRUE AND s.retired_at IS NULL AND s.region_id = ${p.region_id}::uuid
+          AND s.parent_id IS NOT DISTINCT FROM ${p.parent_id}::uuid
+          AND ( ${orgSubtreeScopePredicate('s')}
+                OR EXISTS (SELECT 1 FROM cou_owner co WHERE co.org_unit_id = s.id
+                           AND co.teammate_id = NULLIF(current_setting('app.user_teammate_id', true), '')::uuid AND co.revoked_at IS NULL) )
+      )
+      SELECT sibs.id::text AS id, sibs.display_name, sibs.code,
+             COALESCE(SUM(ar.cost_usd), 0)::text AS usage_usd,
+             ${claudeUsd}::text AS claude, ${copilotUsd}::text AS copilot
+      FROM sibs
+      LEFT JOIN org_unit ou ON ou.path <@ sibs.path AND ou.region_id = ${p.region_id}::uuid
+      LEFT JOIN v_complete_usage ar ON ar.org_unit_id = ou.id AND ar.ts_event >= ${monthStart}::timestamptz
+      GROUP BY sibs.id, sibs.display_name, sibs.code
+      ORDER BY SUM(ar.cost_usd) DESC NULLS LAST LIMIT 8`)
+
+    return {
+      period: 'mtd',
+      practice: { id: p.id, code: p.code, displayName: p.display_name, regionId: p.region_id },
+      header: {
+        usageUsd,
+        tokens: Number(h.tokens),
+        users,
+        avgPerUser: users > 0 ? usageUsd / users : 0,
+        pctOfRegion,
+        vsRegionAvgPct,
+      },
+      lanes: {
+        usageSignalUsd: usageUsd,
+        billUsd: bill.total,
+        billTokens: bill.tokens,
+      },
+      vendorSplit: {
+        claude: { usageUsd: Number(h.claude), billUsd: bill.claude },
+        copilot: { usageUsd: Number(h.copilot), billUsd: bill.copilot },
+        other: { usageUsd: Number(h.other), billUsd: 0 },
+      },
+      topModels: [...modelRows].map((m) => ({ model: m.model, usageUsd: Number(m.usage_usd) })),
+      users: [...userRows].map((u) => ({
+        teammateId: u.teammate_id, name: u.name, spendUsd: Number(u.spend_usd),
+        vendors: [u.has_claude ? 'claude' : null, u.has_copilot ? 'copilot' : null].filter(Boolean),
+        flagged: u.flagged,
+      })),
+      trend: [...trendRows].map((t) => ({ weekStart: t.week_start, claudeUsd: Number(t.claude), copilotUsd: Number(t.copilot) })),
+      comparison: [...compRows].map((c) => ({
+        id: c.id, code: c.code, displayName: c.display_name,
+        usageUsd: Number(c.usage_usd), claudeUsd: Number(c.claude), copilotUsd: Number(c.copilot),
+        isSelf: c.id === p.id,
+      })),
+      planMix: null, // DEFERRED (design slice 5): spike the license_org/tier join first.
+    }
+  })
+})

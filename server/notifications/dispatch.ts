@@ -1,0 +1,360 @@
+/*
+ * Inbox dispatcher — routes each inbox-item category to the actor who can
+ * resolve it. Per docs/build/mvp-lite-epic.md §Epic 3: "Per-actor inbox
+ * dispatcher utility (route conflict / alert / action-request → right
+ * recipient(s))" and journeys 1 / 4 / 5.
+ *
+ * The routing rule table is small and code-side rather than DB-side at
+ * v1 per data-model.md §inbox_item ("Routing rules are implemented in
+ * the notification dispatcher, not stored as a separate table").
+ *
+ * Each rule is pure: takes the dispatch input + the DB and returns the
+ * recipient teammate id(s). Inserts are batched by the caller so callers
+ * can dispatch many items in one transaction.
+ */
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
+import { eq, sql } from 'drizzle-orm'
+import * as schema from '../../drizzle/schema'
+import { isUuid } from '../utils/uuid'
+import { monthStartIso as monthStartIsoFor } from '../utils/period'
+
+export type InboxCategory =
+  | 'sync-conflict'
+  | 'velocity-warning'
+  | 'over-budget'
+  | 'untagged-backlog'
+  | 'over-attribution' // reconciled-lane otel spend exceeds the authoritative Anthropic actual (forgery/mis-tag backstop)
+  | 'reconciliation-gap' // OTel-attributed vs Anthropic-actuals gap exceeds the alert bar (ADR-0005 §4 safety net; the detection-based P2 defense leans on it)
+  | 'structural-conflict' // TODO(convergence-followup): no producer wired; schema lacks structural-divergence detection
+  | 'connector-health' // TODO(convergence-followup): no producer wired; no connector_health table yet
+  | 'read-path-stale' // the OTel read path (azure-monitor-read gatherer) has silently stalled/failed while clients still emit (read-path-health worker); admin-routed
+  | 'copilot-bill-unsettled' // a Copilot org-month has usage but no read license SKU line (copilot-pool-bill worker) — the month reports unsettled; admin-routed (finance concern)
+  | 'project-ending-soon' // D3: a project a dev is tagged to enters its end_date warning window — re-tag ahead
+  | 'project-ended-retag' // D2a: a dev's spend spilled to unallocated because the project ended — re-tag the spilled portion
+
+export interface DispatchInput {
+  category: InboxCategory
+  severity?: 'info' | 'attention' | 'urgent'
+  subject: string
+  body: Record<string, unknown>
+  /**
+   * Entity context — required for routing decisions in some categories
+   * (e.g. over-budget routes via project → manager).
+   */
+  relatedEntityKind?: string
+  relatedEntityId?: string
+  /**
+   * Optional explicit recipient hint. When set, bypasses the routing rule
+   * (e.g. dispatcher caller already knows the dev for a velocity-warning).
+   */
+  recipientTeammateIdHint?: string
+  /**
+   * Time anchor for time-windowed routing (over-budget's current-month
+   * contributor set). Workers inject their run `now` so routing agrees
+   * with the worker's own window; defaults to wall-clock. Before this
+   * existed the dispatcher silently used real `new Date()` while the
+   * worker honoured an injected clock — the contributor set could miss
+   * the very spend that triggered the alert.
+   */
+  now?: Date
+  /**
+   * Region the alert pertains to, used to scope admin-routed categories so a
+   * region's own admins only get that region's alerts. Optional: when omitted
+   * the dispatcher DERIVES it from relatedEntityKind/relatedEntityId. When
+   * neither yields a region, admin alerts route to the unbounded cross-region
+   * roles only (never to a sibling region's admins, never dropped).
+   */
+  regionId?: string
+}
+
+export interface DispatchResult {
+  inboxItemId: string
+  recipientTeammateId: string
+}
+
+export async function dispatchInbox(
+  db: PostgresJsDatabase<typeof schema>,
+  input: DispatchInput,
+): Promise<DispatchResult[]> {
+  const { recipientIds, routingScope } = await resolveRecipients(db, input)
+  if (recipientIds.length === 0) {
+    // Caller-facing: no-op rather than throw, so a missing manager (e.g.
+    // unassigned project) doesn't crash the worker. Surfaces as 'no
+    // recipient' lookup in the audit log.
+    return []
+  }
+
+  // Stamp the routing decision into the body of admin-routed items (the dispatch
+  // path writes no audit row — inbox_item is the artifact). Lets a later
+  // debugging session see WHY a recipient set was chosen ('region:<id>' vs the
+  // 'fail-open' cross-region-only path) without re-deriving it.
+  const body = routingScope ? { ...input.body, routing_scope: routingScope } : input.body
+
+  // inbox_item.related_entity_id is a uuid column — never hand it a non-UUID
+  // (a malformed caller value would otherwise abort the whole insert and crash
+  // the worker tick). A non-UUID id is dropped to null; the kind is kept for
+  // context.
+  const relatedEntityId = isUuid(input.relatedEntityId) ? input.relatedEntityId : null
+
+  const rows = await db
+    .insert(schema.inboxItem)
+    .values(
+      recipientIds.map((recipientTeammateId) => ({
+        recipientTeammateId,
+        category: input.category,
+        severity: input.severity ?? defaultSeverity(input.category),
+        subject: input.subject,
+        body,
+        relatedEntityKind: input.relatedEntityKind,
+        relatedEntityId,
+      })),
+    )
+    .returning({ id: schema.inboxItem.id, recipientTeammateId: schema.inboxItem.recipientTeammateId })
+
+  return rows.map((r) => ({ inboxItemId: r.id, recipientTeammateId: r.recipientTeammateId }))
+}
+
+function defaultSeverity(category: InboxCategory): 'info' | 'attention' | 'urgent' {
+  switch (category) {
+    case 'over-budget':
+    case 'sync-conflict':
+    case 'structural-conflict':
+    case 'over-attribution':
+    case 'reconciliation-gap':
+    case 'project-ending-soon':
+    case 'project-ended-retag':
+      return 'attention'
+    // 'read-path-stale': a silent read-path outage means spend stops attributing
+    // entirely (the 5.5-day incident) — page it like a connector failure, not a nag.
+    case 'connector-health':
+    case 'read-path-stale':
+      return 'urgent'
+    case 'copilot-bill-unsettled':
+      return 'attention'
+    case 'velocity-warning':
+    case 'untagged-backlog':
+    default:
+      return 'info'
+  }
+}
+
+interface ResolvedRecipients {
+  recipientIds: string[]
+  /**
+   * For admin-routed categories only: the routing decision, stamped into the
+   * inbox_item body for traceability. `region:<id>` when scoped to a derived
+   * region; `fail-open` when the region was underivable (cross-region roles
+   * only). Undefined for non-admin categories (no scoping decision is made).
+   */
+  routingScope?: string
+}
+
+async function resolveRecipients(
+  db: PostgresJsDatabase<typeof schema>,
+  input: DispatchInput,
+): Promise<ResolvedRecipients> {
+  if (input.recipientTeammateIdHint) {
+    return { recipientIds: [input.recipientTeammateIdHint] }
+  }
+
+  switch (input.category) {
+    case 'over-budget':
+      return { recipientIds: await resolveOverBudgetRecipients(db, input.relatedEntityId, input.now) }
+    case 'sync-conflict':
+    case 'structural-conflict':
+    case 'connector-health':
+    case 'copilot-bill-unsettled': {
+      // Admin-routed, region-scoped when derivable (the org's region, passed as input.regionId);
+      // otherwise the cross-region finance/ops roles only. A missing-license-SKU month is a
+      // finance data-correctness concern → global-finops / platform-admin (+ the region's admin).
+      const region = await deriveAlertRegion(db, input)
+      return {
+        recipientIds: await resolveAdmins(db, region),
+        routingScope: region ? `region:${region}` : 'fail-open',
+      }
+    }
+    case 'read-path-stale': {
+      // The azure-monitor-read gatherer is a GLOBAL, region-agnostic ingestion
+      // path — a stall/outage starves EVERY region's attribution, not one
+      // region's. So this alert always routes to the cross-region ops roles
+      // (platform-admin / global-finops) only, never a single region's admins.
+      // No region is derived (there is none to derive).
+      return {
+        recipientIds: await resolveAdmins(db, null),
+        routingScope: 'platform',
+      }
+    }
+    case 'velocity-warning':
+    case 'untagged-backlog':
+    case 'over-attribution':
+    case 'reconciliation-gap':
+    case 'project-ending-soon':
+    case 'project-ended-retag':
+      // Per-developer notifications — the caller resolves the recipient and
+      // passes recipientTeammateIdHint (handled above); no rule-based routing.
+      return { recipientIds: [] }
+    default:
+      return { recipientIds: [] }
+  }
+}
+
+async function resolveOverBudgetRecipients(
+  db: PostgresJsDatabase<typeof schema>,
+  projectId: string | undefined,
+  nowAnchor?: Date,
+): Promise<string[]> {
+  if (!projectId) return []
+  /*
+   * Over-budget alerts route to two audiences with different jobs:
+   *
+   * 1. BUDGET-RESPONSIBLE parties (mig 0048): the project's currently-
+   *    effective PMs and the lead cost centre's active owners. They can
+   *    ACT — the PM passes the allocation editor's relationship gate,
+   *    the owner watches the P&L — so the alert's deep links are
+   *    honourable for them. A $0-contribution PM still gets the alert:
+   *    the budget is their job regardless of their own spend.
+   * 2. ACTUAL contributors — teammates who emitted at least one
+   *    attribution_record on this project in the current month. For
+   *    them it's awareness ("you're spending against an exhausted
+   *    budget"); the inbox read path withholds editor links they could
+   *    not honour. Sending the alert to a $0 CoU peer instead would be
+   *    misleading: their bucket card shows $0 healthy while their inbox
+   *    screams over-budget.
+   *
+   * Fallback: if BOTH sets are empty (newly-created allocation, no
+   * PM/owner designated yet), route to the project's CoU teammates so
+   * SOMEONE sees the alert — the original pilot rule kept as a net.
+   */
+  const now = nowAnchor ?? new Date()
+  const monthStartIso = monthStartIsoFor(now)
+
+  const responsibleRows = await db.execute<{ teammate_id: string }>(sql`
+    SELECT pa.teammate_id::text AS teammate_id
+    FROM project_assignment pa
+    WHERE pa.project_id = ${projectId}::uuid
+      AND pa.role = 'manager'
+      AND pa.effective @> now()
+    UNION
+    SELECT co.teammate_id::text AS teammate_id
+    FROM cou_owner co
+    JOIN project p ON p.cost_owning_unit_id = co.org_unit_id
+    WHERE p.id = ${projectId}::uuid
+      AND co.revoked_at IS NULL
+  `)
+  const contributorRows = await db.execute<{ teammate_id: string }>(sql`
+    SELECT DISTINCT ar.teammate_id::text AS teammate_id
+    FROM attribution_record ar
+    WHERE ar.project_id = ${projectId}::uuid
+      AND ar.ts_event >= ${monthStartIso}::timestamptz
+  `)
+  const recipients = [
+    ...new Set([
+      ...[...responsibleRows].map((r) => r.teammate_id),
+      ...[...contributorRows].map((r) => r.teammate_id),
+    ]),
+  ]
+  if (recipients.length > 0) return recipients
+
+  // Fallback to CoU teammates only when there are no responsible
+  // parties or contributors at all. Pilot rule preserved.
+  const [proj] = await db
+    .select({ costOwningUnitId: schema.project.costOwningUnitId })
+    .from(schema.project)
+    .where(eq(schema.project.id, projectId))
+    .limit(1)
+  if (!proj) return []
+  const rows = await db
+    .select({ id: schema.teammate.id })
+    .from(schema.teammate)
+    .where(eq(schema.teammate.orgUnitId, proj.costOwningUnitId))
+  return rows.map((r) => r.id)
+}
+
+async function scalarRegion(
+  db: PostgresJsDatabase<typeof schema>,
+  query: ReturnType<typeof sql>,
+): Promise<string | null> {
+  const rows = await db.execute<{ region_id: string | null }>(query)
+  return [...rows][0]?.region_id ?? null
+}
+
+/**
+ * Resolve the region an admin-routed alert pertains to, for region-scoping:
+ *   explicit input.regionId  →  the related entity's region  →  null.
+ *
+ * `relatedEntityKind` for connector alerts is the raw `sync_conflict.target_table`
+ * (snake_case), so we key on table names. Returns null on a missing/deleted
+ * entity, an unmapped kind, or a non-UUID id — the caller treats null as "route
+ * to the unbounded cross-region roles only" (never a sibling region's admins,
+ * never dropped). The SELECT also validates the entity exists (a stale conflict
+ * pointing at a deleted project → null → fail open), since target_pk carries no
+ * FK.
+ *
+ * KNOWN LIMITATION: a producer with recipient-agnostic idempotency (e.g.
+ * connector-health dedups on body->>'sync_conflict_id') freezes the recipient
+ * set at first dispatch. So if the region is transiently underivable on the
+ * first tick (a conflict that references a not-yet-created project) the region's
+ * own admin is not back-filled once the entity appears. The alert is never lost
+ * — the cross-region roles always receive it — only the region-admin's copy is
+ * missed in that narrow window. Recipient/region-aware dedup is deferred.
+ */
+async function deriveAlertRegion(
+  db: PostgresJsDatabase<typeof schema>,
+  input: DispatchInput,
+): Promise<string | null> {
+  if (isUuid(input.regionId)) return input.regionId
+  const id = input.relatedEntityId
+  if (!isUuid(id) || !input.relatedEntityKind) return null
+  switch (input.relatedEntityKind) {
+    case 'project':
+      return scalarRegion(db, sql`SELECT region_id::text AS region_id FROM project WHERE id = ${id}::uuid`)
+    case 'org_unit':
+      return scalarRegion(db, sql`SELECT region_id::text AS region_id FROM org_unit WHERE id = ${id}::uuid`)
+    case 'teammate':
+      return scalarRegion(db, sql`SELECT region_id::text AS region_id FROM teammate WHERE id = ${id}::uuid`)
+    case 'region':
+      // Self, but validated so a stale/bogus region id fails open like the rest.
+      return scalarRegion(db, sql`SELECT id::text AS region_id FROM region WHERE id = ${id}::uuid`)
+    default:
+      return null
+  }
+}
+
+/**
+ * Recipients for the admin-routed ops categories (sync-conflict /
+ * structural-conflict / connector-health).
+ *
+ * The cross-region roles — `platform-admin` (ops super-admin) and
+ * `global-finops` — ALWAYS receive these (they answer for every region); a
+ * region's own `admin`s are ADDED on top when the alert's region is known.
+ * `regionId === null` (underivable) routes to the cross-region roles ONLY: an
+ * unscoped ops alert must not leak one region's data (the conflicting project's
+ * name etc.) into a sibling region admin's inbox, since the inbox read path is
+ * recipient-scoped with no RLS backstop. The cross-region roles are present
+ * unconditionally, so a region with no admin still has a recipient — the set is
+ * never empty for want of scoping. Inactive teammates are excluded.
+ *
+ * Scoping key is `teammate.region_id` (home region) — the same key
+ * `requireRegionScope` (server/auth/rbac.ts) gates an admin's ACCESS on, so an
+ * admin is never alerted about a region they could not open. Multi-region admin
+ * coverage (an admin administering a region other than their home) is not
+ * expressible in the current model and is deliberately out of scope.
+ */
+async function resolveAdmins(
+  db: PostgresJsDatabase<typeof schema>,
+  regionId: string | null,
+): Promise<string[]> {
+  const rows = await db.execute<{ id: string }>(sql`
+    SELECT id::text AS id
+    FROM teammate
+    WHERE is_active = true
+      AND (
+        role IN ('platform-admin', 'global-finops')
+        -- region-scoped: when regionId is null, region_id = NULL::uuid is
+        -- UNKNOWN (falsy), so no region admin matches -- i.e. cross-region roles
+        -- only. No explicit null-guard needed.
+        OR (role = 'admin' AND region_id = ${regionId}::uuid)
+      )
+  `)
+  return [...rows].map((r) => r.id)
+}

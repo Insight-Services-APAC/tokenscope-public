@@ -1,0 +1,62 @@
+# ── Scratch / temp workspace ─────────────────────────────────────────
+/tmp/*
+!/tmp/README.md
+
+# ── OS / editor junk ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Node / Nuxt ──────────────────────────────────────────────────────
+node_modules/
+.nuxt/
+.output/
+.data/
+.nitro/
+.cache/
+dist/
+
+# ── Env / secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+# Sandbox deploy secrets — generated locally by az-deployment iteration.
+# Never commit these. The deploy KV (Bicep-managed) is the persistent
+# store; this file just lets us re-apply without re-generating.
+.azure-*-secrets.env
+
+# ── Test artefacts ───────────────────────────────────────────────────
+coverage/
+playwright-report/
+playwright/.cache/
+test-results/
+/.playwright-cli/
+
+# ── Logs ─────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── cw worker-local auto-managed files ───────────────────────────────
+.claude/
+
+# ── TokenScope plugin session env (never commit; carries session_token) ──
+.tokenscope.env
+# Per-project Copilot forwarder telemetry/state (span file, offset, lock) — the
+# forwarder also self-heals this entry at runtime, but ignore it here too so
+# dogfooding TokenScope on this very repo never stages its own telemetry.
+.tokenscope.local/
+.claude-audit/
+
+# ── Bicep compile artifacts (we ship .bicep + .bicepparam, not .json) ──
+infra/*.json
+infra/modules/*.json
+infra/parameters/*.json
+
+# Local-only sandbox repro harness (needs --no-save @opentelemetry/* exporter
+# packages the app never ships; verified recipes are in
+# docs/development/claude-code-telemetry-contract.md and sandbox-realclaude-journey.md).
+scripts/spikes/
+
+# Sandbox reconciliation PATs (never commit)
+.env.sandbox

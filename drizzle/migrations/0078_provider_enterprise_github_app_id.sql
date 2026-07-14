@@ -1,0 +1,19 @@
+-- 0078: provider_enterprise.github_app_id — the App-id that OPTS an enterprise into the
+-- GitHub-App credential path for Copilot reconciliation (docs/design/github-pat-to-github-app-transition.md).
+--
+-- WHY a column (not env-only): the App-id is a NON-SECRET integer (e.g. 1234567) that
+-- identifies which registered GitHub App authenticates this enterprise's reads. It pairs with
+-- the existing credential_secret_name, which now points the github branch at the App PRIVATE
+-- KEY env var (NUXT_GITHUB_APP_KEY_<NAME>, base64-encoded PEM) instead of a PAT env var.
+--
+-- KIND DERIVATION (server/reconciliation/credentials.ts, FAIL-LOUD per the adversarial review):
+--   github_app_id IS NULL      → PAT mode (today's default; the classic enterprise PAT path).
+--   github_app_id IS NOT NULL  → App mode INTENDED → the resolver MUST find the App key env, and
+--                                ERRORS if it is missing (never silently falls back to PAT — that
+--                                would be a green run with zero attribution).
+--
+-- Nullable + no default: App mode is OPT-IN per enterprise. Every existing row keeps github_app_id
+-- NULL → stays on the PAT path unchanged (back-compat). No CHECK on the value here — the API
+-- boundary (provider-validation.ts) validates it as ^\d+$ so a malformed id is a clean 400, not a
+-- raw constraint 500. Non-secret, so it lives in the table (the secret stays in KV/env).
+ALTER TABLE provider_enterprise ADD COLUMN github_app_id text;

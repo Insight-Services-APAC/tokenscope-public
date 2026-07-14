@@ -1,0 +1,12 @@
+-- 0047 — project WBS code (optional financial-system correlation field)
+--
+-- The Work-Breakdown-Structure code from the project/financial system. Stored
+-- alongside the slug (code) and title (display_name) so reporting and the
+-- My-projects view can correlate a TokenScope project back to its
+-- finance-system record. Distinct from fin_system / fin_system_id (which name
+-- the accounting SYSTEM + that system's own id); wbs_code is the structured
+-- WBS identifier itself. Optional / nullable — projects without a finance link
+-- leave it NULL. Stored as TEXT (not numeric): WBS codes are structured
+-- identifiers (e.g. '1.2.3', 'P-12345', leading zeros) that must not be coerced
+-- to a number.
+ALTER TABLE project ADD COLUMN IF NOT EXISTS wbs_code text;

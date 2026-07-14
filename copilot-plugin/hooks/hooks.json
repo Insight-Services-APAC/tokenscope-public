@@ -1,0 +1,27 @@
+{
+  "description": "TokenScope Copilot forwarder lifecycle — start/stop the singleton per-container file-forwarder that transcodes Copilot OTEL spans and emits them to Azure Monitor.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${COPILOT_PLUGIN_ROOT}/hooks/forwarder-lifecycle.mjs\" start",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${COPILOT_PLUGIN_ROOT}/hooks/forwarder-lifecycle.mjs\" stop",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

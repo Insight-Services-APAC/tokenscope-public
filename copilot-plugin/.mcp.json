@@ -1,0 +1,9 @@
+{
+  "// NOTE": "URL must be a LITERAL. GitHub Copilot CLI does NOT expand ${VAR} or ${VAR:-default} in a plugin .mcp.json (Claude Code does — that is why plugin/.mcp.json differs). A non-literal URL is rejected at load with 'Invalid url' and the server silently never registers. To target a different TokenScope server, edit this URL or register it yourself: copilot mcp add --transport http tokenscope <url>.",
+  "mcpServers": {
+    "tokenscope": {
+      "type": "http",
+      "url": "https://tokenscope.example.com/api/v1/mcp"
+    }
+  }
+}

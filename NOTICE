@@ -1,0 +1,26 @@
+TokenScope
+==========
+
+Copyright 2026 Insight Enterprises Australia Pty Ltd.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this software except in compliance with the License. You may obtain a copy of
+the License in the LICENSE file, or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied.
+
+---
+
+This product includes third-party components, each under its own licence:
+
+- JavaScript / TypeScript dependencies — see `package.json` and the resolved
+  licences in `package-lock.json`.
+- Patched upstream dependency: `nuxt-oidc-auth` — see `patches/` for the applied
+  patch (the upstream package remains under its own licence).
+
+TokenScope, "TokenSheets", and the TokenScope logo are used to describe the
+project. This NOTICE does not grant trademark rights (see LICENSE §6).

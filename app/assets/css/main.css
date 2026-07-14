@@ -1,0 +1,88 @@
+@import 'tailwindcss';
+@import '@nuxt/ui';
+@import './brand-tokens.css';
+
+/*
+ * TokenScope — Tailwind 4 @theme bindings
+ *
+ * Maps the CSS custom properties in brand-tokens.css to Tailwind 4 theme
+ * tokens. After this binding, components MUST use Tailwind utility classes
+ * (e.g. `bg-brand-harmony`, `text-carbon`) or the `--brand-*` CSS custom
+ * properties directly — never a hardcoded hex literal in a component.
+ */
+
+@theme {
+  /* ───── Brand colours (1:1 with brand-tokens.css) ───── */
+  --color-brand-hustle: var(--brand-hustle);
+  --color-brand-inspired: var(--brand-inspired);
+  --color-brand-hunger: var(--brand-hunger);
+  --color-brand-heart: var(--brand-heart);
+  --color-brand-harmony: var(--brand-harmony);
+  --color-brand-vision: var(--brand-vision);
+  --color-brand-zeal: var(--brand-zeal);
+
+  --color-brand-hunger-lite: var(--brand-hunger-lite);
+  --color-brand-harmony-lite: var(--brand-harmony-lite);
+  --color-brand-vision-lite: var(--brand-vision-lite);
+  --color-brand-zeal-lite: var(--brand-zeal-lite);
+
+  --color-brand-hunger-sheer: var(--brand-hunger-sheer);
+  --color-brand-harmony-sheer: var(--brand-harmony-sheer);
+  --color-brand-vision-sheer: var(--brand-vision-sheer);
+
+  /* ───── Neutrals ───── */
+  --color-carbon: var(--carbon);
+  /* carbon-1 / calm-1 aliases: ~35 reporting call-sites use text-carbon-1 /
+   * bg-calm-1 / border-calm-1, but no `-1` token was ever defined (they
+   * resolved to nothing). Alias them to the base ramp step so those utilities
+   * paint correctly without touching every call-site. */
+  --color-carbon-1: var(--carbon);
+  --color-carbon-2: var(--carbon-2);
+  --color-carbon-3: var(--carbon-3);
+  --color-cloud: var(--cloud);
+  --color-calm: var(--calm);
+  --color-calm-1: var(--calm);
+  --color-calm-2: var(--calm-2);
+  --color-paper: var(--paper);
+
+  /* ───── RAG ───── */
+  --color-rag-red: var(--rag-red);
+  --color-rag-amber: var(--rag-amber);
+  --color-rag-green: var(--rag-green);
+
+  /* ───── Fonts ───── */
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-slab: var(--font-slab);
+}
+
+/* ───── Base layout ───── */
+html,
+body,
+#__nuxt {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.4;
+  color: var(--carbon);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* In @layer base so Tailwind utility classes (e.g. text-white on a NuxtLink
+ * styled as a button) WIN over this default link colour. Unlayered, this rule
+ * beat the utilities and rendered button-links as purple-on-purple. */
+@layer base {
+  a {
+    color: var(--brand-harmony);
+    text-decoration: none;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
+}

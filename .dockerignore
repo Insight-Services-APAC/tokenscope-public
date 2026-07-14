@@ -1,0 +1,17 @@
+node_modules
+.nuxt
+.output
+.data
+.git
+.github
+coverage
+playwright-report
+test-results
+.playwright-cli
+.claude
+tmp
+docs
+plugin-marketplace
+.env
+.env.*
+*.log

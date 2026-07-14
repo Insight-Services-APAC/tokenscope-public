@@ -1,0 +1,157 @@
+/*
+ * POST /api/v1/setup/enroll { enrollment_secret, claimed_email, device_binding }
+ * — the NO-LOGIN emit-on-install enroll path (slice 3).
+ *
+ * docs/design/emit-on-install-provisional-attribution.md §Flows 1. The Insight
+ * plugin is distributed privately and bundles a rotatable enrollment secret; on
+ * install it calls THIS endpoint (no OAuth, no human) to obtain a durable
+ * emit-only credential + the OTel bundle, bound to a SERVER-CHOSEN instance and a
+ * PROVISIONAL shadow teammate keyed on the claimed email. Usage then emits
+ * immediately, attributed `identity_state=provisional` until the human signs in
+ * and explicitly confirms (slice 5).
+ *
+ * Threat-model invariants enforced here:
+ *   - GATE: the bundled secret is the ONLY externally-distinguishable outcome —
+ *     a bad/expired/revoked secret is the endpoint's sole 401, returned before any
+ *     teammate/instance work.
+ *   - PROVISIONAL ONLY: locate-or-create a provisional shadow teammate; NEVER link
+ *     to / look up a real teammate (no existence oracle, no laundering bridge).
+ *   - SERVER-CHOSEN id: the instance id is minted server-side (randomUUID), never
+ *     from client input.
+ *   - EMIT-ONLY: the credential is minted via issueInstanceEmitCredentialTx(
+ *     issueEmitCredential) — scope tokenscope.emit ONLY; no scope param is read,
+ *     no internal client is registered.
+ *   - CONSTANT-SHAPE: the response is byte-shape identical regardless of whether
+ *     the claimed email already exists anywhere — only server-minted material is
+ *     returned, never a canonicalised email or any teammate field.
+ *   - IDEMPOTENT + CAPPED: a re-enroll from the same (claimed_email, device_binding)
+ *     reuses the same rows; a global + per-email provisional cap returns 429.
+ *
+ * The response carries one-time credential material → Cache-Control: no-store
+ * (mirrors /setup/redeem + the OAuth token endpoint). Shape mirrors
+ * /setup/redeem so the local write helper is reused verbatim.
+ */
+import {
+  createError,
+  defineEventHandler,
+  getHeader,
+  getRequestIP,
+  readValidatedBody,
+  setResponseHeaders,
+} from 'h3'
+import { z } from 'zod'
+import { getDb } from '../../../db'
+import { issueEmitCredential } from '../../../auth/emit-credential'
+import { issueInstanceEmitCredentialTx, buildOtelBundle } from '../../../auth/emit-provision'
+import {
+  verifyEnrollmentSecret,
+  locateOrCreateProvisionalInstance,
+} from '../../../auth/enroll-provision'
+import { recordAuditEvent } from '../../../db/audit'
+import { getPublicRequestURL } from '../../../utils/public-url'
+
+const Body = z.object({
+  enrollment_secret: z.string().min(1).max(512),
+  claimed_email: z.string().email().max(320),
+  device_binding: z.string().min(1).max(512),
+  // The emitting client. A SERVER-SIDE discriminator (mirrors provision_emit /
+  // emit-provision.ts's `tool`) so a Copilot enroll returns the copilot-shaped
+  // bundle (tool=copilot-cli + the copilot telemetry block) directly, instead of
+  // the Copilot client regex-rewriting tool= in a claude bundle — that stopgap
+  // silently mis-labels spend as claude-code if the attr-string format shifts.
+  // Defaults to 'claude-code' so an existing Claude enroll (which omits the field)
+  // is byte-for-byte unchanged.
+  tool: z.enum(['claude-code', 'copilot-cli']).default('claude-code'),
+})
+
+export default defineEventHandler(async (event) => {
+  setResponseHeaders(event, { 'Cache-Control': 'no-store', Pragma: 'no-cache' })
+  const { enrollment_secret, claimed_email, device_binding, tool } = await readValidatedBody(
+    event,
+    (d) => Body.parse(d),
+  )
+  const db = getDb()
+
+  // GATE. A bad/expired/revoked secret is the endpoint's ONLY 401 and the only
+  // outcome an attacker can distinguish — checked before any teammate/instance work.
+  if (!(await verifyEnrollmentSecret(db, enrollment_secret))) {
+    throw createError({ statusCode: 401, statusMessage: 'Invalid enrollment secret' })
+  }
+
+  // Canonicalise for dedup + the cap counters only — NEVER echoed back (no oracle).
+  const claimedEmail = claimed_email.trim().toLowerCase()
+  // Audit IP/UA are best-effort and must NEVER crash the enroll (audit.ts already
+  // normalises junk; getRequestIP itself throws when there's no socket).
+  let ip: string | null = null
+  try {
+    ip = getRequestIP(event, { xForwardedFor: true }) ?? null
+  } catch {
+    ip = null
+  }
+  const ua = getHeader(event, 'user-agent') ?? null
+
+  // ONE transaction for locate/create → mint → audit, mirroring /setup/redeem: a
+  // mid-sequence failure (incl. a throwing audit) rolls everything back. The emit
+  // mint's per-instance advisory xact lock lives inside it.
+  const result = await db.transaction(async (tx) => {
+    const located = await locateOrCreateProvisionalInstance(tx as never, claimedEmail, device_binding, tool)
+    if ('capExceeded' in located) {
+      throw createError({ statusCode: 429, statusMessage: 'Enrollment capacity reached' })
+    }
+
+    // EMIT-ONLY. issueEmitCredential hard-literals scope 'tokenscope.emit'; the
+    // Tx wrapper binds it to this instance and rotates out any prior live emit
+    // credential for it (at most one live per device).
+    const emit = await issueInstanceEmitCredentialTx(
+      tx as never,
+      located.teammateId,
+      located.instanceId,
+      issueEmitCredential,
+    )
+
+    await recordAuditEvent(tx as never, {
+      eventType: 'instance-enrolled-provisional',
+      actorTeammateId: located.teammateId,
+      actorSystem: 'setup-enroll',
+      subjectKind: 'instance',
+      subjectId: located.instanceId,
+      payload: { reused: located.reused, identity_state: 'provisional', tool },
+      ipAddress: ip,
+      userAgent: ua,
+    })
+
+    return { instanceId: located.instanceId, emit }
+  })
+
+  // PUBLIC origin (pinned APP_PUBLIC_ORIGIN, else Front Door host, else Host) so
+  // the baked bearer/OTLP endpoints are reachable behind the WAF — same discipline
+  // as /setup/redeem. Provisional enroll mints UNASSIGNED (untagged): no project.
+  const origin = getPublicRequestURL(event).origin
+  const { bearerEndpoint, oauthTokenEndpoint, bundle } = buildOtelBundle(
+    origin,
+    result.instanceId,
+    null,
+    tool,
+  )
+
+  // CONSTANT-SHAPE: every field is either server-minted THIS request or derived
+  // ONLY from the request's own `tool` — identical regardless of whether
+  // claimed_email exists anywhere. No canonicalised email, no teammate field, no
+  // `reused` flag (that rides the audit row only). The bundle/telemetry key vary by
+  // the CLIENT's chosen tool, never by email existence, so this is no oracle. Shape
+  // mirrors /setup/redeem (telemetry.copilot for copilot-cli, telemetry.claude else)
+  // so the matching client write helper is reused verbatim.
+  const telemetry = tool === 'copilot-cli' ? { copilot: bundle } : { claude: bundle }
+  return {
+    instance_id: result.instanceId,
+    session_id: result.instanceId, // legacy alias (redeem/exchange parity)
+    bearer_endpoint: bearerEndpoint,
+    oauth_refresh_token: result.emit.refreshToken,
+    oauth_token_endpoint: oauthTokenEndpoint,
+    oauth_client_id: result.emit.clientId,
+    project_code: null, // provisional enroll is untagged; tagged per-repo/session later
+    unassigned: true,
+    tool,
+    telemetry,
+  }
+})

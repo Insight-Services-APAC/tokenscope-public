@@ -1,0 +1,170 @@
+/*
+ * GET /api/v1/admin/region/{regionId} — Region-scoped admin landing
+ * payload. Mirrors the existing /api/v1/admin/region shape but
+ * scopes to the requested region. Used by the Epic 13 6-tab admin
+ * page.
+ *
+ * Region access: caller must either be a global-finops / admin with
+ * matching region OR be assigned to the region (RLS enforced
+ * downstream). The same-region constraint is enforced here so an
+ * APAC admin querying region=EMEA gets a 403, not empty rows.
+ */
+import { defineEventHandler, createError } from 'h3'
+import { sql } from 'drizzle-orm'
+import { requireRole, requireRegionScope } from '../../../../../auth/rbac'
+import { withRequestRls } from '../../../../../db/request-rls'
+import { requireUuidParam } from '../../../../../utils/require-uuid-param'
+
+interface CountRow extends Record<string, unknown> {
+  entity: string
+  count: string
+}
+
+interface RegionRow extends Record<string, unknown> {
+  id: string
+  code: string
+  display_name: string
+}
+
+export default defineEventHandler(async (event) => {
+  await requireRole(event, 'admin', 'global-finops')
+  const regionId = requireUuidParam(event, 'regionId')
+  await requireRegionScope(event, regionId)
+
+  return await withRequestRls(event, async (tx) => {
+    const region = await tx.execute<RegionRow>(sql`
+      SELECT id::text AS id, code, display_name
+      FROM region WHERE id = ${regionId}::uuid
+    `)
+    const regionRow = [...region][0]
+    if (!regionRow) {
+      throw createError({ statusCode: 404, statusMessage: 'Region not found' })
+    }
+
+    const counts = await tx.execute<CountRow>(sql`
+      SELECT 'org_units' AS entity, COUNT(*)::text AS count FROM org_unit WHERE region_id = ${regionId}::uuid
+      UNION ALL
+      SELECT 'bus' AS entity, COUNT(*)::text AS count FROM org_unit WHERE region_id = ${regionId}::uuid AND unit_type = 'bu'
+      UNION ALL
+      SELECT 'teammates' AS entity, COUNT(*)::text AS count FROM teammate WHERE region_id = ${regionId}::uuid AND is_active = TRUE
+      UNION ALL
+      SELECT 'projects' AS entity, COUNT(*)::text AS count FROM project WHERE region_id = ${regionId}::uuid
+      UNION ALL
+      SELECT 'projects_onboarded' AS entity, COUNT(*)::text AS count FROM project WHERE region_id = ${regionId}::uuid AND is_onboarded = TRUE
+      UNION ALL
+      SELECT 'repos_mapped' AS entity, COUNT(*)::text AS count
+        FROM repo_project_map rpm JOIN project p ON p.id = rpm.project_id
+       WHERE p.region_id = ${regionId}::uuid
+      UNION ALL
+      SELECT 'admins' AS entity, COUNT(*)::text AS count
+        FROM teammate WHERE region_id = ${regionId}::uuid AND role = 'admin' AND is_active = TRUE
+      UNION ALL
+      SELECT 'cous' AS entity, COUNT(*)::text AS count
+        FROM org_unit WHERE region_id = ${regionId}::uuid AND is_cost_owning_unit AND retired_at IS NULL
+      UNION ALL
+      SELECT 'cous_with_owner' AS entity, COUNT(DISTINCT co.org_unit_id)::text AS count
+        FROM cou_owner co JOIN org_unit ou ON ou.id = co.org_unit_id
+       WHERE ou.region_id = ${regionId}::uuid AND ou.retired_at IS NULL AND co.revoked_at IS NULL
+      UNION ALL
+      SELECT 'projects_with_pm' AS entity, COUNT(DISTINCT pa.project_id)::text AS count
+        FROM project_assignment pa JOIN project p ON p.id = pa.project_id
+       WHERE p.region_id = ${regionId}::uuid AND pa.role = 'manager' AND pa.effective @> now()
+    `)
+    const counters: Record<string, number> = {}
+    for (const r of counts) counters[r.entity] = Number(r.count)
+
+    // Connector status: per-region presence.  Today the connectors
+    // table doesn't exist; surface design-time defaults that vary
+    // by region per design-notes §Screen 5.
+    const regionCode = regionRow.code
+    const connectorStatusByRegion: Record<string, { label: string; status: 'configured' | 'planned' | 'unconfigured' | 'none' }> = {
+      apac: { label: 'PSR (APAC, planned)', status: 'planned' },
+      emea: { label: 'None', status: 'none' },
+      us: { label: 'None', status: 'none' },
+    }
+    const connector = connectorStatusByRegion[regionCode] ?? { label: 'None', status: 'none' }
+
+    // Checklist computed from real counts (API-16 — the repos / admin-roles
+    // rows previously carried fabricated literals; every figure below now
+    // comes from the counts query above).
+    const reposMapped = counters.repos_mapped ?? 0
+    const adminCount = counters.admins ?? 0
+    const checklist = [
+      {
+        key: 'org-units',
+        label: 'Create org-unit skeleton',
+        status: (counters.org_units ?? 0) >= 4 ? 'done' : 'in_progress',
+        sub: `${counters.org_units ?? 0} sub-OU / team rows created`,
+      },
+      {
+        key: 'teammates',
+        label: 'Add teammates',
+        status: (counters.teammates ?? 0) >= 50 ? 'done' : 'in_progress',
+        sub: `${counters.teammates ?? 0} added · CSV or per-row`,
+      },
+      {
+        key: 'projects',
+        label: 'Add projects',
+        status: (counters.projects ?? 0) >= 5 ? 'done' : 'in_progress',
+        sub: `${counters.projects_onboarded ?? 0} onboarded · ${Math.max(0, (counters.projects ?? 0) - (counters.projects_onboarded ?? 0))} catalogue-only`,
+      },
+      {
+        key: 'repos',
+        label: 'Bind repos to projects',
+        status: reposMapped > 0 ? 'done' : 'todo',
+        sub: `${reposMapped} repos mapped to projects`,
+      },
+      {
+        key: 'admin-roles',
+        label: 'Confirm bootstrap admin roles',
+        status: adminCount > 0 ? 'done' : 'todo',
+        sub: `${adminCount} admin${adminCount === 1 ? '' : 's'} assigned`,
+      },
+      // J4 (mig 0048): the org-setup journey's two relationship steps —
+      // every cost-owning unit gets a P&L owner; every project gets a PM.
+      {
+        key: 'cou-owners',
+        label: 'Assign cost-centre owners',
+        status:
+          (counters.cous ?? 0) > 0 && (counters.cous_with_owner ?? 0) >= (counters.cous ?? 0)
+            ? 'done'
+            : (counters.cous_with_owner ?? 0) > 0
+              ? 'in_progress'
+              : 'todo',
+        sub: `${counters.cous_with_owner ?? 0} of ${counters.cous ?? 0} cost-owning units have an owner`,
+      },
+      {
+        key: 'project-pms',
+        label: 'Designate project managers',
+        status:
+          (counters.projects ?? 0) > 0 && (counters.projects_with_pm ?? 0) >= (counters.projects ?? 0)
+            ? 'done'
+            : (counters.projects_with_pm ?? 0) > 0
+              ? 'in_progress'
+              : 'todo',
+        sub: `${counters.projects_with_pm ?? 0} of ${counters.projects ?? 0} projects have a PM`,
+      },
+    ]
+    // Progress is computed as item-count fraction; items are NOT
+    // weighted (adding teammates is harder than confirming admin
+    // roles, but the macro bar reads "% of items done" — a coarser,
+    // honest measure). Per-item weights land in a later slice if
+    // operators ask for a more nuanced bar.
+    const doneCount = checklist.filter((c) => c.status === 'done').length
+    const inProgress = checklist.filter((c) => c.status === 'in_progress').length
+    const todoCount = checklist.filter((c) => c.status === 'todo').length
+
+    return {
+      region: regionRow,
+      counts: counters,
+      connector,
+      checklist: {
+        items: checklist,
+        progress_pct: Math.round((doneCount / checklist.length) * 100),
+        done: doneCount,
+        in_progress: inProgress,
+        todo: todoCount,
+      },
+    }
+  })
+})

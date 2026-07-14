@@ -1,0 +1,14 @@
+-- 0034: drop setup_token — the legacy headless CLI-enrolment surface.
+--
+-- The OAuth/MCP cutover removed the setup-token enrolment path entirely:
+--   - POST /api/v1/me/setup-token (minter) and POST /api/v1/setup/exchange
+--     (redeemer) are deleted; device emit is now provisioned by the MCP
+--     provision_emit tool → /api/v1/setup/redeem (emit_handoff, NOT setup_token).
+--   - The web "Enrol this device" card and the /tokenscope:enrol plugin command
+--     are gone; enrolment is the MCP-client OAuth flow + provision_emit.
+--
+-- Nothing reads or writes setup_token anymore (the schema's pgTable, the admin
+-- project-delete cascade line, and the enrolment test were all removed). Drop
+-- the table. IF EXISTS keeps this idempotent / safe on a DB where it was never
+-- created. emit_handoff (the LIVE provision_emit/redeem table) is untouched.
+DROP TABLE IF EXISTS setup_token;

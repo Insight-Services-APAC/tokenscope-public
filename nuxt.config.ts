@@ -1,0 +1,200 @@
+// https://nuxt.com/docs/api/configuration/nuxt-config
+export default defineNuxtConfig({
+  compatibilityDate: '2025-07-15',
+
+  devtools: { enabled: true },
+
+  modules: ['@nuxt/ui', '@nuxt/eslint', 'nuxt-oidc-auth', 'nuxt-security', 'nuxt-echarts'],
+
+  css: ['~/assets/css/main.css'],
+
+  // nuxt-echarts — tree-shaken ECharts wiring for the branded reporting chart
+  // kit (app/components/reporting/charts/**). SVG renderer keeps the DOM
+  // inspectable + CSP-clean (no canvas image data) and lets brand CSS vars
+  // resolve; only the charts/components/features actually used are bundled so
+  // we don't ship all of ECharts. The module registers <VChart> globally and a
+  // generated global `ECOption` type composed from the enabled pieces.
+  echarts: {
+    renderer: 'svg',
+    charts: ['LineChart', 'BarChart', 'PieChart', 'HeatmapChart'],
+    components: [
+      'GridComponent',
+      'TooltipComponent',
+      'LegendComponent',
+      'DatasetComponent',
+      'MarkLineComponent',
+      'MarkAreaComponent',
+      'GraphicComponent',
+      'VisualMapComponent',
+    ],
+    // LegacyGridContainLabel is required in ECharts 6: `grid.containLabel` was
+    // extracted into this opt-in legacy feature, so without it the option is a
+    // silent no-op and axis / bar-end labels clip. The chart kit relies on
+    // containLabel to fit ranked-bar category + value labels.
+    features: ['LabelLayout', 'UniversalTransition', 'LegacyGridContainLabel'],
+  },
+
+  devServer: {
+    host: '0.0.0.0',
+    port: 3450,
+  },
+
+  app: {
+    head: {
+      htmlAttrs: { lang: 'en' },
+      title: 'TokenScope',
+      meta: [
+        { name: 'viewport', content: 'width=device-width, initial-scale=1' },
+        {
+          name: 'description',
+          content:
+            'TokenScope — Usage-Based Token Attribution Platform. Trust the developer. Track every token. Let the budget do the teaching.',
+        },
+      ],
+      link: [
+        { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
+        { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' },
+        {
+          rel: 'stylesheet',
+          href: 'https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Zilla+Slab:ital,wght@1,500&family=JetBrains+Mono:wght@400;500&display=swap',
+        },
+      ],
+    },
+  },
+
+  typescript: {
+    strict: true,
+    typeCheck: false,
+  },
+
+  runtimeConfig: {
+    sessionSecret: process.env.NUXT_SESSION_SECRET || '',
+    azureMonitorEndpoint: process.env.NUXT_AZURE_MONITOR_ENDPOINT || '',
+    public: {
+      authDevMode: process.env.NUXT_OIDC_AUTH_DEV_MODE === 'true',
+      // Client mirror of NUXT_DEPLOY_ENV, consumed by useDemoFeatures() to hide
+      // persona/demo UI off demo-capable envs. Empty placeholder — runtime-overlaid
+      // from NUXT_PUBLIC_DEPLOY_ENV at container BOOT (never a build-time read; see
+      // the OIDC comment below for why build-time process.env reads are unsafe).
+      // Bicep sets NUXT_PUBLIC_DEPLOY_ENV from the SAME `environment` param as
+      // NUXT_DEPLOY_ENV so the client/server mirrors cannot drift. The UI gate is
+      // cosmetic defense-in-depth; the server gate is authoritative.
+      deployEnv: '',
+    },
+  },
+
+  // OIDC config:
+  //   - Local dev (NUXT_OIDC_AUTH_DEV_MODE=true): enabled:false; the
+  //     custom cookie path (server/auth/session.ts) switches between
+  //     4 demo personas.
+  //   - Sandbox / prod (Epic 10): real Entra OIDC via nuxt-oidc-auth.
+  //
+  // CRITICAL: do NOT read process.env.* inside provider config fields.
+  // nuxt.config.ts is evaluated at BUILD time (e.g. inside `az acr build`,
+  // which has no Azure secrets). Build-baked '' would override every env
+  // var read by the running container. Instead, declare placeholder
+  // strings here and let Nuxt's runtime-config overlay fill them in
+  // from these env vars at boot:
+  //
+  //   NUXT_OIDC_PROVIDERS_ENTRA_CLIENT_ID
+  //   NUXT_OIDC_PROVIDERS_ENTRA_CLIENT_SECRET
+  //   NUXT_OIDC_PROVIDERS_ENTRA_REDIRECT_URI
+  //   NUXT_OIDC_PROVIDERS_ENTRA_AUTHORIZATION_URL
+  //   NUXT_OIDC_PROVIDERS_ENTRA_TOKEN_URL
+  //
+  // Bicep (infra/modules/container-app.bicep) sets each one. Placeholders
+  // are non-empty so the build-time requiredProperties validation passes;
+  // the runtime overlay swaps in real values.
+  oidc: {
+    enabled: process.env.NUXT_OIDC_AUTH_DEV_MODE !== 'true',
+    middleware: { globalMiddlewareEnabled: false },
+    defaultProvider: 'entra',
+    providers: {
+      entra: {
+        // Placeholders — overridden at runtime by NUXT_OIDC_PROVIDERS_ENTRA_* env vars.
+        clientId: '__set_at_runtime__',
+        clientSecret: '__set_at_runtime__',
+        authorizationUrl: 'https://login.microsoftonline.com/__tenant_id__/oauth2/v2.0/authorize',
+        tokenUrl: 'https://login.microsoftonline.com/__tenant_id__/oauth2/v2.0/token',
+        redirectUri: 'https://__hostname__/auth/entra/callback',
+        // Federated logout. Both keys MUST be declared here (even as
+        // placeholders) so Nuxt creates the runtimeConfig slots that
+        // NUXT_OIDC_PROVIDERS_ENTRA_LOGOUT_{URL,REDIRECT_URI} override at
+        // container boot — same build-time-declaration requirement as
+        // redirectUri above. Without logoutUrl the module's logout handler
+        // falls back to redirecting at getRequestURL().host, which under
+        // Azure Front Door is the REWRITTEN origin FQDN → direct Container
+        // App hit → require-front-door 500. logoutRedirectUri is the
+        // post_logout_redirect_uri sent to Entra's end_session_endpoint;
+        // it MUST be registered as a redirect URI on the app registration.
+        logoutUrl: 'https://login.microsoftonline.com/__tenant_id__/oauth2/v2.0/logout',
+        logoutRedirectUri: 'https://__hostname__/login',
+        scope: ['openid', 'profile', 'email', 'offline_access'],
+        userNameClaim: 'preferred_username',
+        // Wave-V — JIT teammate creator reads these claims from the id
+        // token. `oid` is the durable Entra object id (the audit
+        // record's actualOid); `email` + `name` are the JIT-creation
+        // payload. nuxt-oidc-auth's callback handler copies any claim
+        // listed here into user.claims for downstream session-hook
+        // consumers.
+        optionalClaims: ['oid', 'email', 'name'],
+      },
+    },
+  },
+
+  // Security headers via nuxt-security. CSP frame-ancestors set to
+  // 'none' (clickjacking defense — TokenScope is never iframed by
+  // design); 'unsafe-inline' on style-src remains a known Epic-3
+  // baseline gap that @nuxt/ui v4 requires.
+  //
+  // Rate limiter — default 150 req/5min/IP is too tight for the E2E
+  // suite (single localhost IP, many dev-login cycles + API hits per
+  // test). Disable in dev mode (`NUXT_OIDC_AUTH_DEV_MODE=true`); keep
+  // default in sandbox/prod.
+  //
+  // IP keying (CORE-4): nuxt-security's default keys the bucket on the FIRST
+  // X-Forwarded-For hop, which is CLIENT-controlled behind Azure Front Door
+  // (AFD *appends* its hop) — a caller rotating fake XFF values bypasses the
+  // limit, and pinning a victim's IP exhausts their bucket. `ipHeader` (v2.5+)
+  // names a single trustworthy header instead. The trust gate is the SAME as
+  // getPublicRequestURL / require-front-door: only when AZURE_FRONT_DOOR_ID is
+  // enforced is every request guaranteed to have transited AFD, making AFD's
+  // X-Azure-ClientIP authoritative. That is a RUNTIME condition and this file
+  // is evaluated at BUILD time (see the OIDC note above), so we declare the
+  // ipHeader slot as an empty placeholder ('' → falls back to the default
+  // resolution) and let the runtime-config overlay fill it: deployments that
+  // set AZURE_FRONT_DOOR_ID must also set
+  //   NUXT_SECURITY_RATE_LIMITER_IP_HEADER=x-azure-clientip
+  // (Bicep sets both together; without AFD the placeholder keeps local /
+  // phase-1 behaviour unchanged).
+  security: {
+    headers: {
+      contentSecurityPolicy: {
+        'img-src': ["'self'", 'data:'],
+        'font-src': ["'self'", 'https://fonts.gstatic.com', 'data:'],
+        'style-src': ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+        'frame-ancestors': ["'none'"],
+      },
+      crossOriginEmbedderPolicy: 'unsafe-none',
+    },
+    // Bounded high limit in dev mode rather than full disable so a stray
+    // test loop still trips an upper bound. Production keeps the
+    // nuxt-security defaults (150/5min). `ipHeader: ''` is a runtime-override
+    // SLOT, not a working value: empty is falsy so nuxt-security falls back to
+    // the spoofable first-XFF hop until the deployment sets
+    // NUXT_SECURITY_RATE_LIMITER_IP_HEADER=x-azure-clientip — wired in lockstep
+    // with AZURE_FRONT_DOOR_ID in infra/modules/container-app.bicep (CORE-4).
+    rateLimiter:
+      process.env.NUXT_OIDC_AUTH_DEV_MODE === 'true'
+        ? { tokensPerInterval: 5000, interval: 'second', ipHeader: '' }
+        : { tokensPerInterval: 150, interval: 300_000, ipHeader: '' },
+  },
+
+  routeRules: {
+    // /api/health is probed by Container Apps' internal LB directly (no AFD →
+    // no X-Azure-ClientIP). With ipHeader keying, every probe would share the
+    // '' bucket and a 429'd health probe restart-loops the replicas — exempt
+    // it (it is also the one path require-front-door excludes).
+    '/api/health': { security: { rateLimiter: false } },
+  },
+})

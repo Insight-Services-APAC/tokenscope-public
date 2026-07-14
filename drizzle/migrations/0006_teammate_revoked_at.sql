@@ -1,0 +1,24 @@
+-- 0006_teammate_revoked_at — Wave VII: active-session revocation anchor.
+--
+-- ts_session is an HMAC-signed stateless cookie; without a server-side
+-- "this teammate's pre-X sessions are invalid" timestamp, role changes
+-- propagate only on next OIDC fetch hook (every page load) and an
+-- attacker who exfiltrated a session cookie can keep using it until
+-- expiry. revoked_at is the durable anchor: any session whose issuedAt
+-- predates revoked_at is treated as cleared.
+--
+-- Two writers in Wave VII:
+--   1. PATCH /api/v1/admin/users/[id] — auto-revoke on every role change
+--      (eventType: teammate-sessions-auto-revoked).
+--   2. POST  /api/v1/admin/users/[id]/revoke-sessions — explicit operator
+--      action (eventType: teammate-sessions-revoked).
+--
+-- Both writers run inside the same withRequestRls transaction as the
+-- audit row so the revocation and the audit-trail row commit atomically.
+--
+-- Reader: server/middleware/validate-session.ts compares
+-- teammate.revoked_at to session.issuedAt on every /api/v1/** request.
+-- session.issuedAt missing (pre-migration sessions) is treated as the
+-- epoch — those sessions are forced to re-auth after this deploy.
+ALTER TABLE teammate
+  ADD COLUMN revoked_at TIMESTAMPTZ NULL;

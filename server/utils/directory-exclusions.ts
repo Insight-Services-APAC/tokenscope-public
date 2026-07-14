@@ -1,0 +1,129 @@
+/*
+ * directory-exclusions — the admin-configurable policy for directory accounts
+ * that must never become teammates (privileged/service accounts that don't run
+ * the tools, don't emit, don't bill), stored as UPN glob patterns in
+ * `directory_exclusion_pattern` (mig 0083). Applied at three sites: the
+ * people-picker search filter, the assign-time guard
+ * (assertDirectoryIdentityPickable), and the opt-in retro-cleanup worker.
+ *
+ * PORTABILITY: nothing org-specific is hardcoded. The patterns are DATA an
+ * admin edits; a fresh install has NONE and therefore excludes NOBODY
+ * (fail-open) until an admin opts in. `loadDirectoryExclusionPatterns` reads
+ * the table with a plain db handle so it works from a request handler AND a
+ * worker (mirrors server/utils/governance-settings.ts).
+ *
+ * MATCHING: `*` is the only wildcard (any run, incl. empty). Everything else is
+ * a literal. Both the pattern and the UPN are lowercased (the UPN is already
+ * lowercased on read in azure/directory.ts, and the unique index is on
+ * lower(pattern)); we do NOT also use the `i` regex flag — one normalisation
+ * mechanism, not two. Anchored `^…$` so a pattern matches the WHOLE UPN.
+ */
+import { sql } from 'drizzle-orm'
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
+
+type Db = PostgresJsDatabase<Record<string, unknown>>
+
+/** Regex metacharacters to escape in the literal (non-`*`) parts of a pattern. */
+const RE_META = /[.*+?^${}()|[\]\\]/g
+
+/**
+ * Validate a pattern for the match-all footgun and structural sanity. A pattern
+ * that reduces to "match everything" would empty every people-picker and (in
+ * the cleanup worker) mass-deactivate — so it is rejected here AND at the API
+ * layer (defense in depth). Returns an error string, or null when valid.
+ *
+ * Rules: non-empty; not all-wildcard (`***`); ≤200 chars; and the portion after
+ * the last `@` must contain at least one literal (non-`*`) dot-bearing domain
+ * label — i.e. the pattern must pin a real domain, not `*` / `*@*` / `*@*.com`.
+ */
+export function validateExclusionPattern(raw: string): string | null {
+  const p = raw.trim().toLowerCase()
+  if (!p) return 'Pattern is empty.'
+  if (p.length > 200) return 'Pattern is too long (max 200 characters).'
+  if (/^\*+$/.test(p)) return 'Pattern matches everything — pin a domain (e.g. *@*.onmicrosoft.com).'
+  const at = p.lastIndexOf('@')
+  const domain = at >= 0 ? p.slice(at + 1) : p
+  // The literal (wildcards removed) domain must pin a REAL domain — at least two
+  // non-empty labels (SLD.TLD), so `*@*.com` (all of .com, incl. example.com),
+  // `*@*.*` and `*@*` are rejected while `*@contoso.onmicrosoft.com` and
+  // `*-cld@example.com` pass.
+  const literalLabels = domain
+    .replace(/\*/g, '')
+    .split('.')
+    .filter((l) => /[a-z0-9]/.test(l))
+  if (literalLabels.length < 2) {
+    return 'Pattern must pin a real domain after "@" (e.g. *@contoso.onmicrosoft.com).'
+  }
+  return null
+}
+
+/** Compile a `*`-glob to an anchored RegExp. Consecutive `*` collapse to one
+ *  `.*` to avoid needless polynomial backtracking. Caller passes a
+ *  validate-passed pattern; we still escape fully (defense in depth). */
+export function upnGlobToRegExp(pattern: string): RegExp {
+  const collapsed = pattern.trim().toLowerCase().replace(/\*+/g, '*')
+  const body = collapsed
+    .split('*')
+    .map((seg) => seg.replace(RE_META, '\\$&'))
+    .join('.*')
+  return new RegExp(`^${body}$`)
+}
+
+/**
+ * Translate a `*`-glob to a SQL `LIKE` body (use with `ESCAPE '\'`), so a match
+ * count can run in the DB instead of loading the roster into memory. `*` → `%`;
+ * LIKE metacharacters (`% _ \`) in the literal parts are escaped. Agrees with
+ * `upnGlobToRegExp` for these patterns (both treat `.` as literal).
+ */
+export function upnGlobToSqlLike(pattern: string): string {
+  return pattern
+    .trim()
+    .toLowerCase()
+    .replace(/\*+/g, '*')
+    .split('*')
+    .map((seg) => seg.replace(/[\\%_]/g, '\\$&'))
+    .join('%')
+}
+
+/**
+ * True when `upn` matches any exclusion pattern. FAIL-OPEN by construction: an
+ * empty pattern list, or a null/blank upn, returns false (exclude nobody). This
+ * direction is deliberate and load-bearing — the cleanup worker deactivates on
+ * a `true`, so fail-closed would mass-deactivate.
+ */
+export function isExcludedUpn(upn: string | null | undefined, patterns: string[]): boolean {
+  if (!upn || patterns.length === 0) return false
+  const u = upn.toLowerCase()
+  for (const p of patterns) {
+    if (upnGlobToRegExp(p).test(u)) return true
+  }
+  return false
+}
+
+/**
+ * Load the active exclusion patterns. Plain db handle → works from a request
+ * (pre-tx) or a worker. No RLS gotcha: the read policy is USING(true) and RLS
+ * is runtime-inert (owner connection), mirroring governance_setting.
+ *
+ * REAL defense-in-depth (not just the POST validator): every row is
+ * re-validated here and an INVALID one is SKIPPED (logged), so a match-all
+ * pattern that reached the table by any path OTHER than the POST route (a
+ * bulk import, a migration backfill, a direct psql fix) can never empty every
+ * picker or drive the cleanup worker — the guard is enforced at the read, not
+ * only at the write.
+ */
+export async function loadDirectoryExclusionPatterns(db: Db): Promise<string[]> {
+  const rows = await db.execute<{ pattern: string }>(sql`
+    SELECT pattern FROM directory_exclusion_pattern ORDER BY lower(pattern)
+  `)
+  const out: string[] = []
+  for (const r of rows) {
+    const bad = validateExclusionPattern(r.pattern)
+    if (bad) {
+      console.warn(`[directory-exclusions] skipping invalid stored pattern ${JSON.stringify(r.pattern)}: ${bad}`)
+      continue
+    }
+    out.push(r.pattern)
+  }
+  return out
+}

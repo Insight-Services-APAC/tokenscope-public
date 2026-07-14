@@ -1,0 +1,76 @@
+/*
+ * recordAuditEvent — the canonical write into audit_event.
+ *
+ * Per AGENTS.md §Audit events: handlers MUST go through this helper, never
+ * insert directly into audit_event. The append-only trigger on audit_event
+ * (drizzle/migrations/0001_schema.sql) means a row, once written, cannot
+ * be UPDATEd or DELETEd — so the helper is the only allocation point.
+ *
+ * Named after a sibling project's `lib/audit/` pattern (R2 F3 of the build plan).
+ */
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
+import { auditEvent } from '../../drizzle/schema'
+
+/*
+ * Every audit event names its actor (SYS-3, robustness-review-2026-06-09):
+ * either the teammate who acted or an explicit system identity (worker /
+ * flow name). Omitting both is how forensically-blind rows like the
+ * actor-less project-member-added events (API-3) slipped through — so the
+ * union makes that a type error rather than a convention.
+ */
+export type AuditActor =
+  | { actorTeammateId: string; actorSystem?: string | null }
+  | { actorSystem: string; actorTeammateId?: string | null }
+
+export type AuditEventInput = {
+  eventType: string
+  subjectKind?: string | null
+  subjectId?: string | null
+  payload: Record<string, unknown>
+  ipAddress?: string | null
+  userAgent?: string | null
+} & AuditActor
+
+/**
+ * Coerce a client address into something the `inet` column accepts. h3's
+ * getRequestIP can return `host:port` (dev's WAF forwards the source port in
+ * X-Forwarded-For, e.g. `10.80.12.36:46306`), and `inet` rejects a port — which
+ * 500s the whole request. Strip the port (IPv4 + bracketed IPv6), and null
+ * anything that still isn't a bare IP, since the audit IP is best-effort and
+ * must never crash the operation it's recording.
+ */
+export function normalizeInet(ip: string | null | undefined): string | null {
+  if (!ip) return null
+  const s = String(ip).trim()
+  const v6 = s.match(/^\[([0-9a-fA-F:]+)\](?::\d+)?$/) // [::1]:443 -> ::1
+  if (v6) return v6[1]!
+  const v4 = s.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/) // 10.0.0.1:443 -> 10.0.0.1
+  if (v4) return v4[1]!
+  // Bare IPv4 or IPv6 passes through; anything else (hostname, junk) → null.
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(s) || /^[0-9a-fA-F:]+$/.test(s)) return s
+  return null
+}
+
+export async function recordAuditEvent(
+  db: PostgresJsDatabase<Record<string, unknown>>,
+  input: AuditEventInput,
+): Promise<{ id: string }> {
+  const [row] = await db
+    .insert(auditEvent)
+    .values({
+      eventType: input.eventType,
+      actorTeammateId: input.actorTeammateId ?? null,
+      actorSystem: input.actorSystem ?? null,
+      subjectKind: input.subjectKind ?? null,
+      subjectId: input.subjectId ?? null,
+      payload: input.payload,
+      ipAddress: normalizeInet(input.ipAddress),
+      userAgent: input.userAgent ?? null,
+    })
+    .returning({ id: auditEvent.id })
+
+  if (!row) {
+    throw new Error('recordAuditEvent: insert returned no row')
+  }
+  return { id: row.id }
+}

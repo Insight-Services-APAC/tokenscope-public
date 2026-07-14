@@ -1,0 +1,8 @@
+{
+  "name": "fake-azure-monitor",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Local stub that responds with the @azure/monitor-query shape. Epic 6 builds out the LogsQueryClient + MetricsQueryClient endpoints.",
+  "type": "module",
+  "main": "server.js"
+}

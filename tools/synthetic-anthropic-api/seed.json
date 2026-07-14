@@ -1,0 +1,12 @@
+{
+  "users": [
+    { "email": "priya.iyer@example.com", "base_input": 12000, "base_output": 8000 },
+    { "email": "jason.wu@example.com", "base_input": 6000, "base_output": 4000 },
+    { "email": "anil.verma@example.com", "base_input": 18000, "base_output": 12000 },
+    { "email": "mei.tanaka@example.com", "base_input": 9000, "base_output": 6000 },
+    { "email": "liam.osullivan@example.com", "base_input": 4500, "base_output": 3000 },
+    { "email": "aarti.shah@example.com", "base_input": 14000, "base_output": 9000 }
+  ],
+  "price_per_million_input": 3.0,
+  "price_per_million_output": 15.0
+}

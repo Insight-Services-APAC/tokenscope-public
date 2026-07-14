@@ -1,0 +1,10 @@
+title: TokenScope
+description: >-
+  Manage AI engineering the way you manage people engineering. People fill in
+  timesheets; AI fills in TokenSheets. Token attribution, reconciliation, and
+  project budgets for AI-coding tools (Claude Code + GitHub Copilot).
+theme: jekyll-theme-cayman
+# GitHub Pages serves this folder (repo Settings → Pages → Source: main /docs).
+# index.html is the bespoke landing; the Markdown docs render with the theme.
+exclude:
+  - "*.bicepparam"

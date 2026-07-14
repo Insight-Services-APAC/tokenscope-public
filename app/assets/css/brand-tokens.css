@@ -1,0 +1,70 @@
+/*
+ * TokenScope brand tokens — TokenScope palette.
+ *
+ * Mirrors docs/design/ux-pilot/tokenscope-pilot-design/project/styles.css
+ * so the Claude Design hi-fi prototype and the live Nuxt app reference the
+ * exact same values. All component colours MUST resolve to one of these
+ * tokens — no hardcoded hex (enforced by adversarial review).
+ *
+ * Naming: --brand-<canonical-name>, --carbon{,-2,-3}, --rag-{red,amber,green}.
+ */
+
+:root {
+  /* ───── Primary palette (canonical) ───── */
+  --brand-hustle: #d30c55;
+  --brand-inspired: #ed1944;
+  --brand-hunger: #d40e8c;
+  --brand-heart: #b01c87;
+  --brand-harmony: #582873;
+  --brand-vision: #5990f0;
+  --brand-zeal: #4ec7ea;
+
+  /* ───── Secondary (lites) — soft backgrounds, chips ───── */
+  --brand-hunger-lite: #f8d5f8;
+  --brand-harmony-lite: #e8daff;
+  --brand-vision-lite: #d0e2ff;
+  --brand-zeal-lite: #c5edfa;
+  --brand-clarity: #f5f5f5;
+
+  /* ───── Tertiary (sheers) — washes ───── */
+  --brand-hunger-sheer: #fff2fd;
+  --brand-harmony-sheer: #efedfe;
+  --brand-vision-sheer: #e5f6ff;
+
+  /* ───── Neutrals ───── */
+  --carbon: #3e332d;
+  --carbon-2: #5a4d45;
+  --carbon-3: #8a7e76;
+  --cloud: #bdbdbd;
+  --calm: #e0e0e0;
+  --calm-2: #ececec;
+  --paper: #fafaf8;
+  --white: #ffffff;
+
+  /* ───── RAG (TokenScope-defined; brand doesn't prescribe) ───── */
+  --rag-red: #dc2626;
+  --rag-amber: #d97706;
+  --rag-green: #16a34a;
+
+  /* ───── Semantic ───── */
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --error: #ef4444;
+  --info: var(--brand-vision);
+
+  /* ───── Type ───── */
+  --font-sans: 'Manrope', 'Greycliff CF', Arial, system-ui, sans-serif;
+  --font-slab: 'Zilla Slab', 'Klinic Slab', Georgia, serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'SF Mono', monospace;
+
+  /* ───── Shape ───── */
+  --r-card: 12px;
+  --r-badge: 6px;
+  --r-input: 8px;
+  --r-pill: 999px;
+
+  /* ───── Shadows (Harmony-tinted per brand) ───── */
+  --shadow-card: 0 4px 24px rgba(88, 40, 115, 0.08);
+  --shadow-card-h: 0 8px 28px rgba(88, 40, 115, 0.12);
+  --shadow-pop: 0 16px 48px rgba(88, 40, 115, 0.16);
+}

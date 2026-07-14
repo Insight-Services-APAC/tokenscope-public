@@ -1,0 +1,22 @@
+-- 0041: drop the obsolete narrow teammate_identity_map uniqueness (Stream A).
+--
+-- Found by Stream B against the testcontainers schema. 0001 created an INLINE
+-- `UNIQUE (system, identifier)` constraint (auto-named
+-- teammate_identity_map_system_identifier_key). 0012 added a case-insensitive
+-- INDEX, and 0038 widened that index to
+-- (system, COALESCE(enterprise_slug,''), lower(identifier)) for the multi-enterprise
+-- identity model — but the original 0001 CONSTRAINT was never dropped, and it
+-- SHADOWS the widened key:
+--   * a login already linked via human self-service (enterprise_slug NULL) collides
+--     with the SAME login directory-synced into an enterprise lane
+--     (enterprise_slug=<ent>) -> the sync throws -> the whole enterprise sweep is
+--     silently abandoned (one pre-existing self-service seat kills it);
+--   * one login holding seats across multiple enterprises (0038's stated goal) is
+--     blocked.
+--
+-- Drop the narrow constraint (this also drops its backing index). The widened
+-- unique index `teammate_identity_map_identity_unique` is the authoritative key and
+-- still enforces the anti-claim-jacking guard for self-service rows (enterprise_slug
+-- NULL -> COALESCE('') -> one identity per teammate, case-insensitive).
+ALTER TABLE teammate_identity_map
+  DROP CONSTRAINT IF EXISTS teammate_identity_map_system_identifier_key;

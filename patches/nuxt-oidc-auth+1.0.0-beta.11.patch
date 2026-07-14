@@ -1,0 +1,21 @@
+diff --git a/node_modules/nuxt-oidc-auth/dist/runtime/server/handler/callback.js b/node_modules/nuxt-oidc-auth/dist/runtime/server/handler/callback.js
+index d81e265..c67b53b 100644
+--- a/node_modules/nuxt-oidc-auth/dist/runtime/server/handler/callback.js
++++ b/node_modules/nuxt-oidc-auth/dist/runtime/server/handler/callback.js
+@@ -198,6 +198,7 @@ function callbackEventHandler({ onSuccess }) {
+       const userSessionId = await getUserSessionId(event);
+       await useStorage("oidc").setItem(userSessionId, persistentSession);
+     }
++    const sessionCallbackRedirectUrl = session.data.callbackRedirectUrl;
+     await session.clear();
+     deleteCookie(event, "oidc");
+     return onSuccess(event, {
+@@ -205,7 +206,7 @@ function callbackEventHandler({ onSuccess }) {
+       callbackRedirectUrl: resolveCallbackRedirectUrl({
+         configuredCallbackRedirectUrl: config.callbackRedirectUrl,
+         hasConfiguredCallbackRedirectUrl,
+-        sessionCallbackRedirectUrl: session.data.callbackRedirectUrl
++        sessionCallbackRedirectUrl
+       })
+     });
+   });

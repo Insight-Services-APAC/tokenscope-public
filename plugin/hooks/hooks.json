@@ -1,0 +1,16 @@
+{
+  "description": "Zero-touch repo tagging + proactive emission-health warning: on session start, reconcile the repo-local tag from the current global enrolment (so the next launch is tagged) and run the real emit path, surfacing a visible warning if telemetry is not emitting.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

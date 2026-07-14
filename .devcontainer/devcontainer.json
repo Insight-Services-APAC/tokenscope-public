@@ -1,0 +1,21 @@
+{
+	"name": "TokenScope",
+	"image": "mcr.microsoft.com/devcontainers/base:noble",
+
+	"features": {
+		"ghcr.io/devcontainers/features/node:1": { "version": "22" },
+		"ghcr.io/devcontainers/features/github-cli:1": {}
+	},
+
+	"forwardPorts": [3450, 3451, 3452, 3453, 3454, 3455],
+	"portsAttributes": {
+		"3450": { "label": "TokenScope (Nuxt)" },
+		"3451": { "label": "Postgres" },
+		"3452": { "label": "Redis" },
+		"3453": { "label": "Azurite" },
+		"3454": { "label": "OTel Collector" },
+		"3455": { "label": "fake-azure-monitor" }
+	},
+
+	"remoteUser": "vscode"
+}

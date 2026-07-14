@@ -1,0 +1,132 @@
+# TokenScope local dev stack — 5 sibling containers on the cw worker network.
+#
+# Per docs/build/mvp-lite-epic.md §Local dev stack. The Nuxt app itself runs
+# on the cw worker (`npm run dev` → 0.0.0.0:3450) — only :3450 is published
+# to the host (via .devcontainer/devcontainer.json forwardPorts).
+#
+# Sibling services are NOT published to the host. The worker reaches them
+# via container DNS on the shared cw network:
+#   postgres           → ${CW_WORKER_NAME}-postgres:5432
+#   redis              → ${CW_WORKER_NAME}-redis:6379
+#   azurite            → ${CW_WORKER_NAME}-azurite:10000
+#   otel-collector     → ${CW_WORKER_NAME}-otel-collector:4318
+#   fake-azure-monitor → ${CW_WORKER_NAME}-fake-azure-monitor:8080
+#
+# (Per AGENTS.md §Environment: the cw worker already owns ports 3450-3455
+# on the host, so re-publishing those from sibling containers conflicts.
+# Dev tooling that needs host access connects via `docker exec` into the
+# target container, not through a published port.)
+#
+# Brought up via `npm run dev:stack` (scripts/dev-stack.sh wraps
+# `docker compose up -d`). Verify:
+#   docker compose ps
+
+name: tokenscope
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: ${CW_WORKER_NAME:-tokenscope}-postgres
+    environment:
+      POSTGRES_USER: tokenscope
+      POSTGRES_PASSWORD: tokenscope
+      POSTGRES_DB: tokenscope
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U tokenscope -d tokenscope']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: ${CW_WORKER_NAME:-tokenscope}-redis
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: ${CW_WORKER_NAME:-tokenscope}-azurite
+    command:
+      - azurite
+      - --blobHost
+      - 0.0.0.0
+      - --queueHost
+      - 0.0.0.0
+      - --tableHost
+      - 0.0.0.0
+      - --skipApiVersionCheck
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: ${CW_WORKER_NAME:-tokenscope}-otel-collector
+    command: ['--config=/etc/otel-collector-config.yaml']
+    configs:
+      - source: otel_config
+        target: /etc/otel-collector-config.yaml
+    volumes:
+      - otel-data:/var/lib/otel
+
+  fake-azure-monitor:
+    build:
+      context: ./tools/fake-azure-monitor
+    container_name: ${CW_WORKER_NAME:-tokenscope}-fake-azure-monitor
+    environment:
+      PORT: '8080'
+    depends_on:
+      - otel-collector
+
+  synthetic-anthropic-api:
+    build:
+      context: ./tools/synthetic-anthropic-api
+    container_name: ${CW_WORKER_NAME:-tokenscope}-synthetic-anthropic-api
+    environment:
+      PORT: '8080'
+
+volumes:
+  otel-data:
+
+# Inline configs keep sibling containers free of bind mounts (which would
+# need host-side paths to work via the cw worker's docker socket).
+configs:
+  otel_config:
+    content: |
+      receivers:
+        otlp:
+          protocols:
+            http:
+              endpoint: 0.0.0.0:4318
+      processors:
+        batch:
+          timeout: 5s
+          send_batch_size: 1024
+      exporters:
+        debug:
+          verbosity: basic
+        file:
+          path: /var/lib/otel/telemetry.jsonl
+      service:
+        pipelines:
+          traces:
+            receivers: [otlp]
+            processors: [batch]
+            exporters: [debug, file]
+          metrics:
+            receivers: [otlp]
+            processors: [batch]
+            exporters: [debug, file]
+          logs:
+            receivers: [otlp]
+            processors: [batch]
+            exporters: [debug, file]
+
+# Attach all sibling containers to the cw worker network so the Nuxt app
+# (running on the worker itself) can reach them via container DNS names.
+# `external: true` means compose will NOT create the network — it must
+# already exist, which it always does inside a cw worker.
+networks:
+  default:
+    name: ${CW_NETWORK:-bridge}
+    external: true
