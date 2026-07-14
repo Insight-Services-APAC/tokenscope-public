@@ -67,7 +67,7 @@
     "happy-dom": "^20.8.6",
     "patch-package": "^8.0.1",
     "playwright-chromium": "^1.58.2",
-    "prettier": "^3.8.1",
+    "prettier": "^3.9.5",
     "typescript": "^5.7.0",
     "vitest": "^4.1.1",
     "vue-tsc": "^3.3.0"
