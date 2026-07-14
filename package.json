@@ -55,7 +55,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@nuxt/eslint": "^1.15.1",
+    "@nuxt/eslint": "^1.16.0",
     "@playwright/cli": "^0.1.13",
     "@playwright/test": "^1.58.2",
     "@testcontainers/postgresql": "^12.0.0",
