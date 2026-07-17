@@ -1,239 +1,292 @@
 <script setup lang="ts">
 /*
- * Admin → Department map. Curate the department → region map (mig 0068),
- * the PRIMARY region-derivation signal: an unplaced user's Entra `department`
- * is looked up (case-insensitively) to home them in their real region.
- *
- * Org-wide curated config (not region-scoped) — adding a mapping is a
- * deliberate placement policy, so this page is intentionally not bounded to
- * the admin's own region. Add (department text + region select), and remove
- * (hard delete — it's config, not history).
- *
- * Money-policy note (design doc fix #6): mapping a department to the
- * Global/Shared region is allowed but is a deliberate "this whole department
- * is a shared function regardless of reporting line" assertion. The UI warns
- * before such a mapping; mis-derivation lands in that region's unattributed
- * holding bucket and is admin-correctable.
- *
- * RBAC: client-side guard via useSession() — the server still 401/403s a
- * non-admin's API calls (requireRole admin / global-finops); the page just
- * hides itself.
+ * Admin → Region rules. Curate "when a user's <directory attribute> = <value>,
+ * their region is <R>" rules (mig 0089) — the placement signal for people who
+ * appear on a provider bill before they ever log in. Any tenant keys on the
+ * attribute that is region-correlated on THEIR directory (companyName at
+ * Insight); the Discover panel samples the directory and shows which one that
+ * is. GLOBAL roles only. Region leaders are the manager-walk FALLBACK layer.
  */
 import { computed, ref } from 'vue'
 import { consola } from 'consola'
+import { useAdminAccess } from '../../composables/useAdminAccess'
+import {
+  REGION_ATTRIBUTES,
+  regionAttribute,
+  regionAttributeLabel,
+  type MatchMode,
+} from '#shared/placement/region-attributes'
+import type { AttributeDistribution } from '#shared/placement/field-distribution'
 
-interface MappingRow {
-  department: string
-  department_lower: string
+definePageMeta({ layout: 'admin', middleware: 'admin' })
+
+interface Rule {
+  id: string
+  attribute: string
+  match_mode: string
+  match_value: string
+  match_value_raw: string
   region_id: string
   region_code: string
   region_display_name: string
 }
 
-const { session, ensure } = useSession()
-await ensure()
-
-const isAdmin = computed(() => {
-  const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
-})
+// Region rules are ORG-WIDE cross-region placement config, so the rules /
+// diagnostic APIs are global-roles-only. Gate the whole page on isOrgWide (not
+// isAdmin) — a region admin would otherwise land on a page whose every action
+// 403s. The sidebar item is 'org-wide' too, so they see it locked with a hint.
+const { isOrgWide } = useAdminAccess()
 
 const { data: regionsData } = await useFetch<{ regions: { id: string; code: string; display_name: string }[] }>(
   '/api/v1/admin/regions',
-  { default: () => ({ regions: [] }), immediate: isAdmin.value },
+  { key: 'region-rules-regions', default: () => ({ regions: [] }), immediate: isOrgWide.value },
 )
+const regions = computed(() => regionsData.value?.regions ?? [])
 
-const { data, refresh, pending } = await useFetch<{ mappings: MappingRow[] }>(
-  '/api/v1/admin/department-map',
-  { default: () => ({ mappings: [] }), immediate: isAdmin.value },
-)
-const mappings = computed(() => data.value?.mappings ?? [])
+const { data, refresh, pending } = await useFetch<{ rules: Rule[] }>('/api/v1/admin/directory-region-rules', {
+  key: 'region-rules-list',
+  default: () => ({ rules: [] }),
+  immediate: isOrgWide.value,
+})
+const rules = computed(() => data.value?.rules ?? [])
+const rulesByAttribute = computed(() => {
+  const groups = new Map<string, Rule[]>()
+  for (const r of rules.value) {
+    const g = groups.get(r.attribute) ?? []
+    g.push(r)
+    groups.set(r.attribute, g)
+  }
+  return REGION_ATTRIBUTES.map((a) => ({ attribute: a.key, label: a.label, rows: groups.get(a.key) ?? [] })).filter(
+    (g) => g.rows.length,
+  )
+})
 
 const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 function flashToast(kind: 'ok' | 'err', message: string) {
   toast.value = { kind, message }
   if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => { toast.value = null }, 3500)
+  toastTimer = setTimeout(() => (toast.value = null), 3500)
 }
 
-// ── add / upsert a mapping ────────────────────────────────────────────────
-const newDept = ref('')
-const newRegionId = ref('')
-const adding = ref(false)
+// ── Add-rule form ──────────────────────────────────────────────────────────
+const formAttribute = ref<string>('companyName')
+const formMode = ref<MatchMode>('exact')
+const formValue = ref('')
+const formRegion = ref('')
+const saving = ref(false)
+const formHint = computed(() => regionAttribute(formAttribute.value)?.hint ?? '')
+const selectedRegion = computed(() => regions.value.find((r) => r.id === formRegion.value))
 
-const selectedIsGlobalShared = computed(
-  () => regionsData.value?.regions.find((r) => r.id === newRegionId.value)?.code === 'global-shared',
-)
+function prefill(attribute: string, value: string, mode: MatchMode = 'exact') {
+  formAttribute.value = attribute
+  formValue.value = value
+  formMode.value = mode
+  document.querySelector<HTMLInputElement>('[data-testid="rule-value"]')?.focus()
+}
 
-async function addMapping() {
-  const department = newDept.value.trim()
-  if (!department || !newRegionId.value) return
-  // Money-policy guard (fix #6): mapping to Global/Shared is a deliberate
-  // "whole department is a shared function" assertion, not a geo placement.
+async function addRule() {
+  if (!formValue.value.trim() || !formRegion.value) {
+    flashToast('err', 'Pick an attribute value and a region.')
+    return
+  }
+  // Money-policy guardrail: mapping an attribute value to Global/Shared asserts
+  // "this whole group is a shared function regardless of geography" — a
+  // deliberate, spend-affecting choice. Confirm before it lands in that region's
+  // unattributed bucket.
   if (
-    selectedIsGlobalShared.value &&
+    selectedRegion.value?.code === 'global-shared' &&
     !confirm(
-      `Map "${department}" to the Global / Shared region?\n\n` +
-        'This asserts the whole department is a shared function regardless of ' +
-        "reporting line. Don't use it for a geo-correlated department — those " +
-        'should map to a real region. Continue?',
+      `Map ${regionAttributeLabel(formAttribute.value)} “${formValue.value.trim()}” to Global/Shared? Everyone matching becomes a shared function regardless of their reporting line.`,
     )
   ) {
     return
   }
-  adding.value = true
+  saving.value = true
   try {
-    await $fetch('/api/v1/admin/department-map', {
+    await $fetch('/api/v1/admin/directory-region-rules', {
       method: 'POST',
-      body: { department, region_id: newRegionId.value },
+      body: {
+        attribute: formAttribute.value,
+        match_mode: formMode.value,
+        match_value: formValue.value.trim(),
+        region_id: formRegion.value,
+      },
     })
-    flashToast('ok', `Mapped '${department}'.`)
-    newDept.value = ''
-    newRegionId.value = ''
+    flashToast('ok', `Rule saved: ${regionAttributeLabel(formAttribute.value)} “${formValue.value.trim()}”.`)
+    formValue.value = ''
     await refresh()
-  } catch (err) {
-    flashToast('err', apiErrorDetail(err, 'Add refused.'))
-    consola.warn('department-map add failed', err)
+  } catch (e) {
+    consola.error(e)
+    flashToast('err', 'Save failed.')
   } finally {
-    adding.value = false
+    saving.value = false
   }
 }
 
-// ── remove a mapping (hard delete — config, not history) ──────────────────
-const removingKey = ref<string | null>(null)
-async function removeMapping(row: MappingRow) {
-  if (!confirm(`Remove the mapping for "${row.department}"? Unplaced users in this department fall back to the manager walk.`)) {
-    return
-  }
-  removingKey.value = row.department_lower
+async function removeRule(r: Rule) {
+  if (!confirm(`Remove the rule ${regionAttributeLabel(r.attribute)} “${r.match_value_raw}” → ${r.region_display_name}?`)) return
   try {
-    await $fetch(`/api/v1/admin/department-map/${encodeURIComponent(row.department_lower)}`, {
-      method: 'DELETE',
-    })
-    flashToast('ok', `Removed '${row.department}'.`)
+    await $fetch(`/api/v1/admin/directory-region-rules/${r.id}`, { method: 'DELETE' })
+    flashToast('ok', 'Rule removed.')
     await refresh()
-  } catch (err) {
-    flashToast('err', apiErrorDetail(err, 'Remove refused.'))
-    consola.warn('department-map remove failed', err)
+  } catch (e) {
+    consola.error(e)
+    flashToast('err', 'Remove failed.')
+  }
+}
+
+// ── Discover panel (field-distribution diagnostic) ───────────────────────────
+const discovering = ref(false)
+const discovered = ref<{ sampled: number; attributes: AttributeDistribution[] } | null>(null)
+type FieldDist = { sampled: number; attributes: AttributeDistribution[] }
+async function discover() {
+  discovering.value = true
+  try {
+    // Narrowed $fetch sig — the query-string URL otherwise trips Nuxt's
+    // route-union typegen into a TS2321 "excessive stack depth" (same trap as
+    // useSession.ts).
+    const get = $fetch as (url: string) => Promise<FieldDist>
+    discovered.value = await get('/api/v1/admin/directory/field-distribution?sample=300')
+  } catch (e) {
+    consola.error(e)
+    flashToast('err', 'Could not sample the directory.')
   } finally {
-    removingKey.value = null
+    discovering.value = false
   }
 }
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-department-map">
+  <div v-if="isOrgWide" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-region-rules">
     <UiPageHead
-      eyebrow="Administration"
-      title="Department map"
-      sub="Map an Entra department to a region. Unplaced users are homed in their real region by department first; the manager walk is the fallback."
-      :crumbs="['Admin', 'Department map']"
+      eyebrow="Organisation"
+      title="Region rules"
+      sub="Home never-logged-in people to their region from their Entra profile. Pick the directory attribute that maps to region on your tenant."
     />
+    <p class="-mt-4 mb-8 text-sm text-carbon-2 leading-relaxed max-w-3xl">
+      A rule says “when a teammate's <strong>&lt;attribute&gt;</strong> equals <strong>&lt;value&gt;</strong>, their
+      region is <strong>&lt;R&gt;</strong>”. This is the first placement layer;
+      <NuxtLink to="/admin/regions" class="text-brand-harmony hover:underline">Region leaders</NuxtLink>
+      (the manager-walk) are the fallback, then Unassigned.
+      Not sure which attribute? <strong>Discover</strong> samples your directory below.
+    </p>
 
     <div
       v-if="toast"
-      :data-testid="`admin-department-map-toast-${toast.kind}`"
+      :data-testid="`region-rules-toast-${toast.kind}`"
       class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-hunger border border-brand-hunger/30'"
+      :class="toast.kind === 'ok' ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30' : 'bg-brand-hunger/10 text-brand-hunger border border-brand-hunger/30'"
     >
       {{ toast.message }}
     </div>
 
-    <!-- Add / upsert -->
-    <UiCard class="mb-5">
-      <form class="flex flex-wrap items-end gap-3" data-testid="department-map-add-form" @submit.prevent="addMapping">
+    <!-- Discover panel -->
+    <UiCard accent="vision" class="mb-8" data-testid="region-rules-discover">
+      <div class="flex items-center justify-between gap-3 flex-wrap mb-1">
         <div>
-          <label class="block text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-1.5">Department</label>
-          <input
-            v-model="newDept"
-            type="text"
-            maxlength="200"
-            placeholder="e.g. Data &amp; AI Practice"
-            class="px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none min-w-[280px]"
-            data-testid="department-map-new-dept"
-          >
+          <UiEyebrow>Discover</UiEyebrow>
+          <h2 class="text-lg font-bold text-carbon mt-0.5">Which attribute maps to region?</h2>
         </div>
-        <div>
-          <label class="block text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-1.5">Region</label>
-          <select
-            v-model="newRegionId"
-            class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
-            data-testid="department-map-new-region"
-          >
-            <option value="" disabled>Select a region…</option>
-            <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
-          </select>
-        </div>
-        <UiButton
-          kind="primary"
-          size="sm"
-          type="submit"
-          :disabled="adding || !newDept.trim() || !newRegionId"
-          data-testid="department-map-add"
-        >
-          {{ adding ? 'Saving…' : '+ Map department' }}
+        <UiButton kind="primary" size="sm" :disabled="discovering" data-testid="region-rules-discover-run" @click="discover">
+          {{ discovering ? 'Sampling…' : discovered ? 'Re-sample directory' : 'Sample directory' }}
         </UiButton>
-        <span class="text-[11px] text-carbon-3">
-          Matching is case-insensitive. Re-mapping an existing department updates its region.
-        </span>
-      </form>
-      <p
-        v-if="selectedIsGlobalShared"
-        class="mt-3 text-[12px] text-rag-amber"
-        data-testid="department-map-global-shared-warn"
-      >
-        Global / Shared declares the whole department a shared function regardless of reporting line — don't use it for a geo-correlated department.
+      </div>
+      <p class="text-xs text-carbon-3 mb-4 leading-relaxed">
+        Samples up to 300 directory users (best-effort, not a census) and shows each attribute's coverage + top
+        values. Values are aggregate counts only — no personal data. Rare values (&lt;5 people) are hidden.
       </p>
+
+      <div v-if="discovered" class="grid grid-cols-1 lg:grid-cols-2 gap-4" data-testid="region-rules-discover-results">
+        <div
+          v-for="a in discovered.attributes"
+          :key="a.attribute"
+          class="p-3 rounded-lg border border-calm-2"
+          :data-testid="`discover-attr-${a.attribute}`"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-sm font-bold text-carbon">{{ a.label }}</span>
+            <span class="text-[11px] text-carbon-3">{{ a.coveragePct }}% populated · {{ a.distinct }} distinct</span>
+          </div>
+          <div class="h-1.5 mt-1.5 rounded bg-calm-1 overflow-hidden">
+            <div class="h-full bg-brand-harmony" :style="{ width: `${a.coveragePct}%` }" />
+          </div>
+          <p class="text-[10.5px] text-carbon-3 mt-1.5 leading-tight">{{ regionAttribute(a.attribute)?.hint }}</p>
+          <div v-if="a.top.length" class="mt-2 flex flex-col gap-1">
+            <div v-for="v in a.top" :key="v.value" class="flex items-center justify-between gap-2 text-sm">
+              <span class="text-carbon-2 truncate">{{ v.value }} <span class="text-carbon-3 text-xs">· {{ v.count }}</span></span>
+              <button
+                type="button"
+                class="text-[11px] font-semibold text-brand-harmony hover:underline shrink-0"
+                :data-testid="`discover-map-${a.attribute}`"
+                @click="prefill(a.attribute, v.value)"
+              >Map →</button>
+            </div>
+            <p v-if="a.other.values" class="text-[11px] text-carbon-3 italic">+ {{ a.other.values }} smaller values ({{ a.other.users }} people)</p>
+          </div>
+          <p v-else class="text-[11px] text-carbon-3 italic mt-2">No values with ≥5 people.</p>
+        </div>
+      </div>
     </UiCard>
 
-    <UiCard data-testid="department-map-table">
-      <div v-if="pending" class="text-sm text-carbon-3 py-6 text-center">Loading…</div>
-      <table v-else-if="mappings.length" class="w-full text-sm">
-        <thead>
-          <tr class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 border-b border-calm-2">
-            <th class="px-3 py-2">Department</th>
-            <th class="px-3 py-2">Region</th>
-            <th class="px-3 py-2 text-right">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="row in mappings"
-            :key="row.department_lower"
-            class="border-b border-calm-2 last:border-b-0 hover:bg-brand-harmony-sheer/30"
-            :data-testid="`department-map-row-${row.department_lower}`"
-          >
-            <td class="px-3 py-2 text-carbon font-medium">{{ row.department }}</td>
-            <td class="px-3 py-2">
-              <UiBadge :kind="row.region_code === 'global-shared' ? 'neutral' : 'harmony'">
-                {{ row.region_display_name }}
-              </UiBadge>
-            </td>
-            <td class="px-3 py-2 text-right whitespace-nowrap">
-              <UiButton
-                kind="ghost"
-                size="sm"
-                :disabled="removingKey === row.department_lower"
-                :data-testid="`department-map-remove-${row.department_lower}`"
-                @click="removeMapping(row)"
-              >
-                {{ removingKey === row.department_lower ? '…' : 'Remove' }}
-              </UiButton>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <UiEmptyState
-        v-else
-        headline="No department mappings yet"
-        sub="Add a department → region row above. Until then, unplaced users rely on the manager walk and the Global / Unassigned fallback."
-      />
+    <!-- Add rule -->
+    <UiCard class="mb-8" data-testid="region-rules-add">
+      <UiEyebrow>Add a rule</UiEyebrow>
+      <div class="grid grid-cols-1 md:grid-cols-[180px_120px_1fr_1fr_auto] gap-3 items-end mt-3">
+        <label class="text-[12px] font-semibold text-carbon">
+          Attribute
+          <select v-model="formAttribute" data-testid="rule-attribute" class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white">
+            <option v-for="a in REGION_ATTRIBUTES" :key="a.key" :value="a.key">{{ a.label }}</option>
+          </select>
+        </label>
+        <label class="text-[12px] font-semibold text-carbon">
+          Match
+          <select v-model="formMode" data-testid="rule-mode" class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white">
+            <option value="exact">Exact</option>
+            <option value="prefix">Prefix</option>
+          </select>
+        </label>
+        <label class="text-[12px] font-semibold text-carbon">
+          Value
+          <input v-model="formValue" data-testid="rule-value" :placeholder="regionAttribute(formAttribute)?.example" class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none">
+        </label>
+        <label class="text-[12px] font-semibold text-carbon">
+          Region
+          <select v-model="formRegion" data-testid="rule-region" class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white">
+            <option value="" disabled>Select…</option>
+            <option v-for="r in regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
+          </select>
+        </label>
+        <UiButton kind="primary" size="sm" :disabled="saving" data-testid="rule-add" @click="addRule">
+          {{ saving ? 'Saving…' : 'Add rule' }}
+        </UiButton>
+      </div>
+      <p class="text-[11px] text-carbon-3 mt-2 leading-relaxed">{{ formHint }}</p>
     </UiCard>
+
+    <!-- Rules -->
+    <div v-if="pending" class="text-center text-sm text-carbon-3 py-8">Loading…</div>
+    <div v-else-if="!rules.length" class="p-6 rounded-lg border border-calm-2 text-center" data-testid="region-rules-empty">
+      <p class="text-sm text-carbon-2">No region rules yet. Run <strong>Discover</strong> to see which attribute maps to region, then add rules — or unplaced people fall back to Region leaders and Unassigned.</p>
+    </div>
+    <div v-else class="flex flex-col gap-6" data-testid="region-rules-list">
+      <div v-for="g in rulesByAttribute" :key="g.attribute">
+        <h3 class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">{{ g.label }}</h3>
+        <div class="rounded-lg border border-calm-2 divide-y divide-calm-2">
+          <div v-for="r in g.rows" :key="r.id" class="flex items-center justify-between gap-3 px-4 py-2.5" :data-testid="`rule-row-${r.id}`">
+            <div class="flex items-center gap-2 min-w-0 flex-wrap">
+              <span class="text-sm font-semibold text-carbon truncate">{{ r.match_value_raw }}</span>
+              <UiBadge v-if="r.match_mode === 'prefix'" kind="neutral">prefix</UiBadge>
+              <span class="text-carbon-3 text-sm">→</span>
+              <UiBadge :kind="r.region_code === 'global-shared' ? 'neutral' : 'harmony'">{{ r.region_display_name }}</UiBadge>
+            </div>
+            <button type="button" class="text-xs font-semibold text-brand-hunger hover:underline shrink-0" :data-testid="`rule-remove-${r.id}`" @click="removeRule(r)">Remove</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
   <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
-    <div class="text-lg font-bold text-carbon">Admin access required.</div>
+    <div class="text-lg font-bold text-carbon">Global finance access required.</div>
   </div>
 </template>

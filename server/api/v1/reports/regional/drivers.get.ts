@@ -11,6 +11,7 @@
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { z } from 'zod'
 import { requireRole } from '../../../../auth/rbac'
+import { resolveReportGrants } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
@@ -45,7 +46,13 @@ export default defineEventHandler(async (event) => {
   const month = win.monthStr ?? monthKeyUtc(new Date(win.startIso))
 
   return await withRequestRls(event, async (tx) => {
-    const scope = await resolveRegionalScope(tx, caller, { region: query.region, ou: query.ou })
+    const grants = await resolveReportGrants(event, tx, caller)
+    const scope = await resolveRegionalScope(
+      tx,
+      caller,
+      { region: query.region, ou: query.ou },
+      { crossRegion: grants.regional === 'all-regions' },
+    )
     const { rows, headlineUsd } = await fetchRegionalDrivers(tx, scope, win, query.axis)
     return {
       month,

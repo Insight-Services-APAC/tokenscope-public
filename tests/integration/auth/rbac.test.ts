@@ -10,7 +10,6 @@
 import { describe, it, expect } from 'vitest'
 import { requireAuth, requireRole, requireRegionScope } from '../../../server/auth/rbac'
 import { assertProjectScope } from '../../../server/auth/project-scope'
-import { financeRegionFilter } from '../../../server/auth/finance-scope'
 import type { Session } from '../../../server/utils/auth'
 import { injectTestSession } from '../../helpers/auth'
 
@@ -155,22 +154,6 @@ describe('assertProjectScope — explicit allowlist, 403 default (CORE-3)', () =
       await expect(projectScope({ ...DEV, role } as Session)).rejects.toMatchObject({
         statusCode: 403,
       })
-    }
-  })
-})
-
-describe('financeRegionFilter — explicit allowlist, 403 default (CORE-3)', () => {
-  it('admin clamps to their own region; global-finops honours the filter', () => {
-    expect(String(financeRegionFilter(ADMIN, 'all'))).toBeTruthy()
-    expect(String(financeRegionFilter({ ...DEV, role: 'global-finops' }, 'all'))).toBeTruthy()
-    expect(String(financeRegionFilter({ ...DEV, role: 'platform-admin' }, 'apac'))).toBeTruthy()
-  })
-
-  it('UNLISTED roles → throws 403 (developer, manager, finance, unknown)', () => {
-    for (const role of ['developer', 'manager', 'finance', 'auditor']) {
-      expect(() => financeRegionFilter({ ...DEV, role } as Session, 'all')).toThrowError(
-        expect.objectContaining({ statusCode: 403 }),
-      )
     }
   })
 })

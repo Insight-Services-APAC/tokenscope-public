@@ -21,6 +21,7 @@
 import { defineEventHandler, getValidatedQuery, getRouterParam, createError } from 'h3'
 import { z } from 'zod'
 import { requireAuth } from '../../../../auth/rbac'
+import { resolveReportGrants } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
@@ -57,7 +58,13 @@ export default defineEventHandler(async (event) => {
   const month = win.monthStr ?? monthKeyUtc(new Date(win.startIso))
 
   return await withRequestRls(event, async (tx) => {
-    const cc = await resolveCostCentreDrill(tx, event, session, ccId)
+    // A loosened policy mode (reportGrants.costCentre === 'all') lets the caller drill
+    // ANY existing cost centre; non-elevated callers keep the owner-OR-region gate. A
+    // non-existent CC is still a 404 either way (resolveCostCentreDrill).
+    const grants = await resolveReportGrants(event, tx, session)
+    const cc = await resolveCostCentreDrill(tx, event, session, ccId, {
+      unbounded: grants.costCentre === 'all',
+    })
 
     const burn = await fetchCostCentreBurnDrill(tx, cc.id, win)
     const drivers = await fetchCostCentreBurnDrivers(tx, cc.id, win, query.axis, burn.burnUsd)

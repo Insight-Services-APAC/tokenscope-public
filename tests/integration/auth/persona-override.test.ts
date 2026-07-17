@@ -265,7 +265,7 @@ describe('persona-override cookie READ is env-gated (the cookie-read enforcement
       try {
         session = (await tryAuth(ev as never)) as { teammateId?: string } | null
       } catch {
-        session = null // no OIDC fallback in the harness → unauthenticated, which is correct
+        // No OIDC fallback in the harness → unauthenticated (correct); `session` stays null.
       }
       expect(session?.teammateId).not.toBe(priyaId)
     },
@@ -282,7 +282,7 @@ describe('persona-override cookie READ is env-gated (the cookie-read enforcement
     try {
       session = (await tryAuth(ev as never)) as { teammateId?: string } | null
     } catch {
-      session = null
+      // Fail-closed: unauthenticated on error; `session` stays null.
     }
     expect(session?.teammateId).not.toBe(priyaId)
   })

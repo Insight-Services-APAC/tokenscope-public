@@ -105,10 +105,19 @@ afterAll(async () => { await stopTestDb(t) })
 interface Resp {
   header: { usageUsd: number; users: number; pctOfRegion: number | null; vsRegionAvgPct: number | null }
   lanes: { usageSignalUsd: number; billUsd: number }
-  vendorSplit: { claude: { usageUsd: number; billUsd: number }; copilot: { usageUsd: number } }
+  // #142: ordered per-lane array (claude = Claude CODE first, copilot, then any
+  // non-Code surface lane with spend; zero-spend surface lanes are elided).
+  vendorSplit: { lane: string; label: string; usageUsd: number; billUsd: number }[]
   users: { name: string }[]
   comparison: { code: string; isSelf: boolean }[]
   trend: { weekStart: string; claudeUsd: number; copilotUsd: number }[]
+}
+
+/** The vendorSplit entry for a lane; fails the test loudly if the lane is absent. */
+function lane(r: Resp, id: string): { lane: string; label: string; usageUsd: number; billUsd: number } {
+  const l = r.vendorSplit.find((v) => v.lane === id)
+  expect(l, `vendorSplit is missing the ${id} lane`).toBeDefined()
+  return l!
 }
 
 describe('GET /api/v1/rollups/practice/:ouId', () => {
@@ -116,9 +125,15 @@ describe('GET /api/v1/rollups/practice/:ouId', () => {
     const r = (await handler(ev(sess('admin', 'mpo', regionA), mpoId))) as Resp
     expect(r.header.usageUsd).toBe(14) // claude 10 + copilot 4
     expect(r.lanes.billUsd).toBe(20) // the reconciled bill homed to mpo — NOT the usage estimate
-    expect(r.vendorSplit.claude.usageUsd).toBe(10)
-    expect(r.vendorSplit.copilot.usageUsd).toBe(4)
-    expect(r.vendorSplit.claude.billUsd).toBe(20)
+    expect(lane(r, 'claude').usageUsd).toBe(10)
+    expect(lane(r, 'copilot').usageUsd).toBe(4)
+    expect(lane(r, 'claude').billUsd).toBe(20)
+    expect(lane(r, 'claude').label).toBe('Claude Code')
+    // #142 lane elision: no non-Code Claude surface has spend here, so only the
+    // always-present claude + copilot lanes render (zero-spend surfaces elided).
+    expect(r.vendorSplit.map((v) => v.lane).sort()).toEqual(['claude', 'copilot'])
+    // Conservation: Σ lane bills == the header bill (the catch-all guarantee).
+    expect(r.vendorSplit.reduce((a, v) => a + v.billUsd, 0)).toBe(r.lanes.billUsd)
     expect(r.users.map((u) => u.name)).toContain('kat@a.test')
     expect(r.header.pctOfRegion).toBeCloseTo(14 / 21) // region usage = mpo 14 + biz 7; admin sees the ratio
     // Trend (v_effective_spend) — this week carries mpo's claude 10 + copilot 4.
@@ -130,7 +145,7 @@ describe('GET /api/v1/rollups/practice/:ouId', () => {
     const r = (await handler(ev(sess('admin', 'cop', regionC), copId))) as Resp
     expect(r.header.usageUsd).toBe(30) // dave's unaccounted Copilot — invisible to attribution_record alone
     expect(r.header.users).toBe(1) // and he COUNTS as a person (was 0)
-    expect(r.vendorSplit.copilot.usageUsd).toBe(30) // attributed to the Copilot vendor lane
+    expect(lane(r, 'copilot').usageUsd).toBe(30) // attributed to the Copilot vendor lane
     expect(r.users.map((u) => u.name)).toContain('dave@c.test') // shows in the people list with his spend
   })
 
@@ -166,5 +181,21 @@ describe('GET /api/v1/rollups/practice/:ouId', () => {
     await expect(handler(ev(sess('developer', 'somewhere.else', regionA, KAT), bizId))).rejects.toMatchObject({ statusCode: 403 })
     const r = (await handler(ev(sess('developer', 'somewhere.else', regionA, KAT), mpoId))) as Resp
     expect(r.comparison.map((c) => c.code)).toEqual(['mpo']) // only her own practice, NOT biz
+  })
+
+  it('a non-Code Claude surface bill gets its OWN lane — bill-only, $0 usage (#142)', async () => {
+    // kat's Claude Chat spend arrives on the BILL side only (non-Code surfaces
+    // never emit OTel). It must surface as a distinct claude-ai lane, labelled,
+    // with usageUsd structurally 0 — and the lane totals must still conserve.
+    await t.client`INSERT INTO actual_spend (teammate_id, date, tool, input_tokens, output_tokens, cost_usd)
+      VALUES (${KAT}::uuid, CURRENT_DATE, 'claude-ai', 200, 100, 6)`
+    const r = (await handler(ev(sess('admin', 'mpo', regionA), mpoId))) as Resp
+    const chat = lane(r, 'claude-ai')
+    expect(chat.billUsd).toBe(6)
+    expect(chat.usageUsd).toBe(0) // no OTel for chat — bill-only by design
+    expect(chat.label).toBe('Claude Chat')
+    expect(lane(r, 'claude').billUsd).toBe(20) // the Code bill did NOT absorb it
+    expect(r.lanes.billUsd).toBe(26)
+    expect(r.vendorSplit.reduce((a, v) => a + v.billUsd, 0)).toBe(26) // conservation across lanes
   })
 })

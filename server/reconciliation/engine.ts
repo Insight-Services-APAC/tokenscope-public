@@ -42,10 +42,19 @@ const OTEL_INVISIBLE: ReadonlySet<ReconcileCategory> = new Set<ReconcileCategory
   'priority_tier',
 ])
 
-/* Per-user reconcilable categories -> the attribution_record `tool` to sum. */
+/*
+ * Per-user categories -> the tool lane the category belongs to. For the OTel-
+ * reconcilable categories this is the attribution_record `tool` to sum;
+ * copilot_coding_agent is OTEL_INVISIBLE (ingest_only, above), so its operand
+ * query is never reached — the mapping records its §A usage-lane binding
+ * ('copilot-agent', the v_teammate_usage_daily lane id, mig 0086) so any
+ * consult of this map carries the right tool. Display-only: never taggable,
+ * never OTel-joined.
+ */
 const CATEGORY_TOOL: Partial<Record<ReconcileCategory, string>> = {
   model_tokens: 'claude-code',
   copilot_interactive: 'copilot-cli',
+  copilot_coding_agent: 'copilot-agent',
 }
 
 export type Disposition = 'untagged' | 'walk_back' | 'matched' | 'no_install' | 'ingest_only'

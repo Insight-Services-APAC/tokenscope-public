@@ -19,6 +19,7 @@
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { z } from 'zod'
 import { requireRole } from '../../../../auth/rbac'
+import { resolveReportGrants } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
@@ -28,6 +29,7 @@ import {
   fetchRegionalChargebackByCostCentre,
   fetchRegionalDailyMetrics,
   fetchRegionalChargebackTrend,
+  fetchRegionalChargebackLanes,
   fetchRegionalVendorSplit,
   fetchRegionalProviderSplit,
   fetchRegionalExceptions,
@@ -70,7 +72,16 @@ export default defineEventHandler(async (event) => {
   const momMonthRange = win.isMonth ? win.monthRange : null
 
   return await withRequestRls(event, async (tx) => {
-    const scope = await resolveRegionalScope(tx, caller, { region: query.region, ou: query.ou })
+    // Report-visibility grant: a loosened mode makes an admin (or a mode-3 cost-centre
+    // owner) cross-region — regionOptions + a honoured `?region`. Non-elevated callers
+    // keep the own-region hard-bind (grant is a level, never a clamp bypass).
+    const grants = await resolveReportGrants(event, tx, caller)
+    const scope = await resolveRegionalScope(
+      tx,
+      caller,
+      { region: query.region, ou: query.ou },
+      { crossRegion: grants.regional === 'all-regions' },
+    )
 
     const kpis = await fetchRegionalKpis(tx, scope, win, { copilotChargeback, momMonthRange, now })
 
@@ -96,6 +107,10 @@ export default defineEventHandler(async (event) => {
     // §B ANTHROPIC chargeback per-day series over the SAME window — the Chargeable
     // KPI-tile sparkline (bill lane, scope-clamped). Separate from the rolling trend endpoint.
     const chargeDaily = await fetchRegionalChargebackTrend(tx, scope, win)
+    // §B per-lane chargeback totals (lane-visuals V2-Regional) — the ChargebackSplitCard
+    // donut. Anthropic lanes day-grained; Copilot §B lanes ride along only on the KPI's
+    // exact gate (validated chargeback mode + month-aligned window).
+    const chargebackLanes = await fetchRegionalChargebackLanes(tx, scope, win, { copilotChargeback })
 
     const threshold = await resolveVelocitySpikeThreshold(tx, scope.effectiveRegionId)
     const exceptions = await fetchRegionalExceptions(tx, scope, threshold)
@@ -152,6 +167,9 @@ export default defineEventHandler(async (event) => {
             : null,
         partialMonthUnavailable: kpis.copilotPartialMonthUnavailable,
       },
+      // §B per-lane chargeback totals over the window (lane-visuals V2-Regional) —
+      // Σ(lanes minus copilot-unclassified) == kpis.chargeableUsd (cent-exact, test-pinned).
+      chargebackLanes,
       providerSplit,
       dailyMetrics,
       chargeDaily,

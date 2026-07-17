@@ -2,8 +2,8 @@
 /*
  * API-1 (robustness-review-2026-06-09) — GET /projects/{id}/consumption must be
  * region-bounded for the region `admin` role (the same requireRegionScope
- * pattern as rollups/finance/[couId]/breakdown.get.ts). Before the fix the
- * scope predicate let ANY admin read ANY project's consumption cross-region.
+ * pattern the admin/* endpoints apply). Before the fix the scope predicate let
+ * ANY admin read ANY project's consumption cross-region.
  *
  * Coverage:
  *   - region-B admin reading a region-A project → 403;

@@ -13,6 +13,7 @@
 import { computed } from 'vue'
 import UiCard from '../../ui/Card.vue'
 import ChartHeatmap from '../charts/ChartHeatmap.client.vue'
+import LaneSwitchLink from '../LaneSwitchLink.vue'
 import { isoWeekLabel } from '../charts/chart-utils'
 import type { Seasonality } from '#shared/reports/types'
 
@@ -56,5 +57,7 @@ function compactUsd(v: number): string {
       :value-format="compactUsd"
       :height="220"
     />
+    <!-- I5 cross-link: this usage card's §B sibling is the chargeback day-of-week card. -->
+    <LaneSwitchLink label="See when chargeback happens" />
   </UiCard>
 </template>

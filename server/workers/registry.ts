@@ -67,6 +67,15 @@ export interface WorkerRunContext {
     // privileged-identity-cleanup: destructive apply gate (default report-only).
     // Only reachable via the signed HMAC worker body, never the UI trigger.
     apply?: boolean
+    // analytics-poll: explicit YYYY-MM-DD window override (validated by
+    // workerOptsSchema) — the #142 historical re-split lever. Both must be set
+    // and form a valid span; otherwise the default trailing window applies.
+    startingAt?: string
+    endingAt?: string
+    // analytics-poll: scope the poll to ONE reconciled org's external id.
+    // Strongly recommended alongside a window override — an unscoped override
+    // re-pulls every reconciled org serially against the shared 60-RPM cap.
+    externalOrgId?: string
   }
 }
 
@@ -115,18 +124,33 @@ export function analyticsPollWindow(now: Date): { startingAt: string; endingAt: 
 export const WORKERS: ReadonlyArray<WorkerEntry> = [
   {
     name: 'analytics-poll',
-    run: (db) => {
+    run: (db, ctx) => {
       /*
        * Scheduler entrypoint: poll every RECONCILED Anthropic org (each with its
        * own admin key) over the trailing revision window (see
        * analyticsPollWindow). With zero reconciled orgs this is a clean no-op (it
        * does NOT require NUXT_ANTHROPIC_API_ENDPOINT) — so the scheduled job
        * succeeds until a reconciled org + key is onboarded.
+       *
+       * A signed { startingAt, endingAt } body (or `--opts` via the CLI)
+       * overrides the window — the #142 historical re-split lever: re-pulling a
+       * pre-split period rewrites its collapsed claude-code rows as per-surface
+       * lanes. Honoured only as a PAIR forming a valid span; anything else falls
+       * back to the auto window (fail-soft, like every other worker opt).
+       * An override re-pulls EVERY reconciled org unless scoped with
+       * { externalOrgId } — scope it: the Enterprise API's 60-RPM org-wide cap
+       * is shared with reconciliation-sync, and a long unscoped re-pull starves it.
        */
-      return runAnalyticsPollReconciledOrgs(db, analyticsPollWindow(new Date()))
+      const { startingAt, endingAt, externalOrgId } = ctx?.opts ?? {}
+      const window =
+        startingAt && endingAt && startingAt <= endingAt
+          ? { startingAt, endingAt }
+          : analyticsPollWindow(new Date())
+      return runAnalyticsPollReconciledOrgs(db, window, { onlyExternalOrgId: externalOrgId })
     },
     recommendedCron: '*/15 * * * *',
-    description: 'Poll reconciled Anthropic orgs for new actual_spend rows',
+    description:
+      'Poll reconciled Anthropic orgs for new actual_spend rows (per-surface lanes; signed {startingAt,endingAt,externalOrgId} body re-pulls history, scoped to one org)',
   },
   {
     name: 'placement-sync',

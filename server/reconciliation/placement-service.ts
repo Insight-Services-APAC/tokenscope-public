@@ -9,7 +9,8 @@
  */
 import { getDirectoryUserByMailOrUpn, type DirectoryUser } from '../azure/directory'
 import { decidePlacement, type PlacementCandidate, type PlacementReason } from './placement'
-import type { OwnedUnit } from './region-derivation'
+import type { OwnedUnit, RegionRuleSet } from './region-derivation'
+import type { RegionAttributeKey } from '../../shared/placement/region-attributes'
 
 /** The DB operations provisionAndPlace needs. The SQL adapter (CI-tested) sets
  *  org_unit_id; teammate.region_id follows automatically via the mig-0066 trigger
@@ -27,8 +28,8 @@ export interface PlacementStore {
   unplacedOrgUnitId(): Promise<string>
   /** The per-region __UNPLACED__ holding org_unit id (mig 0068), create-on-demand. */
   unplacedOrgUnitIdForRegion(regionId: string): Promise<string>
-  /** Curated department_lower → region_id map (mig 0068 primary signal). */
-  loadDepartmentToRegion(): Promise<Map<string, string>>
+  /** Curated directory-attribute → region rules, pre-indexed (mig 0089). */
+  loadDirectoryRegionRules(): Promise<RegionRuleSet>
   /** Active region_leader oid → region_id map (mig 0068 manager-walk target). */
   loadActiveRegionLeaders(): Promise<Map<string, string>>
   /** Active cou_owner → owned cost-owning units, keyed on the owner's REAL Entra oid (the
@@ -49,14 +50,19 @@ export interface PlacementStore {
   replayOwedBills(teammateId: string, email: string): Promise<number>
 }
 
-/** How a cost-centre-unplaced user's home was derived (mig 0068 + the practice extension).
- *  via='unit' → a cost-owning unit (chargeable, with orgUnitId + the owner oid for
- *  provenance); via='department'|'manager' → a region (holding node); via=null → neither. */
+/** How a cost-centre-unplaced user's home was derived (mig 0068 + the practice extension +
+ *  the mig 0089 attribute generalisation). via='unit' → a cost-owning unit (chargeable,
+ *  with orgUnitId + the owner oid for provenance); via='attribute'|'manager' → a region
+ *  (holding node); via=null → neither. On 'attribute', `attribute` names the matched
+ *  directory field (coverage instrumentation) and `conflict` flags a divergent lower-
+ *  precedence match. */
 export interface PlacementDerivation {
   orgUnitId?: string
   regionId?: string
   ownerOid?: string
-  via: 'unit' | 'department' | 'manager' | null
+  via: 'unit' | 'attribute' | 'manager' | null
+  attribute?: RegionAttributeKey
+  conflict?: boolean
 }
 
 export interface PlacementDeps {
@@ -77,7 +83,16 @@ export interface PlacementDeps {
   fallbackRegionId?: string
 }
 
-export type PlacementVia = 'cost-centre' | 'unit' | 'department' | 'manager' | 'global'
+// 'attribute' = a directory-attribute region rule (mig 0089; was 'department').
+// 'billing-region' = ADR-0010 D4 GitHub license-org → region fallback (a region
+// holding home NOT derived from Entra — previously mislabeled 'department').
+export type PlacementVia =
+  | 'cost-centre'
+  | 'unit'
+  | 'manager'
+  | 'attribute'
+  | 'billing-region'
+  | 'global'
 
 export interface PlaceOutcome {
   teammateId: string
@@ -90,6 +105,10 @@ export interface PlaceOutcome {
   replayedBills: number
   /** How the home was determined (coverage instrumentation). */
   placedVia: PlacementVia
+  /** When placedVia==='attribute', which directory attribute matched (per-attribute
+   *  coverage). And whether a lower-precedence attribute matched a DIFFERENT region. */
+  placedAttribute?: RegionAttributeKey
+  placedConflict?: boolean
   /** True when this call actually created or re-homed the teammate (vs left-in-place). */
   homed: boolean
 }
@@ -120,6 +139,8 @@ export async function provisionAndPlace(emailRaw: string, deps: PlacementDeps): 
   let placedVia: PlacementVia
   let placed: boolean
   let unitOwnerOid: string | null = null
+  let placedAttribute: RegionAttributeKey | undefined
+  let placedConflict: boolean | undefined
   if (decision?.placed) {
     orgUnitId = decision.orgUnitId!
     placedVia = 'cost-centre'
@@ -133,7 +154,11 @@ export async function provisionAndPlace(emailRaw: string, deps: PlacementDeps): 
       unitOwnerOid = der.ownerOid ?? null
     } else if (der?.regionId) {
       orgUnitId = await store.unplacedOrgUnitIdForRegion(der.regionId)
-      placedVia = der.via === 'manager' ? 'manager' : 'department'
+      placedVia = der.via === 'manager' ? 'manager' : 'attribute'
+      if (der.via === 'attribute') {
+        placedAttribute = der.attribute
+        placedConflict = der.conflict
+      }
       placed = false
     } else if (deps.fallbackRegionId) {
       // ADR-0010 D4: no Entra placement, but the caller knows the billing region
@@ -141,7 +166,7 @@ export async function provisionAndPlace(emailRaw: string, deps: PlacementDeps): 
       // cost lands in the right region rather than the global unassigned bucket. Same
       // OUTCOME as a department-derived region home (region holding node, placed=false).
       orgUnitId = await store.unplacedOrgUnitIdForRegion(deps.fallbackRegionId)
-      placedVia = 'department'
+      placedVia = 'billing-region'
       placed = false
     } else {
       orgUnitId = await store.unplacedOrgUnitId()
@@ -180,5 +205,5 @@ export async function provisionAndPlace(emailRaw: string, deps: PlacementDeps): 
   // 4. Replay owed bills now that the teammate exists.
   const replayedBills = await store.replayOwedBills(teammateId, email)
 
-  return { teammateId, created, placed, reason, replayedBills, placedVia, homed }
+  return { teammateId, created, placed, reason, replayedBills, placedVia, placedAttribute, placedConflict, homed }
 }

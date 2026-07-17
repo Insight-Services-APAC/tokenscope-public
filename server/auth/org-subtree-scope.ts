@@ -4,8 +4,7 @@
  *
  * RLS is INERT at runtime (the app connects as the table owner, no FORCE ROW
  * LEVEL SECURITY) so this MUST be embedded in-query; a handler that "relies on
- * RLS" here is a cross-region spend leak. The role split mirrors
- * financeRegionFilter (server/auth/finance-scope.ts) exactly — the same
+ * RLS" here is a cross-region spend leak. The role split applies the same
  * region-scoped-admin contract every admin/* endpoint applies:
  *
  *   - global-finops / platform-admin  → unbounded (platform-admin is mapped to
@@ -16,7 +15,7 @@
  *
  * NOTE this deliberately does NOT copy allocation-scope's "admin is unbounded"
  * semantics: that predates the multi-region operating model. For a region-scoped
- * spend view, admin must be hard-bound to their region (see finance-scope.ts).
+ * spend view, admin must be hard-bound to their region.
  */
 import { sql, type SQL } from 'drizzle-orm'
 

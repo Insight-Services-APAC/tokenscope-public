@@ -7,7 +7,7 @@
  * 'platform-admin') correctly 403s a region admin AND global-finops — only
  * platform-admin passes (via the super-admin bypass in requireRole).
  *
- * `code` is the stable region key (the finance-scope filter hardcodes codes
+ * `code` is the stable region key (region-scoped queries hardcode codes
  * like 'apac'); it must be a slug. The table has a UNIQUE constraint on code
  * (mig 0022) — we pre-check for a clean 409 instead of a raw constraint error.
  */

@@ -77,11 +77,14 @@ vs forwarded OTel paths) are in [PROVIDERS.md](PROVIDERS.md).
 
 ## Roles & reporting scopes
 
-Six roles (`shared/auth/roles.ts`): `developer`, `manager`, `admin`, `finance`,
-`global-finops`, `platform-admin`. Region-scoped `admin` up to cross-region
-`platform-admin`; row-level security scopes data by region/org path. Reporting
+Roles (`shared/auth/roles.ts`): `developer`, `manager`, `admin`,
+`global-finops`, `platform-admin` — plus `finance`, retired and unassignable
+(kept in the enum for historical data, excluded from role assignment; still
+present as a demo persona). Region-scoped `admin` up to cross-region
+`platform-admin`; `global-finops` ("Global finance") is the live cross-region
+finance super-role; row-level security scopes data by region/org path. Reporting
 scopes map to personas: developer "my usage", manager regional budget-burn,
-finance chargeback, cost-centre-owner P&L.
+Global-finance chargeback, cost-centre-owner P&L.
 
 ## Deploy topology
 

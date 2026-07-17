@@ -8,7 +8,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { buildAcrossTrend } from '../../../app/components/reporting/across/build-trend'
-import { buildRegionalTrend } from '../../../app/components/reporting/regional/build-regional-trend'
+import { buildRegionalTrend, type RegionalTrendRow } from '../../../app/components/reporting/regional/build-regional-trend'
 import type { AcrossTrendPoint, Forecast } from '../../../shared/reports/types'
 
 /** In-progress July forecast: 3 of 31 days elapsed. */
@@ -80,16 +80,79 @@ describe('buildAcrossTrend — run-rate projection', () => {
   })
 })
 
-describe('buildRegionalTrend — run-rate projection (display-name keys)', () => {
-  it('projects the current-month MTD rate, mapping Claude→magenta key', () => {
-    const pts = [
-      ...Array.from({ length: 30 }, (_, i) => ({ day: `2026-06-${String(i + 1).padStart(2, '0')}`, key: 'Claude', value: 300 })),
-      ...Array.from({ length: 3 }, (_, i) => ({ day: `2026-07-${String(i + 1).padStart(2, '0')}`, key: 'Claude', value: 100 })),
+describe('buildAcrossTrend — the three-lane §A ceiling (lane-visuals V1)', () => {
+  it('surfaces NO copilot-agent / other series while they carry no spend (§A values byte-identical)', () => {
+    const { series } = buildAcrossTrend(acrossPoints(), null, null)
+    expect(series.map((s) => s.key)).toEqual(['claude-code', 'copilot-cli'])
+  })
+
+  it('surfaces the copilot-agent lane as its OWN series when it carries spend (never folded into other)', () => {
+    const pts: AcrossTrendPoint[] = [
+      ...acrossPoints(),
+      { day: '2026-06-05', key: 'copilot-agent', value: 42 },
+      { day: '2026-06-06', key: 'other', value: 7 },
     ]
-    const { series, forecastFrom } = buildRegionalTrend(pts, JULY_FORECAST, '2026-07')
+    const { series } = buildAcrossTrend(pts, null, null)
+    expect(series.map((s) => s.key)).toEqual(['claude-code', 'copilot-cli', 'copilot-agent', 'other'])
+    const agent = series.find((s) => s.key === 'copilot-agent')!
+    expect(agent.name).toBe('Copilot Coding Agent')
+    expect(agent.data.find((p) => p.x === '2026-06-05')!.y).toBe(42)
+    // The other catch-all stays live and separate.
+    expect(series.find((s) => s.key === 'other')!.data.find((p) => p.x === '2026-06-06')!.y).toBe(7)
+  })
+
+  it('conservation: Σ per-day series values == dailyTotals across all four lanes', () => {
+    const pts: AcrossTrendPoint[] = [
+      ...acrossPoints(),
+      { day: '2026-07-02', key: 'copilot-agent', value: 5 },
+      { day: '2026-07-02', key: 'copilot-cli', value: 11 },
+      { day: '2026-07-02', key: 'other', value: 2 },
+    ]
+    const { series, dailyTotals } = buildAcrossTrend(pts, null, null)
+    const days = [...new Set(pts.map((p) => p.day))].sort()
+    days.forEach((day, i) => {
+      const sum = series.reduce((a, s) => a + (s.data.find((p) => p.x === day)?.y ?? 0), 0)
+      expect(sum).toBeCloseTo(dailyTotals[i]!, 9)
+    })
+  })
+})
+
+describe('buildRegionalTrend — run-rate projection (registry keys, V2-Regional widening)', () => {
+  // The wire keys ARE the registry tool ids now (the V2-Regional widening) —
+  // the pre-widening display names ('Claude'/'Copilot'/'Other') are gone.
+  const regionalPoints = (): RegionalTrendRow[] => [
+    ...Array.from({ length: 30 }, (_, i): RegionalTrendRow => ({ day: `2026-06-${String(i + 1).padStart(2, '0')}`, key: 'claude-code', value: 300 })),
+    ...Array.from({ length: 3 }, (_, i): RegionalTrendRow => ({ day: `2026-07-${String(i + 1).padStart(2, '0')}`, key: 'claude-code', value: 100 })),
+  ]
+
+  it('projects the current-month MTD rate on the claude-code lane', () => {
+    const { series, forecastFrom } = buildRegionalTrend(regionalPoints(), JULY_FORECAST, '2026-07')
     expect(forecastFrom).toBe('2026-07-04')
-    const claude = series.find((s) => s.key === 'claude-code')! // remapped from 'Claude'
+    const claude = series.find((s) => s.key === 'claude-code')!
     expect(claude.name).toBe('Claude Code')
     expect(claude.data.find((p) => p.x === '2026-07-04')!.y).toBeCloseTo(100, 5)
+  })
+
+  it('three-lane §A ceiling: optional lanes surface ONLY when they carry spend', () => {
+    // Baseline: the requested pair only.
+    expect(buildRegionalTrend(regionalPoints(), null, null).series.map((s) => s.key)).toEqual([
+      'claude-code',
+      'copilot-cli',
+    ])
+    // copilot-agent + other appear as their OWN series when live (never folded into other).
+    const pts: RegionalTrendRow[] = [
+      ...regionalPoints(),
+      { day: '2026-06-05', key: 'copilot-agent', value: 42 },
+      { day: '2026-06-06', key: 'other', value: 7 },
+    ]
+    const { series, dailyTotals } = buildRegionalTrend(pts, null, null)
+    expect(series.map((s) => s.key)).toEqual(['claude-code', 'copilot-cli', 'copilot-agent', 'other'])
+    expect(series.find((s) => s.key === 'copilot-agent')!.name).toBe('Copilot Coding Agent')
+    // Conservation: Σ per-day series values == dailyTotals.
+    const days = [...new Set(pts.map((p) => p.day))].sort()
+    days.forEach((day, i) => {
+      const sum = series.reduce((a, s) => a + (s.data.find((p) => p.x === day)?.y ?? 0), 0)
+      expect(sum).toBeCloseTo(dailyTotals[i]!, 9)
+    })
   })
 })

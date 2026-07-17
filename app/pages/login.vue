@@ -42,7 +42,7 @@ const personas = [
   { key: 'developer', label: 'Sign in as Developer', sub: 'Priya Iyer · Services APAC' },
   { key: 'manager', label: 'Sign in as Manager', sub: 'Anil Verma · Practice lead' },
   { key: 'admin', label: 'Sign in as Region admin', sub: 'Lena Park · APAC' },
-  { key: 'finance', label: 'Sign in as Finance', sub: 'Mara Holloway · global-finops' },
+  { key: 'finance', label: 'Sign in as Global finance', sub: 'Mara Holloway · cross-region finance' },
   // J3 (mig 0048): developer ROLE with cou_owner rows — demos that the
   // P&L view flows from the ownership relationship, not the role enum.
   { key: 'cc-owner', label: 'Sign in as CC owner', sub: 'Owen Cole · owns Delta + Echo' },

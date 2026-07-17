@@ -17,6 +17,7 @@
  * Re-parent is deferred server-side, so the UI signposts it as
  * coming-soon rather than hiding it.
  */
+
 import { computed, ref, watch } from 'vue'
 import { consola } from 'consola'
 import AdminTabs, { type AdminTab } from '../../../components/admin/AdminTabs.vue'
@@ -27,6 +28,14 @@ import EntityTable from '../../../components/admin/EntityTable.vue'
 import ConnectorCard, { type ConnectorStatus } from '../../../components/admin/ConnectorCard.vue'
 import ChecklistRow from '../../../components/admin/ChecklistRow.vue'
 import SetupProgressBar from '../../../components/admin/SetupProgressBar.vue'
+definePageMeta({
+  layout: 'admin',
+  middleware: 'admin',
+  // Remount on region-id change (not on ?tab= changes) so route-param-derived
+  // reads — and the breadcrumb tail — never serve a stale region when Vue Router
+  // reuses this component between two /admin/regions/:id navigations.
+  key: (route) => String(route.params.id),
+})
 
 interface RegionResp {
   region: { id: string; code: string; display_name: string }
@@ -74,6 +83,18 @@ const regionAsync = useFetch<RegionResp>(
   { default: () => null as unknown as RegionResp, immediate: isAdmin.value },
 )
 const { data: region, error: regionError, refresh: refreshRegion } = regionAsync
+
+// Contribute the region name as the trailing breadcrumb (Admin › Regions › X).
+// Cleared automatically on navigation away by the admin layout.
+const { setTail } = useAdminBreadcrumbTail()
+watch(
+  region,
+  () => {
+    const name = region.value?.region?.display_name
+    setTail(name ? [{ label: name }] : [])
+  },
+  { immediate: true },
+)
 
 const treeAsync = useFetch<{ nodes: OrgNode[] }>(
   () => `/api/v1/admin/org-units?region=${regionId}`,
@@ -306,25 +327,20 @@ const teammateColumns = [
     <UiPageHead
       eyebrow="Region"
       :title="headline"
-      :crumbs="['Admin', 'Regions', region.region.display_name]"
     >
       <template #actions>
-        <NuxtLink
-          to="/admin/regions"
-          class="text-sm font-semibold text-carbon-2 hover:text-brand-harmony no-underline"
-          data-testid="region-back"
-        >
-          ← All regions
-        </NuxtLink>
-        <UiButton
-          kind="ghost"
-          size="sm"
-          data-testid="region-leaders-open"
-          title="Manage the region's leaders — the manager-walk fallback for placing unplaced users"
-          @click="openLeaders"
-        >
-          ★ Leaders
-        </UiButton>
+        <span class="inline-flex items-center gap-1">
+          <UiButton
+            kind="ghost"
+            size="sm"
+            data-testid="region-leaders-open"
+            title="Placement anchors (SVP / shared function) that decide which cost centre a teammate rolls up to. Not a role, not an owner."
+            @click="openLeaders"
+          >
+            Region leaders
+          </UiButton>
+          <AdminHelpLink anchor="region-leader" label="a Region leader" />
+        </span>
         <UiButton
           v-if="isPlatformAdmin"
           kind="ghost"
@@ -355,7 +371,7 @@ const teammateColumns = [
 
     <!-- KPI row -->
     <div class="grid grid-cols-1 md:grid-cols-4 gap-5 mb-8" data-testid="admin-kpi-row">
-      <UiKpi accent="harmony" label="Org units" :value="String(region.counts.org_units ?? 0)" :sub="`across ${region.counts.bus ?? 0} BUs`" />
+      <UiKpi accent="harmony" label="Org units" :value="String(region.counts.org_units ?? 0)" :sub="`across ${region.counts.bus ?? 0} business ${region.counts.bus === 1 ? 'unit' : 'units'}`" />
       <UiKpi accent="vision" label="Teammates" :value="String(region.counts.teammates ?? 0)" sub="in this region" />
       <UiKpi accent="hunger" label="Projects" :value="String(region.counts.projects ?? 0)" :sub="`${region.counts.projects_onboarded ?? 0} onboarded · ${Math.max(0, (region.counts.projects ?? 0) - (region.counts.projects_onboarded ?? 0))} catalogue`" />
       <UiKpi accent="zeal" label="Connector status" :value="region.connector.status === 'planned' ? 'PSR' : 'None'" :sub="region.connector.status === 'planned' ? 'planned for pilot' : 'manual setup mode'" />
@@ -365,22 +381,17 @@ const teammateColumns = [
 
     <!-- Cost centres -->
     <UiCard v-if="activeTab === 'cost-centres'" data-testid="panel-cost-centres">
-      <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
-        <div class="text-[11px] text-carbon-3 italic">Indented by LTREE depth. Projects bill to the nearest cost-owning unit.</div>
-        <div class="flex items-center gap-2">
-          <UiButton
-            kind="ghost"
-            size="sm"
-            data-testid="region-leaders-open-tab"
-            title="Manage the region's leaders — the manager-walk fallback for placing unplaced users"
-            @click="openLeaders"
-          >
-            ★ Region leaders
-          </UiButton>
-          <UiButton kind="primary" size="sm" data-testid="cost-centre-create-open" @click="openCreate">
-            + New cost centre
-          </UiButton>
-        </div>
+      <div class="flex items-start justify-between mb-4 gap-3 flex-wrap">
+        <p class="text-[11px] text-carbon-3 max-w-xl leading-relaxed m-0">
+          Nested by depth. Projects bill to the nearest <strong>cost-owning
+          unit</strong>. Each cost-owning unit can have <strong>cost-centre
+          owners</strong><AdminHelpLink anchor="cost-centre-owner" label="a cost-centre owner" /> — the people who
+          can see its spend &amp; budget. <em>(Cost-centre owners are different
+          from Region leaders, above.)</em>
+        </p>
+        <UiButton kind="primary" size="sm" data-testid="cost-centre-create-open" @click="openCreate">
+          + New cost centre
+        </UiButton>
       </div>
 
       <!-- Get-started CTA: shown when the cost-centre tree is empty so a new
@@ -416,7 +427,7 @@ const teammateColumns = [
           <div class="flex items-center gap-2 min-w-0 flex-wrap">
             <span class="text-sm font-bold text-carbon truncate">{{ node.display_name }}</span>
             <span class="text-[10px] text-carbon-3 font-mono">{{ node.code }}</span>
-            <UiBadge v-if="node.is_cost_owning_unit" kind="zeal" :data-testid="`cc-cou-${node.code}`">Cost-owning</UiBadge>
+            <UiBadge v-if="node.is_cost_owning_unit" kind="zeal" :data-testid="`cc-cou-${node.code}`" title="Cost-owning unit (CoU) — a P&L node that projects bill to.">Cost-owning</UiBadge>
             <span class="text-[11px] text-carbon-3">
               {{ node.teammate_count }} {{ node.teammate_count === 1 ? 'teammate' : 'teammates' }}
               · {{ node.project_count }} {{ node.project_count === 1 ? 'project' : 'projects' }}

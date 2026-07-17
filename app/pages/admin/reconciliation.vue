@@ -10,6 +10,7 @@
  *               key presence, and the LIVE per-org health badge.
  * See docs/design/reconciliation-admin.md.
  */
+
 import { computed, ref, watch, onBeforeUnmount, type Ref } from 'vue'
 import { consola } from 'consola'
 import ProviderOrgDialog, {
@@ -25,6 +26,7 @@ import BackfillDialog, {
 import { apiErrorDetail } from '../../composables/useApiError'
 import { useModalA11y } from '../../composables/useModalA11y'
 import { UI_TRIGGERABLE_WORKER_NAMES, UI_MONEY_WORKER_NAMES } from '#shared/workers/ui-triggerable'
+definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 const { session, ensure } = useSession()
 await ensure()
@@ -40,7 +42,34 @@ const canRunWorkers = computed(() => {
   return r === 'global-finops' || r === 'platform-admin'
 })
 
-const tab = ref<'runs' | 'records' | 'providers'>('runs')
+// URL-synced tab (?tab=runs|records|providers) so a tab is deep-linkable and
+// reload-safe — and so the "Providers" sidebar entry can land directly on the
+// provider-onboarding view. Writable computed: reads/writes stay `tab === t` /
+// `tab = t` at every call site.
+const tabRoute = useRoute()
+const tabRouter = useRouter()
+const TAB_KEYS = ['runs', 'records', 'providers'] as const
+const tab = computed<(typeof TAB_KEYS)[number]>({
+  get() {
+    const t = String(tabRoute.query.tab ?? 'runs')
+    return (TAB_KEYS as readonly string[]).includes(t) ? (t as (typeof TAB_KEYS)[number]) : 'runs'
+  },
+  set(v) {
+    tabRouter.push({ query: { ...tabRoute.query, tab: v } })
+  },
+})
+// Correct an unknown ?tab=xyz in the URL once (replace, no history entry) so a
+// stale/shared/typo'd value can't linger in the address bar while the UI shows
+// the 'runs' fallback — a reloadable desync.
+watch(
+  () => tabRoute.query.tab,
+  (t) => {
+    if (t != null && !(TAB_KEYS as readonly string[]).includes(String(t))) {
+      tabRouter.replace({ query: { ...tabRoute.query, tab: 'runs' } })
+    }
+  },
+  { immediate: true },
+)
 
 // ---- formatting helpers ----
 function fmtTs(v: string | null): string {
@@ -831,7 +860,6 @@ function onBackfillSaved() {
       eyebrow="Administration"
       title="Reconciliation"
       sub="What the billing-reconciliation engine ran, and the deltas it produced. Read-only."
-      :crumbs="['Admin', 'Reconciliation']"
     >
       <template #actions>
         <UiButton

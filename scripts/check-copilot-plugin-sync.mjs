@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* eslint-disable no-console */
+ 
 /**
  * check-copilot-plugin-sync.mjs
  *

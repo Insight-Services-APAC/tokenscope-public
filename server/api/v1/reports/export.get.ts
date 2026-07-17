@@ -21,6 +21,7 @@
 import { defineEventHandler, getValidatedQuery, getQuery, setHeader, createError, type H3Event } from 'h3'
 import { z } from 'zod'
 import { requireRole, requireAuth } from '../../../auth/rbac'
+import { requireReportScope, resolveReportGrants } from '../../../auth/report-scope'
 import { withRequestRls } from '../../../db/request-rls'
 import { resolveReportMonth, resolveReportWindow, DATE_REGEX } from '../../../reporting/params'
 import {
@@ -155,7 +156,16 @@ async function exportRegional(event: H3Event, query: ExportQuery): Promise<strin
     : 'teammate'
 
   const { csv, filename } = await withRequestRls(event, async (tx) => {
-    const scope = await resolveRegionalScope(tx, caller, { region: query.region, ou: query.ou })
+    // Thread the report-visibility grant so a loosened mode lets an elevated admin /
+    // cost-centre owner export cross-region (grant is a level, not a bypass — the
+    // resolver still clamps to the honoured region).
+    const grants = await resolveReportGrants(event, tx, caller)
+    const scope = await resolveRegionalScope(
+      tx,
+      caller,
+      { region: query.region, ou: query.ou },
+      { crossRegion: grants.regional === 'all-regions' },
+    )
     const scopeLabel = scope.ou?.displayName ?? scope.region?.displayName ?? 'scope'
     // asOfDate is the same MAX(ts_event) the screen KPIs stamp (one shared source).
     const kpis = await fetchRegionalKpis(tx, scope, win, {
@@ -191,7 +201,6 @@ async function exportRegional(event: H3Event, query: ExportQuery): Promise<strin
 
 // ── Across-Regions (Wave 4) — whole-company, global-finops / platform-admin ──
 async function exportAcrossRegions(event: H3Event, query: ExportQuery): Promise<string> {
-  await requireRole(event, 'global-finops', 'platform-admin')
   // Month OR custom from/to window — the SAME window the screen endpoints use. In range
   // mode the drivers/regions/concentration queries window the WHOLE range, so the CSV
   // stays byte-identical to the range-windowed screen figures. Month mode is byte-identical
@@ -203,6 +212,7 @@ async function exportAcrossRegions(event: H3Event, query: ExportQuery): Promise<
     : 'region'
 
   const { csv, filename } = await withRequestRls(event, async (tx) => {
+    await requireReportScope(event, tx, 'across')
     // asOfDate is the same MAX(ts_event) the screen KPIs stamp (one shared source).
     const kpis = await fetchAcrossKpis(tx, win, {
       copilotChargeback: copilotChargebackEnabled(),
@@ -257,8 +267,13 @@ async function costCentreExport(event: H3Event): Promise<string> {
   const monthCtx = win.isMonth && win.monthStr ? { month: win.monthStr, now } : null
 
   const { csv, filename } = await withRequestRls(event, async (tx) => {
+    // A loosened policy mode (reportGrants.costCentre === 'all') unbounds the visible
+    // set + the drill; non-elevated callers keep the owner/subtree predicate.
+    const grants = await resolveReportGrants(event, tx, session)
+    const unbounded = grants.costCentre === 'all'
+
     if (query.report === 'cards') {
-      const ccs = await fetchVisibleCostCentres(tx)
+      const ccs = await fetchVisibleCostCentres(tx, { unbounded })
       const { cards, asOfDate } = await fetchCostCentreCards(tx, ccs, win, monthCtx, {
         copilotChargeback: copilotChargebackEnabled(),
       })
@@ -270,7 +285,7 @@ async function costCentreExport(event: H3Event): Promise<string> {
 
     // drivers (the only drill report) — resolve + authorise the CC (anti-IDOR).
     if (!query.cc) throw createError({ statusCode: 400, statusMessage: 'cc required for this report' })
-    const cc = await resolveCostCentreDrill(tx, event, session, query.cc)
+    const cc = await resolveCostCentreDrill(tx, event, session, query.cc, { unbounded })
     const slug = cc.code.replace(/[^a-z0-9-]/gi, '')
 
     const burn = await fetchCostCentreBurnDrill(tx, cc.id, win)
@@ -292,7 +307,6 @@ async function costCentreExport(event: H3Event): Promise<string> {
  * the last complete month. asOf-stamped via the ledger header.
  */
 async function financeExport(event: H3Event): Promise<string> {
-  await requireRole(event, 'global-finops', 'platform-admin')
   const query = await getValidatedQuery(event, (d) => FinanceQuery.parse(d))
   const now = new Date()
   const { month, range } = resolveReportMonth(query.month ?? lastCompleteMonth(now), { now })
@@ -300,6 +314,8 @@ async function financeExport(event: H3Event): Promise<string> {
   const region = query.region ?? null
 
   const csv = await withRequestRls(event, async (tx) => {
+    // Whole-company finance ledger — same cross-region gate as /reports/finance.
+    await requireReportScope(event, tx, 'finance')
     const cous = await fetchFinanceCous(tx, range, { copilotChargeback, region })
     const check = await fetchFinanceBillCheck(tx, range)
     const states = providerStatesForMonth(month, now)

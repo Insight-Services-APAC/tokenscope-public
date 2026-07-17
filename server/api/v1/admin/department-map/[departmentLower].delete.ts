@@ -33,9 +33,9 @@ export default defineEventHandler(async (event) => {
 
   return await withRequestRls(event, async (tx) => {
     const deleted = await tx.execute<{ department_lower: string; department: string }>(sql`
-      DELETE FROM department_to_region
-      WHERE department_lower = ${departmentLower}
-      RETURNING department_lower, department
+      DELETE FROM directory_region_rule
+      WHERE attribute = 'department' AND match_value = ${departmentLower}
+      RETURNING match_value AS department_lower, match_value_raw AS department
     `)
     const row = [...deleted][0]
     if (!row) {
@@ -45,7 +45,7 @@ export default defineEventHandler(async (event) => {
     await recordAuditEvent(tx, {
       eventType: 'department-map-removed',
       actorTeammateId: caller.teammateId,
-      subjectKind: 'department_to_region',
+      subjectKind: 'directory_region_rule',
       subjectId: null,
       payload: {
         department: row.department,

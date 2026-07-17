@@ -180,8 +180,8 @@ describe('region derivation (mig 0068) — department + manager-chain → per-re
     await t.client`INSERT INTO region (id, code, display_name) VALUES (gen_random_uuid(), 'emea', 'EMEA') ON CONFLICT (code) DO NOTHING`
     const [rg] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM region WHERE code='emea'`
     emeaId = rg!.id
-    await t.client`INSERT INTO department_to_region (department_lower, department, region_id)
-      VALUES ('emea data & ai', 'EMEA Data & AI', ${emeaId}) ON CONFLICT DO NOTHING`
+    await t.client`INSERT INTO directory_region_rule (attribute, match_mode, match_value, match_value_raw, region_id)
+      VALUES ('department', 'exact', 'emea data & ai', 'EMEA Data & AI', ${emeaId}) ON CONFLICT DO NOTHING`
     await t.client`INSERT INTO region_leader (region_id, leader_oid, leader_email, kind)
       VALUES (${emeaId}, 'boss-oid', 'boss@example.com', 'region-svp')`
   })
@@ -205,7 +205,7 @@ describe('region derivation (mig 0068) — department + manager-chain → per-re
       lookupDirectory: enrich('EMEA Data & AI', 'CC-NONE', 'deptuser-oid'),
       getManager: async () => { throw new Error('manager walk must not run when department maps') },
     })
-    expect(r.viaDepartment).toBe(1)
+    expect(r.viaAttribute).toBe(1)
     const tm = await regionOf('deptuser@example.com')
     expect(tm.region_code).toBe('emea')
     expect(tm.ou_code).toBe('__UNPLACED__')

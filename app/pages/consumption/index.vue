@@ -8,6 +8,7 @@
  */
 import { computed, ref } from 'vue'
 import { modelDisplay } from '../../composables/useModelDisplay'
+import type { HeroGroupWire } from '../../components/consumption/build-consumption-hero'
 import type {
   AuxSplit,
   CacheStats,
@@ -44,6 +45,17 @@ interface ConsumptionResp {
   insights: Finding[]
   freshness_minutes_ago: number | null
   aggregate_refreshed_minutes_ago: number | null
+  // ── visuals-iter2 §I3 ─────────────────────────────────────────────────
+  /** `as_of` = the server's UTC today — the hero's partial-week anchor (never client `new Date()`). */
+  hero: { window_days: number; as_of: string; groups: HeroGroupWire[] }
+  /** The page's ONE MTD scalar — provider truth, never attribution math. */
+  provider_truth: { month: string; mtd_usd: string; run_rate: RunRate }
+  page_freshness: {
+    telemetry_minutes_ago: number | null
+    aggregate_minutes_ago: number | null
+    provider_feed_minutes_ago: number | null
+    worst_minutes_ago: number | null
+  }
 }
 
 const { session, ensure } = useSession()
@@ -57,9 +69,28 @@ const { data, refresh, pending, error } = await useFetch<ConsumptionResp>(
   { query: computed(() => ({ window: windowDays.value })), lazy: true },
 )
 
+// Quota tracking stays on the ATTRIBUTED month spend (quota bar unchanged, §I3
+// — quota is a §A construct); the quota-basis spend itself is never rendered as
+// a second MTD $ scalar.
 const monthSpend = computed(() => Number(data.value?.month.spend_usd ?? 0))
 const quota = computed(() => Number(data.value?.month.quota_usd ?? 0))
-const projected = computed(() => Number(data.value?.month.run_rate.projected_month_end_usd ?? 0))
+// The page's ONE MTD scalar + its run-rate: provider truth (§I3).
+const providerMtd = computed(() => Number(data.value?.provider_truth.mtd_usd ?? 0))
+const projected = computed(() =>
+  Number(data.value?.provider_truth.run_rate.projected_month_end_usd ?? 0),
+)
+// Worst-of-sources page freshness line (§I3) — replaces per-card footnotes.
+const freshnessLine = computed(() => {
+  const f = data.value?.page_freshness
+  if (!f || f.worst_minutes_ago == null) return null
+  const leg = (label: string, m: number | null) => (m == null ? null : `${label} ${m}m`)
+  const legs = [
+    leg('telemetry', f.telemetry_minutes_ago),
+    leg('usage rollup', f.aggregate_minutes_ago),
+    leg('provider feeds', f.provider_feed_minutes_ago),
+  ].filter((l): l is string => l != null)
+  return `Data as fresh as its stalest source: ${f.worst_minutes_ago}m ago (${legs.join(' · ')})`
+})
 
 const modelKeyOrder = computed(() => data.value?.mix.by_model.map((m) => m.model) ?? [])
 const stackedRows = computed(() =>
@@ -139,24 +170,34 @@ async function dismiss(id: string) {
     </UiPageHead>
 
     <div v-if="data" class="space-y-5">
-      <!-- Month header band -->
+      <!-- ONE worst-of-sources freshness line for the whole page (§I3) -->
+      <p v-if="freshnessLine" class="text-[11px] text-carbon-3 -mt-2" data-testid="page-freshness">
+        {{ freshnessLine }}
+      </p>
+
+      <!-- Month header band — the page's ONE MTD scalar (provider truth) -->
       <UiCard accent="harmony" data-testid="month-band">
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
           <div>
             <UiEyebrow>Month to date</UiEyebrow>
-            <div class="text-[32px] font-bold text-carbon mt-1" style="font-variant-numeric: tabular-nums">
-              {{ fmtUsd(monthSpend) }}
+            <div
+              class="text-[32px] font-bold text-carbon mt-1"
+              style="font-variant-numeric: tabular-nums"
+              data-testid="mtd-scalar"
+              data-mtd-scalar="provider-truth"
+            >
+              {{ fmtUsd(providerMtd) }}
             </div>
             <div class="text-xs text-carbon-3">
-              {{ fmtTokens(data.month.tokens) }} tokens ·
-              updated {{ data.freshness_minutes_ago != null ? `${data.freshness_minutes_ago}m ago` : '—' }}
+              provider-reported · all AI surfaces · month to date
             </div>
           </div>
           <div class="pt-1">
             <ChartsUtilBar :used="monthSpend" :total="quota > 0 ? quota : null" label="Quota used" />
             <p class="text-[11px] text-carbon-3 mt-2">
               {{ fmtUsd(data.month.base_allowance_usd) }} allowance +
-              {{ fmtUsd(data.month.allocation_usd) }} project allocations
+              {{ fmtUsd(data.month.allocation_usd) }} project allocations (quota $, month) ·
+              quota tracks attributed telemetry spend
             </p>
           </div>
           <div>
@@ -166,22 +207,23 @@ async function dismiss(id: string) {
             </div>
             <p
               class="text-[11px] text-carbon-3 mt-1"
-              :title="`Linear run-rate: MTD × days-in-month / days-elapsed (${data.month.run_rate.days_elapsed}/${data.month.run_rate.days_in_month} days)`"
+              :title="`Linear run-rate: MTD × days-in-month / days-elapsed (${data.provider_truth.run_rate.days_elapsed}/${data.provider_truth.run_rate.days_in_month} days)`"
             >
-              linear run-rate · day {{ data.month.run_rate.days_elapsed }} of
-              {{ data.month.run_rate.days_in_month }}
-            </p>
-            <p v-if="advisory > 0" class="text-[11px] text-carbon-3 mt-1">
-              {{ fmtUsd(advisory) }} of the last {{ windowDays }}d is advisory (telemetry-only) spend
+              linear run-rate on the provider-reported MTD · day
+              {{ data.provider_truth.run_rate.days_elapsed }} of
+              {{ data.provider_truth.run_rate.days_in_month }}
             </p>
           </div>
         </div>
       </UiCard>
 
+      <!-- Consumption-type hero (§I3) — above the daily line -->
+      <ConsumptionHeroCard :groups="data.hero.groups" :window-days="windowDays" :as-of="data.hero.as_of" />
+
       <!-- Daily trend -->
       <UiCard data-testid="trend-card">
         <div class="flex items-center justify-between mb-2">
-          <UiEyebrow>Daily spend</UiEyebrow>
+          <UiEyebrow>Daily spend · attributed telemetry · last {{ windowDays }}d</UiEyebrow>
           <UsageWindowToggle v-model="windowDays">
             <button
               class="text-[11px] px-2 py-0.5 rounded border"
@@ -200,23 +242,23 @@ async function dismiss(id: string) {
           :window-days="windowDays"
         />
         <ChartsTrendArea v-else :series="data.series" :window-days="windowDays" />
-        <p v-if="data.aggregate_refreshed_minutes_ago != null" class="text-[10px] text-carbon-3 mt-1 text-right">
-          series refreshed {{ data.aggregate_refreshed_minutes_ago }}m ago
+        <p v-if="advisory > 0" class="text-[10px] text-carbon-3 mt-1 text-right">
+          {{ fmtUsd(advisory) }} of the last {{ windowDays }}d is advisory (telemetry-only) spend
         </p>
       </UiCard>
 
       <!-- Composition row -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <UiCard data-testid="mix-models">
-          <UiEyebrow>Model mix ({{ windowDays }}d, by cost)</UiEyebrow>
-          <div class="mt-3"><ChartsDonutChart :slices="modelSlices" aria-label="Model mix by cost" :center-label="fmtUsd(data.fidelity.window_cost_usd)" center-sub="window spend" /></div>
+          <UiEyebrow>Model mix · attributed telemetry · last {{ windowDays }}d</UiEyebrow>
+          <div class="mt-3"><ChartsDonutChart :slices="modelSlices" aria-label="Model mix by cost" :center-label="fmtUsd(data.fidelity.window_cost_usd)" :center-sub="`${windowDays}d attributed`" /></div>
         </UiCard>
         <UiCard data-testid="mix-token-types">
-          <UiEyebrow>Token types ({{ windowDays }}d, by volume)</UiEyebrow>
+          <UiEyebrow>Token types · attributed telemetry · last {{ windowDays }}d</UiEyebrow>
           <div class="mt-3"><ChartsDonutChart :slices="tokenTypeSlices" aria-label="Token types by volume" :center-label="cacheHitPct != null ? cacheHitPct + '%' : '—'" center-sub="cache hit" /></div>
         </UiCard>
         <UiCard data-testid="mix-destination">
-          <UiEyebrow>Where it went (MTD)</UiEyebrow>
+          <UiEyebrow>Where it went · attributed telemetry · MTD</UiEyebrow>
           <div class="mt-3"><ChartsDonutChart :slices="destinationSlices" aria-label="Spend by budget destination" :center-label="String(data.mix.buckets.length)" center-sub="budgets" /></div>
           <p v-if="data.mix.unallocated.needs_tagging_count > 0" class="text-[11px] text-carbon-3 mt-2">
             {{ data.mix.unallocated.needs_tagging_count }} session{{ data.mix.unallocated.needs_tagging_count === 1 ? '' : 's' }}
@@ -228,7 +270,7 @@ async function dismiss(id: string) {
       <!-- Cache economics + aux strip -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <UiCard accent="zeal" data-testid="cache-card">
-          <UiEyebrow>Cache economics ({{ windowDays }}d)</UiEyebrow>
+          <UiEyebrow>Cache economics · attributed telemetry · last {{ windowDays }}d</UiEyebrow>
           <div class="mt-2 text-xl font-bold text-carbon">
             <template v-if="data.cache.savings_usd != null">
               Caching saved you {{ fmtUsd(data.cache.savings_usd) }}

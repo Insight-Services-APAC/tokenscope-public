@@ -19,8 +19,19 @@ describe('decideForwarderAction', () => {
     expect(decideForwarderAction('hung', DIR)).toEqual({ action: 'spawn', killPidfile: true })
   })
 
-  it('answering AND our stateDir → healthy (leave it running)', () => {
+  it('answering AND our stateDir AND ready → healthy (leave it running)', () => {
+    expect(decideForwarderAction({ ok: true, pid: 123, dir: DIR, ready: true }, DIR)).toEqual({ action: 'healthy' })
+  })
+
+  it('answering AND our stateDir, no ready field (older forwarder) → healthy (backward-compatible)', () => {
     expect(decideForwarderAction({ ok: true, pid: 123, dir: DIR }, DIR)).toEqual({ action: 'healthy' })
+  })
+
+  it('our stateDir but ready:false (stash gone / wiped ~/.tokenscope) → kill its pid + spawn', () => {
+    expect(decideForwarderAction({ ok: true, pid: 789, dir: DIR, ready: false }, DIR)).toEqual({
+      action: 'spawn',
+      killPid: 789,
+    })
   })
 
   it('answering but a DIFFERENT stateDir (stale / leaked HOME) → kill its pid + spawn', () => {

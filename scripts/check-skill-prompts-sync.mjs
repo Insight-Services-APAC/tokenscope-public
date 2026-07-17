@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* eslint-disable no-console */
+ 
 /**
  * check-skill-prompts-sync.mjs — CI gate.
  *

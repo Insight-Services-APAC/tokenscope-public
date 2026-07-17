@@ -14,7 +14,7 @@
  */
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { z } from 'zod'
-import { requireRole } from '../../../../auth/rbac'
+import { requireReportScope } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
@@ -32,7 +32,6 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'global-finops', 'platform-admin')
   const query = await getValidatedQuery(event, (d) => Query.parse(d))
   // Month OR custom from/to window (drivers + concentration are usage-lane, so a
   // custom range windows cleanly). Month mode is byte-identical to the old path.
@@ -40,6 +39,7 @@ export default defineEventHandler(async (event) => {
   const month = win.monthStr ?? monthKeyUtc(new Date(win.startIso))
 
   return await withRequestRls(event, async (tx) => {
+    await requireReportScope(event, tx, 'across')
     const { rows, headlineUsd } = await fetchAcrossDrivers(tx, win, query.axis)
     const concentration = await fetchConcentration(tx, win)
     return {

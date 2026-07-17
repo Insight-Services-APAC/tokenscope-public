@@ -19,6 +19,9 @@ export default defineEventHandler(async (event) => {
   await requireRole(event, 'global-finops', 'platform-admin')
 
   return await withRequestRls(event, async (tx) => {
+    // Back-compat view over directory_region_rule (mig 0089): this legacy endpoint
+    // manages only the department-attribute rules; the generalised rules API +
+    // Region-rules UI supersede it.
     const rows = await tx.execute<{
       department: string
       department_lower: string
@@ -26,14 +29,15 @@ export default defineEventHandler(async (event) => {
       region_code: string
       region_display_name: string
     }>(sql`
-      SELECT d.department,
-             d.department_lower,
+      SELECT d.match_value_raw AS department,
+             d.match_value AS department_lower,
              d.region_id::text AS region_id,
              r.code AS region_code,
              r.display_name AS region_display_name
-      FROM department_to_region d
+      FROM directory_region_rule d
       JOIN region r ON r.id = d.region_id
-      ORDER BY d.department_lower ASC
+      WHERE d.attribute = 'department'
+      ORDER BY d.match_value ASC
     `)
 
     return {

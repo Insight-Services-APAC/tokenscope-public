@@ -11,15 +11,17 @@
  *     (the §B bill lane). Copilot chargeable is gated on `copilot.mode`: held back
  *     with a "pending" marker until Wave 0 validates (build-design §6).
  *
- * RBAC (build-design §2): `requireRole('global-finops','platform-admin')`. This scope
- * is whole-company ONLY — no region/ou params are honoured for anyone (there is nothing
- * to clamp; every other role is a hard 403).
+ * RBAC (build-design §2 + task #19): `requireReportScope(event, tx, 'across')` — the
+ * whole-company grant (reportGrants.across). Standard = global-finops / platform-admin
+ * ONLY; a loosened report-visibility policy may also admit a region admin / cost-centre
+ * owner. This scope is whole-company (no region/ou params are honoured for anyone —
+ * there is nothing to clamp); a caller without the grant is a hard 403 (audited).
  *
  * No `attribution_record` / raw `actual_spend` (the lane firewall, §7(7)).
  */
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { z } from 'zod'
-import { requireRole } from '../../../../auth/rbac'
+import { requireReportScope } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
@@ -29,6 +31,7 @@ import {
   fetchProviderSplit,
   fetchAcrossDailyMetrics,
   fetchAcrossChargebackTrend,
+  fetchAcrossChargebackLanes,
 } from '../../../../reporting/across-regions'
 import { forecastForMonth } from '../../../../reports/forecast'
 import { providerStatesForWindow } from '../../../../reports/settling'
@@ -43,7 +46,6 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'global-finops', 'platform-admin')
   const query = await getValidatedQuery(event, (d) => Query.parse(d))
   const now = new Date()
   const win = resolveReportWindow(query, { now })
@@ -63,6 +65,10 @@ export default defineEventHandler(async (event) => {
   const metaMonth = win.monthStr ?? monthKeyUtc(new Date(win.startIso))
 
   return await withRequestRls(event, async (tx) => {
+    // Whole-company scope: requires the 'across' grant (reportGrants). Standard =
+    // global-finops / platform-admin only; a loosened policy mode may also admit a
+    // region admin / cost-centre owner. Denies are audited (report-scope-denied).
+    await requireReportScope(event, tx, 'across')
     const kpis = await fetchAcrossKpis(tx, win, { copilotChargeback, momMonthRange, now })
     const regionCards = await fetchAcrossRegionCards(tx, win, { copilotChargeback })
     // §B chargeback-by-region ranking — the chargeback-lane swap for the usage region
@@ -75,6 +81,9 @@ export default defineEventHandler(async (event) => {
     // §B ANTHROPIC chargeback per-day series over the SAME window — the Chargeable
     // KPI-tile sparkline (bill lane). Separate from the trend endpoint's rolling window.
     const chargeDaily = await fetchAcrossChargebackTrend(tx, win)
+    // §B per-lane chargeback totals (lane-visuals V2) — the ChargebackSplitCard donut.
+    // Composed on the KPI's exact gates, so Σ(chargeable lanes) == kpis.chargeableUsd.
+    const chargebackLanes = await fetchAcrossChargebackLanes(tx, win, { copilotChargeback })
 
     // Forecast is ALWAYS anchored on the in-progress month (closed months → null);
     // range mode has no month anchor, so it is null there too.
@@ -138,6 +147,7 @@ export default defineEventHandler(async (event) => {
       providerSplit,
       dailyMetrics,
       chargeDaily,
+      chargebackLanes,
       forecast,
       actualUsd: kpis.genuineUsd,
       regionCards,

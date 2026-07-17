@@ -33,15 +33,16 @@ try {
   await page.waitForURL((u) => u.toString().includes('/admin'), { timeout: 20000 })
   await page.waitForSelector('[data-testid="admin-hub"]', { timeout: 20000 })
 
-  // ── hub: six tiles ──
+  // ── Overview: status strip + common-task quick actions (the launcher that
+  //    replaced the flat tile wall). The persistent sidebar is the full surface.
   step = 'hub'
-  for (const k of ['users', 'regions', 'projects', 'audit', 'settings', 'diagnostics']) {
-    await must(`[data-testid="admin-tile-${k}"]`, `tile ${k}`)
-  }
+  await must('[data-testid="admin-overview-stats"]', 'overview status strip')
+  await must('[data-testid="admin-qa-region"]', 'set-up-region quick action')
+  await must('[data-testid="admin-nav-teammates"]', 'sidebar Teammates')
 
-  // ── Regions list ──
+  // ── Regions list — navigate via the persistent sidebar ──
   step = 'regions'
-  await page.click('[data-testid="admin-tile-regions"]')
+  await page.click('[data-testid="admin-nav-regions"]')
   await page.waitForURL((u) => u.toString().includes('/admin/regions'), { timeout: 15000 })
   await page.waitForSelector('[data-testid="regions-list"]', { timeout: 15000 })
   await must('[data-testid="regions-list"]', 'regions list')

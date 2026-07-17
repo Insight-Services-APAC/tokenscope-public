@@ -129,10 +129,16 @@ describe('§A usage — v_complete_usage totals (attribution ∪ unaccounted gap
     const s = await fetchProviderSplit(tx, WIN)
     expect(s.claudeCode.spendUsd).toBeCloseTo(900, 6)
     expect(s.claudeCode.activeUsers).toBe(4)
-    expect(s.copilot.spendUsd).toBeCloseTo(15, 6)
-    expect(s.copilot.activeUsers).toBe(2) // alice, bob
+    expect(s.copilotCli.spendUsd).toBeCloseTo(15, 6)
+    expect(s.copilotCli.activeUsers).toBe(2) // alice, bob
+    // Three-lane §A ceiling: copilot-agent is structurally absent from
+    // v_complete_usage (mig 0086) — its bucket exists and reads 0.
+    expect(s.copilotAgent.spendUsd).toBeCloseTo(0, 6)
+    expect(s.copilotAgent.activeUsers).toBe(0)
     expect(s.other.spendUsd).toBeCloseTo(0, 6)
-    expect(s.claudeCode.spendUsd + s.copilot.spendUsd + s.other.spendUsd).toBeCloseTo(915, 6)
+    expect(
+      s.claudeCode.spendUsd + s.copilotCli.spendUsd + s.copilotAgent.spendUsd + s.other.spendUsd,
+    ).toBeCloseTo(915, 6)
   })
 
   it('§A model drivers sum back to 915 (claude-sonnet 850 + NULL/unattributed 65)', async () => {
@@ -276,12 +282,16 @@ describe('§B chargeback — per-cost-centre, teammate-homed (Anthropic) + poole
 
   it('INVARIANT: Σ Anthropic chargeback = 900; by region APAC = 700, EMEA = 200', async () => {
     // Whole-company Anthropic chargeback (bill lane).
+    // mig 0085: the copilot arm emits the three §B LANE IDS, so the Anthropic
+    // reference excludes THOSE (the old `tool <> 'copilot-cli'` would now let the
+    // copilot lane rows leak into the Anthropic sum).
     const [row] = await t.client<{ total: string; apac: string; emea: string }[]>`
       SELECT COALESCE(SUM(charge_usd),0)::text AS total,
              COALESCE(SUM(charge_usd) FILTER (WHERE region_id = ${ids.regionApac}::uuid),0)::text AS apac,
              COALESCE(SUM(charge_usd) FILTER (WHERE region_id = ${ids.regionEmea}::uuid),0)::text AS emea
       FROM v_finance_chargeback_month
-      WHERE tool <> 'copilot-cli' AND period_month >= '2026-05-01'::date AND period_month < '2026-06-01'::date`
+      WHERE tool NOT IN ('copilot-license', 'copilot-usage', 'copilot-unclassified')
+        AND period_month >= '2026-05-01'::date AND period_month < '2026-06-01'::date`
     expect(Number(row!.total)).toBeCloseTo(900, 6)
     expect(Number(row!.apac)).toBeCloseTo(700, 6) // alice 350 + bob 300 + dave 50
     expect(Number(row!.emea)).toBeCloseTo(200, 6) // carol 200
@@ -300,9 +310,13 @@ describe('§B chargeback — per-cost-centre, teammate-homed (Anthropic) + poole
   })
 
   it('Copilot pooled chargeback = 40, homed to apac.delivery (region APAC per the view)', async () => {
+    // mig 0085: one row PER §B LANE per (cou, month) — the (cou, month) group still
+    // homes to apac.delivery and Σ lanes is the pre-split 40.
     const [row] = await t.client<{ cou: string | null; region: string | null; charge: string }[]>`
-      SELECT cost_owning_unit_id::text AS cou, region_id::text AS region, charge_usd::text AS charge
-      FROM v_finance_copilot_pool_chargeback WHERE period_month = '2026-05-01'::date`
+      SELECT cost_owning_unit_id::text AS cou, region_id::text AS region,
+             COALESCE(SUM(charge_usd), 0)::text AS charge
+      FROM v_finance_copilot_pool_chargeback WHERE period_month = '2026-05-01'::date
+      GROUP BY cost_owning_unit_id, region_id`
     expect(row!.cou).toBe(ids.uApacDelivery)
     expect(row!.region).toBe(ids.regionApac) // derived from the CoU's org_unit region
     expect(Number(row!.charge)).toBeCloseTo(40, 6)

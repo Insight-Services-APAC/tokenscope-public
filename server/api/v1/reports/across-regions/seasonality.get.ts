@@ -12,7 +12,7 @@
  */
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { z } from 'zod'
-import { requireRole } from '../../../../auth/rbac'
+import { requireReportScope } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import { fetchAcrossSeasonality, fetchAcrossChargebackDow } from '../../../../reporting/across-regions'
@@ -26,11 +26,11 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event): Promise<Seasonality> => {
-  await requireRole(event, 'global-finops', 'platform-admin')
   const query = await getValidatedQuery(event, (d) => Query.parse(d))
   const win = resolveReportWindow(query)
 
   return await withRequestRls(event, async (tx) => {
+    await requireReportScope(event, tx, 'across')
     const { weeks, cells } = await fetchAcrossSeasonality(tx, win)
     // §B ANTHROPIC chargeback by day-of-week over the SAME window (bill lane) — the
     // chargeback-mode "when spend happens", carried alongside the §A cells (never summed).

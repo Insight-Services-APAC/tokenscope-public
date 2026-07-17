@@ -16,8 +16,10 @@
  * RBAC: client-side guard via useSession() — the server still 401/403s a
  * non-admin's API calls; the page just hides itself.
  */
+
 import { computed, ref, watch } from 'vue'
 import { consola } from 'consola'
+definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface Teammate extends Record<string, unknown> {
   id: string
@@ -133,9 +135,8 @@ function fmtTs(v: string | null): string {
   <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-grants">
     <UiPageHead
       eyebrow="Administration"
-      title="Grants"
+      title="Connections"
       sub="Authorized connections (OAuth/MCP grants) per teammate. Revoke a connection to log a client out — emit grants also stop the device emitting."
-      :crumbs="['Admin', 'Grants']"
     />
 
     <div

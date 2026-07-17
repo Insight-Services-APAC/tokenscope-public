@@ -16,9 +16,11 @@
  * RBAC: client-side guard via useSession() — server middleware still
  * 401/403s a non-admin's API calls; the page just hides itself.
  */
+
 import { computed, ref, watch } from 'vue'
 import { consola } from 'consola'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
+definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface InstanceRow extends Record<string, unknown> {
   instance_id: string
@@ -119,9 +121,8 @@ function fmtTs(v: string | null): string {
   <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-instances">
     <UiPageHead
       eyebrow="Administration"
-      title="Instances"
+      title="Devices"
       sub="Enrolled devices in this region. Spot an emitter that's wrong — or went silent — and revoke it."
-      :crumbs="['Admin', 'Instances']"
     />
 
     <div

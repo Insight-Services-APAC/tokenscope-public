@@ -60,3 +60,7 @@ scripts/spikes/
 
 # Sandbox reconciliation PATs (never commit)
 .env.sandbox
+
+# Node/V8 core dumps (e.g. from an OOM during build)
+core
+core.*

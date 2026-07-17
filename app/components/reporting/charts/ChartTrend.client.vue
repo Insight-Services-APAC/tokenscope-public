@@ -38,6 +38,20 @@ const props = withDefaults(
     /** Tooltip / axis value formatter. Defaults to a plain number. */
     valueFormat?: (v: number) => string
     height?: number
+    /**
+     * Render the in-chart legend (default, ≥2 series). Pages carrying ONE
+     * page-level LaneLegend (lane-visuals V1 item 5 — cards render NO legends
+     * there) pass false; identity then lives in the page legend + tooltips.
+     */
+    legend?: boolean
+    /**
+     * A run-rate continuation of the TOTAL (lane-visuals V2): rendered as ONE
+     * dashed, muted neutral line on top of the (typically stacked) series —
+     * the stacked areas end cleanly at the boundary and the tail carries the
+     * projection. Its first point should be the last ACTUAL total so the line
+     * visually connects. Its x-values extend the category axis.
+     */
+    totalTail?: TrendPoint[]
   }>(),
   {
     forecastFrom: undefined,
@@ -45,6 +59,8 @@ const props = withDefaults(
     smooth: false,
     valueFormat: undefined,
     height: 260,
+    legend: true,
+    totalTail: undefined,
   },
 )
 
@@ -52,7 +68,9 @@ const { baseOption, colorForKey, readVar } = useChartTheme()
 
 const fmt = (v: number) => (props.valueFormat ? props.valueFormat(v) : String(v))
 
-const categories = computed(() => categoryUnion(props.series.map((s) => s.data)))
+const categories = computed(() =>
+  categoryUnion([...props.series.map((s) => s.data), props.totalTail ?? []]),
+)
 
 // Boundary index: first category that is projected (-1 when no forecast).
 const forecastIdx = computed(() =>
@@ -66,8 +84,9 @@ const hasData = computed(
     props.series.some((s) => s.data.some((p) => p.y > 0)),
 )
 
-// Legend only for ≥2 series (dataviz: a single series is named by the title).
-const showLegend = computed(() => props.series.length >= 2)
+// Legend only for ≥2 series (dataviz: a single series is named by the title),
+// and only when the page has not taken over identity via a page-level LaneLegend.
+const showLegend = computed(() => props.legend && props.series.length >= 2)
 
 const option = computed<ECOption>(() => {
   const cats = categories.value
@@ -136,6 +155,25 @@ const option = computed<ECOption>(() => {
       })
     }
   })
+
+  // Run-rate tail on the TOTAL (lane-visuals V2): ONE dashed, muted NEUTRAL line
+  // on top of the stack — never a per-lane projection, never a brand hue (it is
+  // an annotation of the total, not a lane). Kept out of the legend (legend.data
+  // lists the real series only); the tooltip names it on projected days.
+  if (props.totalTail?.length) {
+    const tailMap = new Map(props.totalTail.map((p) => [p.x, p.y]))
+    series.push({
+      name: 'Projected total',
+      type: 'line',
+      data: cats.map((c) => (tailMap.has(c) ? (tailMap.get(c) as number) : null)),
+      smooth: props.smooth,
+      showSymbol: false,
+      connectNulls: false,
+      lineStyle: { width: 2, color: carbon3, type: 'dashed', opacity: 0.8 },
+      itemStyle: { color: carbon3, opacity: 0.8 },
+      emphasis: { focus: 'series' },
+    })
+  }
 
   return {
     ...baseOption({ tooltipTrigger: 'axis' }),

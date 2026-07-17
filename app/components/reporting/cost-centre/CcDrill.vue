@@ -39,14 +39,17 @@ const DRILL_AXIS_OPTIONS: AxisOption[] = [
   { value: 'model', label: 'Model' },
 ]
 
-// Provider-split slices — named so colorForKey resolves the validated hues
-// (Claude = brand-hunger magenta, GitHub Copilot = brand-vision blue, Other = carbon-3).
+// Provider-split slices — registry lane KEYS so colorForKey resolves the
+// validated hues through the lane registry (Claude Code = brand-hunger magenta,
+// GitHub Copilot = brand-vision blue, Other = carbon-3), not name-fuzzing.
+// "Claude Code" (V6 honest labelling): this §A burn IS the claude-code tool —
+// the non-Code Claude surfaces never carry a per-CC usage burn.
 const vendorSlices = computed(() => {
   const v = props.drill.vendor
   return [
-    { name: 'Claude', value: v.claudeUsd },
-    { name: 'GitHub Copilot', value: v.copilotUsd },
-    { name: 'Other', value: v.otherUsd },
+    { name: 'Claude Code', key: 'claude-code', value: v.claudeUsd },
+    { name: 'GitHub Copilot', key: 'copilot-cli', value: v.copilotUsd },
+    { name: 'Other', key: 'other', value: v.otherUsd },
   ].filter((s) => s.value > 0)
 })
 
@@ -105,8 +108,11 @@ const zeroBurnTagged = computed(() => hasAllocation.value && props.drill.burnUsd
       data-testid="cc-drill-donut"
     >
       <div class="text-sm font-semibold text-carbon-1 mb-1">Burn by vendor</div>
+      <!-- V6: lane-qualified per the LaneToggle vocabulary — this is the §A
+           attributed-usage burn, never the billed §B figure. -->
       <p class="text-[11px] text-carbon-3 mb-3">
-        Copilot pooled usage carries no cost-owning unit, so it is out of scope for the per-cost-centre burn.
+        Attributed usage — what was consumed, not an invoice. Copilot pooled usage carries no
+        cost-owning unit, so it is out of scope for the per-cost-centre burn.
       </p>
       <ChartDonut
         :slices="vendorSlices"

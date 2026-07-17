@@ -20,6 +20,7 @@
 import { writeFileSync, renameSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stateDir } from './plugin-runtime.mjs'
+import { shimActive } from './otlp-shim-policy.mjs'
 
 /**
  * Resource-attr string for a REPO tag (repo-local config): the device session id
@@ -184,7 +185,7 @@ const OTLP_PROXY_PORT = Number(process.env.TOKENSCOPE_OTLP_PROXY_PORT) || 14318
 const OTLP_PROXY_ENDPOINT = `http://127.0.0.1:${OTLP_PROXY_PORT}/v1/logs`
 
 /** True if a URL's host is the local loopback (already the proxy — don't re-stash). */
-function isLoopbackHost(urlStr) {
+export function isLoopbackHost(urlStr) {
   try {
     const h = new URL(urlStr).hostname.toLowerCase()
     return h === '127.0.0.1' || h === 'localhost' || h === '::1'
@@ -212,24 +213,38 @@ function readStashedDce() {
  *     set the endpoint to the local proxy (the forward direction).
  *   ON, endpoint already the proxy → no-op (do NOT overwrite the stash with the
  *     proxy's own address, which would create a self-referential loop).
- *   OFF (TOKENSCOPE_OTLP_PROXY=0), endpoint IS the proxy + a stashed DCE exists →
+ *   DORMANT, endpoint IS the proxy + a stashed DCE exists + `revertWhenDormant` →
  *     RESTORE the endpoint to the stashed DCE (reverts global + repo-local to
  *     direct once Claude Code is fixed). The stash file is kept so re-enabling
  *     doesn't need a re-redeem.
- *   OFF, endpoint is a real DCE (or no stash) → no-op.
+ *   DORMANT, endpoint is a real DCE (or no stash, or `revertWhenDormant` false) → no-op.
  *
  * No logs endpoint at all (fresh/partial enrolment) → no-op in every case.
+ *
+ * `revertWhenDormant` (default true) is the shared-host guard: on a host whose
+ * home dir (and thus ~/.claude/settings.json) is shared by multiple CWs on
+ * DIFFERENT CLI versions, a fixed-CLI session must NOT rip a live proxy endpoint
+ * back to the DCE while a broken-CLI sibling is depending on the running
+ * forwarder (that would silently drop the sibling's telemetry). The caller
+ * passes false when it has observed the forwarder still serving.
  */
-export function applyOtlpProxyRepoint(env) {
+export function applyOtlpProxyRepoint(env, { revertWhenDormant = true } = {}) {
   if (!env || typeof env !== 'object') return env
   const current = env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
   if (typeof current !== 'string' || !current.trim()) return env
-  const killed = process.env.TOKENSCOPE_OTLP_PROXY === '0'
+  // CC #72671 (chunked OTLP → DCE 400) was FIXED in CLI 2.1.212. The forwarder is
+  // now version-aware AUTO: active ONLY on CLI versions known to ship the
+  // chunked-export regression (see otlp-shim-policy.mjs OTLP_BROKEN_RANGES),
+  // dormant (direct emission) otherwise. Manual override: TOKENSCOPE_OTLP_PROXY=1
+  // forces on, =0 forces off. See plugin/scripts/otlp-forwarder.README.md.
+  const active = shimActive()
   const atProxy = isLoopbackHost(current)
 
-  if (killed) {
-    // Reverse: only when currently pointed AT the proxy and we have the DCE stashed.
-    if (atProxy) {
+  if (!active) {
+    // Dormant (default): if a prior session left the endpoint pointed AT the
+    // forwarder, restore the direct DCE from the stash (reverts the shim) —
+    // UNLESS a live forwarder is still serving a sibling (revertWhenDormant=false).
+    if (atProxy && revertWhenDormant) {
       const dce = readStashedDce()
       if (dce) env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = dce
     }

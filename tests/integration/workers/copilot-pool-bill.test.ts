@@ -25,6 +25,7 @@ import * as schema from '../../../drizzle/schema'
 import {
   runCopilotPoolBill,
   aggregateOrgBill,
+  copilotRawNetUsd,
   type BillingReportClient,
 } from '../../../server/workers/copilot-pool-bill'
 import { BillingUsageReportSchema } from '../../../server/reconciliation/adapters/github-client'
@@ -45,11 +46,11 @@ const MONTH = '2026-06-01'
 function item(
   org: string | null,
   sku: string,
-  opts: { gross?: number; discount?: number; net?: number; quantity?: number },
+  opts: { gross?: number; discount?: number; net?: number; quantity?: number; product?: string },
 ): GithubBillingUsageItem {
   return {
     date: '2026-06-10',
-    product: 'Copilot',
+    product: opts.product ?? 'Copilot',
     sku,
     quantity: opts.quantity ?? 0,
     unitType: '',
@@ -182,9 +183,11 @@ describe('copilot-pool-bill Wave-0 invariants', () => {
     expect(Number(n)).toBe(0)
 
     // Copilot chargeback term = pool net only: 4000 + 2300 + 1100(lonely) + 50(residual) = 7450.
+    // (mig 0085: the copilot arm emits the three §B LANE IDS, never 'copilot-cli'.)
     const [{ c }] = await t.client<{ c: string }[]>`
       SELECT COALESCE(SUM(charge_usd),0)::text AS c FROM v_finance_chargeback_month
-      WHERE period_month = ${MONTH}::date AND tool = 'copilot-cli'`
+      WHERE period_month = ${MONTH}::date
+        AND tool IN ('copilot-license', 'copilot-usage', 'copilot-unclassified')`
     expect(Number(c)).toBe(7450) // NOT 7450 + 39 (the copilot-seat actual_spend row is excluded)
 
     // NULL-CoU bucket (unmapped 'lonely' 1100 + residual 50) is present + visible.
@@ -266,10 +269,16 @@ describe('copilot-pool-bill Wave-0 invariants', () => {
     expect(unsettled).toBe(true)
 
     // The chargeback figure for acme's CoU is the OVERAGE ONLY (300) — NOT 39 (flat) or 339.
+    // (mig 0085 lane split: the money sits on the copilot-usage lane.)
     const [{ charge }] = await t.client<{ charge: string }[]>`
-      SELECT charge_usd::text AS charge FROM v_finance_chargeback_month
-      WHERE period_month = ${MONTH}::date AND tool = 'copilot-cli' AND cost_owning_unit_id = ${couA}::uuid`
+      SELECT COALESCE(SUM(charge_usd),0)::text AS charge FROM v_finance_chargeback_month
+      WHERE period_month = ${MONTH}::date AND cost_owning_unit_id = ${couA}::uuid
+        AND tool IN ('copilot-license', 'copilot-usage', 'copilot-unclassified')`
     expect(Number(charge)).toBe(300)
+    const [{ usage_lane }] = await t.client<{ usage_lane: string }[]>`
+      SELECT charge_usd::text AS usage_lane FROM v_finance_chargeback_month
+      WHERE period_month = ${MONTH}::date AND tool = 'copilot-usage' AND cost_owning_unit_id = ${couA}::uuid`
+    expect(Number(usage_lane)).toBe(300)
 
     // reset the flat price so it can't leak into other tests
     await t.client`UPDATE provider_enterprise SET flat_seat_price_usd = NULL WHERE external_id = ${ENT}`
@@ -279,9 +288,11 @@ describe('copilot-pool-bill Wave-0 invariants', () => {
     const here = dirname(fileURLToPath(import.meta.url))
     const worker = readFileSync(join(here, '../../../server/workers/copilot-pool-bill.ts'), 'utf8')
     const mig = readFileSync(join(here, '../../../drizzle/migrations/0081_finance_copilot_pool_chargeback_views.sql'), 'utf8')
+    const mig85 = readFileSync(join(here, '../../../drizzle/migrations/0085_copilot_chargeback_lane_split.sql'), 'utf8')
     expect(worker).not.toContain('flat_seat_price')
     expect(worker).not.toContain('flatSeatPrice')
     expect(mig).not.toContain('flat_seat_price')
+    expect(mig85).not.toContain('flat_seat_price')
   })
 
   it('(4) bill-read fidelity under a mid-month seat change: license/overage/included EXACTLY equal the bill net/net/discount', async () => {
@@ -379,6 +390,203 @@ describe('copilot-pool-bill Wave-0 invariants', () => {
     expect(Number(row!.registered)).toBeGreaterThan(0)
   })
 
+  // ── D3 lane split: June-2026 SKU reality + unclassified + C1 conservation ──
+
+  it('(10) June-2026 snake_case SKUs classify: credits/agent/premium-request → usage, copilot_enterprise → license; spark/models ignored but COUNTED', async () => {
+    const items: GithubBillingUsageItem[] = [
+      item('acme', 'copilot_enterprise', { net: 3900, quantity: 100, product: 'copilot' }),
+      item('acme', 'copilot_ai_credits', { gross: 500, discount: 380, net: 120, product: 'copilot' }),
+      item('acme', 'coding_agent_ai_credit', { gross: 90, discount: 60, net: 30, product: 'copilot' }),
+      item('acme', 'copilot_premium_request', { gross: 10, net: 10, product: 'copilot' }), // legacy metered usage — never a seat
+      // Non-Copilot products: excluded from Copilot's bill, counted per product.
+      item('acme', 'spark_ai_credits', { net: 77, product: 'spark_ai_credits' }),
+      item('acme', 'models_inference', { net: 33, product: 'models_inference' }),
+    ]
+    // Pure classification.
+    const ignored: Record<string, number> = {}
+    const agg = aggregateOrgBill(items, ignored)
+    expect(agg.licenseNetUsd).toBe(3900)
+    expect(agg.overageNetUsd).toBe(160) // 120 + 30 + 10
+    expect(agg.unclassifiedNetUsd).toBe(0)
+    expect(agg.usageGrossUsd).toBe(600)
+    expect(ignored).toEqual({ spark_ai_credits: 77, models_inference: 33 })
+    // C1 reference: the classified columns equal Σ raw Copilot net exactly.
+    expect((agg.licenseNetUsd ?? 0) + agg.overageNetUsd + agg.unclassifiedNetUsd).toBe(copilotRawNetUsd(items))
+
+    // End-to-end: the run result carries the ignored products KEYED per
+    // (enterprise, month) — provenance, not a run-global blur (r1 finding 8).
+    const res = await runCopilotPoolBill(t.db, { now: NOW, monthsBack: 0, clientOverride: stub({ usageItems: items }) })
+    expect(res.orgRowsWritten).toBe(1)
+    expect(res.unclassifiedOrgMonths).toBe(0)
+    expect(res.ignoredProducts).toEqual({
+      [`${ENT}:2026-06`]: { spark_ai_credits: 77, models_inference: 33 },
+    })
+    const [row] = await t.client<{ license: string; overage: string; unclassified: string }[]>`
+      SELECT license_net_usd::text AS license, overage_net_usd::text AS overage, unclassified_net_usd::text AS unclassified
+      FROM copilot_pool_bill WHERE provider_org_id = ${orgAcme}::uuid`
+    expect(Number(row!.license)).toBe(3900)
+    expect(Number(row!.overage)).toBe(160)
+    expect(Number(row!.unclassified)).toBe(0)
+    // spark/models never leaked into any Copilot figure: Σ github bill = 3900 + 160.
+    const [{ gh }] = await t.client<{ gh: string }[]>`
+      SELECT bill_usd::text AS gh FROM v_finance_bill_totals_month WHERE period_month = ${MONTH}::date AND provider = 'github'`
+    expect(Number(gh)).toBe(4060)
+    // No unclassified/conservation alert.
+    const [{ n }] = await t.client<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM inbox_item WHERE category = 'copilot-bill-unclassified'`
+    expect(Number(n)).toBe(0)
+  })
+
+  it('(11) a Copilot line matching NEITHER classifier → unclassified column + visible lane + idempotent alert; C1/Σ=bill still hold', async () => {
+    const items: GithubBillingUsageItem[] = [
+      item('acme', 'copilot_enterprise', { net: 1000, quantity: 25, product: 'copilot' }),
+      item('acme', 'copilot_mystery_new_thing', { net: 55, product: 'copilot' }), // matches neither regex
+    ]
+    const res = await runCopilotPoolBill(t.db, { now: NOW, monthsBack: 0, clientOverride: stub({ usageItems: items }) })
+    expect(res.orgRowsWritten).toBe(1)
+    expect(res.unclassifiedOrgMonths).toBe(1)
+
+    // The column + the visible copilot-unclassified lane carry the $55.
+    const [row] = await t.client<{ unclassified: string }[]>`
+      SELECT unclassified_net_usd::text AS unclassified FROM copilot_pool_bill WHERE provider_org_id = ${orgAcme}::uuid`
+    expect(Number(row!.unclassified)).toBe(55)
+    const [{ lane }] = await t.client<{ lane: string }[]>`
+      SELECT charge_usd::text AS lane FROM v_finance_copilot_pool_chargeback
+      WHERE period_month = ${MONTH}::date AND tool = 'copilot-unclassified' AND cost_owning_unit_id = ${couA}::uuid`
+    expect(Number(lane)).toBe(55)
+
+    // The 'copilot-bill-unclassified' alert (kind unclassified-spend) was raised — once.
+    const [{ n }] = await t.client<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM inbox_item
+      WHERE category = 'copilot-bill-unclassified' AND body->>'kind' = 'unclassified-spend'`
+    expect(Number(n)).toBe(1)
+    // Idempotent: a re-run counts the month again but raises no duplicate inbox item.
+    const res2 = await runCopilotPoolBill(t.db, { now: NOW, monthsBack: 0, clientOverride: stub({ usageItems: items }) })
+    expect(res2.unclassifiedOrgMonths).toBe(1)
+    const [{ n2 }] = await t.client<{ n2: string }[]>`
+      SELECT count(*)::text AS n2 FROM inbox_item
+      WHERE category = 'copilot-bill-unclassified' AND body->>'kind' = 'unclassified-spend'`
+    expect(Number(n2)).toBe(1)
+
+    // Σ=bill whole-truth: the unclassified $55 is in BOTH the bill footing and the
+    // chargeback view, so the identity holds (C2 + the Σ=bill check).
+    const cb = await sumChargebackMonth()
+    const bt = await sumBillTotals()
+    expect(bt).toBeCloseTo(1055, 6)
+    expect(cb).toBeCloseTo(bt, 6)
+    // No conservation-violation was raised (classification conserved every dollar).
+    const [{ cv }] = await t.client<{ cv: string }[]>`
+      SELECT count(*)::text AS cv FROM inbox_item
+      WHERE category = 'copilot-bill-unclassified' AND body->>'kind' = 'conservation-violation'`
+    expect(Number(cv)).toBe(0)
+  })
+
+  it('(12) C2 lane identity: the three view lanes are exactly the three columns per (cou, month)', async () => {
+    const items: GithubBillingUsageItem[] = [
+      item('acme', LICENSE, { net: 200, quantity: 5 }),
+      item('acme', CREDITS, { gross: 300, discount: 200, net: 100 }),
+      item('acme', 'copilot_mystery_new_thing', { net: 7, product: 'copilot' }),
+    ]
+    await runCopilotPoolBill(t.db, { now: NOW, monthsBack: 0, clientOverride: stub({ usageItems: items }) })
+    const lanes = await t.client<{ tool: string; charge: string }[]>`
+      SELECT tool, charge_usd::text AS charge FROM v_finance_copilot_pool_chargeback
+      WHERE period_month = ${MONTH}::date AND cost_owning_unit_id = ${couA}::uuid
+      ORDER BY tool`
+    expect(lanes.map((l) => [l.tool, Number(l.charge)])).toEqual([
+      ['copilot-license', 200],
+      ['copilot-unclassified', 7],
+      ['copilot-usage', 100],
+    ])
+    // Σ 3 lanes == the pre-split single-lane total (license + overage) + unclassified.
+    const sum = lanes.reduce((a, l) => a + Number(l.charge), 0)
+    expect(sum).toBe(307)
+  })
+
+  it('(13) a SKU matching BOTH classifiers books to OVERAGE — AI-credit priority is a pinned contract, not an accident of code order', () => {
+    // 'copilot_enterprise_ai_credits' matches AI_CREDIT ('ai_credit') AND the anchored
+    // LICENSE ('copilot_enterprise'). AI-credit is tested FIRST → overage, never a seat.
+    const items: GithubBillingUsageItem[] = [
+      item('acme', 'copilot_enterprise_ai_credits', { gross: 90, discount: 50, net: 40, product: 'copilot' }),
+    ]
+    const agg = aggregateOrgBill(items)
+    expect(agg.overageNetUsd).toBe(40)
+    expect(agg.licenseNetUsd).toBeNull() // no seat booked from the overlapping match
+    expect(agg.unclassifiedNetUsd).toBe(0)
+    expect(agg.usageGrossUsd).toBe(90)
+    // C1 conservation still holds through the overlap.
+    expect((agg.licenseNetUsd ?? 0) + agg.overageNetUsd + agg.unclassifiedNetUsd).toBe(copilotRawNetUsd(items))
+  })
+
+  it("(14) a license-ISH Copilot line matching NO anchored seat SKU ('Copilot seat-warmer promo') books UNCLASSIFIED, never license — the safety net catching ambiguity (r1 finding 2)", async () => {
+    const items: GithubBillingUsageItem[] = [
+      item('acme', 'copilot_enterprise', { net: 1000, quantity: 25, product: 'copilot' }),
+      // Generic license-flavoured words ('seat', 'subscription', 'promo') must NOT
+      // classify — only the documented concrete seat SKU ids do.
+      item('acme', 'Copilot seat-warmer promo', { net: 20, quantity: 10, product: 'copilot' }),
+      item('acme', 'premium seat subscription', { net: 5, quantity: 1, product: 'copilot' }),
+    ]
+    const agg = aggregateOrgBill(items)
+    expect(agg.licenseNetUsd).toBe(1000) // ONLY the concrete copilot_enterprise SKU
+    expect(agg.unclassifiedNetUsd).toBe(25) // 20 + 5 — visible, alerted, never charged
+    expect(agg.overageNetUsd).toBe(0)
+
+    // End-to-end: the ambiguous money reaches the unclassified column + alert, not license.
+    const res = await runCopilotPoolBill(t.db, { now: NOW, monthsBack: 0, clientOverride: stub({ usageItems: items }) })
+    expect(res.unclassifiedOrgMonths).toBe(1)
+    const [row] = await t.client<{ license: string; unclassified: string }[]>`
+      SELECT license_net_usd::text AS license, unclassified_net_usd::text AS unclassified
+      FROM copilot_pool_bill WHERE provider_org_id = ${orgAcme}::uuid`
+    expect(Number(row!.license)).toBe(1000)
+    expect(Number(row!.unclassified)).toBe(25)
+  })
+
+  it('(15) D3 remediation loop: unclassified month → corrected upstream re-pull → month rewrites to unclassified 0; the inbox item PERSISTS until an admin resolves it (alertUnclassified never auto-resolves)', async () => {
+    // Round 1 — the runbook trigger: a mystery Copilot SKU books unclassified + alerts.
+    const before: GithubBillingUsageItem[] = [
+      item('acme', 'copilot_enterprise', { net: 1000, quantity: 25, product: 'copilot' }),
+      item('acme', 'copilot_mystery_new_thing', { net: 55, product: 'copilot' }),
+    ]
+    const r1 = await runCopilotPoolBill(t.db, { now: NOW, monthsBack: 0, clientOverride: stub({ usageItems: before }) })
+    expect(r1.unclassifiedOrgMonths).toBe(1)
+    const [{ n1 }] = await t.client<{ n1: string }[]>`
+      SELECT count(*)::text AS n1 FROM inbox_item
+      WHERE category = 'copilot-bill-unclassified' AND body->>'kind' = 'unclassified-spend'`
+    expect(Number(n1)).toBe(1)
+
+    // Round 2 — remediation (runbook steps 2-3): the re-pull returns the SAME money on a
+    // line the CURRENT classifier handles (the upstream SKU/report was corrected). The
+    // worker's full recompute-and-replace rewrites the month.
+    const after: GithubBillingUsageItem[] = [
+      item('acme', 'copilot_enterprise', { net: 1000, quantity: 25, product: 'copilot' }),
+      item('acme', 'copilot_ai_credits', { gross: 60, discount: 5, net: 55, product: 'copilot' }),
+    ]
+    const r2 = await runCopilotPoolBill(t.db, { now: NOW, monthsBack: 0, clientOverride: stub({ usageItems: after }) })
+    expect(r2.unclassifiedOrgMonths).toBe(0)
+
+    // The month rewrite: unclassified drops to 0, the $55 books where it now belongs.
+    const [row] = await t.client<{ license: string; overage: string; unclassified: string }[]>`
+      SELECT license_net_usd::text AS license, overage_net_usd::text AS overage,
+             unclassified_net_usd::text AS unclassified
+      FROM copilot_pool_bill WHERE provider_org_id = ${orgAcme}::uuid`
+    expect(Number(row!.license)).toBe(1000)
+    expect(Number(row!.overage)).toBe(55)
+    expect(Number(row!.unclassified)).toBe(0)
+    // The visible lane follows (zero-amount lane rows are emitted, value 0).
+    const [{ lane }] = await t.client<{ lane: string }[]>`
+      SELECT charge_usd::text AS lane FROM v_finance_copilot_pool_chargeback
+      WHERE period_month = ${MONTH}::date AND tool = 'copilot-unclassified' AND cost_owning_unit_id = ${couA}::uuid`
+    expect(Number(lane)).toBe(0)
+
+    // Inbox fate (documented): the existing alert machinery NEVER auto-resolves — the
+    // idempotency guard only suppresses duplicates; closing the item is the admin's act
+    // (matching alertUnsettled's behaviour). The item persists, still unresolved.
+    const [item1] = await t.client<{ n: string; ack: string }[]>`
+      SELECT count(*)::text AS n, min(ack_state) AS ack FROM inbox_item
+      WHERE category = 'copilot-bill-unclassified' AND body->>'kind' = 'unclassified-spend'`
+    expect(Number(item1!.n)).toBe(1)
+    expect(['unread', 'read', 'acknowledged']).toContain(item1!.ack)
+  })
+
   it('(8) MEDIUM-1a: an ABSENT net money field THROWS at parse → the month is isolated, not a silent $0', async () => {
     // A bill line with NO netAmount (the field renamed/dropped by an unverified-live report).
     const raw = { usageItems: [{ product: 'Copilot', sku: LICENSE, grossAmount: 4000, quantity: 100, organizationName: 'acme' }] }
@@ -426,9 +634,11 @@ describe('copilot-pool-bill Wave-0 invariants', () => {
     expect(Number(n)).toBe(1)
 
     // The chargeback for acme's CoU is $0 — but flagged unsettled, NOT a confident settled $0.
+    // (mig 0085: summed over the three §B lane rows.)
     const [{ charge }] = await t.client<{ charge: string }[]>`
       SELECT COALESCE(SUM(charge_usd),0)::text AS charge FROM v_finance_chargeback_month
-      WHERE period_month = ${MONTH}::date AND tool = 'copilot-cli' AND cost_owning_unit_id = ${couA}::uuid`
+      WHERE period_month = ${MONTH}::date AND cost_owning_unit_id = ${couA}::uuid
+        AND tool IN ('copilot-license', 'copilot-usage', 'copilot-unclassified')`
     expect(Number(charge)).toBe(0)
   })
 })

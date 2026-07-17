@@ -20,6 +20,9 @@
  * ranked bars use a single hue (magnitudeColor), never a categorical cycle.
  */
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { toolToVendor, type Vendor } from '#shared/usage/vendor'
+import { VENDOR_LANE_COLORS } from '../../../composables/useChartScale'
+import { FOLDED_LANE_ID } from './fold-lanes'
 
 /** SSR-only last-resort values. The live client path always reads the CSS var;
  *  these exist so a server render / missing token degrades to something on-brand
@@ -40,6 +43,23 @@ const FALLBACK: Record<string, string> = {
   '--rag-red': '#dc2626',
   '--rag-amber': '#d97706',
   '--rag-green': '#16a34a',
+  // Vendor-lane tokens (brand-tokens.css §Chart vendor-lane colours) — SSR-only
+  // last-resort mirrors, like every entry above. The live client path resolves
+  // the CSS custom property (which aliases the brand token where one exists).
+  '--lane-claude': '#d40e8c',
+  '--lane-claude-ai': '#3368c4',
+  '--lane-claude-cowork': '#bd014a',
+  '--lane-claude-office': '#a977c8',
+  '--lane-claude-chrome': '#fd4057',
+  '--lane-claude-design': '#1398b8',
+  '--lane-claude-slack': '#7e4d9b',
+  '--lane-claude-other': '#8a7e76',
+  '--lane-copilot': '#5990f0',
+  '--lane-copilot-agent': '#aa1282',
+  '--lane-copilot-license': '#2e5fb7',
+  '--lane-copilot-usage': '#1699bb',
+  '--lane-copilot-unclassified': '#5a4d45',
+  '--lane-other': '#bdbdbd',
   '--font-sans': "'Manrope', Arial, system-ui, sans-serif",
   '--shadow-card': '0 4px 24px rgba(88, 40, 115, 0.08)',
 }
@@ -76,15 +96,37 @@ export function useChartTheme() {
     }
   }
 
-  /** Resolve a colour for an arbitrary series/slice key. Tool codes map to the
-   *  validated provider split; a display name (e.g. "GitHub Copilot", "Claude")
-   *  is fuzzy-matched the same way clientMeta() marks them; anything else falls
-   *  to the neutral "other" hue. */
+  /** A registry lane's FIXED colour: unwrap useChartScale's `var(--lane-…)`
+   *  reference and resolve it live (theme-reactive via readVar). */
+  function laneColor(lane: Vendor): string | null {
+    const token = /^var\((--[\w-]+)\)$/.exec(VENDOR_LANE_COLORS[lane] ?? '')?.[1]
+    if (!token) return null
+    return readVar(token) || null
+  }
+
+  /** Resolve a colour for an arbitrary series/slice key — ONE system app-wide
+   *  (lane-visuals V1 item 1). Resolution order:
+   *    1. an EXACT registry lane id → its FIXED vendorLaneColor (colour follows
+   *       the lane id, never its position);
+   *    2. the folded-remainder pseudo-lane (`other-lanes`) → the neutral hue;
+   *    3. a laned emit TOOL (`claude-code`, `copilot-cli`, `copilot-agent`, the
+   *       #142 surfaces) → its OWNING lane's colour via the registry;
+   *    4. provider-fuzzy fallback ONLY for non-lane keys (display names,
+   *       models, regions), matching the way clientMeta() marks them;
+   *    5. the neutral "other" hue. */
   function colorForKey(key: string): string {
     const p = providerColors()
     const k = (key || '').toLowerCase()
-    if (k === 'claude-code' || k.includes('claude')) return p['claude-code']
-    if (k === 'copilot-cli' || k.includes('copilot')) return p['copilot-cli']
+    // 1. Exact lane id (the registry is the source of truth).
+    if (k in VENDOR_LANE_COLORS) return laneColor(k as Vendor) ?? p.other
+    // 2. The kit's folded remainder — a deliberate neutral, never a brand hue.
+    if (k === FOLDED_LANE_ID) return readVar('--carbon-3') || p.other
+    // 3. A laned tool resolves through the registry to its lane's colour.
+    const lane = toolToVendor(k)
+    if (lane !== 'other') return laneColor(lane) ?? p.other
+    // 4. Provider-fuzzy fallback for non-lane keys only.
+    if (k.includes('claude')) return p['claude-code']
+    if (k.includes('copilot')) return p['copilot-cli']
     return p.other
   }
 

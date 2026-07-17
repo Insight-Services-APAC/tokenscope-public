@@ -30,7 +30,7 @@ export default defineEventHandler(async (event) => {
   try {
     ip = getRequestIP(event, { xForwardedFor: true }) ?? null
   } catch {
-    ip = null
+    // Best-effort — `ip` stays null from the initializer.
   }
   const ua = getHeader(event, 'user-agent') ?? null
 

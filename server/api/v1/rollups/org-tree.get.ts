@@ -43,7 +43,7 @@ import { vendorCostSql } from '../../../../shared/usage/vendor'
 const Query = z.object({
   ouId: z.string().uuid().optional(),
   // Region selector — honoured only for global-finops / platform-admin (cross-region roles);
-  // a region admin is hard-bound to their own region and the param is ignored (finance-scope
+  // a region admin is hard-bound to their own region and the param is ignored (org-subtree-scope
   // contract). Ignored when ouId is set (the drilled node already fixes the region).
   regionId: z.string().uuid().optional(),
 })
@@ -55,7 +55,7 @@ export default defineEventHandler(async (event) => {
   const caller = await requireRole(event, 'developer', 'manager', 'admin', 'global-finops', 'platform-admin')
   const { ouId, regionId: requestedRegionId } = Query.parse(getQuery(event))
   const orgWide = caller.role === 'admin' || caller.role === 'global-finops' || caller.role === 'platform-admin'
-  // Only the cross-region roles may pick a region; admin is locked to its own (finance-scope).
+  // Only the cross-region roles may pick a region; admin is locked to its own (org-subtree-scope).
   const crossRegion = caller.role === 'global-finops' || caller.role === 'platform-admin'
 
   const monthStart = monthStartIso()

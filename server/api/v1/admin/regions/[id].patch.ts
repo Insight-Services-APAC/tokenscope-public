@@ -4,8 +4,8 @@
  * platform-admin ONLY (same rationale as POST /regions: a region is a
  * cross-region object). global-finops and region admins 403.
  *
- * display_name is the ONLY editable field — `code` is IMMUTABLE. The
- * finance-scope filter hardcodes region codes (e.g. 'apac'); changing a
+ * display_name is the ONLY editable field — `code` is IMMUTABLE. Region-scoped
+ * queries hardcode region codes (e.g. 'apac'); changing a
  * region's code would silently break every region-scoped query that keys
  * on the code rather than the id. So we never accept a code change here.
  */

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* eslint-disable no-console */
+ 
 /*
  * /tokenscope:backfill — transcript-replay catch-up for a short emission hiccup
  * (ADR-0005 decision 4, slice 3).

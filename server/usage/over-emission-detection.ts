@@ -33,6 +33,13 @@
  * from reconciliation_record (GitHub ai_credit/usage is per-(user, day)). Do NOT confuse this
  * per-user USAGE with Copilot's POOLED per-cost-centre BILL (§B) — different axis. A tool with
  * no API usage that day yields api_usd=0 and is never flagged (the materiality guard below).
+ *
+ * The display-only 'copilot-agent' lane (mig 0086, design D4) needs no exclusion here: the
+ * computation starts FROM the OTel side and joins the API truth onto it, and no OTel emission
+ * ever carries tool='copilot-agent' (the category is OTEL_INVISIBLE) — so its view rows are
+ * structurally unreachable. Splitting the coding-agent credits OUT of the copilot-cli api_usd
+ * (0086) also puts interactive OTel and interactive API on the SAME basis, tightening the
+ * Copilot corroboration rather than loosening it.
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'

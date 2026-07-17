@@ -1,7 +1,7 @@
 {
   "name": "tokenscope",
-  "version": "0.1.23",
-  "description": "TokenScope — attribute AI-tool token spend to projects via the Insight TokenScope platform. Trust the developer. Track every token.",
+  "version": "0.1.25",
+  "description": "TokenScope \u2014 attribute AI-tool token spend to projects via the Insight TokenScope platform. Trust the developer. Track every token.",
   "author": {
     "name": "Insight Services APAC"
   }

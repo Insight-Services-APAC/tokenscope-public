@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import {
   resolveScriptsDir,
@@ -44,6 +44,29 @@ describe('stateDir', () => {
   it('falls back to ~/.tokenscope', () => {
     const d = stateDir({})
     expect(d.endsWith('/.tokenscope')).toBe(true)
+  })
+  it('ignores a leaked HOME — anchors on the passwd home (the recurring silent-drop fix)', () => {
+    // The whole bug: a leaked HOME made the forwarder resolve a phantom
+    // ~/.tokenscope. stateDir() must NOT follow HOME; it anchors on the passwd
+    // home, so a leaked HOME env cannot move the state dir.
+    const real = userInfo().homedir
+    const leaked = stateDir({ HOME: '/tmp/ts-home-LEAKED' })
+    expect(leaked).toBe(join(real, '.tokenscope'))
+    expect(leaked).not.toContain('/tmp/ts-home-LEAKED')
+  })
+  it('honours a process-level TOKENSCOPE_STATE_DIR even when the passed env lacks it', () => {
+    // The override is a process/deployment concern; a call site handed a
+    // settings block (no override key) must still resolve the pinned dir, so
+    // every call site agrees. Restored after the assertion.
+    const prev = process.env.TOKENSCOPE_STATE_DIR
+    process.env.TOKENSCOPE_STATE_DIR = '/pinned/state'
+    try {
+      expect(stateDir({ SOME_OTHER: 'x' })).toBe('/pinned/state')
+      expect(stateDir({ TOKENSCOPE_STATE_DIR: '/explicit' })).toBe('/explicit') // explicit wins
+    } finally {
+      if (prev === undefined) delete process.env.TOKENSCOPE_STATE_DIR
+      else process.env.TOKENSCOPE_STATE_DIR = prev
+    }
   })
 })
 

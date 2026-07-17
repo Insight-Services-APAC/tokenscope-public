@@ -11,7 +11,12 @@ import { sql } from 'drizzle-orm'
 import { WindowQuery } from '../../../../shared/schemas/usage'
 import { requireAuth } from '../../../auth/rbac'
 import { withRequestRls } from '../../../db/request-rls'
-import { getMyUsage } from '../../../utils/me-queries'
+import {
+  getMyConsumptionHero,
+  getMyProviderFeedFreshness,
+  getMyProviderTruthMtd,
+  getMyUsage,
+} from '../../../utils/me-queries'
 import {
   fetchDailySeries,
   fetchInsightCellsFromWindow,
@@ -36,8 +41,20 @@ export default defineEventHandler(async (event) => {
     // Concurrent issuance on ONE tx connection: postgres-js pipelines and
     // answers in order — safe; the win is one round-trip wave, not true
     // parallelism.
-    const [series, seriesByModel, totals, insightCells, signalCells, catalog, rateLines, acks, aggFresh] =
-      await Promise.all([
+    const [
+      series,
+      seriesByModel,
+      totals,
+      insightCells,
+      signalCells,
+      catalog,
+      rateLines,
+      acks,
+      aggFresh,
+      heroGroups,
+      providerTruthMtd,
+      providerFeedMinutes,
+    ] = await Promise.all([
         fetchDailySeries(tx, 'teammate', session.teammateId, window),
         fetchModelSeries(tx, 'teammate', session.teammateId, window),
         fetchWindowTotals(tx, 'teammate', session.teammateId, window),
@@ -57,12 +74,26 @@ export default defineEventHandler(async (event) => {
           FROM attribution_aggregate
           WHERE scope_type = 'teammate' AND scope_id = ${session.teammateId}::uuid
         `),
+        // §I3 hero: per-basis lane series (requester-scoped; see me-queries).
+        getMyConsumptionHero(tx, session.teammateId, window),
+        // §I3 "one honest number": the provider-truth MTD scalar.
+        getMyProviderTruthMtd(tx, session.teammateId),
+        // §I3 worst-of-sources freshness: the provider-feed leg.
+        getMyProviderFeedFreshness(tx, session.teammateId),
       ])
 
     const dismissed = new Set([...acks].map((a) => a.finding_id))
     const insights = detectFindings(insightCells, catalog, rateLines, signalCells)
       .filter((f) => !dismissed.has(f.id))
       .slice(0, MAX_INSIGHTS)
+
+    const aggMinutesRaw = [...aggFresh][0]?.minutes
+    const aggregateMinutes = aggMinutesRaw == null ? null : Number(aggMinutesRaw)
+    // Worst-of-sources page freshness (§I3): the STALEST of telemetry ledger /
+    // aggregate rollup / provider feeds — one honest line, not three footnotes.
+    const freshnessLegs = [usage.freshness_minutes_ago, aggregateMinutes, providerFeedMinutes]
+      .filter((m): m is number => m != null)
+    const worstMinutes = freshnessLegs.length ? Math.max(...freshnessLegs) : null
 
     return {
       month: {
@@ -91,10 +122,29 @@ export default defineEventHandler(async (event) => {
       },
       insights,
       freshness_minutes_ago: usage.freshness_minutes_ago,
-      aggregate_refreshed_minutes_ago: (() => {
-        const m = [...aggFresh][0]?.minutes
-        return m == null ? null : Number(m)
-      })(),
+      aggregate_refreshed_minutes_ago: aggregateMinutes,
+      // ── visuals-iter2 §I3 additions (all additive) ──────────────────────
+      hero: {
+        window_days: window,
+        // Server-provided "today" (UTC, YYYY-MM-DD) — the client builder's
+        // partial-week/window anchor. The page must never call `new Date()`
+        // at setup scope (SSR vs hydration can disagree across UTC midnight).
+        as_of: new Date().toISOString().slice(0, 10),
+        groups: heroGroups,
+      },
+      // The page's ONE MTD scalar: provider truth (same per-user sources as
+      // the §A reconciliation reads — never the attribution/window numbers).
+      provider_truth: {
+        month: usage.month_to_date,
+        mtd_usd: providerTruthMtd,
+        run_rate: runRate(Number(providerTruthMtd), new Date()),
+      },
+      page_freshness: {
+        telemetry_minutes_ago: usage.freshness_minutes_ago,
+        aggregate_minutes_ago: aggregateMinutes,
+        provider_feed_minutes_ago: providerFeedMinutes,
+        worst_minutes_ago: worstMinutes,
+      },
     }
   })
 })

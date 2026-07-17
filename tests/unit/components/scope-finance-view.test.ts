@@ -35,14 +35,35 @@ function makeReport(over: Partial<FinanceReport> = {}): FinanceReport {
       matched: true,
       unsettled: false,
       copilotChargebackUsd: 300,
+      // V3: the Copilot §B lane split + the Anthropic per-surface split (Σ == 60).
+      copilotLanes: [
+        { lane: 'copilot-license', label: 'Copilot License', usd: 200 },
+        { lane: 'copilot-usage', label: 'Copilot Usage', usd: 100 },
+        { lane: 'copilot-unclassified', label: 'Copilot (unclassified)', usd: 0 },
+      ],
+      anthropicLanes: [
+        { lane: 'claude', label: 'Claude Code', usd: 40 },
+        { lane: 'claude-ai', label: 'Claude Chat', usd: 20 },
+      ],
       providers: [
         { provider: 'anthropic', billUsd: 60, unsettled: false },
         { provider: 'github', billUsd: 300, unsettled: false },
       ],
     },
     cous: [
-      { couId: 'a', code: 'a', displayName: 'Practice A', regionCode: 'ra', anthropicUsd: 50, copilotUsd: 300, copilotPending: false, chargeableUsd: 350 },
-      { couId: null, code: null, displayName: 'Unallocated', regionCode: null, anthropicUsd: 0, copilotUsd: 20, copilotPending: false, chargeableUsd: 20 },
+      {
+        couId: 'a', code: 'a', displayName: 'Practice A', regionCode: 'ra', anthropicUsd: 50, copilotUsd: 300, copilotPending: false, chargeableUsd: 350,
+        // #142 — the per-surface split: Σ non-copilot lanes == anthropicUsd.
+        lanes: [
+          { lane: 'claude', label: 'Claude Code', usd: 30 },
+          { lane: 'claude-ai', label: 'Claude Chat', usd: 20 },
+          { lane: 'copilot', label: 'Copilot', usd: 300 },
+        ],
+      },
+      {
+        couId: null, code: null, displayName: 'Unallocated', regionCode: null, anthropicUsd: 0, copilotUsd: 20, copilotPending: false, chargeableUsd: 20,
+        lanes: [{ lane: 'copilot', label: 'Copilot', usd: 20 }],
+      },
     ],
     copilot: { mode: 'chargeback', pending: false },
     exemptGap: { indicativeUsageUsd: 90, chargebackUsd: 360, gapUsd: -270, copilotChargebackUsd: 300 },
@@ -57,8 +78,22 @@ function makeDrill(over: Partial<FinanceDrill> = {}): FinanceDrill {
     meta,
     cou: { id: 'a', code: 'a', displayName: 'Practice A', regionCode: 'ra' },
     anthropicCharges: [
-      { teammateId: 'al', label: 'alice', chargeUsd: 30 },
-      { teammateId: 'bo', label: 'bob', chargeUsd: 20 },
+      // V3: each teammate row carries its per-lane split (Σ lanes == chargeUsd).
+      {
+        teammateId: 'al',
+        label: 'alice',
+        chargeUsd: 30,
+        lanes: [
+          { lane: 'claude', label: 'Claude Code', usd: 25 },
+          { lane: 'claude-ai', label: 'Claude Chat', usd: 5 },
+        ],
+      },
+      {
+        teammateId: 'bo',
+        label: 'bob',
+        chargeUsd: 20,
+        lanes: [{ lane: 'claude', label: 'Claude Code', usd: 20 }],
+      },
     ],
     anthropicChargeableUsd: 50,
     copilot: {
@@ -315,5 +350,103 @@ describe('ScopeFinanceView — unsettled CoU-month drill (M2)', () => {
     expect(w.find('[data-testid="finance-copilot-chargeback-chip"]').exists()).toBe(true)
     expect(w.find('[data-testid="finance-copilot-unsettled-chip"]').exists()).toBe(false)
     expect(w.find('[data-testid="finance-drill-chargeable-caveat"]').exists()).toBe(false)
+  })
+})
+
+// ── V3: per-lane structure within provider groups + the drill's dominant-lane badge ──
+describe('ScopeFinanceView — bill-compare per-lane structure (lane-visuals V3)', () => {
+  it('renders the Anthropic surface-lane chips AND the Copilot §B lane chips (zero lanes elided)', () => {
+    const w = mount(ScopeFinanceView, { props: { ...baseProps, report: makeReport(), drill: null, isDrill: false, pending: false } })
+    const anthropic = w.find('[data-testid="finance-compare-anthropic-lanes"]')
+    expect(anthropic.exists()).toBe(true)
+    expect(anthropic.text()).toContain('Claude Code')
+    expect(anthropic.text()).toContain('Claude Chat')
+    const copilot = w.find('[data-testid="finance-compare-copilot-lanes"]')
+    expect(copilot.exists()).toBe(true)
+    expect(copilot.text()).toContain('Copilot License')
+    // The $0 copilot-unclassified lane is elided (zero lanes never render).
+    expect(w.find('[data-testid="finance-compare-lane-copilot-unclassified"]').exists()).toBe(false)
+  })
+
+  it('FOLDS the Anthropic group past 5 lanes into ONE "Other surfaces" remainder (r1-F3)', () => {
+    const report = makeReport({
+      billCheck: {
+        ...makeReport().billCheck,
+        anthropicLanes: [
+          { lane: 'claude', label: 'Claude Code', usd: 30 },
+          { lane: 'claude-ai', label: 'Claude Chat', usd: 12 },
+          { lane: 'claude-cowork', label: 'Claude Cowork', usd: 8 },
+          { lane: 'claude-office', label: 'Claude Office Agents', usd: 5 },
+          { lane: 'claude-chrome', label: 'Claude in Chrome', usd: 3 },
+          { lane: 'claude-slack', label: 'Claude in Slack', usd: 1.5 },
+          { lane: 'claude-other', label: 'Claude (other)', usd: 0.5 },
+        ],
+      },
+    })
+    const w = mount(ScopeFinanceView, { props: { ...baseProps, report, drill: null, isDrill: false, pending: false } })
+    const anthropic = w.find('[data-testid="finance-compare-anthropic-lanes"]')
+    // Top-4 keep identity + ONE remainder = 5 chips; the folded two never render alone.
+    expect(anthropic.findAll('[data-testid^="finance-compare-lane-"]').length).toBe(5)
+    const remainder = w.find('[data-testid="finance-compare-lane-other-lanes"]')
+    expect(remainder.exists()).toBe(true)
+    expect(remainder.text()).toContain('Other surfaces')
+    // Conservation: the remainder carries the folded Σ (3 + 1.5 + 0.5 = 5.00 —
+    // top-4 keep identity, r1-F3) and its tooltip itemises the folded lanes.
+    expect(remainder.text()).toContain('$5.00')
+    expect(remainder.attributes('title')).toContain('Claude in Chrome')
+    expect(remainder.attributes('title')).toContain('Claude in Slack')
+    expect(remainder.attributes('title')).toContain('Claude (other)')
+    expect(w.find('[data-testid="finance-compare-lane-claude-slack"]').exists()).toBe(false)
+  })
+})
+
+describe('ScopeFinanceView — drill dominant-lane badge (lane-visuals V3, r1-F7/r2-5)', () => {
+  it('each teammate row badges its DOMINANT lane with the share %, not a mini-stack', () => {
+    const w = mount(ScopeFinanceView, { props: { ...baseProps, report: makeReport(), drill: makeDrill(), isDrill: true, pending: false } })
+    const badges = w.findAll('[data-testid="finance-drill-lane-badge"]')
+    expect(badges.length).toBe(2)
+    // alice: claude 25 of 30 ≈ 83% dominant, +1 surface tooltip itemising the rest.
+    expect(badges[0]!.attributes('data-lane')).toBe('claude')
+    expect(badges[0]!.text()).toContain('Claude Code')
+    expect(badges[0]!.text()).toContain('83%')
+    const others = badges[0]!.find('[data-testid="finance-drill-lane-others"]')
+    expect(others.exists()).toBe(true)
+    expect(others.text()).toContain('+1 surface')
+    expect(others.attributes('title')).toContain('Claude Chat')
+    expect(others.attributes('title')).toContain('$5.00')
+    // bob: single-lane row — badge at 100%, no "+N surfaces" affordance.
+    expect(badges[1]!.text()).toContain('100%')
+    expect(badges[1]!.find('[data-testid="finance-drill-lane-others"]').exists()).toBe(false)
+  })
+
+  it('MIXED-sign row (credit lane): the badge SUPPRESSES the share — lane + $ without a % (r3-5)', () => {
+    const drill = makeDrill({
+      anthropicCharges: [
+        {
+          teammateId: 'cr',
+          label: 'carol',
+          // Σ lanes == chargeUsd (conservation) but one lane is a CREDIT:
+          // claude 100 / chargeUsd 70 would render "143%" — never a share.
+          chargeUsd: 70,
+          lanes: [
+            { lane: 'claude', label: 'Claude Code', usd: 100 },
+            { lane: 'claude-ai', label: 'Claude Chat', usd: -30 },
+          ],
+        },
+      ],
+      anthropicChargeableUsd: 70,
+    })
+    const w = mount(ScopeFinanceView, { props: { ...baseProps, report: makeReport(), drill, isDrill: true, pending: false } })
+    const badge = w.find('[data-testid="finance-drill-lane-badge"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.attributes('data-lane')).toBe('claude')
+    expect(badge.text()).toContain('Claude Code')
+    // The dominant lane's $ replaces the share; NO percentage renders anywhere.
+    expect(badge.text()).toContain('$100.00')
+    expect(badge.text()).not.toContain('%')
+    // The tooltip still itemises the credit lane.
+    const others = badge.find('[data-testid="finance-drill-lane-others"]')
+    expect(others.exists()).toBe(true)
+    expect(others.attributes('title')).toContain('Claude Chat')
   })
 })

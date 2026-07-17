@@ -17,6 +17,9 @@ import { providerEnterprise, providerOrg } from './governance'
  *   - license_net_usd        = "Copilot Enterprise" SKU NET (the seat license). NULL = SKU line
  *                              ABSENT → no license charge, worker alerts, month reports unsettled.
  *   - overage_net_usd        = AI-Credits / Cloud-Agent SKU NET (pooled chargeable authority).
+ *   - unclassified_net_usd   = NET of Copilot lines matching neither classifier (mig 0085).
+ *                              Visible as the copilot-unclassified chargeback lane; NEVER
+ *                              chargeable; > 0 raises a copilot-bill-unclassified alert.
  *   - included_allowance_usd = the `included` discount line (the pool allowance; context).
  *   - usage_gross_usd        = gross AI-credit consumption (context / unsettled signal).
  *   - provider_org_id NULL   = the single explicit unallocated enterprise-residual line.
@@ -35,6 +38,9 @@ export const copilotPoolBill = pgTable('copilot_pool_bill', {
   includedAllowanceUsd: numeric('included_allowance_usd', { precision: 14, scale: 6 }),
   usageGrossUsd: numeric('usage_gross_usd', { precision: 14, scale: 6 }),
   overageNetUsd: numeric('overage_net_usd', { precision: 14, scale: 6 }),
+  unclassifiedNetUsd: numeric('unclassified_net_usd', { precision: 14, scale: 6 })
+    .notNull()
+    .default('0'),
   pulledAt: timestamp('pulled_at', { withTimezone: true }).notNull().defaultNow(),
   rawPayload: jsonb('raw_payload'),
 })

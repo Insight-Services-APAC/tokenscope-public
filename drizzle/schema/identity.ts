@@ -120,17 +120,34 @@ export const couOwner = pgTable('cou_owner', {
 // real region (docs/design/org-entra-region-derivation.md). department_to_region is the
 // primary signal (Entra `department` → region); region_leader is the manager-walk
 // fallback target, keyed on the leader's stable Entra oid.
-export const departmentToRegion = pgTable('department_to_region', {
-  // normalised trim().lower() department — PK so lookup is case-insensitive
-  departmentLower: text('department_lower').primaryKey(),
-  department: text('department').notNull(),
-  regionId: uuid('region_id')
-    .notNull()
-    .references(() => region.id),
-  createdBy: uuid('created_by').references(() => teammate.id),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }),
-})
+// directory_region_rule (was department_to_region, mig 0068 → generalised in
+// mig 0089): a curated "when a user's <attribute> = <value>, their region is R"
+// rule. `attribute` is a RegionAttributeKey (companyName / country /
+// officeLocation / state / department / division) so ANY tenant can key on the
+// directory field that is region-correlated on THEIR directory — not just
+// `department`. See shared/placement/region-attributes.ts + the design doc.
+export const directoryRegionRule = pgTable(
+  'directory_region_rule',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    // RegionAttributeKey — which Entra directory attribute this rule matches on.
+    attribute: text('attribute').notNull(),
+    // 'exact' | 'prefix'. prefix maps a whole country/state at once
+    // (officeLocation 'AU-…' → APAC) without a row per site.
+    matchMode: text('match_mode').notNull().default('exact'),
+    // normalised trim().lower() — the value compared to the user's attribute.
+    matchValue: text('match_value').notNull(),
+    // original casing, for display.
+    matchValueRaw: text('match_value_raw').notNull(),
+    regionId: uuid('region_id')
+      .notNull()
+      .references(() => region.id),
+    createdBy: uuid('created_by').references(() => teammate.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }),
+  },
+  (t) => [uniqueIndex('directory_region_rule_attr_value_unique').on(t.attribute, t.matchValue)],
+)
 
 export const regionLeader = pgTable('region_leader', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),

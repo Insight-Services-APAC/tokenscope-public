@@ -14,6 +14,12 @@
  *   - overage_net_usd        = the AI-Credits / Cloud-Agent SKU NET (the pooled chargeable
  *                              authority; $0 when the pool covered all consumption). NEVER
  *                              Σusage − pool.
+ *   - unclassified_net_usd   = the NET of Copilot-product lines matching NEITHER classifier
+ *                              (mig 0085 / design D3). Booked to the visible
+ *                              copilot-unclassified lane, alerted
+ *                              ('copilot-bill-unclassified'), NEVER charged. Non-Copilot
+ *                              products (spark_ai_credits, models_inference, …) are excluded
+ *                              but COUNTED per product in the run result (ignoredProducts).
  *   - included_allowance_usd = the `included` discount line (the pool allowance; context).
  *   - usage_gross_usd        = gross AI-credit consumption (context / unsettled signal).
  *
@@ -35,7 +41,9 @@
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
+import { consola } from 'consola'
 import type * as schema from '../../drizzle/schema'
+import { copilotChargebackEnabled } from '../reports/copilot-mode'
 import {
   GithubCopilotClient,
   type GithubBillingUsageItem,
@@ -51,19 +59,60 @@ type Db = PostgresJsDatabase<typeof schema>
 export type BillingReportClient = Pick<GithubCopilotClient, 'getEnterpriseBillingUsage'>
 
 /*
- * SKU classification (canonical §B cost shape). AI-credit / coding-agent lines are the pooled
- * OVERAGE; any OTHER Copilot line ("Copilot Enterprise" / "Copilot Business") is the seat
- * LICENSE; non-Copilot products (Actions, Codespaces, Packages, …) are IGNORED — not
- * TokenScope's concern. AI-credit is tested BEFORE license so "Copilot AI Credits" routes to
- * overage, not license.
+ * SKU classification (canonical §B cost shape + copilot-surface-lanes D3, June-2026 SKU
+ * reality). THREE-WAY over Copilot-product lines:
+ *   - AI-credit / coding-agent / premium-request SKUs → the pooled OVERAGE (copilot-usage
+ *     lane). Tested BEFORE license so a line matching both classifiers (e.g. a hypothetical
+ *     "copilot_enterprise_ai_credits") routes to overage — priority pinned by fixture.
+ *     Covers the snake_case June-2026 ids (copilot_ai_credits, coding_agent_ai_credit) and
+ *     the legacy copilot_premium_request (metered usage, never a seat).
+ *   - seat SKUs → the LICENSE (copilot-license lane). ANCHORED on the documented concrete
+ *     SKU ids ONLY — copilot_enterprise, copilot_for_business, copilot_standalone (and
+ *     their human forms "Copilot Enterprise" / "Copilot Business" / "Copilot Standalone"),
+ *     tolerant of space/underscore/hyphen and case. NEVER bare generic words
+ *     ('seat'/'subscription'/'license'/'enterprise'/'business' alone): a generic-word match
+ *     silently books an AMBIGUOUS future SKU as chargeable, bypassing the unclassified
+ *     safety net for exactly the case it exists to catch (r1 finding 2).
+ *   - anything else on a Copilot product → UNCLASSIFIED (unclassified_net_usd → the
+ *     copilot-unclassified lane): counted, alerted ('copilot-bill-unclassified'), NEVER
+ *     charged — never a silent drop and never a mis-booked license. That safety net is
+ *     the intended destination for any Copilot line the anchored classifiers don't know.
+ * Copilot-ness anchors on the PRODUCT field (June-2026 products are snake_case ids —
+ * spark_ai_credits / models_inference are NOT Copilot even though their SKUs contain
+ * 'ai_credit'); a blank product falls back to the sku. Non-Copilot products are excluded
+ * from Copilot's bill but COUNTED per product per (enterprise, month) in the run result
+ * (`ignoredProducts`), so a new spend category is visible drift, never silence.
  */
-const AI_CREDIT_SKU = /ai[\s_-]?credit|coding[\s_-]?agent|padawan|cloud[\s_-]?agent/i
-const COPILOT_LINE = /copilot|ai[\s_-]?credit|coding[\s_-]?agent|padawan|cloud[\s_-]?agent/i
+const AI_CREDIT_SKU = /ai[\s_-]?credit|coding[\s_-]?agent|padawan|cloud[\s_-]?agent|premium[\s_-]?request/i
+// Anchored license classifier: 'copilot' + a documented seat-SKU qualifier, any separator.
+const LICENSE_SKU = /copilot[\s_-]+(?:enterprise|(?:for[\s_-]+)?business|standalone)/i
+/*
+ * Copilot-ness = the 'copilot' token OR one of GitHub's OWN Copilot-agent product
+ * aliases: the coding agent has shipped under 'coding_agent', 'padawan' (its internal
+ * codename) and 'cloud_agent' — all Copilot products that may not carry the copilot
+ * token themselves. ACCEPTED RISK (r1 finding 3): an alias match is by definition
+ * indistinguishable from an unrelated future product that reuses the same words (a
+ * hypothetical 'cloud_agent_gateway' would be swept in) — no negative fixture can
+ * exist for that. The aliases are kept deliberately because they ARE Copilot's
+ * product names; if GitHub ever ships an unrelated colliding product, drop the alias
+ * and re-run the month (D3 runbook, docs/build/worker-scheduler.md).
+ */
+const COPILOT_AGENT_PRODUCT_ALIASES = /coding[\s_-]?agent|padawan|cloud[\s_-]?agent/i
+const COPILOT_PRODUCT = new RegExp(`copilot|${COPILOT_AGENT_PRODUCT_ALIASES.source}`, 'i')
+
+/** Product-anchored Copilot test (blank product → sku fallback). */
+function isCopilotLine(it: GithubBillingUsageItem): boolean {
+  const product = (it.product ?? '').trim()
+  if (product) return COPILOT_PRODUCT.test(product)
+  return COPILOT_PRODUCT.test(it.sku ?? '')
+}
 
 export interface OrgBillAgg {
   /** null = no "Copilot Enterprise" SKU (license) line was present. */
   licenseNetUsd: number | null
   overageNetUsd: number
+  /** NET of Copilot lines matching neither classifier — the copilot-unclassified lane. */
+  unclassifiedNetUsd: number
   includedAllowanceUsd: number
   usageGrossUsd: number
   seats: number | null
@@ -76,39 +125,79 @@ function num(v: unknown): number {
 /*
  * Pure categorisation of one org's billing-report lines into the copilot_pool_bill figures.
  * READ, never recompute: license/overage/included are summed straight off the bill's
- * net/discount fields. Exported for unit testing (the recomputation-divergence / mid-month
- * seat-change case is a fixture over this).
+ * net/discount fields. Copilot lines matching neither classifier land in
+ * `unclassifiedNetUsd` (visible + alerted, never charged); non-Copilot products are summed
+ * per product into the optional `ignoredProducts` accumulator (the caller passes one
+ * accumulator PER (enterprise, month) — run-result provenance, r1 finding 8).
+ * Exported for unit testing (the recomputation-divergence / mid-month seat-change case is a
+ * fixture over this).
  */
-export function aggregateOrgBill(items: GithubBillingUsageItem[]): OrgBillAgg {
+export function aggregateOrgBill(
+  items: GithubBillingUsageItem[],
+  ignoredProducts?: Record<string, number>,
+): OrgBillAgg {
   let licenseNet: number | null = null
   let overageNet = 0
+  let unclassifiedNet = 0
   let included = 0
   let usageGross = 0
   let seats: number | null = null
   for (const it of items) {
+    if (!isCopilotLine(it)) {
+      if (ignoredProducts) {
+        const key = (it.product ?? '').trim() || '(no product)'
+        ignoredProducts[key] = (ignoredProducts[key] ?? 0) + num(it.netAmount)
+      }
+      continue
+    }
     const label = `${it.product ?? ''} ${it.sku ?? ''}`
-    if (!COPILOT_LINE.test(label)) continue
     if (AI_CREDIT_SKU.test(label)) {
       overageNet += num(it.netAmount)
       included += num(it.discountAmount)
       usageGross += num(it.grossAmount)
-    } else {
+    } else if (LICENSE_SKU.test(label)) {
       licenseNet = (licenseNet ?? 0) + num(it.netAmount)
       seats = Math.max(seats ?? 0, num(it.quantity))
+    } else {
+      unclassifiedNet += num(it.netAmount)
     }
   }
   return {
     licenseNetUsd: licenseNet,
     overageNetUsd: overageNet,
+    unclassifiedNetUsd: unclassifiedNet,
     includedAllowanceUsd: included,
     usageGrossUsd: usageGross,
     seats,
   }
 }
 
+/** Σ raw Copilot-line NET — the C1 conservation reference (columns vs raw). */
+export function copilotRawNetUsd(items: GithubBillingUsageItem[]): number {
+  return items.reduce((a, it) => (isCopilotLine(it) ? a + num(it.netAmount) : a), 0)
+}
+
+/*
+ * C1 runtime assertion (design D2, r1-F1): per org group, the classified columns
+ * (license + overage + unclassified) must equal Σ raw Copilot net EXACTLY (both sides
+ * are sums of the same floats; the epsilon only absorbs float re-association). Checked
+ * PRE-normalisation — normalizeUnsettled deliberately refuses to book a drifted license,
+ * which is the unsettled path, not a classification leak.
+ */
+function c1DeltaUsd(agg: OrgBillAgg, items: GithubBillingUsageItem[]): number {
+  const columns = (agg.licenseNetUsd ?? 0) + agg.overageNetUsd + agg.unclassifiedNetUsd
+  return columns - copilotRawNetUsd(items)
+}
+
 /** True when the agg carries any Copilot content worth a row. */
 function hasContent(a: OrgBillAgg): boolean {
-  return a.licenseNetUsd !== null || a.overageNetUsd !== 0 || a.usageGrossUsd > 0 || (a.seats ?? 0) > 0
+  return (
+    a.licenseNetUsd !== null ||
+    a.overageNetUsd !== 0 ||
+    a.unclassifiedNetUsd !== 0 ||
+    a.usageGrossUsd > 0 ||
+    (a.seats ?? 0) > 0
+  )
 }
 
 /** Unsettled = usage present but no read license charge (license SKU line NULL). */
@@ -126,7 +215,12 @@ function isUnsettled(a: OrgBillAgg): boolean {
  * A month with genuine paid overage (overage > 0) is NOT touched — that is real settled money.
  */
 function normalizeUnsettled(a: OrgBillAgg): OrgBillAgg {
-  if (a.usageGrossUsd > 0 && (a.licenseNetUsd ?? 0) <= 0 && a.overageNetUsd <= 0) {
+  if (
+    a.usageGrossUsd > 0 &&
+    (a.licenseNetUsd ?? 0) <= 0 &&
+    a.overageNetUsd <= 0 &&
+    a.unclassifiedNetUsd <= 0
+  ) {
     return { ...a, licenseNetUsd: null }
   }
   return a
@@ -136,6 +230,7 @@ function normalizeUnsettled(a: OrgBillAgg): OrgBillAgg {
 function foldResidual(dst: OrgBillAgg, src: OrgBillAgg): void {
   if (src.licenseNetUsd !== null) dst.licenseNetUsd = (dst.licenseNetUsd ?? 0) + src.licenseNetUsd
   dst.overageNetUsd += src.overageNetUsd
+  dst.unclassifiedNetUsd += src.unclassifiedNetUsd
   dst.includedAllowanceUsd += src.includedAllowanceUsd
   dst.usageGrossUsd += src.usageGrossUsd
   if (src.seats !== null) dst.seats = (dst.seats ?? 0) + src.seats
@@ -184,7 +279,15 @@ export interface CopilotPoolBillResult {
   orgsExemptSkipped: number
   /** Named to match run-warnings extraction; also the count of missing-SKU alerts raised. */
   unsettledOrgMonths: number
+  /** Org-months (incl. the residual) that booked unclassified_net_usd > 0 (D3 alert). */
+  unclassifiedOrgMonths: number
   alertsEmitted: number
+  /** Non-Copilot products seen on the bill (spark_ai_credits, models_inference, …),
+   *  keyed per (enterprise, month) — `'<enterpriseRef>:<YYYY-MM>'` → product →
+   *  Σ netAmount USD — so a new product surfacing in one org-month is
+   *  distinguishable from the same product in another (r1 finding 8). Counted,
+   *  never booked — visible drift, never silence. */
+  ignoredProducts: Record<string, Record<string, number>>
 }
 
 interface OrgGroup {
@@ -250,13 +353,14 @@ async function insertRow(
   await db.execute(sql`
     INSERT INTO copilot_pool_bill
       (month, provider_enterprise_id, provider_org_id, cost_owning_unit_id, seats,
-       license_net_usd, included_allowance_usd, usage_gross_usd, overage_net_usd, raw_payload)
+       license_net_usd, included_allowance_usd, usage_gross_usd, overage_net_usd,
+       unclassified_net_usd, raw_payload)
     VALUES
       (${row.monthStart}::date, ${row.enterpriseId}::uuid, ${row.providerOrgId}::uuid,
        ${row.costOwningUnitId}::uuid, ${row.agg.seats},
        ${n6(row.agg.licenseNetUsd)}::numeric, ${n6(row.agg.includedAllowanceUsd)}::numeric,
        ${n6(row.agg.usageGrossUsd)}::numeric, ${n6(row.agg.overageNetUsd)}::numeric,
-       ${JSON.stringify(row.raw)}::jsonb)
+       ${n6(row.agg.unclassifiedNetUsd)}::numeric, ${JSON.stringify(row.raw)}::jsonb)
   `)
 }
 
@@ -368,6 +472,68 @@ async function alertOrgNameMismatch(
   return dispatched.length > 0
 }
 
+/*
+ * D3 unclassified / conservation alert — the 'copilot-bill-unclassified' category (the
+ * platform-admin copilot-bill alert inbox; runbook: docs/build/worker-scheduler.md).
+ * Two kinds, one machinery (mirrors alertUnsettled's idempotency conventions):
+ *   - kind 'unclassified-spend'     : an org-month booked unclassified_net_usd > 0 —
+ *     classify the SKU (extend the maps) + re-run the month; never charged meanwhile.
+ *   - kind 'conservation-violation' : the C1 runtime assertion tripped (columns ≠ Σ raw
+ *     Copilot net) — a classifier is dropping/double-booking money; carries the $ delta.
+ * Idempotent per (entity, month, kind) until an admin resolves the inbox item.
+ */
+async function alertUnclassified(
+  db: Db,
+  args: {
+    enterpriseSlug: string
+    orgName: string
+    monthStart: string
+    relatedEntityKind: 'provider-org' | 'provider-enterprise'
+    relatedEntityId: string
+    regionId: string | null
+    kind: 'unclassified-spend' | 'conservation-violation'
+    unclassifiedNetUsd: number
+    deltaUsd?: number
+  },
+): Promise<boolean> {
+  const existing = await db.execute<{ id: string }>(sql`
+    SELECT id::text AS id FROM inbox_item
+     WHERE category = 'copilot-bill-unclassified'
+       AND ack_state IN ('unread', 'read', 'acknowledged')
+       AND related_entity_id = ${args.relatedEntityId}::uuid
+       AND body->>'kind' = ${args.kind}
+       AND body->>'month' = ${args.monthStart}
+     LIMIT 1
+  `)
+  if (existing.length > 0) return false
+  const subject =
+    args.kind === 'conservation-violation'
+      ? `Copilot bill conservation violation — classified columns ≠ Σ raw Copilot net for ${args.orgName} (${args.monthStart})`
+      : `Copilot bill unclassified spend — ${args.orgName} has unclassified Copilot lines (${args.monthStart})`
+  const hint =
+    args.kind === 'conservation-violation'
+      ? 'license_net + overage_net + unclassified_net diverged from the Σ of raw Copilot bill-line netAmount for this org-month (the C1 conservation assertion). A SKU classifier is dropping or double-booking money — fix the classification, then re-run the month.'
+      : 'One or more Copilot-product bill lines matched neither the license nor the usage (AI-credit/agent) SKU classifier. The amount is booked to the visible copilot-unclassified lane and is NEVER charged. Classify the SKU by extending the worker SKU maps, then re-run the month. Do not enable Copilot chargeback mode while unclassified > 0 for the billing month (runbook: docs/build/worker-scheduler.md).'
+  const dispatched = await dispatchInbox(db, {
+    category: 'copilot-bill-unclassified',
+    severity: 'attention',
+    subject,
+    body: {
+      kind: args.kind,
+      enterprise: args.enterpriseSlug,
+      org: args.orgName,
+      month: args.monthStart,
+      unclassifiedNetUsd: args.unclassifiedNetUsd,
+      ...(args.deltaUsd !== undefined ? { deltaUsd: args.deltaUsd } : {}),
+      hint,
+    },
+    relatedEntityKind: args.relatedEntityKind,
+    relatedEntityId: args.relatedEntityId,
+    regionId: args.regionId ?? undefined,
+  })
+  return dispatched.length > 0
+}
+
 export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions): Promise<CopilotPoolBillResult> {
   const now = opts?.now ?? new Date()
   const monthsBack = opts?.monthsBack ?? 1
@@ -384,7 +550,9 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
     residualRowsWritten: 0,
     orgsExemptSkipped: 0,
     unsettledOrgMonths: 0,
+    unclassifiedOrgMonths: 0,
     alertsEmitted: 0,
+    ignoredProducts: {},
   }
 
   const ents = await db.execute<{
@@ -413,7 +581,7 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
       } catch (err) {
         // MissingGithubAppKeyError (App-opted enterprise, key unwired) — fail-loud, isolated.
         result.enterprisesErrored += 1
-        console.warn(`[copilot-pool-bill] credential resolve failed for ${ent.external_id}: ${String(err)}`)
+        consola.warn(`[copilot-pool-bill] credential resolve failed for ${ent.external_id}: ${String(err)}`)
         continue
       }
       if (!credential) {
@@ -438,7 +606,7 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
         // MEDIUM-1(a): an ABSENT/renamed NET money field makes the client's Zod parse THROW, so a
         // bill-shape drift lands HERE (fail-loud, month isolated) — never coerced to a $0 report.
         result.enterprisesErrored += 1
-        console.warn(`[copilot-pool-bill] ${ent.external_id} billing report ${mk.monthStart} failed: ${String(err)}`)
+        consola.warn(`[copilot-pool-bill] ${ent.external_id} billing report ${mk.monthStart} failed: ${String(err)}`)
         continue
       }
       entRan = true
@@ -458,13 +626,29 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
       // be atomic — a mid-loop crash must never leave the month short).
       const orgRows: { providerOrgId: string; costOwningUnitId: string | null; agg: OrgBillAgg; raw: unknown }[] = []
       const orgAlerts: { orgName: string; providerOrgId: string; costOwningUnitId: string | null; agg: OrgBillAgg }[] = []
+      // D3 alert candidates: unclassified spend > 0 and/or a C1 conservation break.
+      const unclassifiedAlerts: {
+        orgName: string
+        relatedEntityKind: 'provider-org' | 'provider-enterprise'
+        relatedEntityId: string
+        costOwningUnitId: string | null
+        kind: 'unclassified-spend' | 'conservation-violation'
+        unclassifiedNetUsd: number
+        deltaUsd?: number
+      }[] = []
       const residual: OrgBillAgg = {
         licenseNetUsd: null,
         overageNetUsd: 0,
+        unclassifiedNetUsd: 0,
         includedAllowanceUsd: 0,
         usageGrossUsd: 0,
         seats: null,
       }
+      // Per-(enterprise, month) ignored-product accumulator (r1 finding 8) — folded
+      // into the run result under '<enterpriseRef>:<YYYY-MM>' after the group loop.
+      const monthIgnoredProducts: Record<string, number> = {}
+      // C1 delta of everything folded into the residual (org-less + unregistered orgs).
+      let residualDeltaUsd = 0
       let residualHasContent = false
       // MEDIUM-2 homing-mismatch signal: of the CHARGEABLE named bill orgs, did any match a
       // registered provider_org (by login OR display name)? If NONE did while a registry exists,
@@ -474,14 +658,19 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
       const sampleBillOrgNames: string[] = []
 
       for (const [key, group] of groups) {
-        let agg = aggregateOrgBill(group.items)
+        let agg = aggregateOrgBill(group.items, monthIgnoredProducts)
         if (!hasContent(agg)) continue
+        // C1 (columns vs raw), checked PRE-normalisation: the classified columns must equal
+        // Σ raw Copilot net for the group. normalizeUnsettled deliberately refuses to book a
+        // drifted license (the unsettled path), so it must not trip this assertion.
+        const groupDeltaUsd = c1DeltaUsd(agg, group.items)
         // MEDIUM-1(b): usage present but no positive money → force unsettled (never a silent $0).
         agg = normalizeUnsettled(agg)
 
         if (key === '') {
           // Org-less bill line → the unallocated enterprise-residual row.
           foldResidual(residual, agg)
+          residualDeltaUsd += groupDeltaUsd
           residualHasContent = true
           continue
         }
@@ -505,6 +694,7 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
           // An org with no provider_org registry row: fold into the visible residual (never
           // dropped). Onboard the org (+ map its CoU) for per-org granularity — v1 limitation.
           foldResidual(residual, agg)
+          residualDeltaUsd += groupDeltaUsd
           residualHasContent = true
           continue
         }
@@ -518,9 +708,61 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
         if (isUnsettled(agg)) {
           orgAlerts.push({ orgName: group.orgName, providerOrgId: registered.id, costOwningUnitId: registered.costOwningUnitId, agg })
         }
+        // D3: unclassified spend and/or a C1 break on a registered org → org-grain alerts.
+        if (Math.abs(groupDeltaUsd) > 0.005) {
+          unclassifiedAlerts.push({
+            orgName: group.orgName,
+            relatedEntityKind: 'provider-org',
+            relatedEntityId: registered.id,
+            costOwningUnitId: registered.costOwningUnitId,
+            kind: 'conservation-violation',
+            unclassifiedNetUsd: agg.unclassifiedNetUsd,
+            deltaUsd: groupDeltaUsd,
+          })
+        }
+        if (agg.unclassifiedNetUsd > 0) {
+          unclassifiedAlerts.push({
+            orgName: group.orgName,
+            relatedEntityKind: 'provider-org',
+            relatedEntityId: registered.id,
+            costOwningUnitId: registered.costOwningUnitId,
+            kind: 'unclassified-spend',
+            unclassifiedNetUsd: agg.unclassifiedNetUsd,
+          })
+        }
       }
 
       const residualFinal = residualHasContent ? normalizeUnsettled(residual) : residual
+      // D3: the residual's unclassified / C1 signals have no per-org owner → enterprise grain
+      // (same convention as alertResidualUnsettled).
+      if (residualHasContent && Math.abs(residualDeltaUsd) > 0.005) {
+        unclassifiedAlerts.push({
+          orgName: 'unallocated enterprise residual',
+          relatedEntityKind: 'provider-enterprise',
+          relatedEntityId: ent.id,
+          costOwningUnitId: null,
+          kind: 'conservation-violation',
+          unclassifiedNetUsd: residualFinal.unclassifiedNetUsd,
+          deltaUsd: residualDeltaUsd,
+        })
+      }
+      if (residualHasContent && residualFinal.unclassifiedNetUsd > 0) {
+        unclassifiedAlerts.push({
+          orgName: 'unallocated enterprise residual',
+          relatedEntityKind: 'provider-enterprise',
+          relatedEntityId: ent.id,
+          costOwningUnitId: null,
+          kind: 'unclassified-spend',
+          unclassifiedNetUsd: residualFinal.unclassifiedNetUsd,
+        })
+      }
+
+      // Fold the (enterprise, month) ignored-product counts into the run result
+      // under their provenance key (empty months contribute no key — no noise).
+      if (Object.keys(monthIgnoredProducts).length > 0) {
+        result.ignoredProducts[`${ent.external_id}:${mk.monthStart.slice(0, 7)}`] =
+          monthIgnoredProducts
+      }
 
       // LOW: the whole (enterprise, month) DELETE + re-INSERT runs in ONE transaction.
       await db.transaction(async (tx) => {
@@ -567,6 +809,26 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
         if (emitted) result.alertsEmitted += 1
       }
 
+      // D3: unclassified / conservation alerts — same post-commit discipline. Each
+      // 'unclassified-spend' candidate is one unclassified org-month (counted whether or not
+      // the idempotency guard suppressed a duplicate inbox item).
+      for (const a of unclassifiedAlerts) {
+        if (a.kind === 'unclassified-spend') result.unclassifiedOrgMonths += 1
+        const regionId = await orgRegionForCou(db, a.costOwningUnitId)
+        const emitted = await alertUnclassified(db, {
+          enterpriseSlug: ent.external_id,
+          orgName: a.orgName,
+          monthStart: mk.monthStart,
+          relatedEntityKind: a.relatedEntityKind,
+          relatedEntityId: a.relatedEntityId,
+          regionId,
+          kind: a.kind,
+          unclassifiedNetUsd: a.unclassifiedNetUsd,
+          deltaUsd: a.deltaUsd,
+        })
+        if (emitted) result.alertsEmitted += 1
+      }
+
       // LOW: a residual that is license-NULL with usage → unsettled on the Σ=bill view, but
       // previously NO inbox item. Raise the same 'copilot-bill-unsettled' category for it too.
       if (residualHasContent && isUnsettled(residualFinal)) {
@@ -596,6 +858,17 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
     }
 
     if (entRan) result.enterprisesRun += 1
+  }
+
+  // ADVISORY, never a data block (r1 finding 10): chargeback mode is live while this
+  // run booked unclassified Copilot spend. Unclassified money is never charged, so the
+  // data stays correct — but the runbook says classify + re-run BEFORE enabling the
+  // mode, so shout. The finance API surfaces the matching `unclassifiedWarning` flag
+  // and the finance scope view banners it.
+  if (result.unclassifiedOrgMonths > 0 && copilotChargebackEnabled()) {
+    consola.warn(
+      `[copilot-pool-bill] Copilot chargeback mode is ENABLED while ${result.unclassifiedOrgMonths} org-month(s) carry unclassified Copilot spend — unclassified money is never charged; classify the SKU(s) and re-run the month (runbook: docs/build/worker-scheduler.md, D3).`,
+    )
   }
 
   return result

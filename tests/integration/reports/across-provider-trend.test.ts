@@ -98,7 +98,7 @@ interface ProviderEntry { spendUsd: number; activeUsers: number }
 interface AcrossResp {
   meta: { scope: string; month: string; range?: { from: string; to: string } }
   kpis: { genuineUsd: number; activeUsers: number; momDeltaPct: number | null }
-  providerSplit: { claudeCode: ProviderEntry; copilot: ProviderEntry; other: ProviderEntry }
+  providerSplit: { claudeCode: ProviderEntry; copilotCli: ProviderEntry; copilotAgent: ProviderEntry; other: ProviderEntry }
   forecast: unknown | null
 }
 interface TrendResp {
@@ -107,21 +107,27 @@ interface TrendResp {
 }
 
 describe('GET /reports/across-regions — providerSplit', () => {
-  it('splits genuine into claude-code / copilot-cli / other, summing back to the headline', async () => {
+  it('splits genuine into the three named §A lanes + other, summing back to the headline', async () => {
     const r = (await acrossHandler(ev(gfo(), 'month=2026-07'))) as unknown as AcrossResp
     expect(r.kpis.genuineUsd).toBe(65) // claude 30 + copilot 35
     const ps = r.providerSplit
     expect(ps.claudeCode.spendUsd).toBe(30)
-    expect(ps.copilot.spendUsd).toBe(35)
+    expect(ps.copilotCli.spendUsd).toBe(35)
+    // copilot-agent is structurally absent from v_complete_usage (mig 0086) — the
+    // widened bucket exists (three-lane §A ceiling) and reads 0.
+    expect(ps.copilotAgent.spendUsd).toBe(0)
     expect(ps.other.spendUsd).toBe(0)
-    // The three buckets SUM BACK to the genuine headline (the split invariant).
-    expect(ps.claudeCode.spendUsd + ps.copilot.spendUsd + ps.other.spendUsd).toBe(r.kpis.genuineUsd)
+    // The four buckets SUM BACK to the genuine headline (the split invariant).
+    expect(
+      ps.claudeCode.spendUsd + ps.copilotCli.spendUsd + ps.copilotAgent.spendUsd + ps.other.spendUsd,
+    ).toBe(r.kpis.genuineUsd)
   })
 
   it('per-vendor activeUsers = COUNT(DISTINCT teammate) in that vendor', async () => {
     const r = (await acrossHandler(ev(gfo(), 'month=2026-07'))) as unknown as AcrossResp
     expect(r.providerSplit.claudeCode.activeUsers).toBe(1) // alice
-    expect(r.providerSplit.copilot.activeUsers).toBe(1) // dave
+    expect(r.providerSplit.copilotCli.activeUsers).toBe(1) // dave
+    expect(r.providerSplit.copilotAgent.activeUsers).toBe(0)
     expect(r.providerSplit.other.activeUsers).toBe(0)
     expect(r.kpis.activeUsers).toBe(2) // distinct across the whole window
   })
@@ -140,7 +146,7 @@ describe('GET /reports/across-regions/trend — RBAC + day-grain vendor-stacked 
     // 2026-07-02 (claude 20 + copilot 5), 2026-07-05 (claude 10), 2026-07-10 (copilot 30) → 4 points.
     expect(r.series).toHaveLength(4)
     for (const p of r.series) {
-      expect(['claude-code', 'copilot-cli', 'other']).toContain(p.key)
+      expect(['claude-code', 'copilot-cli', 'copilot-agent', 'other']).toContain(p.key)
       expect(p.day).toMatch(/^\d{4}-\d{2}-\d{2}$/)
       expect(p.value).toBeGreaterThan(0)
     }
@@ -162,7 +168,7 @@ describe('custom from/to range — range aggregates, month-anchored figures null
     const r = (await acrossHandler(ev(gfo(), 'from=2026-07-03&to=2026-07-08'))) as unknown as AcrossResp
     expect(r.kpis.genuineUsd).toBe(10)
     expect(r.providerSplit.claudeCode.spendUsd).toBe(10)
-    expect(r.providerSplit.copilot.spendUsd).toBe(0)
+    expect(r.providerSplit.copilotCli.spendUsd).toBe(0)
     expect(r.forecast).toBeNull()
     expect(r.kpis.momDeltaPct).toBeNull()
     expect(r.meta.range).toEqual({ from: '2026-07-03', to: '2026-07-08' })

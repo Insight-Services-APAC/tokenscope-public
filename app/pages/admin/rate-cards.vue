@@ -16,10 +16,12 @@
  * RBAC: client-side guard via useSession() — server still 401/403s a
  * non-admin's API calls; the page just hides itself.
  */
+
 import { computed, ref, watch, type Ref } from 'vue'
 import { consola } from 'consola'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
 import { useModalA11y } from '../../composables/useModalA11y'
+definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface CardRow extends Record<string, unknown> {
   id: string
@@ -280,7 +282,6 @@ async function createCard() {
       eyebrow="Administration"
       title="Rate cards"
       sub="Provider pricing the joiner costs spend from — per scope, region tier, and effective period. Cards are never edited or deleted: create a new card, retire a wrong one."
-      :crumbs="['Admin', 'Rate cards']"
     >
       <template #actions>
         <UiButton kind="primary" size="sm" data-testid="rate-card-new" @click="showCreate = true">

@@ -7,12 +7,14 @@
  * platform-admin) get a region-view picker (defaults to their own region);
  * region admins are pinned to their own region.
  */
+
 import { computed, ref } from 'vue'
 import { consola } from 'consola'
 import EntityTable from '../../../components/admin/EntityTable.vue'
 import ProjectMembersModal from '../../../components/admin/ProjectMembersModal.vue'
 import ProjectEditDialog, { type ProjectEditTarget } from '../../../components/admin/ProjectEditDialog.vue'
 import SetBudgetDialog, { type SetBudgetTarget } from '../../../components/admin/SetBudgetDialog.vue'
+definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface ProjectRow extends Record<string, unknown> {
   id: string
@@ -233,7 +235,6 @@ async function remove(row: ProjectRow) {
       eyebrow="Administration"
       title="Projects"
       sub="Projects in this region. Create projects, edit budgets and owners, manage members."
-      :crumbs="['Admin', 'Projects']"
     >
       <template v-if="isOrgWide" #actions>
         <select

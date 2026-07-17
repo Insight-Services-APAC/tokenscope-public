@@ -3,6 +3,33 @@
  * by TrendArea / StackedBars / DonutChart so axis math and the series
  * colour palette live in ONE place.
  */
+import type { Vendor } from '#shared/usage/vendor'
+
+/*
+ * FIXED colour per billing vendor lane (#142) — colour follows the lane id,
+ * never its position, so a practice missing a lane doesn't repaint the others.
+ * Tokens defined + derivation documented in assets/css/brand-tokens.css.
+ */
+export const VENDOR_LANE_COLORS: Readonly<Record<Vendor, string>> = {
+  'claude': 'var(--lane-claude)',
+  'claude-ai': 'var(--lane-claude-ai)',
+  'claude-cowork': 'var(--lane-claude-cowork)',
+  'claude-office': 'var(--lane-claude-office)',
+  'claude-chrome': 'var(--lane-claude-chrome)',
+  'claude-design': 'var(--lane-claude-design)',
+  'claude-slack': 'var(--lane-claude-slack)',
+  'claude-other': 'var(--lane-claude-other)',
+  'copilot': 'var(--lane-copilot)',
+  'copilot-agent': 'var(--lane-copilot-agent)',
+  'copilot-license': 'var(--lane-copilot-license)',
+  'copilot-usage': 'var(--lane-copilot-usage)',
+  'copilot-unclassified': 'var(--lane-copilot-unclassified)',
+  'other': 'var(--lane-other)',
+}
+
+export function vendorLaneColor(lane: Vendor): string {
+  return VENDOR_LANE_COLORS[lane]
+}
 
 /** Brand palette order for categorical series (CSS custom properties). */
 export const CHART_PALETTE = [
@@ -49,5 +76,5 @@ export function padDays<T>(
 }
 
 export function useChartScale() {
-  return { CHART_PALETTE, seriesColor, niceMax, padDays }
+  return { CHART_PALETTE, seriesColor, niceMax, padDays, VENDOR_LANE_COLORS, vendorLaneColor }
 }

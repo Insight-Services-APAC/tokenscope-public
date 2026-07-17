@@ -9,7 +9,9 @@
  * Cards are individually defensive: a Postgres miss doesn't break the
  * Redis card (the endpoint already wraps each probe in try/catch).
  */
+
 import { computed, ref } from 'vue'
+definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface DiagResp {
   postgres: {
@@ -314,7 +316,6 @@ function pretty(obj: unknown): string {
       eyebrow="Administration"
       title="Diagnostics"
       sub="Health probes — read-only. No mutations from this page."
-      :crumbs="['Admin', 'Diagnostics']"
     >
       <template #actions>
         <UiButton
@@ -704,7 +705,14 @@ function pretty(obj: unknown): string {
           Log Analytics query path the worker reads telemetry from.
         </p>
 
-        <p v-if="otelError" class="text-sm text-brand-hunger font-mono" data-testid="admin-diag-otel-error">
+        <!-- A 403 here is EXPECTED for a region admin (platform-admin-only
+             probe) — render it as a calm scoped-out note, not an alarming
+             error. Genuine failures (500 / network) keep the red treatment. -->
+        <p v-if="otelError && otelError.statusCode === 403" class="text-sm text-carbon-3" data-testid="admin-diag-otel-scoped">
+          Scoped out — this probe is platform-admin only, so your role can't read the Log Analytics
+          query path. Nothing is wrong; every other card above still applies to your region.
+        </p>
+        <p v-else-if="otelError" class="text-sm text-brand-hunger font-mono" data-testid="admin-diag-otel-error">
           Could not load OTel diagnostics: {{ otelError.statusCode ?? '' }} {{ otelError.statusMessage ?? otelError.message }}
         </p>
         <template v-else-if="otelData">

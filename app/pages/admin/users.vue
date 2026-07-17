@@ -17,6 +17,7 @@
  * home region for admin; the same for global-finops in Wave VI — a
  * region picker lands in a later slice).
  */
+
 import { computed, ref } from 'vue'
 import { consola } from 'consola'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
@@ -24,7 +25,8 @@ import AddTeammateDialog from '../../components/admin/AddTeammateDialog.vue'
 // `#shared/*` is Nuxt 4's alias for the workspace `shared/` directory.
 // Relative paths from app/pages/* don't resolve at server-bundle time
 // (Rollup runs from `.nuxt/dist/server/_nuxt/`, not the source path).
-import { ROLES, type Role } from '#shared/auth/roles'
+import { SELECTABLE_ROLES, roleLabel, type Role } from '#shared/auth/roles'
+definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface UserRow extends Record<string, unknown> {
   id: string
@@ -302,15 +304,25 @@ const isAdmin = computed(() => {
   const r = session.value?.role
   return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
 })
+
+// Options for a row's role <select>: the assignable roles PLUS the row's own
+// current value if it sits OUTSIDE the assignable set (a legacy `finance`
+// zombie). Without this the native select silently drops the value, hiding
+// which teammates still carry a retired role. roleLabel renders it as
+// "Finance (retired)" so it reads as an unassignable, migration-worthy state.
+function roleOptionsFor(current: string): Role[] {
+  return current && !SELECTABLE_ROLES.includes(current as Role)
+    ? [...SELECTABLE_ROLES, current as Role]
+    : [...SELECTABLE_ROLES]
+}
 </script>
 
 <template>
   <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-users">
     <UiPageHead
       eyebrow="Administration"
-      title="Users"
+      title="Teammates"
       sub="Teammates in this region. Change role via the dropdown; the audit trail records every change."
-      :crumbs="['Admin', 'Users']"
     />
 
     <div
@@ -349,7 +361,7 @@ const isAdmin = computed(() => {
           data-testid="admin-users-role-filter"
         >
           <option value="">All roles</option>
-          <option v-for="r in ROLES" :key="r" :value="r">{{ r }}</option>
+          <option v-for="r in SELECTABLE_ROLES" :key="r" :value="r">{{ roleLabel(r) }}</option>
         </select>
         <select
           v-if="isOrgWide"
@@ -387,7 +399,7 @@ const isAdmin = computed(() => {
                 :title="asUserRow(row).id === callerTeammateId ? 'You cannot change your own role.' : ''"
                 @change="(e) => patchRole(asUserRow(row), (e.target as HTMLSelectElement).value as Role)"
               >
-                <option v-for="r in ROLES" :key="r" :value="r">{{ r }}</option>
+                <option v-for="r in roleOptionsFor(asUserRow(row).role)" :key="r" :value="r">{{ roleLabel(r) }}</option>
               </select>
               <UiBadge
                 v-if="isLastAdmin(asUserRow(row))"

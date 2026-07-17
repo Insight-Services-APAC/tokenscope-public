@@ -84,18 +84,18 @@ test.describe('Persona landings', () => {
     await expect(aflRow.locator('[data-testid="contributed-badge"]')).toBeVisible()
   })
 
-  test('admin (lena) lands on /admin hub with sub-page tiles', async ({ page }) => {
+  test('admin (lena) lands on the Overview launcher', async ({ page }) => {
     await signInAs(page, 'admin')
     expect(page.url()).toContain('/admin')
-    // Admin lands on the hub (h1 "Admin"). The hub grew across the
-    // governance sprints to 11 tiles: users / regions / projects /
-    // instances / grants / activity-tags / rate-cards / audit /
-    // settings / diagnostics / reconciliation / department-map.
-    await expect(page.locator('h1')).toContainText('Admin')
-    await expect(page.locator('[data-testid="admin-tile-users"]')).toBeVisible()
-    await expect(page.locator('[data-testid="admin-tile-regions"]')).toBeVisible()
-    await expect(page.locator('[data-testid="admin-tile-rate-cards"]')).toBeVisible()
-    await expect(page.locator('[data-testid^="admin-tile-"]')).toHaveCount(12)
+    // The old flat tile wall was replaced by the Overview launcher (h1
+    // "Overview"): an at-a-glance status strip + role-aware "Common tasks"
+    // quick actions. Everything else lives in the persistent admin sidebar.
+    await expect(page.locator('h1')).toContainText('Overview')
+    await expect(page.locator('[data-testid="admin-overview-stats"]')).toBeVisible()
+    await expect(page.locator('[data-testid="admin-qa-region"]')).toBeVisible()
+    // The sidebar is the complete surface — spot-check a couple of items.
+    await expect(page.locator('[data-testid="admin-nav-teammates"]')).toBeVisible()
+    await expect(page.locator('[data-testid="admin-nav-providers"]')).toBeVisible()
   })
 
   test('finance (mara) lands on /finance with Practice Delta as top CoU', async ({ page }) => {

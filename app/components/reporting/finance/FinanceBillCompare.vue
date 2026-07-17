@@ -17,8 +17,13 @@
  */
 import { computed } from 'vue'
 import UiCard from '../../ui/Card.vue'
+import UiBadge from '../../ui/Badge.vue'
 import { fmtUsd } from '../../../composables/useFormat'
-import type { FinanceBillCheck } from '../finance-report-types'
+import { vendorLaneColor, VENDOR_LANE_COLORS } from '../../../composables/useChartScale'
+import { foldLaneTotals, FOLDED_LANE_ID } from '../charts/fold-lanes'
+import { COPILOT_UNCLASSIFIED_LANE } from '#shared/usage/github-surface'
+import type { Vendor } from '#shared/usage/vendor'
+import type { FinanceBillCheck, FinanceCouLane } from '../finance-report-types'
 
 const props = defineProps<{
   check: FinanceBillCheck
@@ -42,7 +47,8 @@ const rows = computed<CompareRow[]>(() => {
     c.providers.find((p) => p.provider === provider)?.billUsd ?? 0
   const unsettledFor = (provider: string) =>
     c.providers.find((p) => p.provider === provider)?.unsettled ?? false
-  // Anthropic chargeback = whole chargeback − the Copilot (copilot-cli) portion.
+  // Anthropic chargeback = whole chargeback − the Copilot portion (Σ of the three
+  // §B chargeback lanes — copilot-license / copilot-usage / copilot-unclassified).
   const anthropicChargeback = c.chargebackUsd - c.copilotChargebackUsd
   return [
     {
@@ -80,6 +86,48 @@ function delta(r: CompareRow): number {
 }
 function matched(r: CompareRow): boolean {
   return Math.abs(delta(r)) < 0.005 && !r.unsettled
+}
+
+// ── Per-lane structure within each provider group (lane-visuals V3, folded) ──
+// A rendered lane chip row (folded per r1-F3): the kept lanes + (when folding
+// occurred) ONE "Other surfaces" remainder whose tooltip itemises the fold.
+interface RenderedLane extends FinanceCouLane {
+  /** Tooltip itemisation for the folded remainder; undefined on real lanes. */
+  foldedTitle?: string
+}
+
+/** Fold a provider group's lanes to ≤ 5 rows (r1-F3 — donut/composition cap). */
+function foldGroup(rows: FinanceCouLane[]): RenderedLane[] {
+  const live = rows.filter((l) => l.usd !== 0)
+  const folded = foldLaneTotals(
+    live.map((l) => ({ lane: l.lane, label: l.label, value: l.usd })),
+    { max: 5 },
+  )
+  const foldedTitle = folded.folded.map((f) => `${f.label} ${fmtUsd(f.total)}`).join(' · ')
+  return folded.totals.map((t) => ({
+    lane: t.lane,
+    label: t.label,
+    usd: t.value,
+    ...(t.lane === FOLDED_LANE_ID ? { foldedTitle } : {}),
+  }))
+}
+
+// The GitHub chargeback split by §B lane (registry order, zero lanes elided —
+// the wire carries all three; 3 ≤ 5 so the fold is an identity today).
+// copilot-unclassified is badged "needs mapping": it is in the Σ=bill footing
+// (whole-truth) but never in a chargeable total.
+const copilotLanes = computed<RenderedLane[]>(() => foldGroup(props.check.copilotLanes ?? []))
+// The Anthropic chargeback split by surface lane (V3) — up to 8 registry lanes,
+// so this group genuinely folds. Σ (pre-fold == post-fold, conservation by
+// construction) == the Anthropic chargeback bar above it.
+const anthropicLanes = computed<RenderedLane[]>(() => foldGroup(props.check.anthropicLanes ?? []))
+const lanesFor = (key: string): RenderedLane[] =>
+  key === 'copilot' ? copilotLanes.value : anthropicLanes.value
+const isUnclassified = (l: FinanceCouLane) => l.lane === COPILOT_UNCLASSIFIED_LANE
+
+function laneSwatch(lane: string): string {
+  if (lane === FOLDED_LANE_ID) return 'var(--carbon-3)'
+  return lane in VENDOR_LANE_COLORS ? vendorLaneColor(lane as Vendor) : 'var(--carbon-3)'
 }
 
 const SOLID: Record<'hunger' | 'vision', string> = {
@@ -153,6 +201,41 @@ const TRACK: Record<'hunger' | 'vision', string> = {
             </div>
             <span class="w-[68px] shrink-0 text-right text-[12px] text-carbon-2 tabular-nums">{{ fmtUsd(r.billUsd) }}</span>
           </div>
+        </div>
+
+        <!-- Per-lane structure within the provider group (lane-visuals V3, folded per
+             r1-F3): Anthropic by surface lane, GitHub by §B chargeback lane. FIXED
+             lane colours, zero lanes elided, ≤ 5 chips + one "Other surfaces"
+             remainder (tooltip itemises the fold). Unclassified is badged — in the
+             Σ=bill footing, never in a chargeable total. Not a legend: each chip
+             carries its label + exact $ (identity never colour-alone). -->
+        <div
+          v-if="lanesFor(r.key).length"
+          class="mt-2.5 ml-[86px] flex flex-wrap gap-x-4 gap-y-1.5"
+          :data-testid="`finance-compare-${r.key}-lanes`"
+        >
+          <span
+            v-for="l in lanesFor(r.key)"
+            :key="l.lane"
+            class="inline-flex items-center gap-1.5 text-[11px] text-carbon-2 tabular-nums"
+            :class="{ 'cursor-help': l.foldedTitle }"
+            :data-testid="`finance-compare-lane-${l.lane}`"
+            :title="l.foldedTitle"
+          >
+            <span
+              class="inline-block w-2 h-2 rounded-sm shrink-0"
+              :style="{ background: laneSwatch(l.lane) }"
+              aria-hidden="true"
+            />
+            {{ l.label }} · {{ fmtUsd(l.usd) }}
+            <UiBadge
+              v-if="isUnclassified(l)"
+              kind="rag-amber"
+              dot="amber"
+              data-testid="finance-compare-unclassified-badge"
+              title="Copilot bill lines matching no SKU classifier — in the Σ=bill footing but excluded from every chargeable total until classified."
+            >needs mapping</UiBadge>
+          </span>
         </div>
       </div>
     </div>

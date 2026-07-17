@@ -28,6 +28,9 @@ const global = {
   stubs: {
     DateRangeControl: true,
     LaneToggle: true,
+    // LaneSwitchLink self-wires to useReportState (undefined outside Nuxt) —
+    // stubbed exactly like LaneToggle (iter-2 I5 cross-links).
+    LaneSwitchLink: true,
     ClientOnly: { template: '<div><slot /></div>' },
     VChart: true,
   },
@@ -47,7 +50,9 @@ const meta = {
 
 const providerSplit: ProviderSplit = {
   claudeCode: { spendUsd: 32, activeUsers: 2 },
-  copilot: { spendUsd: 15, activeUsers: 1 },
+  copilotCli: { spendUsd: 15, activeUsers: 1 },
+  // Three-lane §A ceiling: copilot-agent reads 0 today (absent from v_complete_usage).
+  copilotAgent: { spendUsd: 0, activeUsers: 0 },
   other: { spendUsd: 3, activeUsers: 1 },
 }
 
@@ -72,6 +77,11 @@ function makeReport(over: Partial<RegionalReport> = {}): RegionalReport {
     ],
     // §B provider split (bill lane) — Anthropic vs Copilot pooled (null while pending).
     chargebackProviderSplit: { anthropicUsd: 12, copilotUsd: null },
+    // §B per-lane chargeback totals (lane-visuals V2-Regional) — Σ == anthropicChargeableUsd (12).
+    chargebackLanes: [
+      { lane: 'claude', chargeUsd: 10 },
+      { lane: 'claude-ai', chargeUsd: 2 },
+    ],
     practices: [{ key: 'a', label: 'Practice A', value: 50, spendClass: 'indicative', isDefault: false }],
     chargebackByCostCentre: [
       { key: 'cou-a', label: 'Practice A', value: 12 },
@@ -104,15 +114,32 @@ const modelDrivers: RegionalDriversResp = {
 }
 
 const trend: RegionalTrendResp = {
+  // The ONE shared window object the billed hero + donut bind on (iter-2 I1).
+  window: { from: '2026-07-01', to: '2026-07-31' },
   windowDays: 31,
+  // §A wire keys are the registry tool ids (the V2-Regional widening — the
+  // pre-widening display names 'Claude'/'Copilot' are gone).
   series: [
-    { day: '2026-07-02', key: 'Claude', value: 20 },
-    { day: '2026-07-03', key: 'Copilot', value: 8 },
+    { day: '2026-07-02', key: 'claude-code', value: 20 },
+    { day: '2026-07-03', key: 'copilot-cli', value: 8 },
   ],
   // §B daily Anthropic chargeback series (bill lane) — feeds the §B spend-trend card.
   chargeSeries: [
     { day: '2026-07-02', chargeUsd: 6 },
     { day: '2026-07-03', chargeUsd: 6 },
+  ],
+  // The per-lane widening (lane-visuals V2-Regional) — Σ lanes per day == chargeSeries[day].
+  chargeLanes: [
+    { day: '2026-07-02', lane: 'claude', chargeUsd: 6 },
+    { day: '2026-07-03', lane: 'claude', chargeUsd: 4 },
+    { day: '2026-07-03', lane: 'claude-ai', chargeUsd: 2 },
+  ],
+  // BILLED showback weekly lane cells (iter-2 I1) — the usage-view hero + donut.
+  showbackWeeklyLanes: [
+    { weekStart: '2026-06-29', lane: 'claude', usd: 30 },
+    { weekStart: '2026-06-29', lane: 'claude-ai', usd: 12 },
+    { weekStart: '2026-07-06', lane: 'claude', usd: 14 },
+    { weekStart: '2026-07-06', lane: 'claude-ai', usd: 5 },
   ],
 }
 
@@ -211,7 +238,13 @@ describe('ScopeRegionalView — the four exclusive states', () => {
     expect(kpi.text().toLowerCase()).toContain('copilot pending')
 
     expect(w.find('[data-testid="regional-hero"]').exists()).toBe(true)
-    expect(w.find('[data-testid="regional-provider-split"]').exists()).toBe(true)
+    // iter-2 I1: the billed composition hero + its pinned donut REPLACE the old
+    // §A provider donut card; the basis caption is on both.
+    expect(w.find('[data-testid="surface-hero-card"]').exists()).toBe(true)
+    expect(w.find('[data-testid="surface-hero-basis"]').text()).toContain('billed usage · all surfaces · weekly')
+    expect(w.find('[data-testid="surface-donut-card"]').exists()).toBe(true)
+    expect(w.find('[data-testid="surface-donut-pointer"]').text()).toContain('bases differ')
+    expect(w.find('[data-testid="across-active-trend-card"]').exists()).toBe(true)
     expect(w.find('[data-testid="regional-trend-card"]').exists()).toBe(true)
     expect(w.find('[data-testid="regional-seasonality"]').exists()).toBe(true)
     expect(w.find('[data-testid="regional-practice-rank"]').exists()).toBe(true)
@@ -287,7 +320,11 @@ describe('ScopeRegionalView — the §A/§B lane re-lens', () => {
     const w = mount(ScopeRegionalView, { props: { ...baseProps, report: makeReport(), pending: false }, global })
     expect(w.find('[data-testid="regional-practice-rank"]').exists()).toBe(true)
     expect(w.find('[data-testid="regional-chargeback-rank"]').exists()).toBe(false)
-    expect(w.find('[data-testid="regional-provider-split"]').exists()).toBe(true)
+    // The billed hero + donut lead the usage view (iter-2 I1), with the page's
+    // ONE LaneLegend carrying their lanes (V1 item 5).
+    expect(w.find('[data-testid="surface-hero-card"]').exists()).toBe(true)
+    expect(w.find('[data-testid="surface-donut-card"]').exists()).toBe(true)
+    expect(w.find('[data-testid="lane-legend"]').exists()).toBe(true)
     expect(w.find('[data-testid="usage-only-card"]').exists()).toBe(false)
   })
 
@@ -317,8 +354,10 @@ describe('ScopeRegionalView — the §A/§B lane re-lens', () => {
     expect(w.find('[data-testid="regional-kpi-avg"]').text()).toContain('Avg charge / billed user')
     expect(w.find('[data-testid="regional-chargeback-caveat"]').text().toLowerCase()).toContain('pooled per')
 
-    // §A cards RE-LENS to their §B bill-lane analogue (not usage-only placeholders).
-    expect(w.find('[data-testid="regional-provider-split"]').exists()).toBe(false)
+    // §A/usage cards RE-LENS to their §B bill-lane analogue (not usage-only
+    // placeholders); the billed hero + donut are usage-view elements and yield too.
+    expect(w.find('[data-testid="surface-hero-card"]').exists()).toBe(false)
+    expect(w.find('[data-testid="surface-donut-card"]').exists()).toBe(false)
     expect(w.find('[data-testid="regional-trend-card"]').exists()).toBe(false)
     expect(w.find('[data-testid="chargeback-split-card"]').exists()).toBe(true)
     expect(w.find('[data-testid="chargeback-trend-card"]').exists()).toBe(true)
@@ -328,6 +367,87 @@ describe('ScopeRegionalView — the §A/§B lane re-lens', () => {
     expect(w.findAll('[data-testid="usage-only-card"]').length).toBe(1)
     // Velocity signals (a §A usage signal) are suppressed in chargeback mode.
     expect(w.find('[data-testid="regional-signals"]').exists()).toBe(false)
+  })
+
+  it('CHARGEBACK lane renders ONE page-level LaneLegend (union of the cards\' lanes) and lane-mode cards', () => {
+    const w = mount(ScopeRegionalView, {
+      props: { ...baseProps, report: makeReport(), pending: false, lane: 'chargeback' },
+      global,
+    })
+    // The page legend carries the lane union (claude + claude-ai across trend + donut);
+    // labels come from the registry.
+    const legend = w.find('[data-testid="lane-legend"]')
+    expect(legend.exists()).toBe(true)
+    expect(w.find('[data-testid="lane-legend-claude"]').text()).toContain('Claude Code')
+    expect(w.find('[data-testid="lane-legend-claude-ai"]').text()).toContain('Claude Chat')
+    // The split card renders the capped+folded lane donut; the trend card the
+    // WEEKLY lane stack (iter-2 I2 — the default grain).
+    expect(w.find('[data-testid="chargeback-split-donut"]').exists()).toBe(true)
+    expect(w.find('[data-testid="chargeback-trend-weekly"]').exists()).toBe(true)
+    // USAGE mode carries its OWN page legend now — the billed hero's lanes (iter-2 I1).
+    const usage = mount(ScopeRegionalView, { props: { ...baseProps, report: makeReport(), pending: false }, global })
+    expect(usage.find('[data-testid="lane-legend"]').exists()).toBe(true)
+    // ...but never the §B copilot chargeback lanes (bases stay separated).
+    expect(usage.find('[data-testid="lane-legend-copilot-license"]').exists()).toBe(false)
+  })
+
+  it('CHARGEBACK lane surfaces the copilot-unclassified badge (visible, never chargeable)', () => {
+    const report = makeReport({
+      chargebackLanes: [
+        { lane: 'claude', chargeUsd: 10 },
+        { lane: 'claude-ai', chargeUsd: 2 },
+        { lane: 'copilot-license', chargeUsd: 100 },
+        { lane: 'copilot-usage', chargeUsd: 20 },
+        { lane: 'copilot-unclassified', chargeUsd: 7 },
+      ],
+      chargebackProviderSplit: { anthropicUsd: 12, copilotUsd: 120 },
+    })
+    const w = mount(ScopeRegionalView, {
+      props: { ...baseProps, report, pending: false, lane: 'chargeback' },
+      global,
+    })
+    const badge = w.find('[data-testid="chargeback-split-unclassified"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.text().toLowerCase()).toContain('needs mapping')
+    // The unclassified lane is not a donut slice → not a legend entry either.
+    expect(w.find('[data-testid="lane-legend-copilot-unclassified"]').exists()).toBe(false)
+    expect(w.find('[data-testid="lane-legend-copilot-license"]').exists()).toBe(true)
+  })
+
+  it('CHARGEBACK lane, $0 Anthropic + non-zero pooled Copilot: BOTH cards stay in lane mode (r3-6)', () => {
+    // No Anthropic per-teammate chargeback this month, but validated pooled
+    // Copilot lanes exist — the ONE page-level signal must put BOTH cards in
+    // lane mode: donut on the split card, the lane-vocabulary EMPTY state on
+    // the trend card — never the legacy single-series card silently.
+    const report = makeReport({
+      chargebackLanes: [
+        { lane: 'copilot-license', chargeUsd: 100 },
+        { lane: 'copilot-usage', chargeUsd: 20 },
+      ],
+      chargebackProviderSplit: { anthropicUsd: 0, copilotUsd: 120 },
+    })
+    const zeroTrend: RegionalTrendResp = {
+      ...trend,
+      chargeSeries: [
+        { day: '2026-07-02', chargeUsd: 0 },
+        { day: '2026-07-03', chargeUsd: 0 },
+      ],
+      chargeLanes: [],
+    }
+    const w = mount(ScopeRegionalView, {
+      props: { ...baseProps, trend: zeroTrend, report, pending: false, lane: 'chargeback' },
+      global,
+    })
+    // The page legend lists the Copilot lanes (the shared signal's source)...
+    expect(w.find('[data-testid="lane-legend"]').exists()).toBe(true)
+    expect(w.find('[data-testid="lane-legend-copilot-license"]').exists()).toBe(true)
+    // ...the split card renders the lane donut...
+    expect(w.find('[data-testid="chargeback-split-donut"]').exists()).toBe(true)
+    // ...and the trend card shows its LANE-MODE state: the lane vocabulary +
+    // the explicit empty note — not the legacy single-series chart.
+    expect(w.find('[data-testid="chargeback-trend-card"]').text()).toContain('by surface')
+    expect(w.find('[data-testid="chargeback-trend-lane-empty"]').exists()).toBe(true)
+    expect(w.find('[data-testid="chargeback-trend-lanes"]').exists()).toBe(false)
   })
 
   it('CHARGEBACK lane + partial-month range, Copilot ON: pooled net WITHHELD — caveat, not a silent $0', () => {

@@ -53,23 +53,25 @@ export default defineEventHandler(async (event) => {
       throw createError({ statusCode: 422, statusMessage: 'Region not found' })
     }
 
-    // Upsert keyed on the normalised department. ON CONFLICT re-points the
-    // department to the new region and refreshes display casing + updated_at.
+    // Upsert a department-attribute rule in directory_region_rule (mig 0089),
+    // keyed on the normalised value. ON CONFLICT re-points to the new region and
+    // refreshes display casing + updated_at. (Legacy back-compat endpoint — the
+    // generalised rules API manages any attribute.)
     const upserted = await tx.execute<{ department_lower: string }>(sql`
-      INSERT INTO department_to_region (department_lower, department, region_id, created_by, created_at)
-      VALUES (${departmentLower}, ${body.department.trim()}, ${body.region_id}::uuid, ${caller.teammateId}::uuid, now())
-      ON CONFLICT (department_lower) DO UPDATE
+      INSERT INTO directory_region_rule (attribute, match_mode, match_value, match_value_raw, region_id, created_by, created_at)
+      VALUES ('department', 'exact', ${departmentLower}, ${body.department.trim()}, ${body.region_id}::uuid, ${caller.teammateId}::uuid, now())
+      ON CONFLICT (attribute, match_value) DO UPDATE
         SET region_id = EXCLUDED.region_id,
-            department = EXCLUDED.department,
+            match_value_raw = EXCLUDED.match_value_raw,
             updated_at = now()
-      RETURNING department_lower
+      RETURNING match_value AS department_lower
     `)
     const row = [...upserted][0]!
 
     await recordAuditEvent(tx, {
       eventType: 'department-map-set',
       actorTeammateId: caller.teammateId,
-      subjectKind: 'department_to_region',
+      subjectKind: 'directory_region_rule',
       subjectId: null,
       payload: {
         department: body.department.trim(),

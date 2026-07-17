@@ -18,8 +18,8 @@ beforeAll(async () => {
   await t.client`INSERT INTO region (id, code, display_name) VALUES (gen_random_uuid(), 'emea', 'EMEA')`
   const [rg] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM region WHERE code='emea'`
   emeaId = rg!.id
-  await t.client`INSERT INTO department_to_region (department_lower, department, region_id)
-    VALUES ('emea data & ai', 'EMEA Data & AI', ${emeaId})`
+  await t.client`INSERT INTO directory_region_rule (attribute, match_mode, match_value, match_value_raw, region_id)
+    VALUES ('department', 'exact', 'emea data & ai', 'EMEA Data & AI', ${emeaId})`
 })
 afterAll(async () => { await stopTestDb(t) })
 

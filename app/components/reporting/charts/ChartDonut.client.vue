@@ -16,7 +16,10 @@ import { escapeHtml } from './chart-utils'
 export interface DonutSlice {
   name: string
   value: number
-  /** Explicit slice colour; when absent, resolved from the name (provider split). */
+  /** Colour key (a registry lane id / laned tool) — preferred over fuzzy-matching
+   *  the display `name` (lane-visuals V1: one colour system app-wide). */
+  key?: string
+  /** Explicit slice colour; when absent, resolved from `key` (else the name). */
   color?: string
 }
 
@@ -28,12 +31,19 @@ const props = withDefaults(
     /** Tooltip value formatter. Defaults to a plain number. */
     valueFormat?: (v: number) => string
     height?: number
+    /**
+     * Render the per-card HTML legend (default). Pages that carry ONE page-level
+     * LaneLegend (lane-visuals V1 item 5 — cards render NO legends there) pass
+     * false; identity then lives in the page legend + tooltips.
+     */
+    legend?: boolean
   }>(),
   {
     centerLabel: undefined,
     centerValue: undefined,
     valueFormat: undefined,
     height: 200,
+    legend: true,
   },
 )
 
@@ -46,11 +56,11 @@ const total = computed(() => shown.value.reduce((a, s) => a + s.value, 0))
 const hasData = computed(() => total.value > 0)
 
 function sliceColor(s: DonutSlice): string {
-  return s.color || colorForKey(s.name)
+  return s.color || colorForKey(s.key ?? s.name)
 }
 
 // HTML legend rows (text tokens; the swatch carries identity, never the text).
-const legend = computed(() =>
+const legendRows = computed(() =>
   shown.value.map((s) => ({
     name: s.name,
     color: sliceColor(s),
@@ -156,9 +166,9 @@ const option = computed<ECOption>(() => {
       </template>
     </ClientOnly>
 
-    <ul v-if="hasData" class="space-y-1 min-w-0">
+    <ul v-if="hasData && legend" class="space-y-1 min-w-0">
       <li
-        v-for="l in legend"
+        v-for="l in legendRows"
         :key="l.name"
         class="flex items-center gap-1.5 text-[11px] text-carbon-2"
       >

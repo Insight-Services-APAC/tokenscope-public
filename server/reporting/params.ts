@@ -24,7 +24,12 @@ import {
   daysInMonthUtc,
   type MonthRangeUtc,
 } from '../utils/period'
-import type { SeasonalityCell, ChargeDowBucket } from '../../shared/reports/types'
+import type {
+  SeasonalityCell,
+  ChargeDowBucket,
+  ShowbackWeeklyLaneCell,
+} from '../../shared/reports/types'
+import { toolToVendor, VENDOR_LANES } from '../../shared/usage/vendor'
 
 /**
  * `format=json|csv`. The screen endpoints always serve JSON; the CSV serialiser
@@ -326,4 +331,36 @@ export function buildSeasonality(
  */
 export function fillDowBuckets(byDow: Map<number, number>): ChargeDowBucket[] {
   return Array.from({ length: 7 }, (_, dow) => ({ dow, chargeUsd: byDow.get(dow) ?? 0 }))
+}
+
+// ── Weekly showback lane merge (pure — shared by Across + Regional, iter-2 I1) ─
+/** Canonical lane order index for deterministic weekly-lane emission. */
+const WEEKLY_LANE_ORDER = new Map<string, number>(VENDOR_LANES.map((l, i) => [l, i]))
+
+/**
+ * Merge raw `(week_start, tool, usd)` showback group rows into `(week, LANE)`
+ * cells: tools sharing a lane (N:1 by contract) SUM, unknown/NULL falls to
+ * 'other' (toolToVendor's catch-all — nothing ever vanishes from the billed
+ * composition), emitted (week asc, canonical lane order) deterministically.
+ * Pure — ONE definition for the Across + Regional weekly showback fetchers so
+ * their cell shape can never drift (and it is unit-testable without a DB).
+ */
+export function mergeWeeklyLaneRows(
+  rows: Iterable<{ week_start: string; tool: string | null; usd: string }>,
+): ShowbackWeeklyLaneCell[] {
+  const byWeekLane = new Map<string, number>()
+  for (const r of rows) {
+    const k = `${r.week_start} ${toolToVendor(r.tool)}`
+    byWeekLane.set(k, (byWeekLane.get(k) ?? 0) + Number(r.usd))
+  }
+  return [...byWeekLane.entries()]
+    .map(([k, usd]) => {
+      const [weekStart, lane] = k.split(' ') as [string, string]
+      return { weekStart, lane, usd }
+    })
+    .sort(
+      (a, b) =>
+        (a.weekStart < b.weekStart ? -1 : a.weekStart > b.weekStart ? 1 : 0) ||
+        (WEEKLY_LANE_ORDER.get(a.lane) ?? 99) - (WEEKLY_LANE_ORDER.get(b.lane) ?? 99),
+    )
 }

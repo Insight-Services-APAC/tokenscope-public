@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* eslint-disable no-console */
+ 
 /**
  * sync-skill-prompts.mjs — generate server/utils/skill-prompts.gen.ts from the
  * SINGLE source of truth: docs/skills/tokenscope/*.md.

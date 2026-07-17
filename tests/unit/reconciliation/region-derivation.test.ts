@@ -6,16 +6,38 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  mapDepartmentToRegion,
-  normalizeDepartment,
+  mapAttributesToRegion,
   resolvePlacementViaManagerChain,
   derivePlacement,
   makeChainCaches,
   type GetManager,
   type ManagerEdge,
   type OwnedUnit,
+  type RegionRuleSet,
 } from '../../../server/reconciliation/region-derivation'
+import { normalizeMatchValue, type RegionAttributeKey } from '../../../shared/placement/region-attributes'
 import type { DirectoryUser } from '../../../server/azure/directory'
+
+/** Build a RegionRuleSet from [attribute, value, regionId, mode?] tuples. */
+function ruleset(rules: Array<[RegionAttributeKey, string, string, ('exact' | 'prefix')?]>): RegionRuleSet {
+  const exact: RegionRuleSet['exact'] = new Map()
+  const prefix: RegionRuleSet['prefix'] = []
+  for (const [attr, val, rid, mode] of rules) {
+    const v = normalizeMatchValue(val)
+    if (mode === 'prefix') {
+      prefix.push({ attribute: attr, value: v, regionId: rid })
+    } else {
+      let m = exact.get(attr)
+      if (!m) {
+        m = new Map()
+        exact.set(attr, m)
+      }
+      m.set(v, rid)
+    }
+  }
+  prefix.sort((a, b) => b.value.length - a.value.length)
+  return { exact, prefix }
+}
 
 function fakeManager(edges: Record<string, ManagerEdge | null>) {
   const calls: string[] = []
@@ -27,20 +49,40 @@ function fakeManager(edges: Record<string, ManagerEdge | null>) {
 }
 const unit = (orgUnitId: string, regionId = 'rg'): OwnedUnit => ({ orgUnitId, regionId })
 const dir = (over: Partial<DirectoryUser> = {}): DirectoryUser => ({
-  oid: 'u', email: 'u@x.com', displayName: 'U', department: null, jobTitle: null, costCenter: null, division: null,
+  oid: 'u', email: 'u@x.com', displayName: 'U', mail: null, upn: null,
+  department: null, jobTitle: null, companyName: null, country: null,
+  officeLocation: null, state: null, costCenter: null, division: null,
   ...over,
 })
 
-describe('mapDepartmentToRegion', () => {
-  const map = new Map([['apac digital', 'rg-apac']])
-  it('case-insensitive + trim; blank/unmapped → null', () => {
-    expect(mapDepartmentToRegion(' APAC Digital ', map)).toBe('rg-apac')
-    expect(mapDepartmentToRegion('Services', map)).toBeNull()
-    expect(mapDepartmentToRegion(null, map)).toBeNull()
+describe('mapAttributesToRegion', () => {
+  it('exact match, case-insensitive + trim; blank/unmapped → null', () => {
+    const rules = ruleset([['companyName', 'Insight Australia', 'rg-apac']])
+    expect(mapAttributesToRegion(dir({ companyName: ' Insight Australia ' }), rules))
+      .toEqual({ regionId: 'rg-apac', attribute: 'companyName', conflict: false })
+    expect(mapAttributesToRegion(dir({ companyName: 'Insight USA' }), rules)).toBeNull()
+    expect(mapAttributesToRegion(dir({ companyName: null }), rules)).toBeNull()
   })
-  it('normalizeDepartment', () => {
-    expect(normalizeDepartment('  Foo ')).toBe('foo')
-    expect(normalizeDepartment(null)).toBe('')
+  it('prefix match — a country/state prefix maps a whole office group', () => {
+    const rules = ruleset([['officeLocation', 'au-', 'rg-apac', 'prefix']])
+    expect(mapAttributesToRegion(dir({ officeLocation: 'AU-Brisbane' }), rules)?.regionId).toBe('rg-apac')
+    expect(mapAttributesToRegion(dir({ officeLocation: 'UK-London' }), rules)).toBeNull()
+  })
+  it('precedence: higher-precedence attribute wins; divergent lower match flags conflict', () => {
+    // companyName (precedence 0) beats department (precedence 4); different regions → conflict.
+    const rules = ruleset([
+      ['companyName', 'Insight Australia', 'rg-apac'],
+      ['department', 'Services', 'rg-emea'],
+    ])
+    const m = mapAttributesToRegion(dir({ companyName: 'Insight Australia', department: 'Services' }), rules)
+    expect(m).toEqual({ regionId: 'rg-apac', attribute: 'companyName', conflict: true })
+  })
+  it('same region across attributes → no conflict', () => {
+    const rules = ruleset([
+      ['companyName', 'Insight Australia', 'rg-apac'],
+      ['country', 'Australia', 'rg-apac'],
+    ])
+    expect(mapAttributesToRegion(dir({ companyName: 'Insight Australia', country: 'Australia' }), rules)?.conflict).toBe(false)
   })
 })
 
@@ -138,27 +180,27 @@ describe('resolvePlacementViaManagerChain', () => {
 })
 
 describe('derivePlacement', () => {
-  const deptMap = new Map([['apac digital', 'rg-dept']])
+  const rules = ruleset([['department', 'APAC Digital', 'rg-dept']])
   it('chain UNIT wins (department ignored, region ignored)', async () => {
     const m = fakeManager({ u: { oid: 'kat', email: null } })
     const r = await derivePlacement(dir({ department: 'APAC Digital', oid: 'u' }), {
-      deptMap, unitOwnerMap: new Map([['kat', [unit('ou-mp', 'rg-x')]]]), leaderMap: new Map([['kat', 'rg-y']]),
+      rules, unitOwnerMap: new Map([['kat', [unit('ou-mp', 'rg-x')]]]), leaderMap: new Map([['kat', 'rg-y']]),
       getManager: m.get, caches: makeChainCaches(),
     })
     expect(r).toEqual({ orgUnitId: 'ou-mp', regionId: 'rg-x', ownerOid: 'kat', via: 'unit' })
   })
-  it('no unit → DEPARTMENT region wins over chain region', async () => {
+  it('no unit → ATTRIBUTE region wins over chain region', async () => {
     const m = fakeManager({ u: { oid: 'vp', email: null } })
     const r = await derivePlacement(dir({ department: 'APAC Digital', oid: 'u' }), {
-      deptMap, unitOwnerMap: new Map(), leaderMap: new Map([['vp', 'rg-chain']]),
+      rules, unitOwnerMap: new Map(), leaderMap: new Map([['vp', 'rg-chain']]),
       getManager: m.get, caches: makeChainCaches(),
     })
-    expect(r).toEqual({ regionId: 'rg-dept', via: 'department' })
+    expect(r).toEqual({ regionId: 'rg-dept', via: 'attribute', attribute: 'department', conflict: false })
   })
-  it('no unit, no department → chain REGION (manager)', async () => {
+  it('no unit, no attribute → chain REGION (manager)', async () => {
     const m = fakeManager({ u: { oid: 'vp', email: null } })
     const r = await derivePlacement(dir({ department: 'Services', oid: 'u' }), {
-      deptMap, unitOwnerMap: new Map(), leaderMap: new Map([['vp', 'rg-chain']]),
+      rules, unitOwnerMap: new Map(), leaderMap: new Map([['vp', 'rg-chain']]),
       getManager: m.get, caches: makeChainCaches(),
     })
     expect(r).toEqual({ regionId: 'rg-chain', via: 'manager' })
@@ -166,14 +208,14 @@ describe('derivePlacement', () => {
   it('nothing resolves → via null', async () => {
     const m = fakeManager({ u: { oid: 'vp', email: null } })
     const r = await derivePlacement(dir({ department: 'Services', oid: 'u' }), {
-      deptMap, unitOwnerMap: new Map(), leaderMap: new Map(), getManager: m.get, caches: makeChainCaches(),
+      rules, unitOwnerMap: new Map(), leaderMap: new Map(), getManager: m.get, caches: makeChainCaches(),
     })
     expect(r).toEqual({ via: null })
   })
   it('no oid → no walk', async () => {
     const m = fakeManager({})
     const r = await derivePlacement(dir({ oid: '' }), {
-      deptMap, unitOwnerMap: new Map([['kat', [unit('ou')]]]), leaderMap: new Map(), getManager: m.get, caches: makeChainCaches(),
+      rules, unitOwnerMap: new Map([['kat', [unit('ou')]]]), leaderMap: new Map(), getManager: m.get, caches: makeChainCaches(),
     })
     expect(r).toEqual({ via: null })
     expect(m.calls).toEqual([])

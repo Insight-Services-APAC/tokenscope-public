@@ -26,7 +26,7 @@ function fakeStore(
     loadCostOwningCandidates: vi.fn(async () => CANDIDATES),
     unplacedOrgUnitId: vi.fn(async () => 'ou-unplaced'),
     unplacedOrgUnitIdForRegion: vi.fn(async (regionId: string) => `ou-unplaced-${regionId}`),
-    loadDepartmentToRegion: vi.fn(async () => new Map<string, string>()),
+    loadDirectoryRegionRules: vi.fn(async () => ({ exact: new Map<string, string>(), prefix: [] })),
     loadActiveRegionLeaders: vi.fn(async () => new Map<string, string>()),
     loadActiveUnitOwners: vi.fn(async () => new Map()),
     createBillTeammate: vi.fn(async () => 'tm-new'),
@@ -64,14 +64,14 @@ describe('provisionAndPlace', () => {
     expect(store.setPlacementProvenance).toHaveBeenCalledWith('tm-new', { ownerOid: 'kat-oid' })
   })
 
-  it('no unit, DEPARTMENT region → region holding node, placed=false, provenance cleared', async () => {
+  it('no unit, ATTRIBUTE region → region holding node, placed=false, provenance cleared', async () => {
     const store = fakeStore()
     const r = await provisionAndPlace('dev@example.com', {
       store,
       lookupDirectory: async () => dirUser('CC-NONE', 'APAC Digital'),
-      derivePlacement: fakeDerive({ regionId: 'rg-apac', via: 'department' }),
+      derivePlacement: fakeDerive({ regionId: 'rg-apac', via: 'attribute', attribute: 'companyName', conflict: false }),
     })
-    expect(r).toMatchObject({ placed: false, placedVia: 'department' })
+    expect(r).toMatchObject({ placed: false, placedVia: 'attribute' })
     expect(store.createBillTeammate).toHaveBeenCalledWith(expect.objectContaining({ orgUnitId: 'ou-unplaced-rg-apac' }))
     expect(store.setPlacementProvenance).toHaveBeenCalledWith('tm-new', null)
   })

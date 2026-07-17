@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* eslint-disable no-console */
+ 
 /*
  * /tokenscope:status implementation — "is my Claude emitting to TokenScope, and
  * is the MCP connection (the query side) authed?"

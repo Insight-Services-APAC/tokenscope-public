@@ -93,3 +93,85 @@ describe('parseWorkerOpts', () => {
     expect(opts).toBeUndefined()
   })
 })
+
+/*
+ * startingAt / endingAt (#142) — the analytics-poll window override. The parser
+ * enforces the YYYY-MM-DD SHAPE plus CALENDAR validity (2026-13-40 must fail
+ * here with a clean validation path, not later as a Postgres ::date cast
+ * error); pairing + span validity ("both set, startingAt <= endingAt") is the
+ * registry's job, so a lone startingAt is KEPT
+ * here and dropped there. Any shape violation fails the whole safeParse →
+ * undefined → auto window (the fail-soft HTTP semantics: an operator typo must
+ * never 500 a scheduled dispatch).
+ */
+describe('parseWorkerOpts — startingAt / endingAt (#142 window override)', () => {
+  it('a valid YYYY-MM-DD pair is kept verbatim', async () => {
+    const opts = await parseWorkerOpts(makeEvent('{"startingAt":"2026-01-01","endingAt":"2026-06-30"}'))
+    expect(opts).toEqual({ startingAt: '2026-01-01', endingAt: '2026-06-30' })
+  })
+
+  it('a lone startingAt is kept by the PARSER (the registry enforces the pair)', async () => {
+    const opts = await parseWorkerOpts(makeEvent('{"startingAt":"2026-01-01"}'))
+    expect(opts).toEqual({ startingAt: '2026-01-01' })
+  })
+
+  it('a non-YYYY-MM-DD startingAt → undefined (whole opts rejected, fail-soft)', async () => {
+    await expect(parseWorkerOpts(makeEvent('{"startingAt":"2026-1-1","endingAt":"2026-06-30"}'))).resolves.toBeUndefined()
+  })
+
+  it('a shape-valid but CALENDAR-INVALID date (2026-13-40) → undefined — the .refine() catches it before Postgres ::date would', async () => {
+    await expect(parseWorkerOpts(makeEvent('{"startingAt":"2026-13-40","endingAt":"2026-12-31"}'))).resolves.toBeUndefined()
+  })
+
+  it('a real-month impossible day (2026-02-30) → undefined (fail-soft, auto window)', async () => {
+    await expect(parseWorkerOpts(makeEvent('{"startingAt":"2026-02-01","endingAt":"2026-02-30"}'))).resolves.toBeUndefined()
+  })
+
+  it('an RFC-3339 timestamp (not a bare date) → undefined — the regex is anchored', async () => {
+    await expect(
+      parseWorkerOpts(makeEvent('{"startingAt":"2026-01-01T00:00:00Z","endingAt":"2026-06-30"}')),
+    ).resolves.toBeUndefined()
+  })
+
+  it('a US-style date → undefined', async () => {
+    await expect(parseWorkerOpts(makeEvent('{"startingAt":"01-01-2026","endingAt":"2026-06-30"}'))).resolves.toBeUndefined()
+  })
+
+  it('a non-string endingAt (number) → undefined', async () => {
+    await expect(parseWorkerOpts(makeEvent('{"startingAt":"2026-01-01","endingAt":20260630}'))).resolves.toBeUndefined()
+  })
+
+  it('the window pair coexists with other opts; unknown keys still stripped', async () => {
+    const opts = await parseWorkerOpts(
+      makeEvent('{"startingAt":"2026-01-01","endingAt":"2026-01-31","deepRescan":true,"nope":1}'),
+    )
+    expect(opts).toEqual({ startingAt: '2026-01-01', endingAt: '2026-01-31', deepRescan: true })
+  })
+})
+
+/*
+ * externalOrgId (#142) — the analytics-poll org-scoping companion to the window
+ * override. The parser only requires a non-empty string; whether the id matches
+ * a reconciled org is the poller's concern (unknown id → clean no-op there).
+ */
+describe('parseWorkerOpts — externalOrgId (#142 org scoping)', () => {
+  it('a non-empty externalOrgId is kept verbatim', async () => {
+    const opts = await parseWorkerOpts(makeEvent('{"externalOrgId":"org-acme"}'))
+    expect(opts).toEqual({ externalOrgId: 'org-acme' })
+  })
+
+  it('an EMPTY-string externalOrgId → undefined (min(1) rejects; fail-soft, never 500)', async () => {
+    await expect(parseWorkerOpts(makeEvent('{"externalOrgId":""}'))).resolves.toBeUndefined()
+  })
+
+  it('a non-string externalOrgId (number) → undefined', async () => {
+    await expect(parseWorkerOpts(makeEvent('{"externalOrgId":42}'))).resolves.toBeUndefined()
+  })
+
+  it('externalOrgId coexists with a window pair (the recommended scoped re-pull shape)', async () => {
+    const opts = await parseWorkerOpts(
+      makeEvent('{"startingAt":"2026-01-01","endingAt":"2026-06-30","externalOrgId":"org-acme"}'),
+    )
+    expect(opts).toEqual({ startingAt: '2026-01-01', endingAt: '2026-06-30', externalOrgId: 'org-acme' })
+  })
+})

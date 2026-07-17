@@ -47,7 +47,6 @@ export default defineEventHandler(async (event) => {
   // exclusively a test concern.
   const pgStart = Date.now()
   let pgReachable = false
-  let pgLatencyMs = 0
   let pgError: string | null = null
   let activeMigration: string | null = null
   try {
@@ -76,11 +75,10 @@ export default defineEventHandler(async (event) => {
         }
       }
     })
-    pgLatencyMs = Date.now() - pgStart
   } catch (err) {
-    pgLatencyMs = Date.now() - pgStart
     pgError = err instanceof Error ? err.message : String(err)
   }
+  const pgLatencyMs = Date.now() - pgStart
 
   // ── Redis (not wired in MVP-Final) ────────────────────────────────
   // The `redis` / `ioredis` packages aren't in the dependency tree as
@@ -111,9 +109,8 @@ export default defineEventHandler(async (event) => {
     )
     lastSync = [...rows].map((r) => ({ source: r.source, ts: r.ts }))
   } catch {
-    // Non-fatal — leave lastSync as empty if the underlying tables
-    // don't exist in this env (shouldn't happen in normal operation).
-    lastSync = []
+    // Non-fatal — leave lastSync as empty (from the initializer) if the
+    // underlying tables don't exist in this env (shouldn't happen normally).
   }
 
   // ── Pipeline freshness (emit -> gather) ───────────────────────────
@@ -342,9 +339,8 @@ export default defineEventHandler(async (event) => {
       }
     })
   } catch {
-    // Non-fatal — leave workers as an empty array (table may be absent in a
-    // bootstrap env, or no worker has run yet).
-    workers = []
+    // Non-fatal — leave workers as an empty array (from the initializer): the
+    // table may be absent in a bootstrap env, or no worker has run yet.
   }
 
   // ── Infra reachability + telemetry read path (run concurrently) ────

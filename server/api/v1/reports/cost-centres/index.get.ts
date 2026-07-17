@@ -20,6 +20,7 @@
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { z } from 'zod'
 import { requireAuth } from '../../../../auth/rbac'
+import { resolveReportGrants } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
@@ -39,7 +40,7 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireAuth(event)
+  const session = await requireAuth(event)
   const query = await getValidatedQuery(event, (d) => Query.parse(d))
   const now = new Date()
   // Month OR custom from/to window. The window filters BURN; allocation is
@@ -53,7 +54,10 @@ export default defineEventHandler(async (event) => {
   const copilotChargeback = copilotChargebackEnabled()
 
   return await withRequestRls(event, async (tx) => {
-    const ccs = await fetchVisibleCostCentres(tx)
+    // A loosened policy mode (reportGrants.costCentre === 'all') makes every cost
+    // centre visible; non-elevated callers keep the owner/subtree predicate unchanged.
+    const grants = await resolveReportGrants(event, tx, session)
+    const ccs = await fetchVisibleCostCentres(tx, { unbounded: grants.costCentre === 'all' })
     const { cards, asOfDate, monthFloor, copilotChargebackPartialMonth } =
       await fetchCostCentreCards(tx, ccs, win, monthCtx, {
         copilotChargeback,

@@ -39,9 +39,8 @@ test.describe('Persona menu', () => {
   test('switching persona via the menu navigates to that persona landing', async ({ page }) => {
     await signInAs(page, 'developer')
     await switchPersonaViaMenu(page, 'admin')
-    // Wave VI — admin lands on /admin hub (h1 "Admin"); Region setup
-    // moved to /admin/region.
-    await expect(page.locator('h1')).toContainText('Admin')
+    // Admin lands on the Overview launcher (h1 "Overview").
+    await expect(page.locator('h1')).toContainText('Overview')
     await switchPersonaViaMenu(page, 'finance')
     await expect(page.locator('h1')).toContainText('Month-end cross-charge')
   })

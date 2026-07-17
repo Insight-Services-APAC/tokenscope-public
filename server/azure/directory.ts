@@ -51,6 +51,13 @@ export interface DirectoryUser {
   upn: string | null
   department: string | null
   jobTitle: string | null
+  // Geo/entity attributes for configurable region derivation (mig 0089). Any of
+  // these can drive a region rule (shared/placement/region-attributes.ts); which
+  // one is region-correlated is tenant-specific (companyName at Insight).
+  companyName: string | null
+  country: string | null
+  officeLocation: string | null
+  state: string | null
   // J4: Entra employeeOrgData — the finance-side placement hints. Soft
   // dependency: whether the tenant POPULATES these is unverified (see
   // docs/design/entra-auto-placement.md), so they are suggestion-grade,
@@ -144,10 +151,21 @@ interface GraphUser {
   userPrincipalName: string | null
   department: string | null
   jobTitle: string | null
+  // Geo/entity attributes for region derivation — all standard v1.0 `User`
+  // properties under the existing User.Read.All (no new scope).
+  companyName: string | null
+  country: string | null
+  officeLocation: string | null
+  state: string | null
   employeeOrgData?: { costCenter: string | null; division: string | null } | null
 }
 
-const SELECT_BASE = 'id,displayName,mail,userPrincipalName,department,jobTitle'
+// The 4 geo/entity attributes ride the base select — they are standard, widely
+// populated User props (unlike employeeOrgData). Per-field $select degradation
+// (drop only an offending field vs the all-or-nothing latch below) is a noted
+// fast-follow; risk is low because these are base User properties.
+const SELECT_BASE =
+  'id,displayName,mail,userPrincipalName,department,jobTitle,companyName,country,officeLocation,state'
 // employeeOrgData (costCenter/division) rides User.Read.All on v1.0, but
 // tenant population is unverified — and a tenant policy could reject the
 // property in $select. Degrade once per process rather than failing the
@@ -174,6 +192,10 @@ function toDirectoryUser(u: GraphUser): DirectoryUser {
     displayName: u.displayName ?? u.mail ?? u.userPrincipalName ?? u.id,
     department: u.department ?? null,
     jobTitle: u.jobTitle ?? null,
+    companyName: u.companyName ?? null,
+    country: u.country ?? null,
+    officeLocation: u.officeLocation ?? null,
+    state: u.state ?? null,
     costCenter: u.employeeOrgData?.costCenter ?? null,
     division: u.employeeOrgData?.division ?? null,
   }
@@ -189,12 +211,12 @@ function toDirectoryUser(u: GraphUser): DirectoryUser {
 // exercised in mock mode too — a B2B guest must be un-pickable everywhere.
 type MockDirectoryUser = DirectoryUser & { userPrincipalName: string }
 const MOCK_DIRECTORY: MockDirectoryUser[] = [
-  { oid: 'dir-oid-0001', email: 'sasha.kumar@example.com', mail: 'sasha.kumar@example.com', upn: 'sasha.kumar@example.com', userPrincipalName: 'sasha.kumar@example.com', displayName: 'Sasha Kumar', department: 'APAC Digital', jobTitle: 'Senior Engineer', costCenter: 'CC-4310 Digital APAC', division: 'Services' },
-  { oid: 'dir-oid-0002', email: 'tom.becker@example.com', mail: 'tom.becker@example.com', upn: 'tom.becker@example.com', userPrincipalName: 'tom.becker@example.com', displayName: 'Tom Becker', department: 'EMEA Data & AI', jobTitle: 'Engineer', costCenter: 'CC-2210 Data EMEA', division: 'Services' },
-  { oid: 'dir-oid-0003', email: 'mei.lin@example.com', mail: 'mei.lin@example.com', upn: 'mei.lin@example.com', userPrincipalName: 'mei.lin@example.com', displayName: 'Mei Lin', department: 'APAC Digital', jobTitle: 'Practice Lead', costCenter: 'CC-4310 Digital APAC', division: 'Services' },
-  { oid: 'dir-oid-0004', email: 'carlos.ferreira@example.com', mail: 'carlos.ferreira@example.com', upn: 'carlos.ferreira@example.com', userPrincipalName: 'carlos.ferreira@example.com', displayName: 'Carlos Ferreira', department: 'US Cloud', jobTitle: 'Architect', costCenter: null, division: null },
-  { oid: 'dir-oid-0005', email: 'nadia.haddad@example.com', mail: 'nadia.haddad@example.com', upn: 'nadia.haddad@example.com', userPrincipalName: 'nadia.haddad@example.com', displayName: 'Nadia Haddad', department: 'EMEA Data & AI', jobTitle: 'Engineering Manager', costCenter: 'CC-2210 Data EMEA', division: 'Services' },
-  { oid: 'dir-oid-0006', email: 'james.oconnor@example.com', mail: 'james.oconnor@example.com', upn: 'james.oconnor@example.com', userPrincipalName: 'james.oconnor@example.com', displayName: "James O'Connor", department: 'APAC Digital', jobTitle: 'Engineer', costCenter: 'CC-4310 Digital APAC', division: 'Services' },
+  { oid: 'dir-oid-0001', email: 'sasha.kumar@example.com', mail: 'sasha.kumar@example.com', upn: 'sasha.kumar@example.com', userPrincipalName: 'sasha.kumar@example.com', displayName: 'Sasha Kumar', department: 'APAC Digital', jobTitle: 'Senior Engineer', companyName: 'Insight Australia', country: 'Australia', officeLocation: 'AU-Sydney', state: null, costCenter: 'CC-4310 Digital APAC', division: 'Services' },
+  { oid: 'dir-oid-0002', email: 'tom.becker@example.com', mail: 'tom.becker@example.com', upn: 'tom.becker@example.com', userPrincipalName: 'tom.becker@example.com', displayName: 'Tom Becker', department: 'EMEA Data & AI', jobTitle: 'Engineer', companyName: 'Insight United Kingdom', country: 'United Kingdom', officeLocation: 'UK-London', state: null, costCenter: 'CC-2210 Data EMEA', division: 'Services' },
+  { oid: 'dir-oid-0003', email: 'mei.lin@example.com', mail: 'mei.lin@example.com', upn: 'mei.lin@example.com', userPrincipalName: 'mei.lin@example.com', displayName: 'Mei Lin', department: 'APAC Digital', jobTitle: 'Practice Lead', companyName: 'Insight Australia', country: 'Australia', officeLocation: 'AU-Sydney', state: null, costCenter: 'CC-4310 Digital APAC', division: 'Services' },
+  { oid: 'dir-oid-0004', email: 'carlos.ferreira@example.com', mail: 'carlos.ferreira@example.com', upn: 'carlos.ferreira@example.com', userPrincipalName: 'carlos.ferreira@example.com', displayName: 'Carlos Ferreira', department: 'US Cloud', jobTitle: 'Architect', companyName: 'Insight USA', country: 'United States', officeLocation: 'US-Chicago', state: null, costCenter: null, division: null },
+  { oid: 'dir-oid-0005', email: 'nadia.haddad@example.com', mail: 'nadia.haddad@example.com', upn: 'nadia.haddad@example.com', userPrincipalName: 'nadia.haddad@example.com', displayName: 'Nadia Haddad', department: 'EMEA Data & AI', jobTitle: 'Engineering Manager', companyName: 'Insight United Kingdom', country: 'United Kingdom', officeLocation: 'UK-London', state: null, costCenter: 'CC-2210 Data EMEA', division: 'Services' },
+  { oid: 'dir-oid-0006', email: 'james.oconnor@example.com', mail: 'james.oconnor@example.com', upn: 'james.oconnor@example.com', userPrincipalName: 'james.oconnor@example.com', displayName: "James O'Connor", department: 'APAC Digital', jobTitle: 'Engineer', companyName: 'Insight Australia', country: 'Australia', officeLocation: 'AU-Sydney', state: null, costCenter: 'CC-4310 Digital APAC', division: 'Services' },
   // DUAL-IDENTITY PAIR (issue #121, the Rob O'Connor shape): one human with a
   // standard `@example.com` account (dir-oid-0007) AND a privileged/CLD account
   // (dir-oid-0007-cld) whose UPN is on the tenant `*.onmicrosoft.com` domain.
@@ -202,16 +224,16 @@ const MOCK_DIRECTORY: MockDirectoryUser[] = [
   // (mig 0083) is what keeps it un-pickable — when an admin configures a pattern
   // like `*@contoso.onmicrosoft.com`. Out of the box (no patterns) BOTH
   // are pickable (fail-open). Exercised by the exclusion tests.
-  { oid: 'dir-oid-0007', email: 'rio.tanaka@example.com', mail: 'rio.tanaka@example.com', upn: 'rio.tanaka@example.com', userPrincipalName: 'rio.tanaka@example.com', displayName: 'Rio Tanaka', department: 'APAC Cyber Security', jobTitle: 'Security Lead', costCenter: 'CC-4520 Cyber APAC', division: 'Services' },
-  { oid: 'dir-oid-0007-cld', email: 'rtanaka-cld@contoso.onmicrosoft.com', mail: null, upn: 'rtanaka-cld@contoso.onmicrosoft.com', userPrincipalName: 'rtanaka-cld@contoso.onmicrosoft.com', displayName: 'Rio Tanaka (CLD)', department: 'APAC Cyber Security', jobTitle: 'Security Lead', costCenter: 'CC-4520 Cyber APAC', division: 'Services' },
+  { oid: 'dir-oid-0007', email: 'rio.tanaka@example.com', mail: 'rio.tanaka@example.com', upn: 'rio.tanaka@example.com', userPrincipalName: 'rio.tanaka@example.com', displayName: 'Rio Tanaka', department: 'APAC Cyber Security', jobTitle: 'Security Lead', companyName: 'Insight Australia', country: 'Australia', officeLocation: 'AU-Sydney', state: null, costCenter: 'CC-4520 Cyber APAC', division: 'Services' },
+  { oid: 'dir-oid-0007-cld', email: 'rtanaka-cld@contoso.onmicrosoft.com', mail: null, upn: 'rtanaka-cld@contoso.onmicrosoft.com', userPrincipalName: 'rtanaka-cld@contoso.onmicrosoft.com', displayName: 'Rio Tanaka (CLD)', department: 'APAC Cyber Security', jobTitle: 'Security Lead', companyName: 'Insight Australia', country: 'Australia', officeLocation: 'AU-Sydney', state: null, costCenter: 'CC-4520 Cyber APAC', division: 'Services' },
   // A genuinely cloud-only real user whose ONLY identity is on the onmicrosoft
   // domain (no `@example.com` twin). Proves the portable default is EMPTY: with
   // no exclusion pattern configured this user stays pickable; a blanket
   // `*@*.onmicrosoft.com` default would wrongly exclude them (why we don't ship one).
-  { oid: 'dir-oid-0008', email: 'kai.wong@contoso.onmicrosoft.com', mail: null, upn: 'kwong@contoso.onmicrosoft.com', userPrincipalName: 'kwong@contoso.onmicrosoft.com', displayName: 'Kai Wong', department: 'APAC Digital', jobTitle: 'Consultant', costCenter: null, division: null },
+  { oid: 'dir-oid-0008', email: 'kai.wong@contoso.onmicrosoft.com', mail: null, upn: 'kwong@contoso.onmicrosoft.com', userPrincipalName: 'kwong@contoso.onmicrosoft.com', displayName: 'Kai Wong', department: 'APAC Digital', jobTitle: 'Consultant', companyName: 'Insight Australia', country: 'Australia', officeLocation: 'AU-Sydney', state: null, costCenter: null, division: null },
   // A B2B GUEST (partner/client/vendor invited into the tenant): #EXT# UPN.
   // Must NEVER be pickable/provisionable as a teammate.
-  { oid: 'dir-oid-9001', email: 'partner@vendor.example', mail: 'partner@vendor.example', upn: 'partner_vendor.example#ext#@contoso.onmicrosoft.com', userPrincipalName: 'partner_vendor.example#EXT#@contoso.onmicrosoft.com', displayName: 'Partner Guest', department: null, jobTitle: null, costCenter: null, division: null },
+  { oid: 'dir-oid-9001', email: 'partner@vendor.example', mail: 'partner@vendor.example', upn: 'partner_vendor.example#ext#@contoso.onmicrosoft.com', userPrincipalName: 'partner_vendor.example#EXT#@contoso.onmicrosoft.com', displayName: 'Partner Guest', department: null, jobTitle: null, companyName: null, country: null, officeLocation: null, state: null, costCenter: null, division: null },
 ]
 
 const isGuestUpn = (upn: string | null | undefined): boolean => (upn ?? '').toUpperCase().includes('#EXT#')
@@ -277,6 +299,32 @@ export async function searchDirectory(query: string, limit = 15): Promise<Direct
  * displayName substring. 0 or >1 hits, or only a guest → null (caller leaves the
  * user unplaced, enriched only by the bill email — never a guessed identity).
  */
+/**
+ * Sample up to `limit` directory users for the region-attribute field-distribution
+ * diagnostic. BEST-EFFORT, re-runnable, NOT a guaranteed-random sample — Graph
+ * returns its default ordering, so on a large tenant the first page may skew.
+ * Employees only (guests excluded). One page (no nextLink paging) — the diagnostic
+ * is a directional "which attribute correlates to region", not a census.
+ * TODO(fast-follow): 429 backoff in graphGet; per-field $select degradation.
+ */
+export async function sampleDirectoryUsers(limit = 200): Promise<DirectoryUser[]> {
+  const top = Math.min(Math.max(limit, 1), 999)
+  const notGuest = (u: GraphUser | MockDirectoryUser) =>
+    !((u as { userPrincipalName?: string | null }).userPrincipalName ?? '').toUpperCase().includes('#EXT#')
+  if (!isRealGraph()) return MOCK_DIRECTORY.filter(notGuest).slice(0, top)
+  const mkParams = () => new URLSearchParams({ $select: activeSelect(), $top: String(top) })
+  try {
+    const json = await graphGet<{ value: GraphUser[] }>('/users', mkParams())
+    return (json.value ?? []).filter(notGuest).map(toDirectoryUser)
+  } catch (err) {
+    const isSelectRejection = !orgDataUnavailable && err instanceof Error && err.message.includes('(400)')
+    if (!isSelectRejection) throw err
+    orgDataUnavailable = true
+    const json = await graphGet<{ value: GraphUser[] }>('/users', mkParams())
+    return (json.value ?? []).filter(notGuest).map(toDirectoryUser)
+  }
+}
+
 export async function getDirectoryUserByMailOrUpn(email: string): Promise<DirectoryUser | null> {
   const e = email.trim().toLowerCase()
   if (!e || !e.includes('@')) return null

@@ -12,7 +12,8 @@ import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type * as schema from '../../drizzle/schema'
 import type { PlacementStore } from './placement-service'
-import type { OwnedUnit } from './region-derivation'
+import type { OwnedUnit, RegionRuleSet } from './region-derivation'
+import type { RegionAttributeKey } from '../../shared/placement/region-attributes'
 
 type Db = PostgresJsDatabase<typeof schema>
 
@@ -102,12 +103,35 @@ export function makePlacementStore(db: Db): PlacementStore {
       return id
     },
 
-    async loadDepartmentToRegion() {
-      // department_lower → region_id (the curated primary signal). Cached per run by the
-      // caller; small table.
-      const rows = await db.execute<{ department_lower: string; region_id: string }>(sql`
-        SELECT department_lower, region_id::text AS region_id FROM department_to_region`)
-      return new Map(rows.map((r) => [r.department_lower, r.region_id]))
+    async loadDirectoryRegionRules(): Promise<RegionRuleSet> {
+      // Curated (attribute, match_value, match_mode) → region rules. Cached per run
+      // by the caller; small table. Exact rules → a keyed map (O(1)); prefix rules →
+      // a list scanned longest-first so the most specific prefix wins.
+      const rows = await db.execute<{
+        attribute: string
+        match_value: string
+        match_mode: string
+        region_id: string
+      }>(sql`
+        SELECT attribute, match_value, match_mode, region_id::text AS region_id
+        FROM directory_region_rule`)
+      const exact: RegionRuleSet['exact'] = new Map()
+      const prefix: RegionRuleSet['prefix'] = []
+      for (const r of rows) {
+        const attr = r.attribute as RegionAttributeKey
+        if (r.match_mode === 'prefix') {
+          prefix.push({ attribute: attr, value: r.match_value, regionId: r.region_id })
+        } else {
+          let m = exact.get(attr)
+          if (!m) {
+            m = new Map()
+            exact.set(attr, m)
+          }
+          m.set(r.match_value, r.region_id)
+        }
+      }
+      prefix.sort((a, b) => b.value.length - a.value.length)
+      return { exact, prefix }
     },
 
     async loadActiveRegionLeaders() {

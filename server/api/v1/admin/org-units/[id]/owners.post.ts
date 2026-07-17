@@ -108,7 +108,7 @@ export default defineEventHandler(async (event) => {
     let ownerRegionId: string
     let ownerEmail: string
     let ownerDisplayName: string | null
-    let adopted = false
+    let adopted: boolean
     let provisioned = false
 
     if (dir) {

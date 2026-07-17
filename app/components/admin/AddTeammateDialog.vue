@@ -20,7 +20,7 @@ import { consola } from 'consola'
 import UiButton from '../ui/Button.vue'
 import { useModalA11y } from '../../composables/useModalA11y'
 import { apiErrorDetail } from '../../composables/useApiError'
-import { ROLES, type Role } from '#shared/auth/roles'
+import { SELECTABLE_ROLES, roleLabel, type Role } from '#shared/auth/roles'
 
 interface DirectoryHit {
   oid: string
@@ -69,8 +69,8 @@ const callerIsOrgWide = computed(
 )
 const grantableRoles = computed<Role[]>(() =>
   callerIsOrgWide.value
-    ? [...ROLES]
-    : ROLES.filter((r) => r !== 'global-finops' && r !== 'platform-admin'),
+    ? [...SELECTABLE_ROLES]
+    : SELECTABLE_ROLES.filter((r) => r !== 'global-finops' && r !== 'platform-admin'),
 )
 
 // Shared dialog a11y; onOpen resets the search/placement form on each open.
@@ -281,7 +281,7 @@ function errText(e: unknown, fallback: string): string {
             class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
             data-testid="at-role"
           >
-            <option v-for="r in grantableRoles" :key="r" :value="r">{{ r }}</option>
+            <option v-for="r in grantableRoles" :key="r" :value="r">{{ roleLabel(r) }}</option>
           </select>
 
           <p v-if="error" class="text-xs text-rag-red mt-3" data-testid="add-teammate-error" role="alert">{{ error }}</p>

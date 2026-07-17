@@ -21,9 +21,10 @@
  * non-owner DB role lands; until then this app-level clamp is the live
  * gate — see server/auth/allocation-scope.ts for the same rationale.)
  */
-import { defineEventHandler } from 'h3'
+import { createError, defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireRole } from '../../../../../auth/rbac'
+import { orgSubtreeScopePredicate } from '../../../../../auth/org-subtree-scope'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { requireUuidParam } from '../../../../../utils/require-uuid-param'
 import {
@@ -44,7 +45,7 @@ interface VelocityRow extends Record<string, unknown> {
 const ROLLING_WEEKS = 4
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'manager', 'admin', 'global-finops')
+  await requireRole(event, 'manager', 'admin', 'global-finops')
   const ouId = requireUuidParam(event, 'ouId')
 
   // Spike-threshold dial (mig 0049): resolved for the PRACTICE's region
@@ -53,22 +54,46 @@ export default defineEventHandler(async (event) => {
   // matching velocity-watch's per-teammate-region inbox verdicts).
   // Echoed in the response so the UI can label the bar it flags against.
   const { rows, flagThreshold } = await withRequestRls(event, async (tx) => {
-    const ouRegion = await tx.execute<{ region_id: string }>(sql`
-      SELECT region_id::text AS region_id FROM org_unit WHERE id = ${ouId}::uuid LIMIT 1
+    // Authorize the FOCUS ou itself (anti-IDOR, sg-H3 leak fix): a region admin passing
+    // a foreign-region ouId must 403, NOT silently read that region. The old clause
+    // unbounded admins by role only (`role IN ('admin','global-finops')`), but org paths
+    // are unique only per-region — so a foreign ouId leaked another region's per-teammate
+    // spend. orgSubtreeScopePredicate region-clamps admins exactly like its siblings
+    // (practice/[ouId].get.ts / managerScopePredicate); global-finops/platform-admin stay
+    // unbounded. A non-existent OR out-of-scope ouId does not resolve → 403.
+    const focusRows = await tx.execute<{ region_id: string }>(sql`
+      SELECT region_id::text AS region_id FROM org_unit
+      WHERE id = ${ouId}::uuid AND ${orgSubtreeScopePredicate('org_unit')}
+      LIMIT 1
     `)
+    const focus = [...focusRows][0]
+    if (!focus) {
+      throw createError({
+        statusCode: 403,
+        statusMessage: 'Forbidden',
+        data: {
+          type: 'https://tokenscope.example.com/errors/forbidden',
+          title: 'Forbidden',
+          status: 403,
+          detail: 'org unit not in your scope',
+        },
+      })
+    }
     const threshold = await resolveGovernanceSetting(
       tx,
       GOV_VELOCITY_SPIKE_THRESHOLD,
-      [...ouRegion][0]?.region_id ?? session.regionId,
+      // The subject org-unit decides the bar (R1 F3). Now that a foreign region 403s
+      // above, this is the caller's own region for an admin, any region for global.
+      focus.region_id,
     )
     const result = await tx.execute<VelocityRow>(sql`
       WITH ouscope AS (
-        SELECT id FROM org_unit
-        WHERE path <@ (SELECT path FROM org_unit WHERE id = ${ouId}::uuid)
-          AND (
-            current_setting('app.user_role', true) IN ('admin', 'global-finops')
-            OR path <@ current_setting('app.user_org_path', true)::ltree
-          )
+        -- Region-clamp the subtree expansion too (not just the focus check): paths are
+        -- unique per-region, so a bare \`path <@ focus.path\` could pull colliding paths
+        -- from ANOTHER region. orgSubtreeScopePredicate wraps the region clamp around it.
+        SELECT ou.id FROM org_unit ou
+        WHERE ou.path <@ (SELECT path FROM org_unit WHERE id = ${ouId}::uuid)
+          AND ${orgSubtreeScopePredicate('ou')}
       ),
       weekly AS (
         SELECT t.id AS teammate_id,

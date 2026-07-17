@@ -4,7 +4,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
-export DATABASE_URL="${DATABASE_URL:-postgresql://tokenscope:tokenscope@${CW_WORKER_NAME:-lead-TokenScope}-postgres:5432/tokenscope}"
+export DATABASE_URL="${DATABASE_URL:-postgresql://tokenscope:tokenscope@${CW_WORKER_NAME:-tokenscope}-postgres:5432/tokenscope}"
 export NUXT_AZURE_MONITOR_ENDPOINT="http://127.0.0.1:4319"
 
 echo "[spike] dev stack up (postgres)…"

@@ -29,6 +29,7 @@ export type InboxCategory =
   | 'connector-health' // TODO(convergence-followup): no producer wired; no connector_health table yet
   | 'read-path-stale' // the OTel read path (azure-monitor-read gatherer) has silently stalled/failed while clients still emit (read-path-health worker); admin-routed
   | 'copilot-bill-unsettled' // a Copilot org-month has usage but no read license SKU line (copilot-pool-bill worker) — the month reports unsettled; admin-routed (finance concern)
+  | 'copilot-bill-unclassified' // a Copilot org-month booked unclassified SKU spend, or the C1 conservation assertion tripped (copilot-pool-bill worker, mig 0085) — classify the SKU + re-run the month; admin-routed (finance concern)
   | 'project-ending-soon' // D3: a project a dev is tagged to enters its end_date warning window — re-tag ahead
   | 'project-ended-retag' // D2a: a dev's spend spilled to unallocated because the project ended — re-tag the spilled portion
 
@@ -130,6 +131,7 @@ function defaultSeverity(category: InboxCategory): 'info' | 'attention' | 'urgen
     case 'read-path-stale':
       return 'urgent'
     case 'copilot-bill-unsettled':
+    case 'copilot-bill-unclassified':
       return 'attention'
     case 'velocity-warning':
     case 'untagged-backlog':
@@ -163,10 +165,12 @@ async function resolveRecipients(
     case 'sync-conflict':
     case 'structural-conflict':
     case 'connector-health':
-    case 'copilot-bill-unsettled': {
+    case 'copilot-bill-unsettled':
+    case 'copilot-bill-unclassified': {
       // Admin-routed, region-scoped when derivable (the org's region, passed as input.regionId);
-      // otherwise the cross-region finance/ops roles only. A missing-license-SKU month is a
-      // finance data-correctness concern → global-finops / platform-admin (+ the region's admin).
+      // otherwise the cross-region finance/ops roles only. A missing-license-SKU month — or an
+      // unclassified/conservation-break month (D3) — is a finance data-correctness concern
+      // → global-finops / platform-admin (+ the region's admin).
       const region = await deriveAlertRegion(db, input)
       return {
         recipientIds: await resolveAdmins(db, region),

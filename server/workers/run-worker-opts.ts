@@ -15,17 +15,48 @@
  *  - `apply` (privileged-identity-cleanup) — the destructive-apply gate: without
  *    it the cleanup worker only REPORTS; with it (and only via this signed body,
  *    never the UI trigger) it may deactivate excluded teammates, under a hard cap.
- * Every other worker ignores both. The shape is deliberately generic/optional.
+ *  - `startingAt` / `endingAt` (analytics-poll) — override the default trailing
+ *    30-day revision window with an explicit YYYY-MM-DD span. The operator lever
+ *    for the #142 historical re-split: re-pulling a pre-split period rewrites its
+ *    collapsed rows as per-surface lanes (the poller's stale-row prune converges
+ *    the old collapsed rows). The Enterprise Analytics API holds data from
+ *    2026-01-01, so that is the earliest useful startingAt.
+ *    OPERATOR WARNING: without `externalOrgId` the override re-pulls the FULL
+ *    window for EVERY reconciled org, serially, against the 60-RPM org-wide
+ *    Enterprise API cap that reconciliation-sync shares — a multi-month
+ *    all-orgs re-pull can run long and starve that worker's tick. Prefer
+ *    scoping to one org per invocation.
+ *  - `externalOrgId` (analytics-poll) — scope the poll (and therefore a window
+ *    override) to ONE reconciled org's external id. Unknown id → clean no-op
+ *    (orgsPolled 0), visible in the worker result.
+ * Every other worker ignores these. The shape is deliberately generic/optional.
  */
 import { readRawBody, type H3Event } from 'h3'
 import { z } from 'zod'
 import type { WorkerRunContext } from './registry'
 
+const isoDay = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD')
+  .refine((s) => {
+    // Calendar-valid, not just shape-valid: 2026-13-40 must fail HERE with a
+    // clean validation path, not later as a raw Postgres ::date cast error.
+    const [y, m, d] = s.split('-').map(Number)
+    const dt = new Date(Date.UTC(y!, m! - 1, d!))
+    return dt.getUTCFullYear() === y && dt.getUTCMonth() === m! - 1 && dt.getUTCDate() === d
+  }, 'not a real calendar date')
+
 // Unknown keys are STRIPPED (not rejected) — forward-compatible with a future
 // scheduler that sends options this build doesn't know about, and defensive
-// against noise. Each flag must be a real boolean.
+// against noise.
 export const workerOptsSchema = z
-  .object({ deepRescan: z.boolean().optional(), apply: z.boolean().optional() })
+  .object({
+    deepRescan: z.boolean().optional(),
+    apply: z.boolean().optional(),
+    startingAt: isoDay.optional(),
+    endingAt: isoDay.optional(),
+    externalOrgId: z.string().min(1).optional(),
+  })
   .strip()
 
 /*

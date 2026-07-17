@@ -135,13 +135,23 @@ export interface ProviderSplitEntry {
 }
 
 /**
- * The Across-Regions per-provider split (whole company, `v_complete_usage`). The
- * three `spendUsd` values SUM BACK to the genuine headline (every record's `tool`
- * lands in exactly one bucket — `other` is the catch-all incl. NULL tool).
+ * The per-provider §A usage split (whole company or region-scoped,
+ * `v_complete_usage`). The three-lane §A ceiling (lane-visuals V1): the THREE
+ * named §A usage lanes — `claude-code` → `claudeCode`, `copilot-cli` →
+ * `copilotCli`, `copilot-agent` → `copilotAgent` — PLUS the standing live
+ * `other` catch-all (unknown tools, NULL from reconciliation deltas). The four
+ * `spendUsd` values SUM BACK to the genuine headline (every record's `tool`
+ * lands in exactly one bucket). NOTE: `copilot-agent` is structurally absent
+ * from `v_complete_usage` today (mig 0086 owner decision — the coding-agent
+ * lane feeds neither union arm), so `copilotAgent` reads 0 until the owner
+ * follow-up lands a non-taggable completeness feed; the bucket exists so that
+ * spend surfaces under its own lane the day it does, instead of silently
+ * folding into `other` (the old 2+catch-all shape's data loss).
  */
 export interface ProviderSplit {
   claudeCode: ProviderSplitEntry
-  copilot: ProviderSplitEntry
+  copilotCli: ProviderSplitEntry
+  copilotAgent: ProviderSplitEntry
   other: ProviderSplitEntry
 }
 
@@ -183,6 +193,64 @@ export interface ChargeDailyPoint {
   chargeUsd: number
 }
 
+// ── §B chargeback lane series (bill lane, per-lane — lane-visuals V2) ─────────
+/**
+ * One `(day, lane)` point of the §B ANTHROPIC chargeback over the window
+ * (`v_finance_bill_chargeback` GROUP BY tool, mapped to registry lane ids via
+ * `chargeToVendor`). The per-lane widening of {@link ChargeDailyPoint}: carried
+ * ALONGSIDE the total `chargeSeries` (which stays zero-filled and authoritative),
+ * and cent-exactly conserving — Σ lanes per day == that day's `chargeUsd`
+ * (pinned by the reports integration suite). Copilot lanes are structurally
+ * ABSENT (the mig-0085 firewall: pooled, MONTH-grained, never in this view).
+ */
+export interface ChargeLanePoint {
+  /** `YYYY-MM-DD` (UTC day). */
+  day: string
+  /** Registry lane id (`claude`, `claude-ai`, … — never a raw tool literal). */
+  lane: string
+  /** Σ chargeback `bill_usd` for that (day, lane). */
+  chargeUsd: number
+}
+
+// ── §B billed showback weekly lanes (bill lane — the usage-view composition hero) ─
+/**
+ * One `(ISO week, lane)` cell of the BILLED showback over the active window
+ * (`v_finance_bill_showback` GROUP BY `date_trunc('week', period_date)` × tool,
+ * tools mapped to registry lane ids via `toolToVendor`). Feeds the usage-view
+ * "Where the AI spend goes" hero + its pinned "Spend by surface · billed" donut
+ * (lane-visuals iter-2 I1). ANTHROPIC surfaces only: the §A GitHub usage tools
+ * (`copilot-cli` / `copilot-agent` — telemetry-basis rows riding the showback
+ * view) are firewalled OUT (GITHUB_FIREWALL_EXCLUSIONS), so a usage-basis figure
+ * can never surface inside a billed-basis element. Σ cells == the window's
+ * (GitHub-excluded) showback total, cent-exact (test-pinned). NEVER summed with
+ * any §A usage figure.
+ */
+export interface ShowbackWeeklyLaneCell {
+  /** `YYYY-MM-DD` — the ISO week's Monday (UTC `date_trunc('week')`). */
+  weekStart: string
+  /** Registry lane id (`claude`, `claude-ai`, … — never a raw tool literal). */
+  lane: string
+  /** Σ showback `bill_usd` for that (week, lane). */
+  usd: number
+}
+
+/**
+ * One lane's §B chargeback total over the active window — the ChargebackSplitCard
+ * donut operand (lane-visuals V2). Anthropic lanes come day-grained from
+ * `v_finance_bill_chargeback` (Σ == `anthropicChargeableUsd`, cent-exact); the
+ * three Copilot §B lanes come pooled-monthly from `v_finance_copilot_pool_chargeback`
+ * and are present ONLY when copilot chargeback is validated AND the window is
+ * month-aligned (the same gate as the KPI fold — never a partial-month slice).
+ * `copilot-unclassified` rides along VISIBLE but is excluded from every
+ * chargeable sum (the FinanceCouTable badge convention).
+ */
+export interface ChargebackLaneRow {
+  /** Registry lane id. */
+  lane: string
+  /** Σ chargeback USD for the lane over the window. */
+  chargeUsd: number
+}
+
 // ── §B chargeback day-of-week (bill lane — the §B analogue of the seasonality heatmap) ─
 /**
  * One day-of-week bucket of §B ANTHROPIC chargeback over the active window
@@ -197,10 +265,15 @@ export interface ChargeDowBucket {
 }
 
 // ── Across trend (day-grain, vendor-stacked) ─────────────────────────────────
-/** One point in the Across trend: a `(day, vendor)` cost. `key` is the `tool` id. */
+/**
+ * One point in the Across trend: a `(day, vendor)` cost. `key` is the `tool` id —
+ * the three named §A usage lanes + the `other` catch-all (the three-lane §A
+ * ceiling, lane-visuals V1). `copilot-agent` is emitted only when it carries
+ * spend (structurally absent from `v_complete_usage` today — see ProviderSplit).
+ */
 export interface AcrossTrendPoint {
   day: string
-  key: 'claude-code' | 'copilot-cli' | 'other'
+  key: 'claude-code' | 'copilot-cli' | 'copilot-agent' | 'other'
   value: number
 }
 
@@ -220,6 +293,21 @@ export interface AcrossTrend {
    * the two lanes are NEVER summed. Copilot is pooled/monthly, so it is absent here.
    */
   chargeSeries: ChargeDailyPoint[]
+  /**
+   * The per-LANE widening of `chargeSeries` (lane-visuals V2): the same §B window
+   * GROUP BY tool, mapped to registry lane ids. Σ lanes per day == that day's
+   * `chargeUsd` (cent-exact, test-pinned); `chargeSeries` remains the zero-filled
+   * total the run-rate tail and sparklines bind on.
+   */
+  chargeLanes: ChargeLanePoint[]
+  /**
+   * The BILLED showback weekly lane cells over the SAME window (iter-2 I1) — the
+   * usage-view composition hero's series (and, summed per lane, its pinned donut).
+   * `window` above is the ONE shared window object hero + donut both bind on.
+   * Billed basis (`v_finance_bill_showback`, GitHub §A tools excluded); never
+   * summed with the §A `series`.
+   */
+  showbackWeeklyLanes: ShowbackWeeklyLaneCell[]
 }
 
 // ── Seasonality (day-of-week × ISO-week heatmap) ─────────────────────────────

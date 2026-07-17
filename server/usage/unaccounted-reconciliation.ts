@@ -25,10 +25,29 @@
  * from actual_spend (pure-metered, bill ≈ usage); copilot-cli GROSS from reconciliation_record
  * (GitHub ai_credit/usage, per-(user, day)). Tool-agnostic — adding a tool means extending the
  * view, not this query.
+ *
+ * EXCEPT the DISPLAY-ONLY usage lanes (GITHUB_INGEST_ONLY_USAGE_TOOLS): 'copilot-agent'
+ * (mig 0086, design D4) is the OTel-INVISIBLE coding-agent lane — no session ever emits it,
+ * so "API − OTel" would equal the FULL amount every day and every coding-agent dollar would
+ * become a permanent, untaggable worklist item. It is usage display only (the view + its
+ * §A display readers), never a needs-tagging record. copilot-cli (interactive) semantics are
+ * unchanged: enrolled containers emit OTel, so the gap is genuinely taggable usage.
+ *
+ * INTENTIONAL SURFACE DIVERGENCE (owner decision, r1 finding 5): because this exclusion
+ * means the coding-agent lane never writes unaccounted_usage — and it has no OTel
+ * attribution rows either — 'copilot-agent' dollars are ABSENT from v_complete_usage
+ * (attribution ∪ unaccounted) and therefore from the completeness rollups (Across /
+ * Regional / Cost-Centre usage cards), while remaining §A-VISIBLE in
+ * v_teammate_usage_daily readers (e.g. Finance Overage Drivers). Folding them into
+ * v_complete_usage would need a NON-TAGGABLE completeness feed (a union arm that can
+ * never become a worklist item) — an owner follow-up, deliberately not done here. See
+ * mig 0086's header; pinned by tests/integration/usage/copilot-usage-completeness.test.ts.
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
 import type * as schema from '../../drizzle/schema'
+import { GITHUB_INGEST_ONLY_USAGE_TOOLS } from '../../shared/usage/github-surface'
+import { laneListSql } from '../../shared/usage/vendor'
 
 type Db = PostgresJsDatabase<typeof schema>
 
@@ -62,6 +81,8 @@ export async function reconcileUnaccountedUsage(
       SELECT teammate_id, day, tool, usage_usd AS api_usd, COALESCE(tokens, 0) AS api_tokens
       FROM v_teammate_usage_daily
       WHERE day >= ${opts.startDate}::date AND day <= ${opts.endDate}::date
+        -- Display-only lanes (see header): never a taggable unaccounted record.
+        AND tool NOT IN (${laneListSql(GITHUB_INGEST_ONLY_USAGE_TOOLS)})
         ${teammateFilter}
     ),
     otel AS (
@@ -115,6 +136,10 @@ export async function reconcileUnaccountedUsage(
     AND NOT EXISTS (
       SELECT 1 FROM v_teammate_usage_daily v
       WHERE v.teammate_id = u.teammate_id AND v.day = u.day AND v.tool = u.tool
+        -- Same display-only exclusion as the api CTE: the effective §A source is the
+        -- FILTERED view, so a (bug-written) display-only key must read as an orphan
+        -- and self-heal, not linger because the raw view still backs it.
+        AND v.tool NOT IN (${laneListSql(GITHUB_INGEST_ONLY_USAGE_TOOLS)})
     )`
   // Untagged orphan: DELETE outright — no tag to keep, and a $0 row would be a permanent ghost in
   // "My projects" / needs-tagging. (If the view later re-produces the key, the upsert re-inserts.)

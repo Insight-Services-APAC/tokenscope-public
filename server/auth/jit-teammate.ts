@@ -243,6 +243,7 @@ export async function resolveOrCreateTeammate(
       })
       throw new Error(
         `JIT teammate bind failed: email ${claims.email} is already owned by another identity (oid ${claims.oid} differs). Resolve the duplicate teammate before this user can sign in.`,
+        { cause: err },
       )
     }
     throw err

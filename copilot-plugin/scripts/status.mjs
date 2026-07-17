@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* eslint-disable no-console */
+ 
 /*
  * tokenscope-status (Copilot CLI) — "is my Copilot CLI emitting to TokenScope, and
  * did a record actually LAND?" The Copilot analogue of the Claude /tokenscope:status
@@ -284,7 +284,7 @@ function probeEmissionAuth(stateD) {
   try {
     hasAuth = Boolean(JSON.parse(res.stdout || '{}').Authorization)
   } catch {
-    hasAuth = false
+    // Unparseable helper output → treat as no auth; `hasAuth` stays false.
   }
   return interpretEmissionProbe({ status: res.status, stdoutHasAuth: hasAuth, sentinel: readEmitSentinel(stateD) })
 }

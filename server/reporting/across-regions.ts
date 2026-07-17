@@ -27,9 +27,24 @@ import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { csvEscape } from '../utils/csv-escape'
 import {
+  laneListSql,
+  chargeToVendor,
+  SECTION_A_USAGE_TOOLS,
+  VENDOR_LANES,
+  type Vendor,
+} from '../../shared/usage/vendor'
+import { CLAUDE_CODE_TOOL } from '../../shared/usage/surface'
+import {
+  GITHUB_CHARGEABLE_LANES,
+  GITHUB_FIREWALL_EXCLUSIONS,
+  COPILOT_CLI_TOOL,
+  COPILOT_AGENT_TOOL,
+} from '../../shared/usage/github-surface'
+import {
   buildSeasonality,
   fillDowBuckets,
   isMonthAlignedWindow,
+  mergeWeeklyLaneRows,
   momPaceWindow,
   type UsageWindow,
 } from './params'
@@ -42,7 +57,10 @@ import type {
   ActiveTrendPoint,
   SeasonalityCell,
   ChargeDailyPoint,
+  ChargeLanePoint,
+  ChargebackLaneRow,
   ChargeDowBucket,
+  ShowbackWeeklyLaneCell,
 } from '../../shared/reports/types'
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
@@ -206,11 +224,13 @@ export async function fetchAcrossKpis(
   // §B COPILOT pooled net is POOLED-MONTHLY (`v_finance_copilot_pool_chargeback`, month
   // grain — no daily grain to window). Keep it month-grained (summed over every
   // `period_month` inside the window) and fold it on top only in chargeback mode.
+  // CHARGEABLE lanes only (registry-driven, mig 0085): copilot-license + copilot-usage;
+  // copilot-unclassified NEVER enters a chargeable figure (design D2).
   const [charge] = [
     ...(await tx.execute<{ copilot: string }>(sql`
       SELECT COALESCE(SUM(charge_usd), 0)::text AS copilot
       FROM v_finance_chargeback_month
-      WHERE tool = 'copilot-cli'
+      WHERE tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})
         AND period_month >= ${startDate}::date AND period_month < ${endDate}::date`)),
   ]
 
@@ -234,10 +254,13 @@ export async function fetchAcrossKpis(
     )
     const prevStart = prevMonth.startIso.slice(0, 10)
     const prevEnd = prevMonth.endIso.slice(0, 10)
+    // Anthropic = everything OUTSIDE the unified GitHub firewall set (every lane id
+    // + §A tool literal — never the narrower chargeback-lane list, r1 finding 1);
+    // copilot = the CHARGEABLE lanes only (unclassified never charges).
     const [prevCharge] = [
       ...(await tx.execute<ChargeRow>(sql`
-        SELECT COALESCE(SUM(charge_usd) FILTER (WHERE tool <> 'copilot-cli'), 0)::text AS anthropic,
-               COALESCE(SUM(charge_usd) FILTER (WHERE tool = 'copilot-cli'), 0)::text  AS copilot
+        SELECT COALESCE(SUM(charge_usd) FILTER (WHERE tool NOT IN (${laneListSql(GITHUB_FIREWALL_EXCLUSIONS)})), 0)::text AS anthropic,
+               COALESCE(SUM(charge_usd) FILTER (WHERE tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})), 0)::text  AS copilot
         FROM v_finance_chargeback_month
         WHERE period_month >= ${prevStart}::date AND period_month < ${prevEnd}::date`)),
     ]
@@ -375,6 +398,138 @@ export async function fetchAcrossChargebackTrend(
   return [...rows].map((r) => ({ day: r.day, chargeUsd: Number(r.charge) }))
 }
 
+// ── §B chargeback lane trend (bill lane, per-lane — lane-visuals V2) ──────────
+/** Canonical lane order index for deterministic per-day lane ordering. */
+const LANE_ORDER = new Map<string, number>(VENDOR_LANES.map((l, i) => [l, i]))
+
+/**
+ * The per-LANE widening of {@link fetchAcrossChargebackTrend}: the SAME
+ * `v_finance_bill_chargeback` window, GROUP BY tool, each tool mapped to its
+ * registry lane id via `chargeToVendor` (claude-code → claude, each #142
+ * non-Code surface → its own lane, unknown/NULL → other). NOT zero-filled —
+ * the total `chargeSeries` stays the zero-filled axis/total of record; this
+ * series carries only (day, lane) cells with rows, and Σ lanes per day equals
+ * that day's `chargeUsd` cent-exactly (test-pinned). Copilot lanes are
+ * structurally ABSENT (the mig-0085 firewall: §B Copilot is pooled, MONTH-
+ * grained, never in this daily view). Never summed with §A usage.
+ */
+export async function fetchAcrossChargebackLaneTrend(
+  tx: Tx,
+  window: UsageWindow,
+): Promise<ChargeLanePoint[]> {
+  const startDate = window.startIso.slice(0, 10)
+  const endDate = window.endIso.slice(0, 10)
+  const rows = await tx.execute<{ day: string; tool: string | null; charge: string }>(sql`
+    SELECT to_char(period_date, 'YYYY-MM-DD') AS day, tool, SUM(bill_usd)::text AS charge
+    FROM v_finance_bill_chargeback
+    WHERE period_date >= ${startDate}::date AND period_date < ${endDate}::date
+    GROUP BY period_date, tool
+    ORDER BY 1`)
+  // Merge tools sharing a lane (e.g. nothing today, but the mapping is N:1 by
+  // contract) and emit (day asc, canonical lane order) deterministically.
+  const byDayLane = new Map<string, number>()
+  for (const r of rows) {
+    const k = `${r.day} ${chargeToVendor(r.tool)}`
+    byDayLane.set(k, (byDayLane.get(k) ?? 0) + Number(r.charge))
+  }
+  return [...byDayLane.entries()]
+    .map(([k, chargeUsd]) => {
+      const [day, lane] = k.split(' ') as [string, string]
+      return { day, lane, chargeUsd }
+    })
+    .sort(
+      (a, b) =>
+        (a.day < b.day ? -1 : a.day > b.day ? 1 : 0) ||
+        (LANE_ORDER.get(a.lane) ?? 99) - (LANE_ORDER.get(b.lane) ?? 99),
+    )
+}
+
+// ── §B billed showback weekly lanes (bill lane — the usage-view composition hero) ─
+/**
+ * The whole-company BILLED showback weekly lane series over the window
+ * (`v_finance_bill_showback` GROUP BY `date_trunc('week', period_date)` × tool,
+ * tools mapped to registry lane ids via `toolToVendor`) — lane-visuals iter-2 I1:
+ * the "Where the AI spend goes" hero + its pinned "Spend by surface · billed"
+ * donut. SHOWBACK basis (every genuine dollar incl. NFR/exempt — ADR-0010 rule
+ * 3), with the §A GitHub usage tools firewalled OUT (GITHUB_FIREWALL_EXCLUSIONS):
+ * they are usage-basis telemetry rows riding the showback view, and a usage-basis
+ * figure must never surface inside a billed-basis element. Σ cells == the
+ * window's GitHub-excluded showback total, cent-exact (test-pinned). NOT
+ * zero-filled (the client's week axis zero-fills); NEVER summed with §A usage.
+ */
+export async function fetchAcrossShowbackWeeklyLanes(
+  tx: Tx,
+  window: UsageWindow,
+): Promise<ShowbackWeeklyLaneCell[]> {
+  const startDate = window.startIso.slice(0, 10)
+  const endDate = window.endIso.slice(0, 10)
+  const rows = await tx.execute<{ week_start: string; tool: string | null; usd: string }>(sql`
+    SELECT date_trunc('week', period_date)::date::text AS week_start, tool,
+           COALESCE(SUM(bill_usd), 0)::text AS usd
+    FROM v_finance_bill_showback
+    WHERE period_date >= ${startDate}::date AND period_date < ${endDate}::date
+      AND (tool NOT IN (${laneListSql(GITHUB_FIREWALL_EXCLUSIONS)}) OR tool IS NULL)
+    GROUP BY 1, tool
+    ORDER BY 1`)
+  return mergeWeeklyLaneRows(rows)
+}
+
+// ── §B chargeback lane totals (bill lane — the split-donut operand, lane-visuals V2) ─
+/**
+ * Per-lane §B chargeback totals over the window — the ChargebackSplitCard donut
+ * operand. Two arms, mirroring the KPI composition EXACTLY (so the donut sums
+ * back to `fetchAcrossKpis.chargeableUsd` cent-exactly):
+ *   - ANTHROPIC: day-grained `v_finance_bill_chargeback` GROUP BY tool over the
+ *     exact window (Σ == `anthropicChargeableUsd` for ANY range), lanes via
+ *     `chargeToVendor`;
+ *   - COPILOT (§B lanes): pooled-monthly `v_finance_copilot_pool_chargeback`,
+ *     included ONLY when `copilotChargeback` AND the window is month-aligned —
+ *     the same gate as the KPI fold (never a partial-month slice, never a
+ *     silent $0). ALL three lanes ride along, INCLUDING copilot-unclassified:
+ *     it is VISIBLE (badged) but excluded from every chargeable sum by the UI
+ *     (the FinanceCouTable convention) — Σ(lanes minus unclassified) == the
+ *     chargeable headline.
+ * Rows are emitted in canonical VENDOR_LANES order; zero-amount lanes with no
+ * rows are omitted (UI elides zeros anyway).
+ */
+export async function fetchAcrossChargebackLanes(
+  tx: Tx,
+  window: UsageWindow,
+  opts: { copilotChargeback: boolean },
+): Promise<ChargebackLaneRow[]> {
+  const startDate = window.startIso.slice(0, 10)
+  const endDate = window.endIso.slice(0, 10)
+  const byLane = new Map<Vendor, number>()
+
+  const anthropicRows = await tx.execute<{ tool: string | null; charge: string }>(sql`
+    SELECT tool, SUM(bill_usd)::text AS charge
+    FROM v_finance_bill_chargeback
+    WHERE period_date >= ${startDate}::date AND period_date < ${endDate}::date
+    GROUP BY tool`)
+  for (const r of anthropicRows) {
+    const lane = chargeToVendor(r.tool)
+    byLane.set(lane, (byLane.get(lane) ?? 0) + Number(r.charge))
+  }
+
+  // Copilot pooled lanes: month-grained, so only over a month-aligned window and
+  // only once chargeback mode is validated (the KPI's exact gate).
+  if (opts.copilotChargeback && isMonthAlignedWindow(window)) {
+    const poolRows = await tx.execute<{ tool: string | null; charge: string }>(sql`
+      SELECT tool, SUM(charge_usd)::text AS charge
+      FROM v_finance_copilot_pool_chargeback
+      WHERE period_month >= ${startDate}::date AND period_month < ${endDate}::date
+      GROUP BY tool`)
+    for (const r of poolRows) {
+      const lane = chargeToVendor(r.tool)
+      byLane.set(lane, (byLane.get(lane) ?? 0) + Number(r.charge))
+    }
+  }
+
+  return [...byLane.entries()]
+    .sort(([a], [b]) => (LANE_ORDER.get(a) ?? 99) - (LANE_ORDER.get(b) ?? 99))
+    .map(([lane, chargeUsd]) => ({ lane, chargeUsd }))
+}
+
 // ── §B chargeback day-of-week (bill lane — "when spend happens", whole-company) ─
 /**
  * The whole-company §B ANTHROPIC chargeback grouped by ISO day-of-week over the window
@@ -450,14 +605,18 @@ export async function fetchAcrossRegionCards(
   // (a single month → today's one-row result; a multi-month range sums them).
   const startDate = window.startIso.slice(0, 10)
   const endDate = window.endIso.slice(0, 10)
+  // Registry-driven §B lane split (mig 0085): anthropic = NOT the unified GitHub
+  // firewall set (every lane id + §A tool literal — a stray §A copilot row must
+  // never count as Anthropic, r1 finding 1); copilot = the CHARGEABLE lanes only
+  // (unclassified never charges).
   const chargeRows = await tx.execute<{
     region_id: string | null
     anthropic: string
     copilot: string
   }>(sql`
     SELECT region_id::text AS region_id,
-           COALESCE(SUM(charge_usd) FILTER (WHERE tool <> 'copilot-cli'), 0)::text AS anthropic,
-           COALESCE(SUM(charge_usd) FILTER (WHERE tool = 'copilot-cli'), 0)::text  AS copilot
+           COALESCE(SUM(charge_usd) FILTER (WHERE tool NOT IN (${laneListSql(GITHUB_FIREWALL_EXCLUSIONS)})), 0)::text AS anthropic,
+           COALESCE(SUM(charge_usd) FILTER (WHERE tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})), 0)::text  AS copilot
     FROM v_finance_chargeback_month
     WHERE period_month >= ${startDate}::date AND period_month < ${endDate}::date
     GROUP BY region_id`)
@@ -530,7 +689,8 @@ export async function fetchAcrossChargebackByRegion(
       UNION ALL
       SELECT region_id, SUM(charge_usd) AS value
       FROM v_finance_copilot_pool_chargeback
-      WHERE period_month >= ${startDate}::date AND period_month < ${endDate}::date
+      WHERE tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})
+        AND period_month >= ${startDate}::date AND period_month < ${endDate}::date
       GROUP BY region_id`
     : sql``
   const rows = await tx.execute<{
@@ -563,11 +723,15 @@ export async function fetchAcrossChargebackByRegion(
 // ── Per-provider split (vendor breakdown over the window) ────────────────────
 /**
  * The whole-company per-provider split over the window (`v_complete_usage`, §A
- * usage lane): per tool bucket — `claude-code` → `claudeCode`, `copilot-cli` →
- * `copilot`, everything else (incl. NULL tool) → `other`. `spendUsd` sums back to
- * the genuine headline (every record lands in exactly one bucket); `activeUsers`
- * is `COUNT(DISTINCT teammate_id)` per bucket (NOT additive — a teammate active in
- * two vendors is counted in both).
+ * usage lane): one bucket per named §A lane — `claude-code` → `claudeCode`,
+ * `copilot-cli` → `copilotCli`, `copilot-agent` → `copilotAgent` (the three-lane
+ * §A ceiling, registry-driven via SECTION_A_USAGE_TOOLS) — plus the live `other`
+ * catch-all (everything else incl. NULL tool). `spendUsd` sums back to the
+ * genuine headline (every record lands in exactly one bucket); `activeUsers` is
+ * `COUNT(DISTINCT teammate_id)` per bucket (NOT additive — a teammate active in
+ * two vendors is counted in both). `copilot-agent` is structurally absent from
+ * `v_complete_usage` today (mig 0086), so its bucket reads 0 until the owner
+ * follow-up lands the non-taggable completeness feed.
  */
 export async function fetchProviderSplit(tx: Tx, window: UsageWindow): Promise<ProviderSplit> {
   const [row] = [
@@ -576,23 +740,28 @@ export async function fetchProviderSplit(tx: Tx, window: UsageWindow): Promise<P
       cc_users: number
       cp_spend: string
       cp_users: number
+      ca_spend: string
+      ca_users: number
       ot_spend: string
       ot_users: number
     }>(sql`
       SELECT
-        COALESCE(SUM(cost_usd) FILTER (WHERE tool = 'claude-code'), 0)::text AS cc_spend,
-        COUNT(DISTINCT teammate_id) FILTER (WHERE tool = 'claude-code')::int AS cc_users,
-        COALESCE(SUM(cost_usd) FILTER (WHERE tool = 'copilot-cli'), 0)::text AS cp_spend,
-        COUNT(DISTINCT teammate_id) FILTER (WHERE tool = 'copilot-cli')::int AS cp_users,
-        COALESCE(SUM(cost_usd) FILTER (WHERE tool NOT IN ('claude-code', 'copilot-cli') OR tool IS NULL), 0)::text AS ot_spend,
-        COUNT(DISTINCT teammate_id) FILTER (WHERE tool NOT IN ('claude-code', 'copilot-cli') OR tool IS NULL)::int AS ot_users
+        COALESCE(SUM(cost_usd) FILTER (WHERE tool = ${CLAUDE_CODE_TOOL}), 0)::text AS cc_spend,
+        COUNT(DISTINCT teammate_id) FILTER (WHERE tool = ${CLAUDE_CODE_TOOL})::int AS cc_users,
+        COALESCE(SUM(cost_usd) FILTER (WHERE tool = ${COPILOT_CLI_TOOL}), 0)::text AS cp_spend,
+        COUNT(DISTINCT teammate_id) FILTER (WHERE tool = ${COPILOT_CLI_TOOL})::int AS cp_users,
+        COALESCE(SUM(cost_usd) FILTER (WHERE tool = ${COPILOT_AGENT_TOOL}), 0)::text AS ca_spend,
+        COUNT(DISTINCT teammate_id) FILTER (WHERE tool = ${COPILOT_AGENT_TOOL})::int AS ca_users,
+        COALESCE(SUM(cost_usd) FILTER (WHERE tool NOT IN (${laneListSql(SECTION_A_USAGE_TOOLS)}) OR tool IS NULL), 0)::text AS ot_spend,
+        COUNT(DISTINCT teammate_id) FILTER (WHERE tool NOT IN (${laneListSql(SECTION_A_USAGE_TOOLS)}) OR tool IS NULL)::int AS ot_users
       FROM v_complete_usage
       WHERE ts_event >= ${window.startIso}::timestamptz
         AND ts_event <  ${window.endIso}::timestamptz`)),
   ]
   return {
     claudeCode: { spendUsd: Number(row?.cc_spend ?? 0), activeUsers: Number(row?.cc_users ?? 0) },
-    copilot: { spendUsd: Number(row?.cp_spend ?? 0), activeUsers: Number(row?.cp_users ?? 0) },
+    copilotCli: { spendUsd: Number(row?.cp_spend ?? 0), activeUsers: Number(row?.cp_users ?? 0) },
+    copilotAgent: { spendUsd: Number(row?.ca_spend ?? 0), activeUsers: Number(row?.ca_users ?? 0) },
     other: { spendUsd: Number(row?.ot_spend ?? 0), activeUsers: Number(row?.ot_users ?? 0) },
   }
 }
@@ -601,14 +770,25 @@ export async function fetchProviderSplit(tx: Tx, window: UsageWindow): Promise<P
 /**
  * The whole-company day-grain vendor-stacked usage trend over the window (mirrors
  * the Regional trend one tier up). One point per (day, vendor) with a positive
- * cost; `key` is the `tool` id (`claude-code` / `copilot-cli` / `other`).
+ * cost; `key` is the `tool` id — the three named §A lanes (`claude-code` /
+ * `copilot-cli` / `copilot-agent`, registry-driven via SECTION_A_USAGE_TOOLS)
+ * plus the live `other` catch-all. `copilot-agent` is structurally absent from
+ * `v_complete_usage` today (mig 0086), so its points only appear once the owner
+ * follow-up lands the non-taggable completeness feed.
  */
 export async function fetchAcrossTrend(tx: Tx, window: UsageWindow): Promise<AcrossTrendPoint[]> {
-  const rows = await tx.execute<{ day: string; claude: string; copilot: string; other: string }>(sql`
+  const rows = await tx.execute<{
+    day: string
+    claude: string
+    copilot: string
+    agent: string
+    other: string
+  }>(sql`
     SELECT to_char(date_trunc('day', ts_event), 'YYYY-MM-DD') AS day,
-           COALESCE(SUM(cost_usd) FILTER (WHERE tool = 'claude-code'), 0)::text AS claude,
-           COALESCE(SUM(cost_usd) FILTER (WHERE tool = 'copilot-cli'), 0)::text AS copilot,
-           COALESCE(SUM(cost_usd) FILTER (WHERE tool NOT IN ('claude-code', 'copilot-cli') OR tool IS NULL), 0)::text AS other
+           COALESCE(SUM(cost_usd) FILTER (WHERE tool = ${CLAUDE_CODE_TOOL}), 0)::text AS claude,
+           COALESCE(SUM(cost_usd) FILTER (WHERE tool = ${COPILOT_CLI_TOOL}), 0)::text AS copilot,
+           COALESCE(SUM(cost_usd) FILTER (WHERE tool = ${COPILOT_AGENT_TOOL}), 0)::text AS agent,
+           COALESCE(SUM(cost_usd) FILTER (WHERE tool NOT IN (${laneListSql(SECTION_A_USAGE_TOOLS)}) OR tool IS NULL), 0)::text AS other
     FROM v_complete_usage
     WHERE ts_event >= ${window.startIso}::timestamptz
       AND ts_event <  ${window.endIso}::timestamptz
@@ -617,6 +797,7 @@ export async function fetchAcrossTrend(tx: Tx, window: UsageWindow): Promise<Acr
   for (const r of rows) {
     if (Number(r.claude) > 0) series.push({ day: r.day, key: 'claude-code', value: Number(r.claude) })
     if (Number(r.copilot) > 0) series.push({ day: r.day, key: 'copilot-cli', value: Number(r.copilot) })
+    if (Number(r.agent) > 0) series.push({ day: r.day, key: 'copilot-agent', value: Number(r.agent) })
     if (Number(r.other) > 0) series.push({ day: r.day, key: 'other', value: Number(r.other) })
   }
   return series

@@ -1,14 +1,16 @@
 <script setup lang="ts">
 /*
  * ChartsDonutChart — composition donut with centre label (SVG). Slices in
- * caller order (cost-share desc by convention); palette via shared scale.
+ * caller order (cost-share desc by convention); palette via shared scale. A
+ * slice may pin its own `color` (fixed identity colours, e.g. vendor lanes —
+ * a missing slice must not repaint the others); otherwise the indexed palette.
  */
 import { computed } from 'vue'
 import { seriesColor } from '../../composables/useChartScale'
 
 const props = withDefaults(
   defineProps<{
-    slices: Array<{ label: string; value: number; title?: string }>
+    slices: Array<{ label: string; value: number; title?: string; color?: string }>
     centerLabel?: string
     centerSub?: string
     size?: number
@@ -31,7 +33,7 @@ const arcs = computed(() => {
       const frac = total.value > 0 ? s.value / total.value : 0
       const arc = {
         ...s,
-        color: seriesColor(i),
+        color: s.color ?? seriesColor(i),
         dash: `${(frac * C).toFixed(2)} ${(C - frac * C).toFixed(2)}`,
         offset: -offset * C,
         frac,

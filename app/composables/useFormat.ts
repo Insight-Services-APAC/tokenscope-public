@@ -77,6 +77,15 @@ export function fmtPct(
 }
 
 /**
+ * Like `fmtPct`, but a tiny non-zero share reads `<1%` instead of rounding to
+ * a misleading `0%` — the lane-bar tooltip/legend convention (#142; shared by
+ * FinanceCouTable and the practice bill-by-surface card).
+ */
+export function fmtSharePct(p: number): string {
+  return p > 0 && p < 0.01 ? '<1%' : `${Math.round(p * 100)}%`
+}
+
+/**
  * Like `fmtPct` but always carries an explicit sign — `+0.12 → "+12%"`,
  * `-0.12 → "-12%"`. For MoM / vs-average deltas. Non-finite → em-dash.
  */

@@ -9,8 +9,8 @@
  * Scope: managers see consumption only for projects whose
  * cost_owning_unit is within their org subtree (app.user_org_path); a
  * region `admin` is bounded to the project's region via
- * requireRegionScope (API-1 — the same pattern as
- * rollups/finance/[couId]/breakdown.get.ts); global-finops /
+ * requireRegionScope (API-1 — the same requireRegionScope pattern the
+ * admin/* endpoints apply); global-finops /
  * platform-admin are unbounded. This app-level clamp is the live gate —
  * RLS is bypassed at runtime (owner DB connection) until Epic 10's
  * non-owner role lands, so we cannot lean on the attribution_record

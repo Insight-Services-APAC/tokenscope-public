@@ -116,7 +116,7 @@ export async function verifyInternalRequest(event: H3Event): Promise<void> {
   try {
     ok = timingSafeEqual(Buffer.from(sigHeader, 'hex'), Buffer.from(expected, 'hex'))
   } catch {
-    ok = false
+    // Malformed hex → unauthenticated; `ok` stays false from the initializer.
   }
   if (!ok) {
     throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })

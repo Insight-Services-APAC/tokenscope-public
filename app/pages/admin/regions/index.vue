@@ -12,8 +12,10 @@
  * RBAC: client-side guard via useSession() — server middleware still
  * 401/403s a non-admin's API calls; the page just hides itself.
  */
+
 import { computed, ref, watch, nextTick, onBeforeUnmount } from 'vue'
 import { consola } from 'consola'
+definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface RegionRow {
   id: string
@@ -134,7 +136,6 @@ async function createRegion() {
       eyebrow="Administration"
       title="Regions"
       sub="Each region owns its cost-centre tree, projects, and teammates."
-      :crumbs="['Admin', 'Regions']"
     />
 
     <div class="mb-4 flex items-center justify-between gap-3">

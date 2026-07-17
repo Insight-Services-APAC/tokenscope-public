@@ -3,7 +3,7 @@
  *
  * Usage:
  *   DATABASE_URL=...   \
- *   NUXT_AZURE_MONITOR_ENDPOINT=http://lead-TokenScope-fake-azure-monitor:8080 \
+ *   NUXT_AZURE_MONITOR_ENDPOINT=http://tokenscope-fake-azure-monitor:8080 \
  *   tsx scripts/emit-stream.ts [intervalSeconds]
  *
  * Reuses scripts/emit-data.ts emitTick() — pinning a session_id per

@@ -151,12 +151,17 @@ beforeAll(async () => {
 
   // reconciliation_record → per-teammate Copilot GROSS usage (v_teammate_usage_daily
   // copilot branch), the Overage-Drivers weight. May: alice 250, bob 150, carol 50.
-  const rr = async (tm: string, usd: number, day: string) => {
+  // Alice's 250 is deliberately SPLIT across the two §A usage lanes (mig 0086:
+  // copilot_interactive → copilot-cli, copilot_coding_agent → copilot-agent): the
+  // Overage-Drivers weight is ALL Copilot usage (registry GITHUB_USAGE_TOOLS), so her
+  // May expectations below only foot if BOTH lanes weigh in.
+  const rr = async (tm: string, usd: number, day: string, category = 'copilot_interactive') => {
     await t.client`INSERT INTO reconciliation_record
         (teammate_id, provider, enterprise_ref, period_date, category, scope, actual_usd, otel_attributed_usd, delta_usd, spend_class, disposition, status)
-      VALUES (${tm}::uuid, 'github', 'ent-x', ${day}::date, 'copilot_interactive', 'teammate', ${usd}, 0, ${usd}, 'indicative', 'ingest_only', 'proposed')`
+      VALUES (${tm}::uuid, 'github', 'ent-x', ${day}::date, ${category}, 'teammate', ${usd}, 0, ${usd}, 'indicative', 'ingest_only', 'proposed')`
   }
-  await rr(alice, 250, '2026-05-15')
+  await rr(alice, 200, '2026-05-15')
+  await rr(alice, 50, '2026-05-15', 'copilot_coding_agent')
   await rr(bob, 150, '2026-05-15')
   await rr(carol, 50, '2026-05-15')
   // July — both BELOW the per-seat share (100): alice 50, bob 40 → Σexcess = 0 → raw-usage weight.
@@ -174,7 +179,7 @@ interface IndexResp {
   meta: { scope: string; month: string; pointInTimeDims: boolean }
   billCheck: { chargebackUsd: number; billUsd: number; deltaUsd: number; matched: boolean; unsettled: boolean; copilotChargebackUsd: number; providers: { provider: string; billUsd: number; unsettled: boolean }[] }
   cous: CouRow[]
-  copilot: { mode: string; pending: boolean }
+  copilot: { mode: string; pending: boolean; unclassifiedWarning: boolean }
   exemptGap: { indicativeUsageUsd: number; chargebackUsd: number; gapUsd: number; copilotChargebackUsd: number }
   homingNote: string
 }
@@ -285,6 +290,34 @@ describe('GET /reports/finance — per-CoU chargeback + chargeback-mode vs pool-
     // The Σ=bill reconciliation stays whole-company regardless of the region view.
     expect(r.billCheck.chargebackUsd).toBeCloseTo(360, 6)
   })
+
+  it('ADVISORY unclassifiedWarning (r1-F10): true ONLY when chargeback mode is ON and the window carries unclassified spend — never blocks data', async () => {
+    // A September month with a $55 unclassified slice (2026-09 is untouched by every
+    // other fixture month in this file; cleaned up in finally).
+    const [{ id: entX }] = await t.client<{ id: string }[]>`
+      SELECT id::text AS id FROM provider_enterprise WHERE external_id='ent-x'`
+    await t.client`INSERT INTO copilot_pool_bill
+        (month, provider_enterprise_id, provider_org_id, cost_owning_unit_id, seats,
+         license_net_usd, overage_net_usd, unclassified_net_usd, included_allowance_usd, usage_gross_usd)
+      VALUES ('2026-09-01'::date, ${entX}::uuid, ${orgO1}::uuid, ${ccA}::uuid, 4, 200, 100, 55, 400, 500)`
+    process.env.NUXT_COPILOT_CHARGEBACK_ENABLED = 'true'
+    try {
+      // Chargeback mode + unclassified in-window → the advisory flag fires, and the
+      // data is UNBLOCKED: the $55 stays out of every chargeable figure regardless.
+      const warn = (await indexHandler(ev(gfo(), 'month=2026-09'))) as unknown as IndexResp
+      expect(warn.copilot.unclassifiedWarning).toBe(true)
+      expect(couOf(warn, 'a')!.chargeableUsd).toBeCloseTo(300, 6) // 200 + 100, never the 55
+      // Same mode, a clean month → no warning.
+      const clean = (await indexHandler(ev(gfo(), 'month=2026-05'))) as unknown as IndexResp
+      expect(clean.copilot.unclassifiedWarning).toBe(false)
+    } finally {
+      delete process.env.NUXT_COPILOT_CHARGEBACK_ENABLED
+      await t.client`DELETE FROM copilot_pool_bill WHERE month = '2026-09-01'::date`
+    }
+    // Pool-utilisation mode never warns — the advisory is chargeback-mode-scoped.
+    const off = (await indexHandler(ev(gfo(), 'month=2026-05'))) as unknown as IndexResp
+    expect(off.copilot.unclassifiedWarning).toBe(false)
+  })
 })
 
 // ── Drill: Anthropic charges + Copilot pooled lines / pool card + project overlay
@@ -339,8 +372,10 @@ describe('GET /reports/finance/[couId] — Overage Drivers (informational, never
       const od = d.overageDrivers!
       expect(od.overageNetUsd).toBeCloseTo(100, 6)
       expect(od.perSeatShareUsd).toBeCloseTo(100, 6) // pool 400 / seats 4
-      // alice usage 250 → excess 150; bob 150 → excess 50; carol 50 → excess 0 (excluded).
+      // alice usage 250 (200 interactive + 50 coding-agent — BOTH §A lanes weigh in) →
+      // excess 150; bob 150 → excess 50; carol 50 → excess 0 (excluded).
       // Σexcess 200 → alice 150/200×100 = 75; bob 50/200×100 = 25. Σ = 100 = overage_net.
+      // (Were copilot-agent excluded from the weight, alice would be 200 → 66.67 ≠ 75.)
       const byName = new Map(od.rows.map((r) => [r.label, r]))
       expect(byName.get('alice@a.test')!.usd).toBeCloseTo(75, 6)
       expect(byName.get('bob@a.test')!.usd).toBeCloseTo(25, 6)
@@ -522,12 +557,20 @@ describe('GET /reports/export?scope=finance — the ledger (cost-centre × provi
       const csv = (await exportHandler(ev(gfo(), 'scope=finance&month=2026-05'))) as unknown as string
       const lines = csv.trim().split('\n')
       expect(lines[0]).toMatch(/^# tokenscope finance ledger/)
-      expect(lines[1]).toBe('cost_centre,region,provider,month,charge_usd,chargeback_pending,settling_state')
-      // ccA → one anthropic row (50.00) + one github row (300.00, not pending).
-      expect(csv).toContain('a,ra,anthropic,2026-05,50.00,false,')
-      expect(csv).toContain('a,ra,github,2026-05,300.00,false,')
-      // ccB → anthropic 10.00, no github row (copilotUsd 0).
-      expect(csv).toContain('b,rb,anthropic,2026-05,10.00,false,')
+      // mig 0085 lane split: the ledger carries a `lane` column — github rows are
+      // per §B chargeback lane; the anthropic row stays aggregate (blank lane). The
+      // column is APPENDED (additive-only convention, r1 finding 4) so index-based
+      // consumers keep every pre-split column position.
+      expect(lines[1]).toBe('cost_centre,region,provider,month,charge_usd,chargeback_pending,settling_state,lane')
+      // ccA → one anthropic row (50.00) + one github row PER non-zero lane
+      // (license 200 + usage 100 = the pre-split 300, not pending).
+      expect(csv).toMatch(/^a,ra,anthropic,2026-05,50\.00,false,[^,]*,$/m)
+      expect(csv).toMatch(/^a,ra,github,2026-05,200\.00,false,[^,]*,copilot-license$/m)
+      expect(csv).toMatch(/^a,ra,github,2026-05,100\.00,false,[^,]*,copilot-usage$/m)
+      // Zero-amount lanes are skipped (no unclassified fixture → no unclassified row).
+      expect(csv).not.toContain('copilot-unclassified')
+      // ccB → anthropic 10.00, no github rows (copilotUsd 0).
+      expect(csv).toMatch(/^b,rb,anthropic,2026-05,10\.00,false,[^,]*,$/m)
       const a = couOf(json, 'a')!
       expect(a.anthropicUsd.toFixed(2)).toBe('50.00')
       expect(a.copilotUsd.toFixed(2)).toBe('300.00')

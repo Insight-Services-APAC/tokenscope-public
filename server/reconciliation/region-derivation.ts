@@ -19,6 +19,11 @@
  */
 import type { DirectoryUser } from '../azure/directory'
 import type { PlacementDerivation } from './placement-service'
+import {
+  REGION_ATTRIBUTE_KEYS,
+  normalizeMatchValue,
+  type RegionAttributeKey,
+} from '../../shared/placement/region-attributes'
 
 /** A manager edge from the Entra `/users/{id}/manager` hop. */
 export interface ManagerEdge {
@@ -50,19 +55,64 @@ export interface ChainCaches {
   placementCache: Map<string, ChainPlacement>
 }
 
-/** Normalise a department string for the curated-map lookup (AEUF parity: trim + lower). */
-export function normalizeDepartment(raw: string | null | undefined): string {
-  return (raw ?? '').trim().toLowerCase()
+/**
+ * The curated directory→region rules, pre-indexed for lookup. `exact` is a
+ * nested attribute→value→region map (O(1) hits, no string-composite key); the
+ * `prefix` list is scanned longest-value-first so the most specific prefix wins.
+ * Built by the store's loadDirectoryRegionRules().
+ */
+export interface RegionRuleSet {
+  exact: Map<RegionAttributeKey, Map<string, string>>
+  prefix: Array<{ attribute: RegionAttributeKey; value: string; regionId: string }>
 }
 
-/** department → region_id via the curated map; blank/unmapped → null. */
-export function mapDepartmentToRegion(
-  department: string | null | undefined,
-  deptMap: Map<string, string>,
-): string | null {
-  const key = normalizeDepartment(department)
-  if (!key) return null
-  return deptMap.get(key) ?? null
+const EMPTY_RULE_SET: RegionRuleSet = { exact: new Map(), prefix: [] }
+
+// Compile-time guard: every catalog key MUST be a real string field on
+// DirectoryUser, so dirAttrValue's lookup can't silently no-op if the catalog
+// and the interface ever drift.
+type _AssertAttrsAreDirectoryFields = RegionAttributeKey extends keyof DirectoryUser ? true : never
+const _assertAttrsAreDirectoryFields: _AssertAttrsAreDirectoryFields = true
+void _assertAttrsAreDirectoryFields
+
+/** Read a directory attribute value off a DirectoryUser by key (nullable). */
+function dirAttrValue(dir: DirectoryUser, attr: RegionAttributeKey): string | null {
+  return dir[attr] ?? null
+}
+
+export interface AttributeMatch {
+  regionId: string
+  attribute: RegionAttributeKey
+  /** True if a LOWER-precedence attribute also matched but to a DIFFERENT region
+   *  (a misconfiguration worth surfacing; the highest-precedence match wins). */
+  conflict: boolean
+}
+
+/**
+ * Resolve a region from the directory rules, trying attributes in catalog
+ * PRECEDENCE order (companyName → … → department). Exact match first, then prefix.
+ * Highest-precedence hit wins; a divergent lower hit is flagged as a conflict.
+ * Returns null when no attribute matches (→ manager-walk / global fallback).
+ */
+export function mapAttributesToRegion(
+  dir: DirectoryUser,
+  rules: RegionRuleSet = EMPTY_RULE_SET,
+): AttributeMatch | null {
+  const hits: Array<{ attribute: RegionAttributeKey; regionId: string }> = []
+  for (const attr of REGION_ATTRIBUTE_KEYS) {
+    const norm = normalizeMatchValue(dirAttrValue(dir, attr))
+    if (!norm) continue
+    let regionId = rules.exact.get(attr)?.get(norm)
+    if (!regionId) {
+      const pfx = rules.prefix.find((p) => p.attribute === attr && norm.startsWith(p.value))
+      if (pfx) regionId = pfx.regionId
+    }
+    if (regionId) hits.push({ attribute: attr, regionId })
+  }
+  if (hits.length === 0) return null
+  const winner = hits[0]!
+  const conflict = hits.some((h) => h.regionId !== winner.regionId)
+  return { regionId: winner.regionId, attribute: winner.attribute, conflict }
 }
 
 /**
@@ -130,13 +180,14 @@ export async function resolvePlacementViaManagerChain(
 
 /**
  * Resolve a placement for an unplaced (no cost-centre match) bill user. Order: a chain UNIT
- * wins (finest); else a department→region OR a chain region; else null. department is kept
- * for AEUF-shaped tenants (no-op at Insight).
+ * wins (finest); else a directory-attribute→region rule OR a chain region; else null. The
+ * attribute rules let each tenant key on whichever directory field is region-correlated on
+ * their directory (companyName at Insight; department on AEUF-shaped tenants).
  */
 export async function derivePlacement(
   dir: DirectoryUser,
   deps: {
-    deptMap: Map<string, string>
+    rules: RegionRuleSet
     unitOwnerMap: Map<string, OwnedUnit[]>
     leaderMap: Map<string, string>
     getManager: GetManager
@@ -153,17 +204,17 @@ export async function derivePlacement(
   }
   let chain: ChainPlacement = null
   // 1. UNIT (practice) wins over everything, so we MUST walk first when any unit owners
-  //    exist (a unit beats a department-mapped region). When there are no unit owners we
-  //    skip this walk so a department-mapped user is not blocked by a transient Graph error.
+  //    exist (a unit beats an attribute-mapped region). When there are no unit owners we
+  //    skip this walk so an attribute-mapped user is not blocked by a transient Graph error.
   if (dir.oid && deps.unitOwnerMap.size > 0) {
     chain = await resolvePlacementViaManagerChain(dir.oid, walkArgs)
     if (chain?.kind === 'unit') {
       return { orgUnitId: chain.orgUnitId, regionId: chain.regionId, ownerOid: chain.ownerOid, via: 'unit' }
     }
   }
-  // 2. department → region (AEUF-style), beats a chain region leader.
-  const byDept = mapDepartmentToRegion(dir.department, deps.deptMap)
-  if (byDept) return { regionId: byDept, via: 'department' }
+  // 2. directory-attribute → region rule, beats a chain region leader.
+  const byAttr = mapAttributesToRegion(dir, deps.rules)
+  if (byAttr) return { regionId: byAttr.regionId, via: 'attribute', attribute: byAttr.attribute, conflict: byAttr.conflict }
   // 3. chain region leader (run the walk now if step 1 was skipped).
   if (dir.oid && deps.leaderMap.size > 0) {
     if (chain === null) chain = await resolvePlacementViaManagerChain(dir.oid, walkArgs)

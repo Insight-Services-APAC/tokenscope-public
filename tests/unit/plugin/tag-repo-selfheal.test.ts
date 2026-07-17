@@ -257,9 +257,25 @@ function writeGlobal(home: string, { instance = 'inst-A', helper = '/plugins/tok
  * dedicated health-warning tests below drive that path via the sentinel instead.
  */
 function runHook(home: string, repo: string, pluginRoot: string = join(home, 'no-plugin')) {
+  // Pin the plugin state dir explicitly to the sandbox home. stateDir() is now
+  // anchored on the passwd home (HOME-leak-proof), so a HOME override alone no
+  // longer redirects ~/.tokenscope — TOKENSCOPE_STATE_DIR is the supported seam.
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    TOKENSCOPE_STATE_DIR: join(home, '.tokenscope'),
+    CLAUDE_PLUGIN_ROOT: pluginRoot,
+  }
+  // These emission-health tests assert a SILENT hook. Strip the host CLI's
+  // version signal so the shim policy sees a fixed/unknown CLI and does not add
+  // its auto-enabled note (the host runs an affected 2.1.x during CI). Tests that
+  // want the shim active set CLAUDE_CODE_EXECPATH explicitly.
+  delete env.CLAUDE_CODE_EXECPATH
+  delete env.AI_AGENT
   return execFileSync(process.execPath, [HOOK], {
     cwd: repo,
-    env: { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_ROOT: pluginRoot },
+    env,
     encoding: 'utf8',
   })
 }

@@ -46,6 +46,49 @@
   --rag-amber: #d97706;
   --rag-green: #16a34a;
 
+  /* ───── Chart vendor-lane colours (#142) ─────
+   * One FIXED colour per billing lane (shared/usage/vendor.ts VENDOR_LANES,
+   * consumed via useChartScale.vendorLaneColor) so a unit missing a lane never
+   * repaints the others. Anchors follow the DATAVIZ-validated provider split
+   * (useChartTheme: Claude = hunger, Copilot = vision — do not repaint those
+   * two); catch-alls are deliberate neutrals (identity via label, never colour
+   * alone). The six surface hues are DERIVED from the primaries above by
+   * holding OKLCH hue+chroma and re-stepping lightness (dataviz
+   * snap-to-passing), searched to maximise the minimum adjacent CVD ΔE in
+   * canonical VENDOR_LANES order, then validated with the dataviz skill's
+   * validate_palette.js: light mode ALL CHECKS PASS (worst adjacent CVD ΔE
+   * 10.0 ≥ 8 target, normal-vision floor 19.6 ≥ 15, contrast ≥ 3:1); dark
+   * mode passes bands/CVD/normal with two lanes in the contrast relief band
+   * (< 3:1) — covered by the always-present labels/legends. */
+  --lane-claude: var(--brand-hunger);
+  --lane-claude-ai: #3368c4; /* vision @ L0.53 */
+  --lane-claude-cowork: #bd014a; /* hustle @ L0.51 */
+  --lane-claude-office: #a977c8; /* harmony @ L0.65 */
+  --lane-claude-chrome: #fd4057; /* inspired @ L0.66 */
+  --lane-claude-design: #1398b8; /* zeal @ L0.63 */
+  --lane-claude-slack: #7e4d9b; /* harmony @ L0.51 */
+  --lane-claude-other: var(--carbon-3);
+  --lane-copilot: var(--brand-vision);
+  /* Copilot §A/§B lanes (migs 0085/0086) — same derivation procedure: hold
+   * the anchor ramp's OKLCH hue+chroma, re-step lightness, validate the FULL
+   * categorical adjacency with the dataviz validate_palette.js. Chromatic
+   * lanes (incl. copilot-agent, D4): light mode ALL CHECKS PASS (worst
+   * adjacent CVD ΔE 10.0 ≥ 8, normal-vision floor 16.4 ≥ 15, contrast ≥ 3:1);
+   * dark mode ALL CHECKS PASS with four lanes in the contrast relief band
+   * (< 3:1: cowork, slack, copilot-agent, copilot-license) — covered by the
+   * always-present labels/legends. copilot-agent takes the heart ramp (the
+   * zeal ramp is out of sRGB gamut below L 0.64 and would collide with
+   * copilot-usage; harmony purples FAIL adjacent CVD against the vision
+   * blues), re-stepped to L 0.50 — distinct from copilot's vision anchor on
+   * both sides of its adjacency. copilot-unclassified is a catch-all → a
+   * deliberate neutral (carbon-2), identity via label + the "needs mapping"
+   * badge, never colour alone. */
+  --lane-copilot-agent: #aa1282; /* heart @ L0.50 */
+  --lane-copilot-license: #2e5fb7; /* vision @ L0.50 */
+  --lane-copilot-usage: #1699bb; /* zeal @ L0.62 */
+  --lane-copilot-unclassified: var(--carbon-2);
+  --lane-other: var(--cloud);
+
   /* ───── Semantic ───── */
   --success: #22c55e;
   --warning: #f59e0b;

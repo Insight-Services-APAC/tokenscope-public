@@ -57,6 +57,15 @@ interface UnallocatedSummary {
   soft_cap_usd: string
   over_soft_cap: boolean
 }
+// §B (#142) — non-Code Claude surface spend (Chat / Cowork / Office / …):
+// read-only chargeback lanes from the provider bill. No sessions, never
+// taggable — rendered in the separate "Other Claude surfaces" panel.
+interface SurfaceRow {
+  tool: string
+  label: string
+  mtd_usd: string
+  days: { day: string; usd: string }[]
+}
 interface UsageResponse {
   month_to_date: string
   total_cost_usd: string
@@ -70,6 +79,7 @@ interface UsageResponse {
   // needs-tagging ACTION list (its LIMIT-100/all-time list no longer skews totals).
   unallocated: UnallocatedSummary
   tagged_spend: TaggedSpendRow[]
+  surfaces: SurfaceRow[]
   freshness_minutes_ago: number
   note: string
 }
@@ -142,6 +152,7 @@ const { data: usage, refresh: refreshUsage, error: usageError } = await useFetch
         over_soft_cap: false,
       },
       tagged_spend: [],
+      surfaces: [],
       freshness_minutes_ago: 0,
       note: '',
     }),
@@ -431,7 +442,7 @@ async function onPeriodChange(v: string) {
               @click="connectClient = 'claude-code'"
             >
               <Icon name="logos:claude-icon" class="text-base" aria-hidden="true" />
-              Connect Claude
+              Connect Claude Code
             </button>
             <button
               type="button"
@@ -937,6 +948,16 @@ async function onPeriodChange(v: string) {
         </table>
       </div>
     </UiCard>
+
+    <!-- §B (#142) — OTHER CLAUDE SURFACES: read-only chargeback lanes (Chat /
+         Cowork / Office / …) from the provider bill. Deliberately BELOW and
+         separate from the taggable sessions/worklist area: these surfaces have
+         no sessions and are never taggable — informational only, no actions. -->
+    <HomeOtherSurfacesPanel
+      v-if="usage?.surfaces?.length"
+      :surfaces="usage.surfaces"
+      :month-to-date="usage.month_to_date"
+    />
 
     <!-- Universal tag / re-tag editor (extracted; focus-trapped, Escape, aria). -->
     <HomeTagSessionDialog

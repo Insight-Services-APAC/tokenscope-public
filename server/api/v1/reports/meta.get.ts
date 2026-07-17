@@ -19,8 +19,9 @@
 import { defineEventHandler, setHeader } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireAuth } from '../../../auth/rbac'
-import { isPlatformAdmin } from '../../../../shared/auth/roles'
 import { withRequestRls } from '../../../db/request-rls'
+import { computeOwnsCostCentre, getReportVisibilityMode } from '../../../auth/report-scope'
+import { reportGrants } from '../../../../shared/auth/report-visibility'
 import { providerStatesForMonth } from '../../../reports/settling'
 import { copilotFinanceMode } from '../../../reports/copilot-mode'
 import { monthKeyUtc } from '../../../utils/period'
@@ -34,32 +35,26 @@ interface FloorRow extends Record<string, unknown> {
 
 export default defineEventHandler(async (event) => {
   const session = await requireAuth(event)
-  const role = session.role
-  const crossRegion = role === 'global-finops' || isPlatformAdmin(role)
   const now = new Date()
   const currentMonth = monthKeyUtc(now)
 
   return await withRequestRls(event, async (tx) => {
-    // CC ownership (a RELATIONSHIP, not a role) grants the Cost-Centre scope.
-    const [own] = [
-      ...(await tx.execute<{ n: string }>(sql`
-        SELECT COUNT(*)::text AS n FROM cou_owner co
-        JOIN org_unit ou ON ou.id = co.org_unit_id
-        WHERE co.teammate_id = ${session.teammateId}::uuid
-          AND co.revoked_at IS NULL AND ou.retired_at IS NULL`)),
-    ]
-    const ownsCostCentre = Number(own?.n ?? 0) > 0
+    // The granted tabs now come from the ONE source of truth (reportGrants), so the
+    // shell can never light up a tab the endpoint would 403. CC ownership (a
+    // RELATIONSHIP, not a role) still feeds the cost-centre grant. Byte-identical to
+    // the old inline map under the default 'standard' policy.
+    const mode = await getReportVisibilityMode(event, tx)
+    const ownsCostCentre = await computeOwnsCostCentre(tx, session.teammateId)
+    const g = reportGrants(mode, { role: session.role, ownsCostCentre })
 
-    // Granted scopes (build-design §1 default order across → regional → cost-centre → finance).
-    const canManage = role === 'manager' || role === 'admin' || crossRegion
+    // Map the per-scope grant object onto the tab booleans (build-design §1 default
+    // order across → regional → cost-centre → finance). The finance TAB is the
+    // whole-company /reports/finance pack — a simple boolean grant.
     const grants: Record<ReportScope, boolean> = {
-      across: crossRegion,
-      regional: role === 'developer' || canManage,
-      'cost-centre': ownsCostCentre || canManage,
-      // Finance is a GLOBAL function (owner-decisions D-Q5): global-finops +
-      // platform-admin ONLY — no region-finance path, and the zombie `finance` enum
-      // is NOT a grant. Matches the `GET /reports/finance` endpoint gate (Wave 5).
-      finance: crossRegion,
+      across: g.across,
+      regional: g.regional !== false,
+      'cost-centre': g.costCentre !== false,
+      finance: g.finance,
     }
     const scopes = REPORT_SCOPES.filter((s) => grants[s])
     const defaultScope = scopes[0] ?? null
@@ -101,6 +96,13 @@ export default defineEventHandler(async (event) => {
       monthFloors: { ...monthFloors, overall },
       providerStates: providerStatesForMonth(currentMonth, now),
       copilotMode: copilotFinanceMode(),
+      // The active report-visibility policy mode — drives the "Visibility:
+      // <label> · admin-configured" chip on the reports header. Only included
+      // when NON-standard: the default 'standard' state is not signalled to
+      // anyone (so an admin-configuration value never leaks by default), while a
+      // loosened policy IS signalled by design (the chip shows for everyone). The
+      // Vue chip reads `meta.value?.mode` optionally, so absence ⇒ no chip.
+      ...(mode !== 'standard' ? { mode } : {}),
     }
   })
 })

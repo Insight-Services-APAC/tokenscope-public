@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* eslint-disable no-console */
+ 
 /*
  * cron-trigger.mjs — sign + POST to the internal run-worker HTTP endpoint.
  *

@@ -13,6 +13,7 @@
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { z } from 'zod'
 import { requireRole } from '../../../../auth/rbac'
+import { resolveReportGrants } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
@@ -44,7 +45,13 @@ export default defineEventHandler(async (event): Promise<Seasonality> => {
   const win = resolveReportWindow(query)
 
   return await withRequestRls(event, async (tx) => {
-    const scope = await resolveRegionalScope(tx, caller, { region: query.region, ou: query.ou })
+    const grants = await resolveReportGrants(event, tx, caller)
+    const scope = await resolveRegionalScope(
+      tx,
+      caller,
+      { region: query.region, ou: query.ou },
+      { crossRegion: grants.regional === 'all-regions' },
+    )
     const { weeks, cells } = await fetchRegionalSeasonality(tx, scope, win)
     // §B ANTHROPIC chargeback by day-of-week over the SAME window (bill lane, scope-clamped)
     // — the chargeback-mode "when spend happens", alongside the §A cells (never summed).

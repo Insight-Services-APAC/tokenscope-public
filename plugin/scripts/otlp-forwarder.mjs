@@ -73,8 +73,21 @@ const server = http.createServer((req, res) => {
   // Health probe (the hook's self-heal signal). Cheap + synchronous; reports the
   // stateDir THIS process resolved so the hook can spot a stale/wrong-HOME instance.
   if (req.method === 'GET' && req.url === '/healthz') {
+    // `ready` = can this forwarder actually resolve its DCE endpoint RIGHT NOW.
+    // Liveness (answering /healthz) is not readiness: a forwarder can be bound
+    // and answering while its stash is missing/unreadable, in which case it
+    // 502s every export. Reporting readiness lets the SessionStart self-heal
+    // replace a dir-correct-but-stashless forwarder, not just a dead one.
+    const ready = (() => {
+      try {
+        readDceEndpoint()
+        return true
+      } catch {
+        return false
+      }
+    })()
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, pid: process.pid, dir: DIR }))
+    res.end(JSON.stringify({ ok: true, pid: process.pid, dir: DIR, ready }))
     return
   }
   const chunks = []

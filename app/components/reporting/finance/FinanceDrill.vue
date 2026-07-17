@@ -15,19 +15,44 @@
  * unread license from Chargeable — the headline caveats it and shows amber, never a
  * silent green pass (M2).
  */
+import { computed } from 'vue'
 import UiCard from '../../ui/Card.vue'
 import UiBadge from '../../ui/Badge.vue'
 import DriversTable, { type AxisOption } from '../DriversTable.vue'
 import FinanceKpiTile from './FinanceKpiTile.vue'
 import { fmtUsd, fmtPct } from '../../../composables/useFormat'
+import { vendorLaneColor, VENDOR_LANE_COLORS } from '../../../composables/useChartScale'
+import { dominantLaneOf, type DominantLane } from './drill-lanes'
+import type { Vendor } from '#shared/usage/vendor'
 import type { FinanceDrill } from '../finance-report-types'
 
-defineProps<{ drill: FinanceDrill }>()
+const props = defineProps<{ drill: FinanceDrill }>()
 
 const emit = defineEmits<{ clearDrill: [] }>()
 
 const PROJECT_AXIS: AxisOption[] = [{ value: 'project', label: 'Project' }]
 const OVERAGE_AXIS: AxisOption[] = [{ value: 'teammate', label: 'Teammate' }]
+
+// ── Dominant-lane badge per teammate row (lane-visuals V3, r1-F7/r2-5) ────────
+// Row resolution, NOT a mini-stack: badge = the largest lane + its share of the
+// row's charge; the rest itemise in the "+N surfaces" tooltip. ONE memoised
+// map (r3-7): the template binds the badge several times per row, so the
+// pick/sort runs once per teammate per data change, never once per binding.
+const laneBadges = computed<ReadonlyMap<string, DominantLane | null>>(
+  () =>
+    new Map(
+      props.drill.anthropicCharges.map((c) => [c.teammateId, dominantLaneOf(c.lanes ?? [], c.chargeUsd)]),
+    ),
+)
+
+function laneSwatch(lane: string): string {
+  return lane in VENDOR_LANE_COLORS ? vendorLaneColor(lane as Vendor) : 'var(--carbon-3)'
+}
+
+/** "+N surfaces" tooltip — the other lanes itemised largest-first. */
+function othersTitle(b: DominantLane): string {
+  return b.others.map((l) => `${l.label} ${fmtUsd(l.usd)}`).join(' · ')
+}
 </script>
 
 <template>
@@ -94,7 +119,9 @@ const OVERAGE_AXIS: AxisOption[] = [{ value: 'teammate', label: 'Teammate' }]
       <FinanceKpiTile
         label="Copilot pooled"
         :value="drill.copilot.chargeableUsd != null ? fmtUsd(drill.copilot.chargeableUsd) : 'pending'"
-        sub="pooled net (org → CoU)"
+        :sub="drill.copilot.unclassifiedNetUsd > 0
+          ? `pooled net (org → CoU) · + ${fmtUsd(drill.copilot.unclassifiedNetUsd)} unclassified (needs mapping, never charged)`
+          : 'pooled net (org → CoU)'"
       />
     </div>
 
@@ -107,21 +134,55 @@ const OVERAGE_AXIS: AxisOption[] = [{ value: 'teammate', label: 'Teammate' }]
           <thead>
             <tr class="text-[11px] uppercase tracking-wide text-carbon-3 border-b border-calm-2">
               <th class="text-left font-semibold py-2">Teammate</th>
+              <th class="text-left font-semibold py-2">Surface</th>
               <th class="text-right font-semibold py-2">Charge</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="c in drill.anthropicCharges" :key="c.teammateId" class="border-b border-calm-1 last:border-0">
               <td class="py-2.5 text-carbon-1">{{ c.label }}</td>
+              <!-- Dominant-lane badge (V3, r1-F7): lane chip + label + its share of THIS
+                   row's charge; near-tied splits read via the share % + the "+N surfaces"
+                   tooltip (r2-5) — deliberately NOT a per-row mini-stack. With a negative
+                   (credit) lane in the row the share is suppressed (r3-5: it would read
+                   >100%) — the badge shows the lane's $ instead; the tooltip still itemises. -->
+              <td class="py-2.5">
+                <template v-if="laneBadges.get(c.teammateId)">
+                  <span
+                    class="inline-flex items-center gap-1.5 text-[12px] text-carbon-2"
+                    data-testid="finance-drill-lane-badge"
+                    :data-lane="laneBadges.get(c.teammateId)!.lane"
+                  >
+                    <span
+                      class="inline-block w-2 h-2 rounded-sm shrink-0"
+                      :style="{ background: laneSwatch(laneBadges.get(c.teammateId)!.lane) }"
+                      aria-hidden="true"
+                    />
+                    {{ laneBadges.get(c.teammateId)!.label }}
+                    <span class="text-carbon-3 tabular-nums">{{
+                      laneBadges.get(c.teammateId)!.sharePct != null
+                        ? fmtPct(laneBadges.get(c.teammateId)!.sharePct!)
+                        : fmtUsd(laneBadges.get(c.teammateId)!.usd)
+                    }}</span>
+                    <span
+                      v-if="laneBadges.get(c.teammateId)!.othersCount > 0"
+                      class="text-[11px] text-carbon-3 underline decoration-dotted cursor-help"
+                      data-testid="finance-drill-lane-others"
+                      :title="othersTitle(laneBadges.get(c.teammateId)!)"
+                    >+{{ laneBadges.get(c.teammateId)!.othersCount }} {{ laneBadges.get(c.teammateId)!.othersCount === 1 ? 'surface' : 'surfaces' }}</span>
+                  </span>
+                </template>
+                <span v-else class="text-carbon-3">—</span>
+              </td>
               <td class="py-2.5 text-right tabular-nums text-carbon-1">{{ fmtUsd(c.chargeUsd) }}</td>
             </tr>
             <tr v-if="!drill.anthropicCharges.length">
-              <td colspan="2" class="py-6 text-center text-carbon-3 text-sm">No Anthropic charges for this month.</td>
+              <td colspan="3" class="py-6 text-center text-carbon-3 text-sm">No Anthropic charges for this month.</td>
             </tr>
           </tbody>
           <tfoot>
             <tr class="border-t-2 border-calm-2 text-carbon-2">
-              <td class="py-2.5 font-semibold">Σ Anthropic chargeable</td>
+              <td colspan="2" class="py-2.5 font-semibold">Σ Anthropic chargeable</td>
               <td class="py-2.5 text-right tabular-nums font-semibold">{{ fmtUsd(drill.anthropicChargeableUsd) }}</td>
             </tr>
           </tfoot>
@@ -132,14 +193,15 @@ const OVERAGE_AXIS: AxisOption[] = [{ value: 'teammate', label: 'Teammate' }]
     <!-- Copilot: per-org pooled lines (chargeback mode) OR pool-utilisation card -->
     <UiCard v-if="drill.copilot.pooledLines" data-testid="finance-copilot-pooled-lines">
       <div class="text-sm font-semibold text-carbon-1 mb-1">Copilot — per-org pooled lines</div>
-      <div class="text-[11px] text-carbon-3 mb-3">Read from the bill (license net + overage net), homed org → CoU. Pooled — never a per-user charge.</div>
+      <div class="text-[11px] text-carbon-3 mb-3">Read from the bill (license net + overage net), homed org → CoU. Pooled — never a per-user charge. Unclassified lines are visible but never chargeable.</div>
       <div class="overflow-x-auto">
-        <table class="w-full text-sm min-w-[480px]">
+        <table class="w-full text-sm min-w-[560px]">
           <thead>
             <tr class="text-[11px] uppercase tracking-wide text-carbon-3 border-b border-calm-2">
               <th class="text-left font-semibold py-2">Org</th>
               <th class="text-right font-semibold py-2">License net</th>
               <th class="text-right font-semibold py-2">Overage net</th>
+              <th class="text-right font-semibold py-2">Unclassified</th>
               <th class="text-right font-semibold py-2">Net</th>
             </tr>
           </thead>
@@ -151,10 +213,23 @@ const OVERAGE_AXIS: AxisOption[] = [{ value: 'teammate', label: 'Teammate' }]
               </td>
               <td class="py-2.5 text-right tabular-nums text-carbon-1">{{ fmtUsd(l.licenseUsd) }}</td>
               <td class="py-2.5 text-right tabular-nums text-carbon-1">{{ fmtUsd(l.overageUsd) }}</td>
+              <td class="py-2.5 text-right tabular-nums text-carbon-1">
+                <template v-if="l.unclassifiedUsd !== 0">
+                  {{ fmtUsd(l.unclassifiedUsd) }}
+                  <UiBadge
+                    kind="rag-amber"
+                    dot="amber"
+                    class="ml-1.5"
+                    data-testid="finance-copilot-unclassified-badge"
+                    title="Copilot bill lines matching no SKU classifier — excluded from every chargeable figure until classified (extend the SKU maps + re-run the month)."
+                  >needs mapping</UiBadge>
+                </template>
+                <span v-else class="text-carbon-3">—</span>
+              </td>
               <td class="py-2.5 text-right tabular-nums font-semibold text-carbon-1">{{ fmtUsd(l.netUsd) }}</td>
             </tr>
             <tr v-if="!drill.copilot.pooledLines.length">
-              <td colspan="4" class="py-6 text-center text-carbon-3 text-sm">No Copilot pooled bill homed to this unit this month.</td>
+              <td colspan="5" class="py-6 text-center text-carbon-3 text-sm">No Copilot pooled bill homed to this unit this month.</td>
             </tr>
           </tbody>
         </table>
@@ -174,6 +249,20 @@ const OVERAGE_AXIS: AxisOption[] = [{ value: 'teammate', label: 'Teammate' }]
           :value="drill.copilot.poolUtilisation.utilisation != null ? fmtPct(drill.copilot.poolUtilisation.utilisation) : 'n/a'"
           sub="gross ÷ pool"
         />
+      </div>
+      <!-- Unclassified is visible in EVERY mode (chargeable in none) — badged, never silent. -->
+      <div
+        v-if="drill.copilot.poolUtilisation.unclassifiedNetUsd > 0"
+        class="mt-3 flex items-center gap-2 text-[12px] text-carbon-2"
+        data-testid="finance-copilot-pool-unclassified"
+      >
+        <UiBadge
+          kind="rag-amber"
+          dot="amber"
+          title="Copilot bill lines matching no SKU classifier — excluded from every chargeable figure until classified (extend the SKU maps + re-run the month)."
+        >needs mapping</UiBadge>
+        <span class="tabular-nums font-semibold">{{ fmtUsd(drill.copilot.poolUtilisation.unclassifiedNetUsd) }}</span>
+        <span>unclassified Copilot bill lines this period — never charged.</span>
       </div>
     </UiCard>
 

@@ -42,7 +42,7 @@
  *   --target-client-id <id>   TARGET_CLIENT_ID     (default: the reconciliation app)
  *   --dry-run                 Print intended installs, change nothing.
  */
-/* eslint-disable no-console -- this is a CLI ops tool; stdout IS its interface */
+ 
 import { createSign } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 

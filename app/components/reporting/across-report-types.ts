@@ -10,6 +10,7 @@ import type {
   ProviderSplit,
   ChargebackProviderSplit,
   ChargeDailyPoint,
+  ChargebackLaneRow,
   ReportMeta,
 } from '#shared/reports/types'
 
@@ -82,6 +83,13 @@ export interface AcrossReport {
   dailyMetrics: DailyMetric[]
   /** §B per-day Anthropic chargeback series (bill lane) — the Chargeable KPI-tile sparkline. */
   chargeDaily: ChargeDailyPoint[]
+  /**
+   * §B per-lane chargeback totals over the window (lane-visuals V2) — the
+   * ChargebackSplitCard donut. Anthropic lanes day-grained; the three Copilot §B
+   * lanes ride along only in validated chargeback mode over a month-aligned window
+   * (the KPI's gate). Σ(lanes minus copilot-unclassified) == kpis.chargeableUsd.
+   */
+  chargebackLanes: ChargebackLaneRow[]
   regionCards: AcrossRegionCard[]
   /**
    * §B chargeback ranked by region (`v_finance_chargeback_month`) — the chargeback-lane

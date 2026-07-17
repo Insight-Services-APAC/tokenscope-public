@@ -18,6 +18,7 @@
 import { computed } from 'vue'
 import UiCard from '../../ui/Card.vue'
 import ChartRankedBar from '../charts/ChartRankedBar.client.vue'
+import LaneSwitchLink from '../LaneSwitchLink.vue'
 import { fmtUsd } from '../../../composables/useFormat'
 import type { SpendClass } from '#shared/reports/types'
 
@@ -98,5 +99,8 @@ function onSelect(row: { label: string; value: number; meta?: unknown }) {
       </div>
       <div class="mt-1 text-[11px] text-carbon-3 italic">unplaced — place these teammates</div>
     </div>
+
+    <!-- I5 cross-link: this usage ranking's §B sibling is chargeback-by-cost-centre. -->
+    <LaneSwitchLink label="See chargeback by cost centre" />
   </UiCard>
 </template>

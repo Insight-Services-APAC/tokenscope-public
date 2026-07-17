@@ -21,20 +21,27 @@ defineProps<{
 </script>
 
 <template>
-  <nav
-    aria-label="Breadcrumb"
-    class="text-xs text-carbon-3 inline-flex items-center gap-1.5 flex-wrap"
-  >
-    <template v-for="(c, i) in crumbs" :key="`${i}-${c.label}`">
-      <span v-if="i > 0" class="text-cloud px-1" aria-hidden="true">›</span>
-      <NuxtLink
-        v-if="c.to"
-        :to="c.to"
-        class="hover:text-brand-harmony hover:underline transition-colors"
+  <nav aria-label="Breadcrumb" class="text-xs text-carbon-3">
+    <ol class="inline-flex items-center gap-1.5 flex-wrap list-none m-0 p-0">
+      <li
+        v-for="(c, i) in crumbs"
+        :key="`${i}-${c.label}`"
+        class="inline-flex items-center gap-1.5"
       >
-        {{ c.label }}
-      </NuxtLink>
-      <span v-else class="text-carbon-2 font-semibold">{{ c.label }}</span>
-    </template>
+        <span v-if="i > 0" class="text-cloud px-1" aria-hidden="true">›</span>
+        <NuxtLink
+          v-if="c.to"
+          :to="c.to"
+          class="hover:text-brand-harmony hover:underline transition-colors"
+        >
+          {{ c.label }}
+        </NuxtLink>
+        <span
+          v-else
+          class="text-carbon-2 font-semibold"
+          :aria-current="i === crumbs.length - 1 ? 'page' : undefined"
+        >{{ c.label }}</span>
+      </li>
+    </ol>
   </nav>
 </template>

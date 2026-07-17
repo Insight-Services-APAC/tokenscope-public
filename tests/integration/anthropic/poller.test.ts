@@ -425,6 +425,19 @@ describe('runAnalyticsPollReconciledOrgs — multi-org (slice 6)', () => {
       expect(ent!.result?.recordsSkippedUnknownUser).toBe(1)
       expect(ent!.result?.recordsUpserted).toBe(1) // priya's one (teammate, day) row
 
+      // #142 per-surface observability: every fixture row is product claude_code,
+      // so the ONE upserted row is the claude-code lane, nothing fell to
+      // claude-other, and a first pull has nothing stale to prune.
+      expect(ent!.result?.rowsByTool).toEqual({ 'claude-code': 1 })
+      expect(ent!.result?.unknownProducts).toEqual({})
+      expect(ent!.result?.staleRowsDeleted).toBe(0)
+      // A routine run (no prune, no unknown products) leaves NO surface-adjusted audit trail.
+      const audit = await t.client<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM audit_event
+        WHERE event_type = 'actual-spend-surface-adjusted'
+          AND payload->>'source' = 'anthropic-analytics-api:org-ent'`
+      expect(audit[0]!.count).toBe('0')
+
       // priya gets a per-org actual_spend row from org-ENT. Tokens come from the usage
       // report; cost_usd is the TOKEN cost ($0.25) ONLY — the $10.00 web_search row is
       // ORG-GRAIN and must NOT inflate her per-teammate spend.

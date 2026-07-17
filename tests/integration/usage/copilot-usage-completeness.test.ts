@@ -3,7 +3,10 @@
  * §A usage completeness for COPILOT — the per-(teammate, day) usage truth is GitHub's
  * ai_credit/usage (per-(user, day), verified live), persisted as reconciliation_record.actual_usd
  * (GROSS, scope='teammate', status='proposed'). The v_teammate_usage_daily view (mig 0073) sources
- * copilot-cli usage from there, so unaccounted + over-emission work for Copilot exactly like Claude.
+ * copilot usage from there, LANED by category since mig 0086 (D4): copilot_interactive →
+ * 'copilot-cli' (unaccounted + over-emission work exactly like Claude), copilot_coding_agent →
+ * 'copilot-agent' (OTel-invisible / ingest_only → usage DISPLAY only: never a taggable
+ * unaccounted record, never OTel-joined).
  *
  * This is the correction to the earlier wrong call that Copilot had "no per-day usage truth": it
  * always did — the §A readers just weren't reading reconciliation_record. The Copilot per-cost-centre
@@ -79,14 +82,70 @@ describe('Copilot §A usage completeness', () => {
     expect(Number(row!.cost)).toBeCloseTo(15, 2)
   })
 
-  it('sums Copilot usage across categories (interactive + coding agent)', async () => {
+  it('v_teammate_usage_daily lanes copilot by category: TWO rows per (teammate, day) — copilot-cli + copilot-agent (mig 0086, D4)', async () => {
+    await copApiUsage('20.00', { category: 'copilot_interactive' })
+    await copApiUsage('14.00', { category: 'copilot_coding_agent' })
+    const rows = await t.client<{ tool: string; usd: string; tokens: string | null }[]>`
+      SELECT tool, usage_usd::text AS usd, tokens::text AS tokens FROM v_teammate_usage_daily
+      WHERE teammate_id = ${teammateId}::uuid AND day = ${DAY}::date ORDER BY tool`
+    expect(rows.map((r) => [r.tool, Number(r.usd)])).toEqual([
+      ['copilot-agent', 14],
+      ['copilot-cli', 20],
+    ])
+    for (const r of rows) expect(r.tokens).toBeNull() // credits-metered, both lanes
+  })
+
+  it('INTENTIONAL surface divergence (r1-F5, owner decision): copilot-agent rows exist in v_teammate_usage_daily while v_complete_usage carries NONE for the same fixture', async () => {
+    await copApiUsage('20.00', { category: 'copilot_interactive' })
+    await copApiUsage('14.00', { category: 'copilot_coding_agent' })
+    await otelCop('cop-div', '19.00')
+    await reconcileUnaccountedUsage(t.db, WINDOW)
+    // §A usage lane: the coding-agent dollars ARE visible (display lane, mig 0086 —
+    // feeds v_teammate_usage_daily readers like the Finance Overage-Drivers weight).
+    const lane = await t.client<{ usd: string }[]>`
+      SELECT usage_usd::text AS usd FROM v_teammate_usage_daily
+      WHERE teammate_id = ${teammateId}::uuid AND day = ${DAY}::date AND tool = 'copilot-agent'`
+    expect(lane).toHaveLength(1)
+    expect(Number(lane[0]!.usd)).toBe(14)
+    // Completeness lane (v_complete_usage = attribution ∪ unaccounted): NO copilot-agent
+    // row — the lane is OTel-invisible (no attribution rows) AND ingest_only-excluded
+    // from unaccounted_usage, so the completeness rollups (Across/Regional/Cost-Centre
+    // usage cards) deliberately omit it. Folding it in would need a NON-TAGGABLE
+    // completeness feed — an owner follow-up (mig 0086 header +
+    // server/usage/unaccounted-reconciliation.ts document the decision).
+    const [complete] = await t.client<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM v_complete_usage WHERE tool = 'copilot-agent'`
+    expect(Number(complete!.n)).toBe(0)
+  })
+
+  it('coding-agent usage NEVER becomes a taggable unaccounted record (display-only lane, D4); copilot-cli reconciles against interactive ONLY', async () => {
+    // Pre-0086 the two categories summed into one copilot-cli row ((20+14) − 19 = 15) and
+    // every coding-agent dollar was taggable. Post-split: interactive reconciles on its own
+    // basis (20 − 19 = 1) and the coding-agent $14 — OTel-invisible, no session, nothing to
+    // tag — produces NO needs-tagging record at all (design D4: usage display only).
     await copApiUsage('20.00', { category: 'copilot_interactive' })
     await copApiUsage('14.00', { category: 'copilot_coding_agent' })
     await otelCop('cop-e', '19.00')
     await reconcileUnaccountedUsage(t.db, WINDOW)
-    const [row] = await t.client<{ cost: string }[]>`
-      SELECT cost_usd::text AS cost FROM unaccounted_usage WHERE teammate_id = ${teammateId}::uuid AND day = ${DAY}::date`
-    expect(Number(row!.cost)).toBeCloseTo(15, 2) // (20+14) − 19
+    const rows = await t.client<{ tool: string; cost: string }[]>`
+      SELECT tool, cost_usd::text AS cost FROM unaccounted_usage
+      WHERE teammate_id = ${teammateId}::uuid AND day = ${DAY}::date ORDER BY tool`
+    expect(rows.map((r) => [r.tool, Number(r.cost)])).toEqual([['copilot-cli', 1]])
+  })
+
+  it('coding-agent usage never corroborates interactive OTel (over-emission joins per lane; agent lane is never OTel-joined)', async () => {
+    // Pre-0086 the coding-agent credits inflated the copilot-cli api_usd and could MASK an
+    // uncorroborated interactive emission. Post-split the bases match per lane: OTel $500
+    // vs interactive truth $50 flags, regardless of the $500 the agent burned GitHub-side.
+    await copApiUsage('50.00', { category: 'copilot_interactive' })
+    await copApiUsage('500.00', { category: 'copilot_coding_agent' })
+    await otelCop('cop-big', '500.00')
+    const res = await detectOverEmission(t.db, WINDOW)
+    expect(res.flagged).toBe(1)
+    const [flag] = await t.client<{ tool: string; over: string }[]>`
+      SELECT tool, over_usd::text AS over FROM over_emission WHERE teammate_id = ${teammateId}::uuid AND over_usd > 0`
+    expect(flag!.tool).toBe('copilot-cli') // never 'copilot-agent' — no OTel carries that tool
+    expect(Number(flag!.over)).toBeCloseTo(450, 2)
   })
 
   it('flags a material Copilot over-emission (API $50, OTel $500 → $450 uncorroborated)', async () => {

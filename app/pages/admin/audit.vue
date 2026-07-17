@@ -9,8 +9,10 @@
  * sees their region's actor / subject footprint; global-finops sees
  * everything.
  */
+
 import { computed, ref } from 'vue'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
+definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface AuditEvent extends Record<string, unknown> {
   id: string
@@ -125,7 +127,6 @@ const isAdmin = computed(() => {
       eyebrow="Administration"
       title="Audit"
       sub="Append-only mutation trail. Click a row to inspect the payload."
-      :crumbs="['Admin', 'Audit']"
     />
 
     <AdminDataTable

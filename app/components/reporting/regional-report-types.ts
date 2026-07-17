@@ -12,6 +12,9 @@ import type {
   SpendClass,
   ChargebackProviderSplit,
   ChargeDailyPoint,
+  ChargeLanePoint,
+  ChargebackLaneRow,
+  ShowbackWeeklyLaneCell,
 } from '#shared/reports/types'
 
 export interface RegionalReport {
@@ -55,6 +58,13 @@ export interface RegionalReport {
   dailyMetrics: DailyMetric[]
   /** §B per-day Anthropic chargeback series (bill lane) — the Chargeable KPI-tile sparkline. */
   chargeDaily: ChargeDailyPoint[]
+  /**
+   * §B per-lane chargeback totals over the window (lane-visuals V2-Regional) — the
+   * ChargebackSplitCard donut. Anthropic lanes day-grained; the three Copilot §B
+   * lanes ride along only in validated chargeback mode over a month-aligned window
+   * (the KPI's gate). Σ(lanes minus copilot-unclassified) == kpis.chargeableUsd.
+   */
+  chargebackLanes: ChargebackLaneRow[]
   practices: {
     key: string
     label: string
@@ -87,11 +97,36 @@ export interface RegionalDriversResp {
 }
 
 export interface RegionalTrendResp {
+  /**
+   * Inclusive window bounds (`YYYY-MM-DD`) — the ONE shared window object the
+   * usage-view composition hero + its pinned donut both bind on (iter-2 I1).
+   */
+  window: { from: string; to: string }
   windowDays: number
-  series: { day: string; key: string; value: number }[]
+  /**
+   * §A day-grain points. `key` is the tool id — the three named §A usage lanes +
+   * the `other` catch-all (the three-lane §A ceiling; the V2-Regional wire
+   * widening — the pre-widening display names 'Claude'/'Copilot'/'Other' are gone).
+   */
+  series: { day: string; key: 'claude-code' | 'copilot-cli' | 'copilot-agent' | 'other'; value: number }[]
   /**
    * §B per-day Anthropic chargeback series (bill lane) — the chargeback-mode spend-trend
    * series, carried alongside the §A `series` (never summed). Copilot pooled/monthly, absent.
    */
   chargeSeries: ChargeDailyPoint[]
+  /**
+   * The per-LANE widening of `chargeSeries` (lane-visuals V2-Regional): the same §B
+   * window GROUP BY tool, mapped to registry lane ids. Σ lanes per day == that day's
+   * `chargeUsd` (cent-exact, test-pinned); `chargeSeries` remains the zero-filled
+   * total the run-rate tail and sparklines bind on.
+   */
+  chargeLanes: ChargeLanePoint[]
+  /**
+   * The BILLED showback weekly lane cells over the SAME window (iter-2 I1, the
+   * regional mirror — region-clamped): the usage-view "Where the AI spend goes"
+   * hero's series (and, summed per lane, its pinned donut). Billed basis
+   * (`v_finance_bill_showback`, GitHub §A tools excluded); never summed with the
+   * §A `series`.
+   */
+  showbackWeeklyLanes: ShowbackWeeklyLaneCell[]
 }

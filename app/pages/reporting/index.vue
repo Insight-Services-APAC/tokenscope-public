@@ -18,6 +18,19 @@ interface ReportMetaResp {
   defaultRegionId: string | null
   monthFloors: { usage: string | null; bill: string | null; reconciliation: string | null; overall: string }
   copilotMode: 'pool-utilisation' | 'chargeback'
+  // Report-visibility policy (#19). Optional: present once meta.get.ts threads
+  // the active mode through (the core agent's change). When absent or 'standard'
+  // the chip is not shown — this stays non-blocking until that field lands.
+  mode?: string
+}
+
+// Short labels for the non-standard visibility modes — a subtle chip on the
+// reports header makes an admin-loosened policy visible rather than silent.
+// Kept local (not imported from shared/auth) so this page has no hard dependency
+// on the policy module; the values mirror REPORT_VISIBILITY_MODE_LABELS.
+const VISIBILITY_MODE_LABEL: Record<string, string> = {
+  'region-admins-see-all': 'Region admins see all',
+  'all-admins-see-all': 'All admins see all',
 }
 
 const SCOPE_LABEL: Record<ReportScope, string> = {
@@ -69,6 +82,14 @@ const activeScope = computed<ReportScope>(() =>
   granted.value.includes(rs.scope.value) ? rs.scope.value : bestScope.value,
 )
 
+// Visibility-mode chip: shown only when an admin has loosened the org-wide
+// policy beyond 'standard' (and meta actually carries the mode). Read-only.
+const visibilityChip = computed<string | null>(() => {
+  const mode = meta.value?.mode
+  if (!mode || mode === 'standard') return null
+  return `Visibility: ${VISIBILITY_MODE_LABEL[mode] ?? mode} · admin-configured`
+})
+
 const tabs = computed(() => granted.value.map((s) => ({ key: s, label: SCOPE_LABEL[s] })))
 const tabModel = computed<string>({
   get: () => activeScope.value,
@@ -91,6 +112,14 @@ const tabModel = computed<string>({
       title="Reporting"
       sub="Usage and spend across the org — one place, scoped to what you can see."
     />
+
+    <div
+      v-if="visibilityChip"
+      class="-mt-2 mb-4 inline-flex items-center gap-1.5 text-[12px] font-medium text-brand-vision bg-brand-vision-sheer border border-brand-vision/30 rounded-full px-3 py-1"
+      data-testid="reporting-visibility-chip"
+    >
+      {{ visibilityChip }}
+    </div>
 
     <UiFetchErrorBanner v-if="metaError" :error="metaError" class="mb-4" />
 

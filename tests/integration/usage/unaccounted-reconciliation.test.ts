@@ -179,4 +179,28 @@ describe('reconcileUnaccountedUsage (§A)', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0]!.cost).toBe(8)
   })
+
+  it('#142 REGRESSION: non-Code surface spend (chat-only day) produces NO needs-tagging record', async () => {
+    // The per-surface split (#142) writes actual_spend lanes for chat / Cowork /
+    // etc. Those surfaces are §B chargeback-only — no OTel, no sessions,
+    // deliberately untaggable. Migration 0084 excludes them from
+    // v_teammate_usage_daily, so a chat-only day must NOT surface in the §A
+    // developer worklist as "unaccounted usage".
+    await bill('2026-06-18', '42.00', 'claude-ai') // Claude Chat spend, bill lane only
+    await bill('2026-06-18', '3.00', 'claude-cowork')
+    const res = await reconcileUnaccountedUsage(t.db, WINDOW)
+    expect(res.recordsWithDelta).toBe(0)
+    expect(res.totalUnaccountedUsd).toBe(0)
+    expect(await records()).toHaveLength(0) // nothing taggable — the worklist stays clean
+  })
+
+  it('#142: a mixed day reconciles ONLY the claude-code lane (chat spend never inflates the delta)', async () => {
+    await bill('2026-06-19', '10.00', 'claude-code')
+    await bill('2026-06-19', '99.00', 'claude-ai') // would be a glaring inflation if folded in
+    await otel('2026-06-19', '4.00')
+    await reconcileUnaccountedUsage(t.db, WINDOW)
+    const rows = await records()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ day: '2026-06-19', tool: 'claude-code', cost: 6 }) // 10 − 4, NOT 109 − 4
+  })
 })

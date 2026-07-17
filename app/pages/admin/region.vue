@@ -5,6 +5,8 @@
  * region, falling back to the regions list. Kept (not deleted) because older
  * links may still target this path.
  */
+definePageMeta({ middleware: 'admin' })
+
 const { session, ensure } = useSession()
 await ensure()
 

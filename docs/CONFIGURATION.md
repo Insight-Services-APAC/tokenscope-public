@@ -42,6 +42,7 @@ Optional during first bring-up (dev mode); required for real sign-in.
 | `NUXT_AZURE_MI_CLIENT_ID` | User-assigned managed identity client id (query + ingest auth). |
 | `NUXT_AZURE_MONITOR_AUTH` | `mi` for managed identity. |
 | `NUXT_AZURE_MONITOR_LOGS_ENDPOINT` | Full DCR OTLP-logs ingest URL. |
+| `NUXT_AZURE_MONITOR_ENDPOINT` | Local/dev collector endpoint the reader queries; also the logs-ingest fallback when `_LOGS_ENDPOINT` is unset. |
 | `NUXT_AZURE_MONITOR_QUERY_ENDPOINT` | Log Analytics query endpoint (leave default unless private-linked). |
 | `NUXT_JOINER_INSTANCE_CAP` | Max instances scanned per read tick (default 500). |
 | `NUXT_COPILOT_NATIVE_OTEL` | `true` enables the native Copilot GenAI read-side (default off). |
@@ -52,6 +53,14 @@ Optional during first bring-up (dev mode); required for real sign-in.
 |---|---|
 | `NUXT_GRAPH_DIRECTORY_MODE` | `graph` to place teammates from Entra (cost-centre + manager chain); empty = mock. |
 | `NUXT_GRAPH_BASE_URL` | Microsoft Graph base URL. |
+
+Placement precedence, most-specific first: a manager-chain **unit** match wins;
+otherwise a configurable **directory-attribute → region rule**; otherwise a
+manager-chain **region** leader. The attribute-rule step lets each tenant map a
+region-correlated directory field (company name, country, office location,
+state, or department) to a region, curated in the admin **Region rules**
+surface — so directories where region tracks an attribute rather than the
+manager chain still place correctly.
 
 ## Providers
 

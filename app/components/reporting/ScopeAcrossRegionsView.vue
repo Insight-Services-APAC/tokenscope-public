@@ -32,8 +32,10 @@ import ChargebackDowCard from './ChargebackDowCard.vue'
 import SettlingStateChip from './SettlingStateChip.vue'
 import ExportCsvButton from './ExportCsvButton.vue'
 import ConcentrationCard, { type ConcentrationStats as CardStats } from './ConcentrationCard.vue'
+import LaneLegend from './LaneLegend.vue'
 import AcrossHero from './across/AcrossHero.vue'
-import ProviderSplitCard from './across/ProviderSplitCard.vue'
+import SurfaceHeroCard from './SurfaceHeroCard.vue'
+import SurfaceDonutCard from './SurfaceDonutCard.vue'
 import ActiveUsersTrendCard from './across/ActiveUsersTrendCard.vue'
 import SpendTrendCard from './across/SpendTrendCard.vue'
 import SeasonalityCard from './across/SeasonalityCard.vue'
@@ -41,6 +43,13 @@ import RegionRankCard from './across/RegionRankCard.vue'
 import TopDriversCard from './across/TopDriversCard.vue'
 import TopModelsCard from './across/TopModelsCard.vue'
 import { buildAcrossTrend } from './across/build-trend'
+import { buildSurfaceHero, heroLegendLanes } from './build-surface-hero'
+import {
+  buildChargebackLaneTrend,
+  buildChargebackLaneTrendWeekly,
+  buildChargebackDonut,
+  chargebackLegendLanes,
+} from './build-chargeback-trend'
 import type { ReportLane } from '../../composables/useReportState'
 import type { AcrossReport, AcrossDriversResp } from './across/across-view-types'
 import type { AcrossTrend, Seasonality, ActiveTrend, ProviderState } from '#shared/reports/types'
@@ -110,6 +119,69 @@ const built = computed(() =>
   ),
 )
 
+// ── Usage-view composition hero + pinned donut (iter-2 I1) ───────────────────
+// BILLED showback basis, built from the trend response's weekly lane cells over
+// its window — the ONE shared window object the hero and the donut both bind on
+// (r2-2). `today` identifies the partial current week (rendered but excluded
+// from fold ranking and the delta — r1-F4). It derives from SERVER data — the
+// shared window's inclusive `to` (the rolling trend window ends on the server's
+// today) — NEVER `new Date()` at setup scope: SSR and client hydration could
+// evaluate that across a UTC midnight and disagree on the in-progress-week
+// flag (hydration mismatch — iter2 review r1).
+const todayUtc = computed(() => props.trend?.window?.to ?? null)
+const surfaceHero = computed(() =>
+  props.trend?.window
+    ? buildSurfaceHero(props.trend.showbackWeeklyLanes ?? [], {
+        from: props.trend.window.from,
+        to: props.trend.window.to,
+        today: props.trend.window.to,
+      })
+    : null,
+)
+// The usage page's ONE LaneLegend (V1 item 5): the hero's rendered lanes (the
+// donut's lanes are a subset by construction — same fold membership).
+const usageLegend = computed(() => heroLegendLanes(surfaceHero.value))
+
+// ── §B chargeback-lane cards + the page-level lane legend (lane-visuals V2) ──
+// The scope view owns every chargeback card's series (the container fetched
+// them), so the folded card inputs AND the page legend derive from the SAME
+// computed data — atomic with the page's data, no provide/inject, no
+// registration timing (V1 item 5, r2-3). The run-rate tail is month-anchored
+// exactly like the §A trend: only the in-progress month (forecast non-null)
+// projects; the tail's MTD operand itself is §B (the chargeback total series).
+const chargebackTailMonth = computed(() =>
+  props.report?.forecast && !props.report.meta.range ? props.report.meta.month : null,
+)
+const chargebackBuilt = computed(() =>
+  buildChargebackLaneTrend(
+    props.trend?.chargeLanes ?? [],
+    props.trend?.chargeSeries ?? [],
+    chargebackTailMonth.value,
+  ),
+)
+// The WEEKLY regrouping of the same folded lane series (iter-2 I2/I4) — the
+// chargeback trend card's default grain; Σ(weekly) == Σ(daily) by construction.
+const chargebackWeekly = computed(() =>
+  // Guarded like surfaceHero: a null trend (pre-load / error) must yield null,
+  // never feed mondayOf('') — an unguarded computed here threw RangeError
+  // (review r2 HIGH).
+  props.trend?.window
+    ? buildChargebackLaneTrendWeekly(props.trend.chargeLanes ?? [], props.trend.chargeSeries ?? [], todayUtc.value ?? props.trend.window.to)
+    : null,
+)
+const chargebackDonut = computed(() => buildChargebackDonut(props.report?.chargebackLanes ?? []))
+// The UNION of lanes the page's chargeback cards actually render this period
+// (folded remainder as its single entry) — the ONE page-level legend's input.
+const chargebackLegend = computed(() =>
+  chargebackLegendLanes([chargebackBuilt.value.laneIds, chargebackDonut.value.laneIds]),
+)
+// The ONE page-level lane-mode signal (r3-6): both chargeback cards derive
+// their mode from THIS (the legend union renders from ≥ 2 lanes — LaneLegend's
+// own threshold), never from each card's private, differently-scoped data — so
+// a $0-Anthropic / pooled-Copilot month can't leave the trend card on its
+// legacy path while the split card renders the lane donut.
+const chargebackLaneMode = computed(() => chargebackLegend.value.length >= 2)
+
 // Concentration (from the same drivers lane) — mapped to the shared card's shape.
 const concentrationStats = computed<CardStats | null>(() => {
   const c = props.drivers?.concentration
@@ -170,8 +242,15 @@ const concentrationStats = computed<CardStats | null>(() => {
            to their §B bill-lane analogue in chargeback mode (the per-teammate bill lane HAS
            the daily / token grain — Anthropic; Copilot is pooled per cost-centre). -->
       <template v-if="!isChargeback">
-        <!-- Provider split: donut + per-provider cards + active-users-over-time -->
-        <ProviderSplitCard :split="report.providerSplit" :copilot-pending="report.copilot.pending" />
+        <!-- ONE page-level lane legend for the billed-basis hero + donut
+             (iter-2 I1, V1 item 5) — the cards render no legends. -->
+        <LaneLegend :lanes="usageLegend" />
+        <!-- Composition hero (I1): billed showback, weekly, $ + 100%-share. -->
+        <SurfaceHeroCard :built="surfaceHero" :window-label="trendWindowLabel" />
+        <!-- The billed surface donut REPLACES the old §A provider donut (I1);
+             attributed provider figures live ONLY in the §A KPI strip above. -->
+        <SurfaceDonutCard :donut="surfaceHero?.donut ?? null" :window-label="trendWindowLabel" />
+
         <ActiveUsersTrendCard :active="activeTrend" :window-label="trendWindowLabel" />
 
         <SpendTrendCard
@@ -183,9 +262,21 @@ const concentrationStats = computed<CardStats | null>(() => {
         <SeasonalityCard :seasonality="seasonality" :window-label="trendWindowLabel" />
       </template>
       <template v-else>
-        <ChargebackSplitCard :split="report.chargebackProviderSplit" />
-        <ChargebackTrendCard :series="trend?.chargeSeries ?? []" :window-label="trendWindowLabel" />
-        <ChargebackDowCard :buckets="seasonality?.chargeDow ?? []" :window-label="trendWindowLabel" />
+        <!-- ONE page-level lane legend for the chargeback cards (V1 item 5) —
+             cards render no legends; identity = this legend + card tooltips. -->
+        <LaneLegend :lanes="chargebackLegend" />
+        <ChargebackSplitCard
+          :split="report.chargebackProviderSplit"
+          :donut="chargebackDonut"
+          :lane-mode="chargebackLaneMode"
+        />
+        <ChargebackTrendCard
+          :series="trend?.chargeSeries ?? []"
+          :built="chargebackBuilt"
+          :built-weekly="chargebackWeekly"
+          :lane-mode="chargebackLaneMode"
+          :window-label="trendWindowLabel"
+        />
       </template>
 
       <RegionRankCard
@@ -193,6 +284,13 @@ const concentrationStats = computed<CardStats | null>(() => {
         :chargeback-rows="report.chargebackByRegion"
         :lane="lane"
         @select="emit('select-region', $event)"
+      />
+
+      <!-- DoW card DEMOTED below the rankings (iter-2 I2) — still chargeback-only. -->
+      <ChargebackDowCard
+        v-if="isChargeback"
+        :buckets="seasonality?.chargeDow ?? []"
+        :window-label="trendWindowLabel"
       />
 
       <!-- Top drivers (axis toggle, default teammate) + top models + concentration —

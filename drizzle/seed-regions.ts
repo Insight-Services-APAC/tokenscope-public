@@ -79,6 +79,44 @@ async function main(): Promise<void> {
       }
       console.warn(`region ready: ${r.displayName} (${r.code})`)
     }
+
+    // Insight-specific EXAMPLE region rules (opt-in). Maps the Entra `companyName`
+    // legal entity → region — the signal that is region-correlated on Insight's
+    // directory (verified: "Insight Australia/United Kingdom/USA/Canada"). Gated
+    // behind SEED_INSIGHT_REGION_RULES so open-source adopters NEVER inherit
+    // Insight's values; they curate their own in the Region rules UI (Discover
+    // shows which attribute maps to region on their tenant). Canada currently
+    // rolls into north-america (no separate region); re-point via the UI if it
+    // becomes its own region.
+    if (process.env.SEED_INSIGHT_REGION_RULES === 'true') {
+      const INSIGHT_COMPANY_RULES: Array<[string, string]> = [
+        ['Insight Australia', 'apac'],
+        ['Insight United Kingdom', 'emea'],
+        ['Insight USA', 'north-america'],
+        ['Insight Canada', 'north-america'],
+      ]
+      for (const [company, regionCode] of INSIGHT_COMPANY_RULES) {
+        const [region] = await db
+          .select({ id: schema.region.id })
+          .from(schema.region)
+          .where(eq(schema.region.code, regionCode))
+        if (!region) {
+          console.warn(`region-rule seed: region '${regionCode}' missing — skipping ${company}`)
+          continue
+        }
+        await db
+          .insert(schema.directoryRegionRule)
+          .values({
+            attribute: 'companyName',
+            matchMode: 'exact',
+            matchValue: company.trim().toLowerCase(),
+            matchValueRaw: company,
+            regionId: region.id,
+          })
+          .onConflictDoNothing()
+      }
+      console.warn('Insight companyName → region rules seeded (SEED_INSIGHT_REGION_RULES).')
+    }
     console.warn('Clean-environment regions seeded. First Entra sign-in can now JIT-provision.')
   } finally {
     await client.end({ timeout: 5 })

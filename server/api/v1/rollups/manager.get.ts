@@ -24,7 +24,7 @@ import { monthStartIso as monthStartIsoFor } from '../../../utils/period'
 import { managerScopePredicate } from '../../../auth/org-subtree-scope'
 
 // Region selector — honoured only for the cross-region roles (global-finops / platform-admin);
-// a region admin is hard-bound to its own region and the param is ignored (finance-scope contract).
+// a region admin is hard-bound to its own region and the param is ignored (org-subtree-scope contract).
 const Query = z.object({ regionId: z.string().uuid().optional() })
 
 const VELOCITY_ROLLING_WEEKS = 4
@@ -72,7 +72,7 @@ export default defineEventHandler(async (event) => {
     // inbox verdicts, so the threshold stays per-teammate-region.
     const thresholdFor = await loadGovernanceSettingResolver(tx, GOV_VELOCITY_SPIKE_THRESHOLD)
 
-    // Region scope (finance-scope model, RLS inert at runtime so it lives in-query):
+    // Region scope (org-subtree-scope model, RLS inert at runtime so it lives in-query):
     //   manager                          → their org subtree (region-clamped against path collision)
     //   admin                            → their OWN region, never another
     //   global-finops / platform-admin   → ALL regions, or a single one picked via ?regionId=

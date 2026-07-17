@@ -22,7 +22,7 @@
  */
 import { defineEventHandler, getValidatedQuery, getRouterParam, createError } from 'h3'
 import { z } from 'zod'
-import { requireRole } from '../../../../auth/rbac'
+import { requireReportScope } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
@@ -46,7 +46,6 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'global-finops', 'platform-admin')
   // Validate as a real UUID (as index.get.ts / export.get.ts do) — a lax `[0-9a-f-]{36}`
   // regex admits 36-char shapes (e.g. all-dashes) that pass the gate then 500 on the ::uuid
   // cast in resolveFinanceCou. A structurally invalid id is a clean 400, never a 500 (L1).
@@ -71,6 +70,9 @@ export default defineEventHandler(async (event) => {
   const copilotChargeback = copilotChargebackEnabled()
 
   return await withRequestRls(event, async (tx) => {
+    // Whole-company finance drill: same finance gate as the finance index
+    // (reportGrants.finance === true). Denies are audited.
+    await requireReportScope(event, tx, 'finance')
     const cou = await resolveFinanceCou(tx, couId)
 
     const anthropic = await fetchAnthropicCharges(tx, cou.id, win)
@@ -87,6 +89,9 @@ export default defineEventHandler(async (event) => {
           })
         : null
 
+    // Chargeable = license + overage ONLY. pool.unclassifiedNetUsd (mig 0085) is surfaced
+    // on the drill but NEVER charged — unclassified money waits for SKU classification
+    // (design D2; runbook docs/build/worker-scheduler.md).
     const copilotChargeableUsd = pool.licenseNetUsd + pool.overageNetUsd
     const chargeableUsd = anthropic.totalUsd + (copilotChargeback ? copilotChargeableUsd : 0)
 
@@ -116,6 +121,8 @@ export default defineEventHandler(async (event) => {
         chargeableUsd: copilotChargeback ? copilotChargeableUsd : null,
         licenseNetUsd: pool.licenseNetUsd,
         overageNetUsd: pool.overageNetUsd,
+        // Visible in BOTH modes, badged "needs mapping", never part of chargeableUsd.
+        unclassifiedNetUsd: pool.unclassifiedNetUsd,
         // UNSETTLED CoU-month (a pooled line has usage but no read license SKU): licenseNetUsd —
         // and thus chargeableUsd — silently drops the unread license. Surface it in chargeback
         // mode so the drill caveats the Chargeable headline + shows amber, not green (M2).

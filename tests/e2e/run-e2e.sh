@@ -22,10 +22,10 @@ echo "[e2e] starting dev stack..."
 bash scripts/dev-stack.sh up >/dev/null 2>&1
 sleep 6
 
-export DATABASE_URL="${DATABASE_URL:-postgresql://tokenscope:tokenscope@${CW_WORKER_NAME:-lead-TokenScope}-postgres:5432/tokenscope}"
+export DATABASE_URL="${DATABASE_URL:-postgresql://tokenscope:tokenscope@${CW_WORKER_NAME:-tokenscope}-postgres:5432/tokenscope}"
 # fake-azure-monitor endpoint — the OTel-source stand-in the journey spec
 # emits spans into (and the server's read-joiner pulls from).
-export NUXT_AZURE_MONITOR_ENDPOINT="${NUXT_AZURE_MONITOR_ENDPOINT:-http://${CW_WORKER_NAME:-lead-TokenScope}-fake-azure-monitor:8080}"
+export NUXT_AZURE_MONITOR_ENDPOINT="${NUXT_AZURE_MONITOR_ENDPOINT:-http://${CW_WORKER_NAME:-tokenscope}-fake-azure-monitor:8080}"
 export NUXT_OIDC_AUTH_DEV_MODE=true
 # Runtime override of the public config so the demo persona grid renders
 # even if a stale .nuxt baked authDevMode=false (e.g. a prior `nuxt prepare`).

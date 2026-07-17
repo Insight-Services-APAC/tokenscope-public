@@ -11,6 +11,7 @@
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
+import { consola } from 'consola'
 import type * as schema from '../../drizzle/schema'
 import {
   AnthropicAnalyticsClient,
@@ -30,38 +31,45 @@ import {
 } from '../anthropic/enterprise-client'
 import { readSecret } from '../reconciliation/credentials'
 import { enqueueOwedBill } from '../reconciliation/placement-store'
+import { recordAuditEvent } from '../db/audit'
+import {
+  mapProductToTool,
+  isKnownProduct,
+  CLAUDE_CODE_TOOL,
+  CLAUDE_FAMILY_TOOLS,
+} from '../../shared/usage/surface'
 
-/* An unknown-email (no teammate yet) owed bill, aggregated per (email, day) so
- * multiple records sum rather than overwrite — the bill-driven-placement trigger.
- * The poller ENQUEUES these (no Graph, just a durable INSERT); the placement-sync
- * worker provisions+places the user and replays them into actual_spend (M2). */
+/* An unknown-email (no teammate yet) owed bill, aggregated per (email, day, tool)
+ * so multiple records sum rather than overwrite — the bill-driven-placement
+ * trigger. The tool rides the aggregate (#142) so the placement-sync replay
+ * preserves the surface lane (pending_placement's unique key already includes
+ * tool). The poller ENQUEUES these (no Graph, just a durable INSERT); the
+ * placement-sync worker provisions+places the user and replays them into
+ * actual_spend (M2). */
 interface OwedAgg {
   email: string
   date: string
+  tool: string
   inputTokens: number
   outputTokens: number
   costUsd: number
 }
-function accumulateOwed(m: Map<string, OwedAgg>, email: string, date: string, inT: number, outT: number, cost: number): void {
+function accumulateOwed(m: Map<string, OwedAgg>, email: string, date: string, tool: string, inT: number, outT: number, cost: number): void {
   const e = email.toLowerCase()
-  const key = `${e}:${date}`
-  const a = m.get(key) ?? { email: e, date, inputTokens: 0, outputTokens: 0, costUsd: 0 }
+  const key = `${e}:${date}:${tool}`
+  const a = m.get(key) ?? { email: e, date, tool, inputTokens: 0, outputTokens: 0, costUsd: 0 }
   a.inputTokens += inT
   a.outputTokens += outT
   if (Number.isFinite(cost)) a.costUsd += cost
   m.set(key, a)
 }
-async function flushOwed(
-  db: PostgresJsDatabase<typeof schema>,
-  m: Map<string, OwedAgg>,
-  args: { source: string; tool: string },
-): Promise<void> {
+async function flushOwed(db: PostgresJsDatabase<typeof schema>, m: Map<string, OwedAgg>, args: { source: string }): Promise<void> {
   for (const a of m.values()) {
     await enqueueOwedBill(db, {
       provider: 'anthropic',
       actualSource: args.source,
       email: a.email,
-      tool: args.tool,
+      tool: a.tool,
       date: a.date,
       costUsd: a.costUsd,
       inputTokens: a.inputTokens,
@@ -75,6 +83,14 @@ export interface PollResult {
   recordsTotal: number
   recordsUpserted: number
   recordsSkippedUnknownUser: number
+  /* Enterprise (per-surface) poll observability — #142. Upserted rows per tool
+   * lane; raw `product` values that fell to the claude-other lane (value →
+   * occurrence count; NEVER dropped, always labelled); and how many stale rows
+   * the post-pull convergence pass pruned (see the cleanup note in
+   * runEnterpriseAnalyticsPoll). Absent on the Admin (claude_code-only) path. */
+  rowsByTool?: Record<string, number>
+  unknownProducts?: Record<string, number>
+  staleRowsDeleted?: number
 }
 
 export interface PollOptions {
@@ -96,14 +112,18 @@ export function sourceForOrg(externalOrgId?: string): string {
 }
 
 /*
- * One (teammate, date) aggregate ready to upsert into actual_spend. Both the
- * Admin (claude_code) and Enterprise-analytics pollers reduce a day's records to
- * these by the conflict key (teammate_id, date) before writing — DO UPDATE would
- * otherwise let the last record CLOBBER earlier ones for the same actor-day.
+ * One (teammate, date, tool) aggregate ready to upsert into actual_spend. Both
+ * the Admin (claude_code) and Enterprise-analytics pollers reduce a day's
+ * records to these by the conflict key (teammate_id, date, tool) before writing
+ * — DO UPDATE would otherwise let the last record CLOBBER earlier ones for the
+ * same actor-day-surface. The Admin path only ever writes tool='claude-code'
+ * (its endpoint is Code-specific by definition); the Enterprise path writes one
+ * lane per `product` surface (#142) via mapProductToTool.
  */
 interface ActualSpendAgg {
   teammateId: string
   date: string // YYYY-MM-DD
+  tool: string
   inputTokens: number
   outputTokens: number
   costUsd: number
@@ -113,10 +133,10 @@ interface ActualSpendAgg {
 
 /*
  * Idempotent actual_spend upsert shared by both pollers. The unique key is
- * (teammate_id, date, tool, source); tool is always 'claude-code'. Returns true
- * if a row was written/updated (always, given RETURNING id). costUsd is fixed to
- * 6 dp for the PG numeric; callers must pre-filter non-finite cost so a single
- * 'NaN' can't poison the column.
+ * (teammate_id, date, tool, source); tool is the aggregate's surface lane.
+ * Returns true if a row was written/updated (always, given RETURNING id).
+ * costUsd is fixed to 6 dp for the PG numeric; callers must pre-filter
+ * non-finite cost so a single 'NaN' can't poison the column.
  */
 async function upsertActualSpend(
   db: PostgresJsDatabase<typeof schema>,
@@ -128,7 +148,7 @@ async function upsertActualSpend(
       INSERT INTO actual_spend
         (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source, raw_payload)
       VALUES
-        (${agg.teammateId}::uuid, ${agg.date}::date, 'claude-code',
+        (${agg.teammateId}::uuid, ${agg.date}::date, ${agg.tool},
          ${agg.inputTokens}::bigint, ${agg.outputTokens}::bigint,
          ${agg.costUsd.toFixed(6)}::numeric, ${source},
          ${JSON.stringify(agg.rawPayload)}::jsonb)
@@ -224,7 +244,7 @@ export async function runAnalyticsPoll(
         skipped += 1
         // Don't drop it: enqueue the owed bill so placement-sync can provision the
         // user later and replay it into actual_spend (never $0, never lost).
-        accumulateOwed(owed, email, recordDate(rec), sumRecordInputTokens(rec), sumRecordOutputTokens(rec), sumRecordCostUsd(rec))
+        accumulateOwed(owed, email, recordDate(rec), CLAUDE_CODE_TOOL, sumRecordInputTokens(rec), sumRecordOutputTokens(rec), sumRecordCostUsd(rec))
         continue
       }
       const recDate = recordDate(rec)
@@ -232,6 +252,7 @@ export async function runAnalyticsPoll(
       const agg = aggs.get(key) ?? {
         teammateId: tmId,
         date: recDate,
+        tool: CLAUDE_CODE_TOOL, // the Admin claude_code endpoint is Code-specific by definition
         inputTokens: 0,
         outputTokens: 0,
         costUsd: 0,
@@ -246,7 +267,7 @@ export async function runAnalyticsPoll(
       if (Number.isFinite(cost)) {
         agg.costUsd += cost
       } else {
-        console.warn(`[analytics-poll] non-numeric estimated_cost skipped for ${agg.date}`)
+        consola.warn(`[analytics-poll] non-numeric estimated_cost skipped for ${agg.date}`)
       }
       agg.recs.push(rec)
       aggs.set(key, agg)
@@ -257,7 +278,7 @@ export async function runAnalyticsPoll(
     }
   }
 
-  await flushOwed(db, owed, { source, tool: 'claude-code' })
+  await flushOwed(db, owed, { source })
   return {
     daysPulled,
     recordsTotal: total,
@@ -278,7 +299,9 @@ export async function runAnalyticsPoll(
  * Per UTC day (daysInclusive) we pull SERIALLY (NOT Promise.all — the Enterprise
  * API caps at 60 RPM org-wide, shared with reconciliation-sync) the usage + cost
  * reports with group_by[]=product&group_by[]=model over ALL products, then
- * aggregate per (teammate, day) ACROSS ALL products:
+ * aggregate per (teammate, day, SURFACE) — one lane per `product` via
+ * mapProductToTool (#142: chat/Cowork/Office/etc are separate chargeback lanes,
+ * no longer folded into the Claude Code number):
  *   - input_tokens  = Σ uncached_input_tokens   (usage rows)
  *   - output_tokens = Σ output_tokens           (usage rows)
  *   - cost_usd      = Σ token cost (centsStringToUsd) for cost rows where
@@ -287,6 +310,20 @@ export async function runAnalyticsPoll(
  *                     reconciliation adapter at the cost-owning unit, NOT per-teammate
  *                     actual_spend (§8.5). Folding them in would inflate a developer's
  *                     bill-anchored spend with costs they don't personally own.
+ * Unknown / unattributable products land in the labelled 'claude-other' lane and
+ * are REPORTED (unknownProducts) — never silently dropped, never re-collapsed
+ * into claude-code (the no-silent-cap rule; future surfaces stay visible).
+ *
+ * STALE-ROW CONVERGENCE: the upsert never deletes, so a (teammate, day) whose
+ * spend previously collapsed into one 'claude-code' row (pre-split) — or whose
+ * spend was revised away — would linger at its old value unless this run happens
+ * to rewrite that exact (tool) key. After a FULLY-successful window pull we
+ * therefore prune rows in (this source × the pulled window × the Claude-family
+ * lanes) whose pulled_at predates this run: whatever the pull did not re-assert
+ * is no longer part of the provider truth. Scoped strictly to this source +
+ * window + CLAUDE_FAMILY_TOOLS so copilot/other sources are untouched; skipped
+ * entirely if any day failed (a thrown day aborts before the prune).
+ *
  * Identity: actor.email, null/deleted skipped (counted), resolved via the same
  * `NOT provisional` money-path guard as runAnalyticsPoll + the adapter.
  *
@@ -303,11 +340,26 @@ export async function runEnterpriseAnalyticsPoll(
   let total = 0
   let upserted = 0
   let skipped = 0
+  const rowsByTool: Record<string, number> = {}
+  const unknownProducts: Record<string, number> = {}
+  const noteUnknownProduct = (product: string | null | undefined): void => {
+    const key = product ?? '(null)'
+    unknownProducts[key] = (unknownProducts[key] ?? 0) + 1
+  }
 
   const teammateCache = new Map<string, string | null>()
   const owed = new Map<string, OwedAgg>() // unknown-email bills → placement queue
 
-  // One (teammate, day) aggregate, carrying the verbatim usage + cost rows for raw_payload.
+  // DB-clock start marker for the stale-row prune: rows this run touches get
+  // pulled_at = their statement's NOW() (> this), rows it never re-asserts keep
+  // an older pulled_at. DB time, not Date.now() — app/DB clock skew must not
+  // widen or shrink the prune window.
+  const [clock] = await db.execute<{ run_started: string }>(sql`SELECT now()::timestamptz AS run_started`)
+  if (!clock) throw new Error('enterprise-analytics-poll: could not read DB clock for the prune marker')
+  const runStarted = clock.run_started
+
+  // One (teammate, day, surface-tool) aggregate, carrying the verbatim usage +
+  // cost rows for raw_payload.
   interface EntDayAgg extends ActualSpendAgg {
     usageRows: EnterpriseUsageRow[]
     costRows: EnterpriseCostRow[]
@@ -329,13 +381,14 @@ export async function runEnterpriseAnalyticsPoll(
     const cost = await client.getUserCostReport({ startingAt, endingAt, groupBy })
 
     const aggs = new Map<string, EntDayAgg>()
-    const getAgg = (teammateId: string): EntDayAgg => {
-      const key = `${teammateId}:${day}`
+    const getAgg = (teammateId: string, tool: string): EntDayAgg => {
+      const key = `${teammateId}:${day}:${tool}`
       let agg = aggs.get(key)
       if (!agg) {
         agg = {
           teammateId,
           date: day,
+          tool,
           inputTokens: 0,
           outputTokens: 0,
           costUsd: 0,
@@ -348,27 +401,35 @@ export async function runEnterpriseAnalyticsPoll(
       return agg
     }
 
+    // The surface lane for a report row; unmapped/null products are counted for
+    // the run summary (they land in the labelled claude-other lane, never dropped).
+    const rowTool = (product: string | null | undefined): string => {
+      if (!isKnownProduct(product)) noteUnknownProduct(product)
+      return mapProductToTool(product)
+    }
+
     // Resolvable actor email (nullable/deleted → none, never guess a teammate).
     const actorEmail = (actor: { email?: string | null; deleted?: boolean }): string | null =>
       actor.email && !actor.deleted ? actor.email : null
 
-    // --- usage: Σ uncached_input / output tokens per (teammate, day), all products ---
+    // --- usage: Σ uncached_input / output tokens per (teammate, day, surface) ---
     for (const row of usage.data) {
       total += 1
+      const tool = rowTool(row.product)
       const email = actorEmail(row.actor)
       const teammateId = email ? await resolveTeammateId(db, teammateCache, email) : null
       if (!teammateId) {
         skipped += 1
-        if (email) accumulateOwed(owed, email, day, row.uncached_input_tokens, row.output_tokens, 0)
+        if (email) accumulateOwed(owed, email, day, tool, row.uncached_input_tokens, row.output_tokens, 0)
         continue
       }
-      const agg = getAgg(teammateId)
+      const agg = getAgg(teammateId, tool)
       agg.inputTokens += row.uncached_input_tokens
       agg.outputTokens += row.output_tokens
       agg.usageRows.push(row)
     }
 
-    // --- cost: Σ TOKEN cost per (teammate, day); EXCLUDE org-grain tool costs ---
+    // --- cost: Σ TOKEN cost per (teammate, day, surface); EXCLUDE org-grain tool costs ---
     for (const row of cost.data) {
       total += 1
       // web_search / code_execution are ORG-GRAIN (emitted by the reconciliation
@@ -377,36 +438,120 @@ export async function runEnterpriseAnalyticsPoll(
       if (row.cost_type === 'web_search' || row.cost_type === 'code_execution') {
         continue
       }
+      const tool = rowTool(row.product)
       const usd = centsStringToUsd(row.amount) // fractional cents string -> USD
       const email = actorEmail(row.actor)
       const teammateId = email ? await resolveTeammateId(db, teammateCache, email) : null
       if (!teammateId) {
         skipped += 1
-        if (email) accumulateOwed(owed, email, day, 0, 0, Number.isFinite(usd) ? usd : 0)
+        if (email) accumulateOwed(owed, email, day, tool, 0, 0, Number.isFinite(usd) ? usd : 0)
         continue
       }
       if (!Number.isFinite(usd)) {
-        console.warn(`[enterprise-analytics-poll] non-numeric cost amount skipped for ${day}`)
+        consola.warn(`[enterprise-analytics-poll] non-numeric cost amount skipped for ${day}`)
         continue
       }
-      const agg = getAgg(teammateId)
+      const agg = getAgg(teammateId, tool)
       agg.costUsd += usd
       agg.costRows.push(row)
     }
 
     for (const agg of aggs.values()) {
-      // raw_payload: the teammate-day's usage + cost rows (the verbatim source).
+      // raw_payload: the teammate-day-surface's usage + cost rows (the verbatim source).
       agg.rawPayload = { day, usage: agg.usageRows, cost: agg.costRows }
-      if (await upsertActualSpend(db, agg, source)) upserted += 1
+      if (await upsertActualSpend(db, agg, source)) {
+        upserted += 1
+        rowsByTool[agg.tool] = (rowsByTool[agg.tool] ?? 0) + 1
+      }
     }
   }
 
-  await flushOwed(db, owed, { source, tool: 'claude-code' })
+  // Stale-row convergence prune (see the contract comment above). Only reached
+  // when EVERY day in the window pulled + wrote successfully — a thrown day
+  // aborts the run before this point, so a partial pull can never delete rows
+  // it did not get the chance to re-assert.
+  //
+  // IDENTITY-FAILURE GUARD (ratio, not boolean): if an outsized share of the
+  // API rows failed to bind a teammate, the failure is likely OURS (identity
+  // resolution regression), not a provider revision — pruning then would erase
+  // rows the broken run merely failed to re-assert. Healthy runs always skip a
+  // FEW rows (api_actors, not-yet-provisioned users → owed queue), so the guard
+  // is a ratio: prune only while skipped/total ≤ PRUNE_MAX_SKIP_RATIO. A
+  // genuinely quiet window — zero API rows — DOES prune (clears revised-away
+  // days). Partially-skipped spend is never lost either way: it is queued as an
+  // owed bill and placement-sync replays it into actual_spend.
+  //
+  // CONCURRENT-RUN NOTE (deliberate, argued in the #142 review): two
+  // overlapping runs for the same source (cron tick + a long --opts historical
+  // re-pull) cannot lose live money through this prune. A run re-asserts every
+  // key its OWN pull returned before its prune fires, and rows written by the
+  // other run AFTER this run's marker survive `pulled_at < marker`. The only
+  // rows a run deletes are keys absent from its own (newest-at-marker-time) API
+  // snapshot — which is the convergence we want. The residual hazard is a
+  // transient mix of two revision snapshots, rewritten by the next 15-min tick;
+  // bounded and self-healing, so no advisory lock is taken.
+  const PRUNE_MAX_SKIP_RATIO = 0.5
+  let staleRowsDeleted = 0
+  const skipRatio = total > 0 ? skipped / total : 0
+  if (skipRatio <= PRUNE_MAX_SKIP_RATIO) {
+    const lanedList = sql.join(
+      CLAUDE_FAMILY_TOOLS.map((t) => sql`${t}`),
+      sql.raw(', '),
+    )
+    const pruned = await db.execute<{ id: string }>(
+      sql`
+        DELETE FROM actual_spend
+        WHERE source = ${source}
+          AND date >= ${opts.startingAt}::date
+          AND date <= ${opts.endingAt}::date
+          AND tool IN (${lanedList})
+          AND pulled_at < ${runStarted}::timestamptz
+        RETURNING id::text AS id
+      `,
+    )
+    staleRowsDeleted = pruned.length
+  } else {
+    consola.warn(
+      `[enterprise-analytics-poll] skipping stale-row prune: ${skipped}/${total} API rows failed to bind a teammate (ratio ${skipRatio.toFixed(2)} > ${PRUNE_MAX_SKIP_RATIO}) — identity resolution looks broken`,
+    )
+  }
+
+  await flushOwed(db, owed, { source })
+
+  if (staleRowsDeleted > 0 || Object.keys(unknownProducts).length > 0) {
+    // Money rows vanishing (prune) or a surface we don't recognise (drift) are
+    // consequential — leave an audit trail beyond worker logs. Routine upserts
+    // stay un-audited (they are observable via pulled_at + worker_run).
+    if (Object.keys(unknownProducts).length > 0) {
+      consola.warn('[enterprise-analytics-poll] unmapped product values landed in claude-other', unknownProducts)
+    }
+    // subject_id is a UUID column and externalOrgId is the EXTERNAL string id
+    // ('org-acme') — it rides the payload instead, mirroring the
+    // identity-sync-github precedent (slug in payload, uuid-or-null subject).
+    await recordAuditEvent(db, {
+      eventType: 'actual-spend-surface-adjusted',
+      actorSystem: 'worker:analytics-poll',
+      subjectKind: 'provider_org',
+      subjectId: null,
+      payload: {
+        window: { startingAt: opts.startingAt, endingAt: opts.endingAt },
+        source,
+        externalOrgId: opts.externalOrgId ?? null,
+        staleRowsDeleted,
+        unknownProducts,
+        rowsByTool,
+      },
+    })
+  }
+
   return {
     daysPulled,
     recordsTotal: total,
     recordsUpserted: upserted,
     recordsSkippedUnknownUser: skipped,
+    rowsByTool,
+    unknownProducts,
+    staleRowsDeleted,
   }
 }
 
@@ -441,7 +586,13 @@ export function resolveOrgApiKey(credentialSecretName: string | null | undefined
 export async function runAnalyticsPollReconciledOrgs(
   db: PostgresJsDatabase<typeof schema>,
   opts: PollOptions,
+  // onlyExternalOrgId (#142): scope the poll to one reconciled org — the
+  // recommended companion to a historical window override, so a long re-pull
+  // doesn't walk every org against the shared 60-RPM cap. Unknown id → clean
+  // no-op (orgsConsidered 0), visible in the result.
+  scope: { onlyExternalOrgId?: string } = {},
 ): Promise<MultiOrgPollResult> {
+  const orgFilter = scope.onlyExternalOrgId ? sql` AND external_org_id = ${scope.onlyExternalOrgId}` : sql``
   const orgs = await db.execute<{
     external_org_id: string
     credential_secret_name: string | null
@@ -450,7 +601,7 @@ export async function runAnalyticsPollReconciledOrgs(
     sql`
       SELECT external_org_id, credential_secret_name, api_kind
       FROM provider_org
-      WHERE provider = 'anthropic' AND reconciliation_mode = 'reconciled'
+      WHERE provider = 'anthropic' AND reconciliation_mode = 'reconciled'${orgFilter}
       ORDER BY external_org_id
     `,
   )

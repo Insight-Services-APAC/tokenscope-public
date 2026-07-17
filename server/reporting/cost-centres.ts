@@ -40,6 +40,8 @@ import { orgSubtreeScopePredicate } from '../auth/org-subtree-scope'
 import { getOwnedCostCentreIds } from '../auth/org-roles'
 import { requireRegionScope } from '../auth/rbac'
 import { csvEscape } from '../utils/csv-escape'
+import { laneListSql } from '../../shared/usage/vendor'
+import { GITHUB_CHARGEABLE_LANES } from '../../shared/usage/github-surface'
 import { forecastForMonth } from '../reports/forecast'
 import { exhaustionDate } from '../usage/projections'
 import { monthKeyUtc } from '../utils/period'
@@ -94,12 +96,21 @@ export type CostCentreDrillAxis = (typeof COST_CENTRE_DRILL_AXES)[number]
  *     owned CCs even when they sit OUTSIDE the owner's own org subtree.
  * NO region denominators are computed for pure owners (build-design §2).
  */
-export async function fetchVisibleCostCentres(tx: Tx): Promise<CostCentreRef[]> {
-  const ownerClause = sql`EXISTS (
-    SELECT 1 FROM cou_owner co
-    WHERE co.org_unit_id = ou.id
-      AND co.teammate_id = NULLIF(current_setting('app.user_teammate_id', true), '')::uuid
-      AND co.revoked_at IS NULL)`
+export async function fetchVisibleCostCentres(
+  tx: Tx,
+  opts?: { unbounded?: boolean },
+): Promise<CostCentreRef[]> {
+  // `unbounded` = reportGrants.costCentre === 'all' (an admin under a loosened policy
+  // mode, or a cost-centre owner under mode 3): every cost centre is visible. For a
+  // non-elevated caller the owner/subtree predicate is UNCHANGED (byte-identical to
+  // standard behaviour).
+  const scopeClause = opts?.unbounded
+    ? sql`TRUE`
+    : sql`( ${orgSubtreeScopePredicate('ou')} OR EXISTS (
+        SELECT 1 FROM cou_owner co
+        WHERE co.org_unit_id = ou.id
+          AND co.teammate_id = NULLIF(current_setting('app.user_teammate_id', true), '')::uuid
+          AND co.revoked_at IS NULL) )`
   const rows = await tx.execute<{
     id: string
     code: string
@@ -111,7 +122,7 @@ export async function fetchVisibleCostCentres(tx: Tx): Promise<CostCentreRef[]> 
            ou.region_id::text AS region_id, r.code AS region_code
     FROM org_unit ou JOIN region r ON r.id = ou.region_id
     WHERE ou.is_cost_owning_unit = TRUE AND ou.retired_at IS NULL
-      AND ( ${orgSubtreeScopePredicate('ou')} OR ${ownerClause} )
+      AND ${scopeClause}
     ORDER BY r.code, ou.display_name`)
   return [...rows].map((r) => ({
     id: r.id,
@@ -135,6 +146,7 @@ export async function resolveCostCentreDrill(
   event: H3Event,
   caller: CostCentreCaller,
   ccId: string,
+  opts?: { unbounded?: boolean },
 ): Promise<CostCentreRef> {
   const rows = await tx.execute<{
     id: string
@@ -151,11 +163,16 @@ export async function resolveCostCentreDrill(
   const cc = [...rows][0]
   if (!cc) throw createError({ statusCode: 404, statusMessage: 'cost centre not found' })
 
-  const owned = await getOwnedCostCentreIds(tx, caller.teammateId)
-  if (!owned.includes(cc.id)) {
-    // requireRegionScope throws 403 for any role without scope over cc.region_id
-    // (developer / manager non-owners, or an admin from another region).
-    await requireRegionScope(event, cc.region_id)
+  // `unbounded` = reportGrants.costCentre === 'all' — any existing cost centre is
+  // drillable (a non-existent one is STILL a 404 above). For a non-elevated caller the
+  // owner-OR-region-scope gate is UNCHANGED.
+  if (!opts?.unbounded) {
+    const owned = await getOwnedCostCentreIds(tx, caller.teammateId)
+    if (!owned.includes(cc.id)) {
+      // requireRegionScope throws 403 for any role without scope over cc.region_id
+      // (developer / manager non-owners, or an admin from another region).
+      await requireRegionScope(event, cc.region_id)
+    }
   }
   return {
     id: cc.id,
@@ -286,10 +303,13 @@ export async function fetchCostCentreCards(
   for (const r of anthropicRows) chargeByCc.set(r.cc_id, Number(r.anthropic))
 
   if (foldCopilot) {
+    // CHARGEABLE lanes only (registry-driven, mig 0085): copilot-license + copilot-usage;
+    // copilot-unclassified NEVER enters a chargeable figure (design D2).
     const copilotRows = await tx.execute<{ cc_id: string; copilot: string }>(sql`
       SELECT cost_owning_unit_id::text AS cc_id, COALESCE(SUM(charge_usd), 0)::text AS copilot
       FROM v_finance_copilot_pool_chargeback
       WHERE cost_owning_unit_id = ANY(${ids})
+        AND tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})
         AND period_month >= ${startDate}::date AND period_month < ${endDate}::date
       GROUP BY cost_owning_unit_id`)
     for (const r of copilotRows) {

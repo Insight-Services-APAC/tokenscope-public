@@ -1,12 +1,19 @@
 /*
  * applyOtlpProxyRepoint — the shared re-point helper for the local OTLP
- * Content-Length forwarder (CC #72671 workaround). Guards:
- *   - a real DCE endpoint → re-pointed at the local proxy + stash file written
- *   - an already-localhost endpoint → no-op, and the stash is NOT overwritten
- *   - TOKENSCOPE_OTLP_PROXY=0 (kill-switch) → env unchanged, no stash written
+ * Content-Length forwarder (CC #72671). Since the fix landed in CLI 2.1.212 the
+ * forwarder is version-aware AUTO: it re-points ONLY on a CLI in a known-broken
+ * range (otlp-shim-policy OTLP_BROKEN_RANGES) or under a manual =1; on a fixed
+ * CLI direct emission is the DEFAULT. Guards:
+ *   - fixed/unknown CLI (dormant): a real DCE stays direct + no stash written
+ *   - dormant + endpoint already at the proxy (stash present) → RESTORE the DCE
+ *   - AUTO on a broken CLI (no flag): a real DCE → re-pointed + stash
+ *   - re-activated (=1): a real DCE → re-pointed at the local proxy + stash
+ *   - re-activated (=1) + already-localhost → no-op, stash NOT overwritten
  *
  * TOKENSCOPE_STATE_DIR is read fresh by stateDir() per call, so it can be set in
  * beforeEach; the module is imported once (its default proxy port 14318 is fine).
+ * The version-detect env (CLAUDE_CODE_EXECPATH/AI_AGENT) is neutralized per test
+ * so the host CLI's real version can't leak into AUTO — each test sets it.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
@@ -20,39 +27,117 @@ const { applyOtlpProxyRepoint, otlpProxyStashMissing } = await import('../../../
 const PROXY = 'http://127.0.0.1:14318/v1/logs'
 const DCE = 'https://dce-abc.westus3-1.ingest.monitor.azure.com/dataCollectionRules/dcr-x/streams/Custom-Logs?api-version=2023-01-01'
 
+const BROKEN_EXECPATH = '/home/x/.local/share/claude/versions/2.1.205' // in the #72671 range
+const FIXED_EXECPATH = '/home/x/.local/share/claude/versions/2.1.212' // fixed
+
 let dir = ''
 let stash = ''
+let savedExecPath: string | undefined
+let savedAiAgent: string | undefined
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'ts-otlp-repoint-'))
   process.env.TOKENSCOPE_STATE_DIR = dir
   stash = join(dir, 'otlp-forward.json')
   delete process.env.TOKENSCOPE_OTLP_PROXY
+  // Neutralize the host CLI's version signal so AUTO defaults to dormant unless a
+  // test opts into a specific version.
+  savedExecPath = process.env.CLAUDE_CODE_EXECPATH
+  savedAiAgent = process.env.AI_AGENT
+  delete process.env.CLAUDE_CODE_EXECPATH
+  delete process.env.AI_AGENT
 })
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
   delete process.env.TOKENSCOPE_STATE_DIR
   delete process.env.TOKENSCOPE_OTLP_PROXY
+  if (savedExecPath === undefined) delete process.env.CLAUDE_CODE_EXECPATH
+  else process.env.CLAUDE_CODE_EXECPATH = savedExecPath
+  if (savedAiAgent === undefined) delete process.env.AI_AGENT
+  else process.env.AI_AGENT = savedAiAgent
 })
 
 describe('applyOtlpProxyRepoint', () => {
-  it('re-points a real DCE endpoint at the proxy and stashes the DCE URL', () => {
+  it('DORMANT by default: a real DCE stays direct, no stash written', () => {
+    // Retirement default (CC #72671 fixed in 2.1.212): no flag → do NOT re-point.
     const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: DCE }
     const out = applyOtlpProxyRepoint(env)
-    expect(out).toBe(env) // mutates + returns the same object
+    expect(out).toBe(env)
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(DCE) // untouched — direct emission
+    expect(existsSync(stash)).toBe(false)
+  })
+
+  it('DORMANT + endpoint left at the proxy (stash present) → RESTORES the direct DCE', () => {
+    // Auto-revert: a user whose prior session repointed to the forwarder gets
+    // moved back to direct emission on the next session, no re-redeem needed.
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(stash, JSON.stringify({ dceLogsEndpoint: DCE }))
+    const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: PROXY }
+    applyOtlpProxyRepoint(env)
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(DCE) // restored to direct
+    expect(existsSync(stash)).toBe(true) // stash kept for a possible re-activation
+  })
+
+  it('DORMANT + at proxy but NO stash → leaves the proxy endpoint (nothing to restore to)', () => {
+    const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: PROXY }
+    applyOtlpProxyRepoint(env)
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(PROXY)
+  })
+
+  it('DORMANT + at proxy + stash, but revertWhenDormant=false → LEAVES the proxy (shared-host guard)', () => {
+    // A live forwarder is serving a broken-CLI sibling; the caller suppresses the
+    // revert so we do not drop the sibling's telemetry.
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(stash, JSON.stringify({ dceLogsEndpoint: DCE }))
+    const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: PROXY }
+    applyOtlpProxyRepoint(env, { revertWhenDormant: false })
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(PROXY) // NOT reverted
+  })
+
+  it('AUTO on a broken CLI (2.1.205, no flag): re-points a real DCE at the proxy + stashes it', () => {
+    // Version-aware self-heal: a user on an affected CLI is fixed with NO action.
+    process.env.CLAUDE_CODE_EXECPATH = BROKEN_EXECPATH
+    const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: DCE }
+    applyOtlpProxyRepoint(env)
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(PROXY)
+    expect(JSON.parse(readFileSync(stash, 'utf8')).dceLogsEndpoint).toBe(DCE)
+  })
+
+  it('AUTO on a fixed CLI (2.1.212, no flag): a real DCE stays direct, no stash', () => {
+    process.env.CLAUDE_CODE_EXECPATH = FIXED_EXECPATH
+    const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: DCE }
+    applyOtlpProxyRepoint(env)
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(DCE)
+    expect(existsSync(stash)).toBe(false)
+  })
+
+  it('FORCED OFF (=0) overrides a broken CLI: stays direct', () => {
+    process.env.TOKENSCOPE_OTLP_PROXY = '0'
+    process.env.CLAUDE_CODE_EXECPATH = BROKEN_EXECPATH
+    const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: DCE }
+    applyOtlpProxyRepoint(env)
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(DCE)
+    expect(existsSync(stash)).toBe(false)
+  })
+
+  it('RE-ACTIVATED (=1): re-points a real DCE at the proxy and stashes the DCE URL', () => {
+    process.env.TOKENSCOPE_OTLP_PROXY = '1'
+    const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: DCE }
+    const out = applyOtlpProxyRepoint(env)
+    expect(out).toBe(env)
     expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(PROXY)
     expect(existsSync(stash)).toBe(true)
     expect(JSON.parse(readFileSync(stash, 'utf8')).dceLogsEndpoint).toBe(DCE)
   })
 
-  it('is a no-op when the endpoint is already the local proxy (stash NOT overwritten)', () => {
-    // A pre-existing stash from a prior real-DCE re-point must survive.
+  it('RE-ACTIVATED (=1) + already the local proxy → no-op, stash NOT overwritten', () => {
+    process.env.TOKENSCOPE_OTLP_PROXY = '1'
     mkdirSync(dir, { recursive: true })
     writeFileSync(stash, JSON.stringify({ dceLogsEndpoint: DCE }))
     const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: PROXY }
     applyOtlpProxyRepoint(env)
-    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(PROXY) // unchanged
-    expect(JSON.parse(readFileSync(stash, 'utf8')).dceLogsEndpoint).toBe(DCE) // NOT clobbered
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(PROXY)
+    expect(JSON.parse(readFileSync(stash, 'utf8')).dceLogsEndpoint).toBe(DCE)
   })
 
   it('is a no-op when there is no logs endpoint (fresh/partial enrolment)', () => {
@@ -60,34 +145,6 @@ describe('applyOtlpProxyRepoint', () => {
     applyOtlpProxyRepoint(env)
     expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBeUndefined()
     expect(existsSync(stash)).toBe(false)
-  })
-
-  it('leaves a real-DCE env unchanged and writes no stash when the kill-switch is set', () => {
-    process.env.TOKENSCOPE_OTLP_PROXY = '0'
-    const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: DCE }
-    applyOtlpProxyRepoint(env)
-    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(DCE) // real DCE untouched
-    expect(existsSync(stash)).toBe(false)
-  })
-
-  it('RESTORES the endpoint to the stashed DCE when the kill-switch is set and env is the proxy', () => {
-    // Reverse direction: TOKENSCOPE_OTLP_PROXY=0 + env currently at the proxy +
-    // a stash present → revert to the direct DCE (no re-redeem needed). The stash
-    // file is KEPT so re-enabling later doesn't need one either.
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(stash, JSON.stringify({ dceLogsEndpoint: DCE }))
-    process.env.TOKENSCOPE_OTLP_PROXY = '0'
-    const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: PROXY }
-    applyOtlpProxyRepoint(env)
-    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(DCE) // restored to direct
-    expect(existsSync(stash)).toBe(true) // stash kept
-  })
-
-  it('kill-switch + proxy endpoint but NO stash → leaves the proxy endpoint (nothing to restore to)', () => {
-    process.env.TOKENSCOPE_OTLP_PROXY = '0'
-    const env: Record<string, string> = { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: PROXY }
-    applyOtlpProxyRepoint(env)
-    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(PROXY) // no stash → cannot restore
   })
 })
 

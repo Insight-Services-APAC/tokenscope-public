@@ -52,10 +52,10 @@ export default defineEventHandler(async (event) => {
     // M2). activity_type is the trap: it is region-scoped but independent of
     // teammates/units/projects, so a region can hold one with all other counts
     // zero. attribution_record + instance_attestation also FK region_id.
-    // department_to_region + region_leader (mig 0068) also FK region_id with a
-    // NO-ACTION posture (never CASCADE — that would silently drop curated
+    // directory_region_rule + region_leader (mig 0068 → 0089) also FK region_id
+    // with a NO-ACTION posture (never CASCADE — that would silently drop curated
     // region-derivation config and re-scope spend). Without them here, deleting
-    // a region that still has a dept-map row or an (active OR revoked) leader
+    // a region that still has a region rule or an (active OR revoked) leader
     // 500s on a raw 23503 instead of returning this clean 409.
     const counts = await tx.execute<{
       org_units: string
@@ -64,7 +64,7 @@ export default defineEventHandler(async (event) => {
       activity_types: string
       attribution_records: string
       instance_attestations: string
-      department_maps: string
+      region_rules: string
       region_leaders: string
     }>(sql`
       SELECT
@@ -74,7 +74,7 @@ export default defineEventHandler(async (event) => {
         (SELECT COUNT(*) FROM activity_type WHERE region_id = ${regionId}::uuid)::text AS activity_types,
         (SELECT COUNT(*) FROM attribution_record WHERE region_id = ${regionId}::uuid)::text AS attribution_records,
         (SELECT COUNT(*) FROM instance_attestation WHERE region_id = ${regionId}::uuid)::text AS instance_attestations,
-        (SELECT COUNT(*) FROM department_to_region WHERE region_id = ${regionId}::uuid)::text AS department_maps,
+        (SELECT COUNT(*) FROM directory_region_rule WHERE region_id = ${regionId}::uuid)::text AS region_rules,
         (SELECT COUNT(*) FROM region_leader WHERE region_id = ${regionId}::uuid)::text AS region_leaders
     `)
     const c = [...counts][0]!
@@ -84,7 +84,7 @@ export default defineEventHandler(async (event) => {
     const activityTypes = Number(c.activity_types)
     const attributionRecords = Number(c.attribution_records)
     const instanceAttestations = Number(c.instance_attestations)
-    const departmentMaps = Number(c.department_maps)
+    const regionRules = Number(c.region_rules)
     const regionLeaders = Number(c.region_leaders)
     const total =
       orgUnits +
@@ -93,7 +93,7 @@ export default defineEventHandler(async (event) => {
       activityTypes +
       attributionRecords +
       instanceAttestations +
-      departmentMaps +
+      regionRules +
       regionLeaders
 
     if (total > 0) {
@@ -107,7 +107,7 @@ export default defineEventHandler(async (event) => {
           detail:
             `Region has ${orgUnits} org units, ${teammates} teammates, ${projects} projects, ` +
             `${activityTypes} activity types, ${attributionRecords} attribution records, ` +
-            `${instanceAttestations} instances, ${departmentMaps} department mappings, ` +
+            `${instanceAttestations} instances, ${regionRules} region rules, ` +
             `${regionLeaders} region leaders — reassign or remove them first.`,
         },
       })

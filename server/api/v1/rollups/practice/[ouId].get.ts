@@ -25,13 +25,16 @@ import { withRequestRls } from '../../../../db/request-rls'
 import { orgSubtreeScopePredicate } from '../../../../auth/org-subtree-scope'
 import { orgSubtreeIds } from '../../../../auth/org-subtree'
 import { monthStartIso } from '../../../../utils/period'
-import { toolToVendor, vendorCostSql } from '../../../../../shared/usage/vendor'
+import { toolToVendor, vendorCostSql, VENDOR_LANES, VENDOR_LABELS, type Vendor } from '../../../../../shared/usage/vendor'
 
 // Flag a user when their current-week spend ≥ FLAG_MULT × their trailing weekly mean (lean
 // fixed threshold; the governance-dial version lives in the manager rollup).
 const FLAG_MULT = 2
 
 // Per-vendor MTD cost split over ar.cost_usd (shared definition — see shared/usage/vendor.ts).
+// USAGE (OTel) side: only claude / copilot / other carry signal — non-Code Claude
+// surfaces (#142) never emit telemetry, so their usage lanes are structurally $0
+// and are not selected here. They appear on the BILL side below.
 const { claude: claudeUsd, copilot: copilotUsd, other: otherUsd } = vendorCostSql('ar.cost_usd')
 
 export default defineEventHandler(async (event) => {
@@ -82,15 +85,48 @@ export default defineEventHandler(async (event) => {
       WHERE b.cost_owning_unit_id IN (${orgSubtreeIds(p.path, p.region_id, { costOwningOnly: true })})
         AND b.period_date >= ${monthStart}::date
       GROUP BY b.tool`)
-    const bill = { claude: 0, copilot: 0, total: 0, tokens: 0 }
+    // Per-LANE bill split (#142): every surface gets its own lane; toolToVendor's
+    // catch-all guarantees Σ lanes == bill.total (nothing vanishes).
+    const billByLane: Record<Vendor, number> = Object.fromEntries(VENDOR_LANES.map((l) => [l, 0])) as Record<Vendor, number>
+    const bill = { total: 0, tokens: 0 }
     for (const r of billRows) {
-      const v = toolToVendor(r.tool)
       const usd = Number(r.bill_usd)
       bill.total += usd
       bill.tokens += Number(r.bill_tokens)
-      if (v === 'claude') bill.claude += usd
-      else if (v === 'copilot') bill.copilot += usd
+      billByLane[toolToVendor(r.tool)] += usd
     }
+
+    // 3b. WEEKLY per-lane §B bill series (lane-visuals V4) — the SAME showback view
+    //     + cost-owning subtree as the MTD bill above, grouped week × tool over the
+    //     trailing 14 weeks (mirrors the §A usage trend's window). §B ONLY — never
+    //     summed with the usage signal. Σ lanes per week == that week's showback
+    //     total by construction (same rows; conservation test-pinned). Lanes are
+    //     registry ids via toolToVendor (its catch-all keeps every dollar in a lane).
+    const billWeeklyRows = await tx.execute<{ week_start: string; tool: string | null; bill_usd: string }>(sql`
+      SELECT date_trunc('week', b.period_date)::date::text AS week_start, b.tool,
+             COALESCE(SUM(b.bill_usd), 0)::text AS bill_usd
+      FROM v_finance_bill_showback b
+      WHERE b.cost_owning_unit_id IN (${orgSubtreeIds(p.path, p.region_id, { costOwningOnly: true })})
+        AND b.period_date >= (date_trunc('week', NOW()) - INTERVAL '13 weeks')::date
+      GROUP BY 1, b.tool
+      ORDER BY 1`)
+    // Merge tools sharing a lane; emit (week asc, canonical lane order) deterministically.
+    const weeklyByWeekLane = new Map<string, number>()
+    for (const r of billWeeklyRows) {
+      const k = `${r.week_start} ${toolToVendor(r.tool)}`
+      weeklyByWeekLane.set(k, (weeklyByWeekLane.get(k) ?? 0) + Number(r.bill_usd))
+    }
+    const laneOrder = new Map<string, number>(VENDOR_LANES.map((l, i) => [l, i]))
+    const billWeeklyLanes = [...weeklyByWeekLane.entries()]
+      .map(([k, usd]) => {
+        const [weekStart, lane] = k.split(' ') as [string, string]
+        return { weekStart, lane, usd }
+      })
+      .sort(
+        (a, b) =>
+          (a.weekStart < b.weekStart ? -1 : a.weekStart > b.weekStart ? 1 : 0) ||
+          (laneOrder.get(a.lane) ?? 99) - (laneOrder.get(b.lane) ?? 99),
+      )
 
     // 4. Region denominator for % of region + vs-region-avg — ONLY for callers with region/subtree
     //    scope (a pure owner gets null, so they can't recover region totals from the ratio). Region-
@@ -194,11 +230,21 @@ export default defineEventHandler(async (event) => {
         billUsd: bill.total,
         billTokens: bill.tokens,
       },
-      vendorSplit: {
-        claude: { usageUsd: Number(h.claude), billUsd: bill.claude },
-        copilot: { usageUsd: Number(h.copilot), billUsd: bill.copilot },
-        other: { usageUsd: Number(h.other), billUsd: 0 },
-      },
+      // Weekly per-lane §B bill series (lane-visuals V4): (weekStart, lane, usd)
+      // cells over the trailing 14 weeks, registry lane ids, canonical order.
+      // Σ lanes per week == that week's showback total (conservation, test-pinned).
+      billWeeklyLanes,
+      // Ordered per-lane split (#142): non-Code Claude surfaces are bill-only
+      // (usageUsd structurally 0 — no OTel). Zero-zero lanes are elided so the
+      // UI renders only surfaces this practice actually has — EXCEPT claude and
+      // copilot, which always render (the two primary lanes anchor the page
+      // even at $0; a practice with no spend still shows its baseline lanes).
+      vendorSplit: VENDOR_LANES.map((lane) => ({
+        lane,
+        label: VENDOR_LABELS[lane],
+        usageUsd: lane === 'claude' ? Number(h.claude) : lane === 'copilot' ? Number(h.copilot) : lane === 'other' ? Number(h.other) : 0,
+        billUsd: billByLane[lane],
+      })).filter((l) => l.usageUsd > 0 || l.billUsd > 0 || l.lane === 'claude' || l.lane === 'copilot'),
       topModels: [...modelRows].map((m) => ({ model: m.model, usageUsd: Number(m.usage_usd) })),
       users: [...userRows].map((u) => ({
         teammateId: u.teammate_id, name: u.name, spendUsd: Number(u.spend_usd),

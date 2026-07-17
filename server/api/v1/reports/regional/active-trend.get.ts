@@ -12,6 +12,7 @@
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { z } from 'zod'
 import { requireRole } from '../../../../auth/rbac'
+import { resolveReportGrants } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import { resolveRegionalScope, fetchRegionalActiveTrend } from '../../../../reporting/regional'
@@ -39,7 +40,13 @@ export default defineEventHandler(async (event): Promise<ActiveTrend> => {
   const win = resolveReportWindow(query)
 
   return await withRequestRls(event, async (tx) => {
-    const scope = await resolveRegionalScope(tx, caller, { region: query.region, ou: query.ou })
+    const grants = await resolveReportGrants(event, tx, caller)
+    const scope = await resolveRegionalScope(
+      tx,
+      caller,
+      { region: query.region, ou: query.ou },
+      { crossRegion: grants.regional === 'all-regions' },
+    )
     const series = await fetchRegionalActiveTrend(tx, scope, win)
     return { window: { from: win.from, to: win.to }, series }
   })

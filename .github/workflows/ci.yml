@@ -1,0 +1,107 @@
+# TokenScope CI — typecheck + lint + smoke (Epic 1).
+#
+# Per docs/build/mvp-lite-epic.md §Constraints: CI scope grows with the epics.
+# Epic 1 adds typecheck + lint + smoke; Epic 2 adds integration; Epic 8 adds
+# Playwright E2E.
+name: CI
+
+on:
+  pull_request:
+    branches: [main, prd-v0.4-review, mvp-lite-first-slice]
+  push:
+    branches: [main, prd-v0.4-review, mvp-lite-first-slice]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NUXT_TELEMETRY_DISABLED: '1'
+
+jobs:
+  static:
+    name: Static (typecheck + lint + compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Check copilot-plugin/scripts/ in sync with plugin/scripts/
+        # Fails if vendored copies have drifted from the canonical source.
+        # Run `npm run sync:copilot-plugin` to regenerate them.
+        run: npm run check:copilot-plugin-sync
+      - name: Check skill-prompts.gen.ts in sync with docs/skills/tokenscope/*.md
+        # Fails if the MCP prompt source .md changed without regenerating.
+        # Run `npm run sync:skill-prompts` to regenerate.
+        run: npm run check:skill-prompts-sync
+      - name: Validate docker-compose schema
+        # Cheap: protects the Epic 1 verifiable end state ("docker compose up
+        # brings the 5 sibling containers up cleanly") against YAML typos
+        # without actually starting the containers.
+        run: docker compose config -q
+
+      - name: Install Bicep
+        run: |
+          curl -Lo bicep https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64
+          chmod +x bicep
+          sudo mv bicep /usr/local/bin/bicep
+      - name: Validate Bicep modules
+        # Compile-only check; deploy is gated behind the manual
+        # .github/workflows/deploy.yml.
+        run: bicep build infra/main.bicep --outdir /tmp/bicep-out
+      - name: Check persona-override params match the demo-capable allowlist
+        # Single trust root: allowPersonaOverride=true is permitted ONLY in the
+        # sandbox bicepparam (the only demo-capable deploy target). Fails LOUDLY on
+        # a stray true for dev/staging/production even though the code allowlist
+        # already neutralizes it at runtime.
+        run: node scripts/check-persona-override-params.mjs
+
+  integration:
+    name: Integration (testcontainers Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Integration
+        # GitHub-hosted runners have a working docker daemon; no Ryuk
+        # gymnastics needed there. The helper sets the flag defensively.
+        env:
+          # On standard docker-in-docker the cw network override doesn't
+          # apply — the helper checks CW_NETWORK and falls back to bridge.
+          CW_NETWORK: bridge
+        run: npm run test:integration
+
+  smoke:
+    name: Smoke (playwright-cli)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install
+        # `playwright-chromium` downloads chromium during its own postinstall,
+        # so the explicit `npx playwright install` step is unnecessary. We
+        # still need the system deps the Playwright browser links against.
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install-deps chromium
+      - name: Smoke
+        run: npm run test:smoke

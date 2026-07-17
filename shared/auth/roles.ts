@@ -1,7 +1,8 @@
 /*
  * Roles + demo personas — pilot-shaped.
  *
- * Five canonical roles per the design / chrome.jsx RoleMenu. Per
+ * Six canonical roles per the design / chrome.jsx RoleMenu (see ROLES below:
+ * developer, manager, admin, finance, global-finops, platform-admin). Per
  * docs/build/mvp-lite-epic.md §Epic 3: "4 demo personas → each lands on
  * role-correct page". The fifth (`global-finops`) is the cross-region
  * super-finance role used in RLS bypass; `finance` (region-finance) is
@@ -26,6 +27,51 @@ export function isRole(value: string): value is Role {
 /** Cross-region super-admin: satisfies any role gate, unbounded data scope. */
 export function isPlatformAdmin(role: string): boolean {
   return role === 'platform-admin'
+}
+
+/** Roles that can reach the admin area at all (region-scoped or wider). */
+export const ADMIN_ROLES = ['admin', 'global-finops', 'platform-admin'] as const
+
+/** Org-wide (cross-region) roles: unbounded data scope, edit platform defaults. */
+export const ORG_WIDE_ROLES = ['global-finops', 'platform-admin'] as const
+
+/** True for any role that may enter /admin (Region admin, Global finance, Platform admin). */
+export function isAdminRole(role: string | null | undefined): boolean {
+  return !!role && (ADMIN_ROLES as readonly string[]).includes(role)
+}
+
+/** True for the cross-region roles (Global finance, Platform admin). */
+export function isOrgWideRole(role: string | null | undefined): boolean {
+  return !!role && (ORG_WIDE_ROLES as readonly string[]).includes(role)
+}
+
+/**
+ * Roles offered in role-assignment dropdowns. Excludes `finance` — a retired
+ * enum member never assigned to anyone (kept in ROLES only for exhaustiveness /
+ * historical data). Never offer an unassignable role. See the "Roles & terms"
+ * glossary for why `finance` still exists in the enum.
+ */
+export const SELECTABLE_ROLES: readonly Role[] = ROLES.filter((r) => r !== 'finance')
+
+/**
+ * Canonical human-facing role labels — ONE source so no surface renders a raw
+ * enum code. `admin` is region-scoped ("Region admin"); `global-finops` is the
+ * cross-region finance super-role ("Global finance"), deliberately distinct
+ * from the retired `finance`. See docs/design/admin-ia.md §Vocabulary.
+ */
+export const ROLE_LABELS: Record<Role, string> = {
+  developer: 'Developer',
+  manager: 'Manager',
+  admin: 'Region admin',
+  finance: 'Finance (retired)',
+  'global-finops': 'Global finance',
+  'platform-admin': 'Platform admin',
+}
+
+/** Display label for a role value; falls back to the raw value if unknown. */
+export function roleLabel(role: string | null | undefined): string {
+  if (!role) return '—'
+  return (ROLE_LABELS as Record<string, string>)[role] ?? role
 }
 
 export const DEMO_PERSONAS = [

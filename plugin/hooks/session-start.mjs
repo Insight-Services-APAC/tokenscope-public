@@ -38,8 +38,9 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import http from 'node:http'
 import { resolveRepoProjectCode, computeCodeHash, readGlobalEnrolment, writeRepoTag } from '../scripts/tag-repo.mjs'
-import { reconcilePluginPaths, applyOtlpProxyRepoint, otlpForwarderPath, mergeClaudeSettings, otlpProxyStashMissing } from '../scripts/env-builder.mjs'
+import { reconcilePluginPaths, applyOtlpProxyRepoint, otlpForwarderPath, mergeClaudeSettings, otlpProxyStashMissing, isLoopbackHost } from '../scripts/env-builder.mjs'
 import { readSettingsEnv, readEmitSentinel, runEmitHelper, stateDir } from '../scripts/plugin-runtime.mjs'
+import { resolveShim, shimActive } from '../scripts/otlp-shim-policy.mjs'
 import { refreshLanded } from '../scripts/landed-check.mjs'
 import { checkRepoProjectBillable } from '../scripts/project-check.mjs'
 import { enrollIfNeeded } from '../scripts/enroll.mjs'
@@ -150,7 +151,14 @@ const OTLP_PORT = Number(process.env.TOKENSCOPE_OTLP_PROXY_PORT) || 14318
 export function decideForwarderAction(probe, expectedDir) {
   if (probe === 'refused') return { action: 'spawn' }
   if (probe === 'hung') return { action: 'spawn', killPidfile: true }
-  if (probe && probe.ok && probe.dir === expectedDir) return { action: 'healthy' }
+  // Healthy = answering AND resolved OUR stateDir AND (if it reports readiness)
+  // able to resolve its DCE stash. `ready === false` on a dir-match means the
+  // stash is gone (wiped ~/.tokenscope, copied settings without its state dir) —
+  // replace it. `ready` undefined = an older forwarder that predates the field:
+  // fall back to dir-match alone (no regression). Since stateDir() is now
+  // passwd-anchored, `expectedDir` is itself HOME-leak-proof, so a dir match is
+  // trustworthy where it previously wasn't.
+  if (probe && probe.ok && probe.dir === expectedDir && probe.ready !== false) return { action: 'healthy' }
   if (probe && typeof probe.pid === 'number') return { action: 'spawn', killPid: probe.pid }
   return { action: 'spawn' } // malformed response → best-effort respawn
 }
@@ -219,7 +227,10 @@ function killForwarderPidfile(dir) {
  * TOKENSCOPE_OTLP_PROXY=0. Only runs when enrolled. Fail-open (never breaks session start).
  */
 async function spawnOtlpForwarder() {
-  if (process.env.TOKENSCOPE_OTLP_PROXY === '0') return
+  // Version-aware AUTO since CC #72671 was fixed in CLI 2.1.212 — spawn the
+  // forwarder ONLY on a CLI in a known-broken range (or a forced =1); direct
+  // emission otherwise. See plugin/scripts/otlp-shim-policy.mjs + README.
+  if (!shimActive()) return
   if (!readGlobalEnrolment()) return // not enrolled — nothing to forward
   const dir = stateDir()
   // Lock the state dir owner-only EVERY enrolled session (mkdirSync(mode) is ignored on
@@ -255,8 +266,9 @@ async function spawnOtlpForwarder() {
  * (never churns the global every session). Atomic temp+rename, 0600 (the file
  * carries the emit credential); fail-OPEN. Returns nothing.
  */
-export function selfHealGlobalOtlpEndpoint({
+export async function selfHealGlobalOtlpEndpoint({
   settingsPath = join(homedir(), '.claude', 'settings.json'),
+  forwarderProbe, // test seam: inject a probeForwarder() result instead of probing
 } = {}) {
   if (!existsSync(settingsPath)) return
   let raw
@@ -273,8 +285,29 @@ export function selfHealGlobalOtlpEndpoint({
   }
   const before = settings?.env?.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
   if (typeof before !== 'string' || !before.trim()) return // not enrolled — nothing to re-point
+  // Shared-host guard: this hook mutates the ONE ~/.claude/settings.json that all
+  // CWs on this host share (they can run different CLI versions). Keep a proxy
+  // endpoint in place ONLY when the forwarder is CONFIRMED HEALTHY — a broken-CLI
+  // sibling is then likely using it and reverting would silently drop that
+  // sibling's telemetry. "Healthy" MUST mean exactly what spawnOtlpForwarder means
+  // by it — answering /healthz AND resolving OUR stateDir AND ready — so a
+  // 'refused' (not running), 'hung' (wedged), or STALE forwarder (a leaked-HOME
+  // instance answering with a mismatched dir → wrong DCE relay, the recurring
+  // silent-drop) all revert to the direct DCE. Reuse decideForwarderAction so the
+  // two definitions can't drift; on a fixed-CLI fleet spawnOtlpForwarder no-ops,
+  // so this is the ONLY place that catches a stale/wedged instance. A broken
+  // sibling that truly needs the forwarder re-spawns it via its own SessionStart.
+  // Note: TOKENSCOPE_OTLP_PROXY=0 (forced-off) also takes this branch; on a shared
+  // host with a healthy sibling forwarder it stays on the (working) proxy rather
+  // than risk dropping the sibling — the safe-for-the-fleet reading of "off".
+  let revertWhenDormant = true
+  if (isLoopbackHost(before) && !shimActive()) {
+    const probe = forwarderProbe ?? (await probeForwarder(OTLP_PORT))
+    const healthy = decideForwarderAction(probe, stateDir()).action === 'healthy'
+    revertWhenDormant = !healthy
+  }
   // Reconcile a COPY of the env so we can compare and skip a no-op write.
-  const nextEnv = applyOtlpProxyRepoint({ ...settings.env })
+  const nextEnv = applyOtlpProxyRepoint({ ...settings.env }, { revertWhenDormant })
   if (nextEnv.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT === before) return // no change — do not churn
   // Additive merge keeps every other env key + all top-level keys (permissions,
   // otelHeadersHelper, statusLine); only the endpoint moves.
@@ -296,6 +329,20 @@ export function selfHealGlobalOtlpEndpoint({
       /* ignore cleanup failure */
     }
   }
+}
+
+/**
+ * Informational note when the OTLP Content-Length forwarder auto-activated
+ * because the running CLI is in a known-broken range (CC #72671 family). Not an
+ * error — telemetry IS landing (the shim fixes it) — but the user should know
+ * why the forwarder is running and that upgrading the CLI retires it. Silent on
+ * a fixed CLI (dormant) and on a manual override. Returns a note or null.
+ */
+function otlpShimAutoNote(env = process.env) {
+  const r = resolveShim(env)
+  if (r.reason !== 'auto-affected') return null
+  const v = Array.isArray(r.version) ? r.version.join('.') : 'unknown'
+  return `ℹ TokenScope: your Claude Code CLI ${v} has the OTLP chunked-export bug (${r.range.issue}) that would otherwise drop telemetry at the ingest endpoint — the local Content-Length forwarder was auto-enabled to keep spend landing this session. Upgrade the CLI (≥ 2.1.212) to retire it automatically.`
 }
 
 /** HTTP status from a sentinel, or null. */
@@ -402,7 +449,7 @@ async function main() {
   }
 
   try {
-    selfHealGlobalOtlpEndpoint() // CC #72671: cover UNTAGGED repos (global env)
+    await selfHealGlobalOtlpEndpoint() // CC #72671: cover UNTAGGED repos (global env)
   } catch {
     /* fail-open */
   }
@@ -442,6 +489,13 @@ async function main() {
 
   try {
     const w = otlpForwarderStashWarning() // CC #72671: pinned-but-stash-missing wedge
+    if (w) lines.push(w)
+  } catch {
+    /* fail-open */
+  }
+
+  try {
+    const w = otlpShimAutoNote() // CC #72671: forwarder auto-enabled for a broken CLI
     if (w) lines.push(w)
   } catch {
     /* fail-open */

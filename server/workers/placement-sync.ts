@@ -24,14 +24,20 @@ export interface PlacementSyncResult {
   placed: number
   errors: number
   // Placement-derivation coverage — counted on actual placements (created or re-homed).
-  // viaUnit = a real practice (cost-owning unit, chargeable); viaManager/viaDepartment = a
-  // region holding node; fellToGlobal = the global bucket. Watch the ratio on
-  // connector-health before trusting the signal / running the one-shot backfill.
+  // viaUnit = a real practice (cost-owning unit, chargeable); viaAttribute (a directory
+  // rule) / viaManager / viaBillingRegion = a region holding node; fellToGlobal = the
+  // global bucket. `byAttribute` breaks viaAttribute down by which directory attribute
+  // matched — the "which signal is placing people" coverage. `conflicts` counts placements
+  // where a lower-precedence attribute matched a DIFFERENT region (a rule misconfig to fix).
+  // Watch the ratio before trusting the signal / running the one-shot backfill.
   viaCostCentre: number
   viaUnit: number
-  viaDepartment: number
+  viaAttribute: number
+  byAttribute: Record<string, number>
   viaManager: number
+  viaBillingRegion: number
   fellToGlobal: number
+  conflicts: number
 }
 
 /** Provision+place every distinct identity with un-replayed owed bills. Idempotent:
@@ -63,13 +69,13 @@ export async function runPlacementSync(
   // Build the region-derivation closure ONCE per run (mig 0068): load the curated maps and
   // create the manager/region caches a single time so they are SHARED across every user in
   // this run (AEUF's cross-user walk optimisation — a per-user cache would be dead).
-  const deptMap = await store.loadDepartmentToRegion()
+  const rules = await store.loadDirectoryRegionRules()
   const leaderMap = await store.loadActiveRegionLeaders()
   const unitOwnerMap = await store.loadActiveUnitOwners()
   const caches = makeChainCaches()
   const getManager = opts?.getManager ?? getUserManager
   const derivePlacementForRun = (dir: DirectoryUser): Promise<PlacementDerivation> =>
-    derivePlacement(dir, { deptMap, unitOwnerMap, leaderMap, getManager, caches })
+    derivePlacement(dir, { rules, unitOwnerMap, leaderMap, getManager, caches })
 
   const result: PlacementSyncResult = {
     emailsConsidered: rows.length,
@@ -78,9 +84,12 @@ export async function runPlacementSync(
     errors: 0,
     viaCostCentre: 0,
     viaUnit: 0,
-    viaDepartment: 0,
+    viaAttribute: 0,
+    byAttribute: {},
     viaManager: 0,
+    viaBillingRegion: 0,
     fellToGlobal: 0,
+    conflicts: 0,
   }
   for (const { email } of rows) {
     try {
@@ -96,8 +105,12 @@ export async function runPlacementSync(
       if (r.homed) {
         if (r.placedVia === 'cost-centre') result.viaCostCentre += 1
         else if (r.placedVia === 'unit') result.viaUnit += 1
-        else if (r.placedVia === 'department') result.viaDepartment += 1
-        else if (r.placedVia === 'manager') result.viaManager += 1
+        else if (r.placedVia === 'attribute') {
+          result.viaAttribute += 1
+          if (r.placedAttribute) result.byAttribute[r.placedAttribute] = (result.byAttribute[r.placedAttribute] ?? 0) + 1
+          if (r.placedConflict) result.conflicts += 1
+        } else if (r.placedVia === 'manager') result.viaManager += 1
+        else if (r.placedVia === 'billing-region') result.viaBillingRegion += 1
         else result.fellToGlobal += 1
       }
     } catch (err) {

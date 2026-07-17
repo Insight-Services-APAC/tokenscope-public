@@ -14,7 +14,7 @@
  * would be silently re-scoped. A teammate that has ever authenticated (real oid) or is
  * emitting is LEFT for the admin region-PATCH (which runs the revoke cascade). So this
  * worker is safe to run on a cron; the operator should still watch the placement-sync
- * coverage ratio (viaDepartment/viaManager : fellToGlobal) on connector-health before
+ * coverage ratio (viaAttribute/viaManager : fellToGlobal) on connector-health before
  * treating its output as authoritative.
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
@@ -46,7 +46,7 @@ export async function runRegionReenrichment(
 ): Promise<RegionReenrichmentResult> {
   const limit = opts?.limit ?? 500
   const store = makePlacementStore(db)
-  const deptMap = await store.loadDepartmentToRegion()
+  const rules = await store.loadDirectoryRegionRules()
   const leaderMap = await store.loadActiveRegionLeaders()
   const unitOwnerMap = await store.loadActiveUnitOwners()
   const caches = makeChainCaches()
@@ -90,7 +90,7 @@ export async function runRegionReenrichment(
         result.unresolved += 1
         continue
       }
-      const der = await derivePlacement(dir, { deptMap, unitOwnerMap, leaderMap, getManager, caches })
+      const der = await derivePlacement(dir, { rules, unitOwnerMap, leaderMap, getManager, caches })
 
       // Resolve the TARGET org_unit + provenance for the derived placement.
       let targetOrgUnit: string

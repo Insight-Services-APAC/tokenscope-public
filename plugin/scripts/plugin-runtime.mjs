@@ -19,7 +19,7 @@
  * probe, the wrong one for a re-emitter.
  */
 import { readFileSync, existsSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, userInfo } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -91,9 +91,51 @@ export function resolveHelperPath() {
   return join(resolveScriptsDir(), 'otel-headers-helper.sh')
 }
 
-/** The TokenScope state dir (TOKENSCOPE_STATE_DIR or ~/.tokenscope). */
+/**
+ * The account's REAL home, HOME-leak-proof. `os.homedir()` trusts the `HOME`
+ * env var first, so a container/`cw` event that leaks `HOME=/tmp/ts-home-*`
+ * into a spawned process makes it resolve a phantom home — the exact recurring
+ * silent-drop bug (the forwarder resolved its DCE stash under the leaked home,
+ * found nothing, and 502'd every export). `os.userInfo().homedir` reads the
+ * passwd entry (getpwuid), which the `HOME` env cannot move, so every plugin
+ * component agrees on one real `~/.tokenscope` regardless of env leaks. Falls
+ * back to `homedir()` only if the passwd lookup itself throws (extremely rare).
+ */
+function realHome() {
+  try {
+    const h = userInfo().homedir
+    if (h) return h
+  } catch {
+    /* fall through to the last-resort branch below */
+  }
+  // Last resort (passwd unavailable — e.g. a minimal container with no
+  // /etc/passwd entry for the uid). This branch DOES follow HOME, so it can
+  // reinstate the leak — but only in the rare no-passwd case AND only when no
+  // TOKENSCOPE_STATE_DIR pin is set (the override is consulted before realHome).
+  // Make the degradation LOUD (stderr, best-effort) so a silent drop in that
+  // corner is at least attributable instead of invisible.
+  try {
+    process.stderr.write('[tokenscope] WARN: os.userInfo() unavailable; state dir falls back to HOME (leak-susceptible). Set TOKENSCOPE_STATE_DIR to pin it.\n')
+  } catch {
+    /* best effort */
+  }
+  return homedir()
+}
+
+/**
+ * The TokenScope state dir (TOKENSCOPE_STATE_DIR or ~/.tokenscope), anchored on
+ * the passwd home so it is stable across a leaked `HOME`. This dir is
+ * plugin-owned (forwarder stash/log/pid, landed state) — it is NOT `~/.claude`,
+ * which stays on `homedir()` to match Claude Code's own settings resolution.
+ */
 export function stateDir(env = process.env) {
-  return (env.TOKENSCOPE_STATE_DIR ?? '').trim() || join(homedir(), '.tokenscope')
+  // The override is a PROCESS-level concern (a deployment pin / test sandbox),
+  // never carried in a per-settings OTEL env block. Honour it from the passed
+  // env first, then the process env, so EVERY call site resolves the same dir
+  // even when handed a settings block that lacks the key — then anchor on the
+  // passwd home (HOME-leak-proof).
+  const override = (env.TOKENSCOPE_STATE_DIR ?? '').trim() || (process.env.TOKENSCOPE_STATE_DIR ?? '').trim()
+  return override || join(realHome(), '.tokenscope')
 }
 
 /** Read a settings.json's `env` block (or {} on any failure). */
@@ -142,7 +184,7 @@ export function runEmitHelper({ env = process.env, timeoutMs } = {}) {
   try {
     hasAuth = Boolean(JSON.parse(res.stdout || '{}').Authorization)
   } catch {
-    hasAuth = false
+    // Unparseable helper output → treat as no auth; `hasAuth` stays false.
   }
   return { ran: true, status: res.status, hasAuth }
 }

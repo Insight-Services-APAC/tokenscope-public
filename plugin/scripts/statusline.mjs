@@ -400,7 +400,7 @@ function main() {
       envLabel: configured ? emitEnvLabel(env) : null,
     })
   } catch {
-    out = '' // never break the UI
+    // Never break the UI — `out` stays '' from the initializer.
   }
   process.stdout.write(out)
 }

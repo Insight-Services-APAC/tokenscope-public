@@ -18,6 +18,15 @@ the same **zero-touch, emit-now-attribute-later** principle.
   credential and points Claude's OTel exporter at your workspace.
 - **Identity** — the setup step injects the server-minted `tokenscope.instance_id`
   resource attribute, so every emitted record joins to a teammate unspoofably.
+- **Billing (§B)** — Anthropic's Enterprise Analytics bills **per user**, and
+  TokenScope charges it per teammate — **per surface**. Each Claude surface is its
+  own chargeback lane: Claude Code, Claude Chat, Cowork, Office Agents, Claude in
+  Chrome, Claude Design, and Claude in Slack, with anything the API cannot
+  attribute landing in a labelled *Claude (other)* lane rather than silently
+  dropped or folded into Claude Code. Session **tagging stays Code-only**: the
+  non-Code surfaces have no sessions to tag, so they are chargeback-only (§B) and
+  appear read-only in a developer's usage view — they never generate
+  "needs tagging" work (§A/§B separation).
 
 ## GitHub Copilot
 

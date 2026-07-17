@@ -19,9 +19,11 @@
  * RBAC: client-side guard via useSession() — server still 401/403s a non-admin's
  * API calls; the page just hides itself.
  */
+
 import { computed, ref, watch } from 'vue'
 import { consola } from 'consola'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
+definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface TagRow extends Record<string, unknown> {
   id: string
@@ -203,7 +205,6 @@ function asRow(row: Record<string, unknown>): TagRow {
       eyebrow="Administration"
       title="Activity tags"
       sub="The activity vocabulary the picker suggests. Add your region's own tags, rename, reorder, or deactivate to hide one."
-      :crumbs="['Admin', 'Activity tags']"
     >
       <template v-if="isOrgWide" #actions>
         <select

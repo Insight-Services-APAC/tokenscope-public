@@ -87,6 +87,10 @@ const drillEmpty = computed(
 const drillData = computed(() => Boolean(props.drill) && !drillErr.value && !drillEmpty.value)
 
 const copilotPending = computed(() => props.report?.copilot.pending ?? false)
+// ADVISORY page-level amber banner (r1 finding 10): chargeback mode is live while the
+// window carries unclassified Copilot spend. Never blocks the data — unclassified is
+// already excluded from every chargeable figure; this surfaces the runbook state.
+const unclassifiedWarning = computed(() => props.report?.copilot.unclassifiedWarning ?? false)
 </script>
 
 <template>
@@ -118,6 +122,20 @@ const copilotPending = computed(() => props.report?.copilot.pending ?? false)
       />
       <div v-else-if="indexData && report" data-testid="finance-index-data" class="space-y-6">
         <span class="block text-[11px] text-carbon-3 italic" data-testid="finance-homing">{{ report.homingNote }}</span>
+
+        <!-- ADVISORY amber banner: chargeback mode is enabled while the period carries
+             unclassified Copilot spend (r1 finding 10). Data is never blocked —
+             unclassified is excluded from every chargeable figure regardless. -->
+        <div
+          v-if="unclassifiedWarning"
+          role="status"
+          class="rounded-md border border-rag-amber/40 bg-rag-amber/10 px-3 py-2 text-[12px] text-[#92400E]"
+          data-testid="finance-unclassified-warning"
+        >
+          <span class="font-semibold">Copilot chargeback is enabled with unclassified Copilot spend in this period.</span>
+          Unclassified lines stay excluded from every chargeable figure — classify the SKU and re-run the month
+          (runbook: worker-scheduler.md, "Copilot bill — unclassified SKU response").
+        </div>
 
         <!-- The trust anchor: Σ chargeback = bill (RAG reconciliation status) -->
         <FinanceBillCheck :check="report.billCheck" :copilot-pending="copilotPending" />

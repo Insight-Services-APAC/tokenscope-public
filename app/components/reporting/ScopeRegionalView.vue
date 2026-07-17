@@ -40,8 +40,11 @@ import ExportCsvButton from './ExportCsvButton.vue'
 import DriversTable, { type AxisOption } from './DriversTable.vue'
 import ConcentrationCard, { type ConcentrationStats } from './ConcentrationCard.vue'
 import UiCard from '../ui/Card.vue'
+import LaneLegend from './LaneLegend.vue'
 import RegionalHero from './regional/RegionalHero.vue'
-import RegionalProviderSplit from './regional/RegionalProviderSplit.vue'
+import SurfaceHeroCard from './SurfaceHeroCard.vue'
+import SurfaceDonutCard from './SurfaceDonutCard.vue'
+import ActiveUsersTrendCard from './across/ActiveUsersTrendCard.vue'
 import RegionalSpendTrend from './regional/RegionalSpendTrend.vue'
 import RegionalSeasonality from './regional/RegionalSeasonality.vue'
 import RegionalPracticeRank from './regional/RegionalPracticeRank.vue'
@@ -49,6 +52,13 @@ import RegionalChargebackRank from './regional/RegionalChargebackRank.vue'
 import RegionalTopModels from './regional/RegionalTopModels.vue'
 import RegionalSignals from './regional/RegionalSignals.vue'
 import { buildRegionalTrend } from './regional/build-regional-trend'
+import { buildSurfaceHero, heroLegendLanes } from './build-surface-hero'
+import {
+  buildChargebackLaneTrend,
+  buildChargebackLaneTrendWeekly,
+  buildChargebackDonut,
+  chargebackLegendLanes,
+} from './build-chargeback-trend'
 import type { ReportLane } from '../../composables/useReportState'
 import type { RegionalReport, RegionalDriversResp, RegionalTrendResp } from './regional/regional-view-types'
 import type { ActiveTrend, Seasonality, ProviderState, DriverRow } from '#shared/reports/types'
@@ -120,6 +130,69 @@ const built = computed(() =>
     props.report?.meta.month ?? null,
   ),
 )
+
+// ── Usage-view composition hero + pinned donut (iter-2 I1, regional mirror) ──
+// BILLED showback basis (region-clamped server-side), built from the trend
+// response's weekly lane cells over its window — the ONE shared window object
+// the hero and the donut both bind on (r2-2). `today` identifies the partial
+// current week (rendered but excluded from ranking/deltas — r1-F4). It derives
+// from SERVER data — the shared window's inclusive `to` (the rolling trend
+// window ends on the server's today) — NEVER `new Date()` at setup scope: SSR
+// and client hydration could evaluate that across a UTC midnight and disagree
+// on the in-progress-week flag (hydration mismatch — iter2 review r1).
+const todayUtc = computed(() => props.trend?.window?.to ?? null)
+const surfaceHero = computed(() =>
+  props.trend?.window
+    ? buildSurfaceHero(props.trend.showbackWeeklyLanes ?? [], {
+        from: props.trend.window.from,
+        to: props.trend.window.to,
+        today: props.trend.window.to,
+      })
+    : null,
+)
+// The usage page's ONE LaneLegend (V1 item 5): the hero's rendered lanes (the
+// donut's lanes are a subset by construction — same fold membership).
+const usageLegend = computed(() => heroLegendLanes(surfaceHero.value))
+
+// ── §B chargeback-lane cards + the page-level lane legend (lane-visuals V2-Regional) ─
+// The scope view owns every chargeback card's series (the container fetched
+// them), so the folded card inputs AND the page legend derive from the SAME
+// computed data — atomic with the page's data, no provide/inject, no
+// registration timing (V1 item 5, r2-3). The run-rate tail is month-anchored
+// exactly like the §A trend: only the in-progress month (forecast non-null)
+// projects; the tail's MTD operand itself is §B (the chargeback total series).
+const chargebackTailMonth = computed(() =>
+  props.report?.forecast && !props.report.meta.range ? props.report.meta.month : null,
+)
+const chargebackBuilt = computed(() =>
+  buildChargebackLaneTrend(
+    props.trend?.chargeLanes ?? [],
+    props.trend?.chargeSeries ?? [],
+    chargebackTailMonth.value,
+  ),
+)
+// The WEEKLY regrouping of the same folded lane series (iter-2 I2/I4) — the
+// chargeback trend card's default grain; Σ(weekly) == Σ(daily) by construction.
+const chargebackWeekly = computed(() =>
+  // Guarded like surfaceHero: a null trend (pre-load / error) must yield null,
+  // never feed mondayOf('') — an unguarded computed here threw RangeError
+  // (review r2 HIGH).
+  props.trend?.window
+    ? buildChargebackLaneTrendWeekly(props.trend.chargeLanes ?? [], props.trend.chargeSeries ?? [], todayUtc.value ?? props.trend.window.to)
+    : null,
+)
+const chargebackDonut = computed(() => buildChargebackDonut(props.report?.chargebackLanes ?? []))
+// The UNION of lanes the page's chargeback cards actually render this period
+// (folded remainder as its single entry) — the ONE page-level legend's input.
+const chargebackLegend = computed(() =>
+  chargebackLegendLanes([chargebackBuilt.value.laneIds, chargebackDonut.value.laneIds]),
+)
+// The ONE page-level lane-mode signal (r3-6): both chargeback cards derive
+// their mode from THIS (the legend union renders from ≥ 2 lanes — LaneLegend's
+// own threshold), never from each card's private, differently-scoped data — so
+// a $0-Anthropic / pooled-Copilot month can't leave the trend card on its
+// legacy path while the split card renders the lane donut.
+const chargebackLaneMode = computed(() => chargebackLegend.value.length >= 2)
 
 function monthLabel(m: string): string {
   const d = new Date(`${m}-01T00:00:00.000Z`)
@@ -227,12 +300,19 @@ function onTableDrill(row: DriverRow) {
            to their §B bill-lane analogue in chargeback mode (per-teammate Anthropic bill;
            Copilot is pooled per cost-centre). -->
       <template v-if="!isChargeback">
-        <RegionalProviderSplit
-          v-if="report.providerSplit"
-          :split="report.providerSplit"
-          :copilot-pending="report.copilot.pending"
-          :active-trend="activeTrend"
+        <!-- ONE page-level lane legend for the billed-basis hero + donut
+             (iter-2 I1, V1 item 5) — the cards render no legends. -->
+        <LaneLegend :lanes="usageLegend" />
+        <!-- Composition hero (I1): billed showback, weekly, $ + 100%-share. -->
+        <SurfaceHeroCard :built="surfaceHero" :window-label="trendWindowLabel ?? windowLabel" />
+        <!-- The billed surface donut REPLACES the old §A provider donut (I1);
+             attributed provider figures live ONLY in the §A KPI strip above. -->
+        <SurfaceDonutCard
+          :donut="surfaceHero?.donut ?? null"
+          :window-label="trendWindowLabel ?? windowLabel"
         />
+
+        <ActiveUsersTrendCard :active="activeTrend" :window-label="trendWindowLabel ?? windowLabel" />
 
         <RegionalSpendTrend
           :series="built.series"
@@ -243,13 +323,19 @@ function onTableDrill(row: DriverRow) {
         <RegionalSeasonality v-if="seasonality" :seasonality="seasonality" />
       </template>
       <template v-else>
-        <ChargebackSplitCard :split="report.chargebackProviderSplit" />
+        <!-- ONE page-level lane legend for the chargeback cards (V1 item 5) —
+             cards render no legends; identity = this legend + card tooltips. -->
+        <LaneLegend :lanes="chargebackLegend" />
+        <ChargebackSplitCard
+          :split="report.chargebackProviderSplit"
+          :donut="chargebackDonut"
+          :lane-mode="chargebackLaneMode"
+        />
         <ChargebackTrendCard
           :series="trend?.chargeSeries ?? []"
-          :window-label="trendWindowLabel ?? windowLabel"
-        />
-        <ChargebackDowCard
-          :buckets="seasonality?.chargeDow ?? []"
+          :built="chargebackBuilt"
+          :built-weekly="chargebackWeekly"
+          :lane-mode="chargebackLaneMode"
           :window-label="trendWindowLabel ?? windowLabel"
         />
       </template>
@@ -267,6 +353,13 @@ function onTableDrill(row: DriverRow) {
           :rows="report.chargebackByCostCentre"
         />
       </template>
+
+      <!-- DoW card DEMOTED below the rankings (iter-2 I2) — still chargeback-only. -->
+      <ChargebackDowCard
+        v-if="isChargeback"
+        :buckets="seasonality?.chargeDow ?? []"
+        :window-label="trendWindowLabel ?? windowLabel"
+      />
 
       <!-- Top models + drivers + concentration — all §A usage cuts. Replaced by one
            usage-only placeholder in chargeback mode. -->

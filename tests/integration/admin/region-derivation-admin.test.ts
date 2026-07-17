@@ -25,6 +25,10 @@ import deptMapGet from '../../../server/api/v1/admin/department-map.get'
 import deptMapPost from '../../../server/api/v1/admin/department-map.post'
 import deptMapDelete from '../../../server/api/v1/admin/department-map/[departmentLower].delete'
 import regionDelete from '../../../server/api/v1/admin/regions/[id].delete'
+import rulesGet from '../../../server/api/v1/admin/directory-region-rules.get'
+import rulesPost from '../../../server/api/v1/admin/directory-region-rules.post'
+import ruleDelete from '../../../server/api/v1/admin/directory-region-rules/[id].delete'
+import fieldDist from '../../../server/api/v1/admin/directory/field-distribution.get'
 
 let t: TestDb
 let regionA: string
@@ -282,9 +286,11 @@ describe('region-delete emptiness — leader / dept-map block the delete (HIGH f
 
   it('a region with a department mapping is BLOCKED (409)', async () => {
     const [r] = await t.db.insert(schema.region).values({ code: 'rd-dept', displayName: 'RD Dept' }).returning()
-    await t.db.insert(schema.departmentToRegion).values({
-      departmentLower: 'blocking dept',
-      department: 'Blocking Dept',
+    await t.db.insert(schema.directoryRegionRule).values({
+      attribute: 'department',
+      matchMode: 'exact',
+      matchValue: 'blocking dept',
+      matchValueRaw: 'Blocking Dept',
       regionId: r!.id,
     })
     await expect(
@@ -312,5 +318,53 @@ describe('region-delete emptiness — leader / dept-map block the delete (HIGH f
       ev({ method: 'DELETE', params: { id: r!.id }, session: platformAdmin() }),
     )) as { deleted: boolean }
     expect(out.deleted).toBe(true)
+  })
+})
+
+describe('directory_region_rule — generalised rules API + diagnostic (GLOBAL roles only)', () => {
+  it('upsert (companyName) / list / prefix / delete by id', async () => {
+    const created = (await rulesPost(
+      ev({ method: 'POST', body: { attribute: 'companyName', match_value: 'Insight Australia', region_id: regionA }, session: platformAdmin() }),
+    )) as { id: string; attribute: string; match_value: string }
+    expect(created.attribute).toBe('companyName')
+    expect(created.match_value).toBe('insight australia')
+
+    // re-add (case-insensitive) → re-points, same row id
+    const re = (await rulesPost(
+      ev({ method: 'POST', body: { attribute: 'companyName', match_value: 'insight australia', region_id: regionA }, session: platformAdmin() }),
+    )) as { id: string }
+    expect(re.id).toBe(created.id)
+
+    // a prefix rule on a different attribute
+    await rulesPost(
+      ev({ method: 'POST', body: { attribute: 'officeLocation', match_mode: 'prefix', match_value: 'AU-', region_id: regionA }, session: platformAdmin() }),
+    )
+    const listed = (await rulesGet(ev({ method: 'GET', session: platformAdmin() }))) as {
+      rules: Array<{ id: string; attribute: string; match_mode: string; match_value: string }>
+    }
+    expect(listed.rules.find((r) => r.attribute === 'officeLocation')?.match_mode).toBe('prefix')
+    expect(listed.rules.find((r) => r.attribute === 'companyName')?.match_value).toBe('insight australia')
+
+    const removed = (await ruleDelete(ev({ method: 'DELETE', params: { id: created.id }, session: platformAdmin() }))) as { removed: boolean }
+    expect(removed.removed).toBe(true)
+  })
+
+  it('rejects an unknown attribute', async () => {
+    await expect(
+      rulesPost(ev({ method: 'POST', body: { attribute: 'email', match_value: 'x@y', region_id: regionA }, session: platformAdmin() })),
+    ).rejects.toMatchObject({ statusCode: 400 })
+  })
+
+  it('region admin is FORBIDDEN (403) — cross-region placement config', async () => {
+    await expect(rulesGet(ev({ method: 'GET', session: adminA() }))).rejects.toMatchObject({ statusCode: 403 })
+  })
+
+  it('field-distribution returns per-attribute coverage (mock directory)', async () => {
+    const d = (await fieldDist(ev({ method: 'GET', query: 'sample=50', session: platformAdmin() }))) as {
+      sampled: number
+      attributes: Array<{ attribute: string; coveragePct: number }>
+    }
+    expect(d.sampled).toBeGreaterThan(0)
+    expect(d.attributes.some((a) => a.attribute === 'companyName')).toBe(true)
   })
 })

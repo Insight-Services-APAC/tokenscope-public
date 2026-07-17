@@ -30,7 +30,7 @@
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { sql } from 'drizzle-orm'
 import { z } from 'zod'
-import { requireRole } from '../../../../auth/rbac'
+import { requireReportScope } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
@@ -43,6 +43,7 @@ import {
 import { providerStatesForWindow } from '../../../../reports/settling'
 import { copilotChargebackEnabled, copilotFinanceMode } from '../../../../reports/copilot-mode'
 import { MONTH_REGEX, monthKeyUtc } from '../../../../utils/period'
+import { COPILOT_UNCLASSIFIED_LANE } from '../../../../../shared/usage/github-surface'
 import type { ReportMeta } from '../../../../../shared/reports/types'
 
 const Query = z.object({
@@ -53,7 +54,6 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'global-finops', 'platform-admin')
   const query = await getValidatedQuery(event, (d) => Query.parse(d))
   const now = new Date()
   // Month OR custom from/to window. The bill/chargeback surfaces are MONTH-GRAINED
@@ -71,6 +71,11 @@ export default defineEventHandler(async (event) => {
   const region = query.region ?? null
 
   return await withRequestRls(event, async (tx) => {
+    // Finance pack is whole-company: requires the finance grant (reportGrants.finance
+    // === true). Standard = global-finops / platform-admin only; a region admin gets
+    // it ONLY under a loosened mode (region-admins-see-all / all-admins-see-all), which
+    // may also admit a cost-centre owner. Denies are audited (report-scope-denied).
+    await requireReportScope(event, tx, 'finance')
     const billCheck = await fetchFinanceBillCheck(tx, win)
     const cous = await fetchFinanceCous(tx, win, { copilotChargeback, region })
     const exemptGap = await fetchFinanceExemptGap(tx, win, { region })
@@ -103,6 +108,14 @@ export default defineEventHandler(async (event) => {
         mode: copilotFinanceMode(),
         // Held back with a "pending correct writer" marker until Wave 0 validates on Dev.
         pending: !copilotChargeback,
+        // ADVISORY (r1 finding 10, never a data block): chargeback mode is live but the
+        // window carries unclassified Copilot spend (whole-company Σ=bill lane split).
+        // Unclassified money never charges, so the figures stay correct — the flag lets
+        // the finance view banner the runbook state ("classify + re-run, do not enable
+        // chargeback while unclassified > 0" — docs/build/worker-scheduler.md, D3).
+        unclassifiedWarning:
+          copilotChargeback &&
+          (billCheck.copilotLanes.find((l) => l.lane === COPILOT_UNCLASSIFIED_LANE)?.usd ?? 0) > 0,
       },
       exemptGap,
       region,
