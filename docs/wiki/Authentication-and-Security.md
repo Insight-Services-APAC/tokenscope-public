@@ -6,7 +6,7 @@ System shape: [Architecture](Architecture.md). Endpoint detail: [API Reference](
 
 > Deployment-specific values (real hostnames, the upstream WAF, environment
 > switches) are illustrated generically here; the Insight instance's specifics
-> live in [Insight Deployment](Insight-Deployment.md).
+> live in your deployment's own configuration.
 
 ## Trust boundaries
 
@@ -377,7 +377,7 @@ sequenceDiagram
   1. **Pinned `appPublicOrigin`** (`APP_PUBLIC_ORIGIN`) — when an upstream WAF/proxy fronts the app under a fixed hostname, the app **pins its public origin from config**. This is deliberately independent of `Host`/`X-Forwarded-*`, so same-origin matching is correct **whether the proxy preserves or rewrites the `Host` header** — no reliance on the WAF forwarding the original Host.
   2. **`X-Forwarded-Host`/`X-Forwarded-Proto`** — honoured **only when `AZURE_FRONT_DOOR_ID` is set** (the same gate as `require-front-door`, inside which every request already carries a matching `X-Azure-FDID`, so the forwarded headers are trustworthy). Trusting `X-Forwarded-*` otherwise would allow header-injection origin forgery.
   3. Otherwise the request's own Host (local dev / no proxy).
-- **WAF-fronted deployments** (no per-app AFD): set `appPublicOrigin` to the public hostname the WAF exposes. Same-origin validation then uses the user-facing origin, not the internal Container Apps FQDN — with no dependency on the WAF's Host-forwarding behaviour. (The Insight dev value is in [Insight Deployment](Insight-Deployment.md).)
+- **WAF-fronted deployments** (no per-app AFD): set `appPublicOrigin` to the public hostname the WAF exposes. Same-origin validation then uses the user-facing origin, not the internal Container Apps FQDN — with no dependency on the WAF's Host-forwarding behaviour. (The Insight dev value is in your deployment's own configuration.)
 - Token-is-auth endpoints (`/setup/redeem`, `/bearer`) and the cookieless OAuth endpoints (`/oauth/token`, `/oauth/register`, `/oauth/revoke`) have **no** CSRF check — they carry no cookie. (The cookie-bearing `POST /oauth/authorize` consent grant **does** assert same-origin.)
 
 ## Network — edge & ingress

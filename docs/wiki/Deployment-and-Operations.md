@@ -11,7 +11,7 @@ maintainers, operators. See also [Architecture](Architecture.md) and
 
 > Insight-specific deployment details (real hostnames, subscription / RG / VNet
 > names, IPAM CIDRs, the private build runner, the internal runbook) live in the
-> internal [Insight Deployment](Insight-Deployment.md) page.
+> your deployment's own configuration.
 
 ## Azure topology
 
@@ -137,7 +137,7 @@ flowchart LR
 > must have line-of-sight to the ACR private endpoint (peering / hub transit) and
 > the central `privatelink.azurecr.io` zone must be linked to the runner's
 > network. For the Insight dev instance, the exact runner name and the open IT
-> confirmation are in [Insight Deployment](Insight-Deployment.md).
+> confirmation are in your deployment's own configuration.
 
 ## Reference
 
@@ -185,7 +185,7 @@ at apply time by the workflow from `secrets.*` — never hardcoded.
   consumes IT-provided central zone resource IDs
   (`centralDnsZonesSubscriptionId` / `centralDnsZonesResourceGroup`) when IT runs
   centralised private DNS. Pick per environment. (Insight dev consumes central
-  zones — see [Insight Deployment](Insight-Deployment.md).)
+  zones — see your deployment's own configuration.)
 
 ## Operator pointers
 

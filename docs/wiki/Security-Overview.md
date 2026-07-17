@@ -6,7 +6,7 @@
 > [Authentication & Security](Authentication-and-Security.md); for the network
 > and data domains see [Network Architecture](Network-Architecture.md) and
 > [Data Protection](Data-Protection.md). Deployment-specific values for the
-> Insight instance are in [Insight Deployment](Insight-Deployment.md).
+> Insight instance are in your deployment's own configuration.
 
 > **Status: MVP-Beta-1 — in active development.** Claude Code is the **only**
 > supported client today. Copilot, the tenant OTLP bridge, FIN connectors, and

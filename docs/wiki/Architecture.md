@@ -99,7 +99,7 @@ flowchart LR
 
 ## Technical / deployment topology
 
-The reference VNet-integrated deployment runs the app on **Azure Container Apps** with **internal ingress** (a private VIP) behind an **upstream WAF** (a shared corporate edge or an optional per-app Azure Front Door — selectable). PostgreSQL, Redis, Key Vault and ACR are all private (private endpoints); every backing service is reached by managed identity. (Instance-specific values — region, resource-group / VNet names, and which edge is used — live in the internal [Insight Deployment](Insight-Deployment.md) page.)
+The reference VNet-integrated deployment runs the app on **Azure Container Apps** with **internal ingress** (a private VIP) behind an **upstream WAF** (a shared corporate edge or an optional per-app Azure Front Door — selectable). PostgreSQL, Redis, Key Vault and ACR are all private (private endpoints); every backing service is reached by managed identity. (Instance-specific values — region, resource-group / VNet names, and which edge is used — live in your deployment's own configuration.)
 
 ```mermaid
 flowchart TB
@@ -130,7 +130,7 @@ flowchart TB
 - **ACA ingress is internal** (`internal: true`, private VIP) — the app is not publicly reachable except through the WAF. `/api/health` remains the ACA probe target.
 - **External scheduler** (ACA cron jobs) drives the workers via the HMAC-signed `run-worker/{name}` endpoint — there is no standing worker pool and no BullMQ/Redis queue.
 - **PostgreSQL Flexible Server** (private endpoint) holds derived state (RLS + audit-trigger append-only). **Log Analytics** is the read-only attribution surface. **Key Vault** (private endpoint) is the single secrets surface; **Redis** (private endpoint) holds sessions/cache only; **ACR** (private endpoint) serves container images.
-- The concrete region and the exact private-endpoint resource set for the Insight instance are in the internal [Insight Deployment](Insight-Deployment.md) page.
+- The concrete region and the exact private-endpoint resource set for the Insight instance are in your deployment's own configuration.
 
 ## The two ingestion paths
 
@@ -157,7 +157,7 @@ The telemetry path is full-fidelity (log events ingested in full, unsampled). Th
 
 ## Region & RBAC
 
-- **Region:** multi-region operating model on the surface; the as-built dev deployment lands in a single region (see the internal [Insight Deployment](Insight-Deployment.md) page for the instance's region). A region-local stack is design-surface only.
+- **Region:** multi-region operating model on the surface; the as-built dev deployment lands in a single region (see your deployment's own configuration for the instance's region). A region-local stack is design-surface only.
 - **Region derivation (placement).** A cost-bearing teammate's home region/unit is derived by a fixed precedence (highest wins): **cost-centre** (exact directory cost-centre → cost-owning unit) > **chain-unit** (manager-chain resolves to an owned unit/practice) > **attribute-rule** (a configurable directory-attribute → region rule) > **chain-region** (manager-chain resolves to a region leader) > **billing-region** (provider license-org → region fallback) > **global** (the unassigned holding node). `placement-sync` runs this bill-driven placement; `region-reenrichment` re-derives it on a `0 */6 * * *` cadence to heal stale/unplaced homes (2026-07-17 change). See [Background Workers](Background-Workers.md).
 - **RBAC:** roles (cost-owning unit owner, regional/global FinOps, manager, admin) scoped by region + org-unit path, enforced at two layers — PostgreSQL RLS (ground truth) plus app-level `requireRole`; dashboard auth is Entra via `nuxt-oidc-auth`. The admin area is a persistent admin shell (sidebar-navigated) with an Overview launcher, first-class Providers, a Settings split into System info + Policies, and a roles glossary.
 

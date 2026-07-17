@@ -7,7 +7,7 @@ this page documents the private, VNet-integrated mode.
 
 > Insight-specific deployment details (real hostnames, subscription / RG / VNet
 > names, IPAM CIDRs, the private build runner) live in the internal
-> [Insight Deployment](Insight-Deployment.md) page.
+> your deployment's own configuration.
 
 > Siblings: [Architecture](Architecture.md) · [Security Overview](Security-Overview.md) · [Deployment & Operations](Deployment-and-Operations.md)
 
@@ -245,7 +245,7 @@ inbound-firewall concern.
    are **not** created; the outputs compose resource IDs of the central zones and
    IT creates the VNet links). Pick the mode that matches the target
    environment's DNS ownership. (The Insight dev instance consumes central zones —
-   see [Insight Deployment](Insight-Deployment.md).)
+   see your deployment's own configuration.)
 3. **Build runner ↔ VNet line-of-sight.** A VNet-integrated build runner needs a
    subnet that peers/shares the deployment VNet so it has line-of-sight to the ACR
    private endpoint for `docker push`.
