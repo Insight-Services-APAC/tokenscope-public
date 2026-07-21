@@ -46,7 +46,7 @@
     "nuxt": "^4.4.2",
     "nuxt-echarts": "^1.0.1",
     "nuxt-oidc-auth": "1.0.0-beta.11",
-    "nuxt-security": "^2.5.0",
+    "nuxt-security": "^2.6.0",
     "postgres": "^3.4.8",
     "tailwindcss": "^4.2.0",
     "tsx": "^4.21.0",
