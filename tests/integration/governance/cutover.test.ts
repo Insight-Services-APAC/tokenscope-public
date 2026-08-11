@@ -23,9 +23,7 @@ import statusGet from '../../../server/api/v1/admin/governance-cutover/index.get
 import preflightPost from '../../../server/api/v1/admin/governance-cutover/preflight.post'
 import activatePost from '../../../server/api/v1/admin/governance-cutover/activate.post'
 import rollbackPost from '../../../server/api/v1/admin/governance-cutover/rollback.post'
-import closePeriodPost from '../../../server/api/v1/admin/finance-periods/[month]/close.post'
-import reopenPeriodPost from '../../../server/api/v1/admin/finance-periods/[month]/reopen.post'
-import restatePeriodPost from '../../../server/api/v1/admin/finance-periods/[month]/restate.post'
+import closePeriodPost from '../../../server/api/v1/admin/reporting-snapshots/[month]/close.post'
 
 let t: TestDb
 let regionId: string
@@ -64,7 +62,7 @@ afterAll(async () => {
 // APPEND-ONLY (trigger-enforced) and deliberately NOT reset here — auditCount()
 // takes a `since` timestamp instead.
 beforeEach(async () => {
-  await t.client`DELETE FROM finance_period`
+  await t.client`DELETE FROM reporting_snapshot`
   await t.client`UPDATE governance_cutover_state SET status = 'not_started', preflight_snapshot = NULL, preflight_verified_at = NULL, preflight_verified_by = NULL, activated_at = NULL, activated_by = NULL, rolled_back_at = NULL, rolled_back_by = NULL WHERE id = 1`
   await t.client`DELETE FROM actual_spend`
   await t.client`DELETE FROM provider_org`
@@ -317,7 +315,7 @@ describe('rollback — allowed before, blocked after a closed period under the n
     expect(await auditCount('governance-cutover-rolled-back', since)).toBe(1)
   })
 
-  it('rollback is rejected once a finance period has closed under the activated regime', async () => {
+  it('rollback is rejected once a month has been RECORDED under the activated regime', async () => {
     await seedGithubEnterprise({ externalId: 'rb2-ent', orgs: [{ externalOrgId: 'rb2-prod' }] })
     await preflightPost(ev({ method: 'POST', session: finops(), body: {} }))
     await activatePost(ev({ method: 'POST', session: finops(), body: {} }))
@@ -329,33 +327,19 @@ describe('rollback — allowed before, blocked after a closed period under the n
     ).rejects.toMatchObject({ statusCode: 409, data: { code: 'closed-period-since-activation' } })
   })
 
-  it('reopening a period closed after activation does not make rollback safe again', async () => {
-    await seedGithubEnterprise({ externalId: 'rb3-ent', orgs: [{ externalOrgId: 'rb3-prod' }] })
-    await preflightPost(ev({ method: 'POST', session: finops(), body: {} }))
-    await activatePost(ev({ method: 'POST', session: finops(), body: {} }))
-    await closePeriodPost(ev({ method: 'POST', session: finops(), body: {}, params: { month: '2026-06' } }))
-    await reopenPeriodPost(
-      ev({ method: 'POST', session: finops(), body: { reason: 'late correction' }, params: { month: '2026-06' } }),
-    )
+  /*
+   * TWO TESTS DELETED HERE, not ported: "reopening a period closed after
+   * activation does not make rollback safe again" and "restating a period after
+   * activation blocks rollback even when its original close predates
+   * activation".
+   *
+   * Both described states that no longer exist. Recording a month captures what
+   * it read and locks nothing, so there is nothing to reopen and nothing to
+   * restate. What survives is the property above: a month RECORDED under the
+   * activated regime means someone has read figures produced by it, and a
+   * rollback would change what those figures mean.
+   */
 
-    await expect(
-      rollbackPost(ev({ method: 'POST', session: finops(), body: { reason: 'still too late' } })),
-    ).rejects.toMatchObject({ statusCode: 409, data: { code: 'closed-period-since-activation' } })
-  })
-
-  it('restating a period after activation blocks rollback even when its original close predates activation', async () => {
-    await seedGithubEnterprise({ externalId: 'rb4-ent', orgs: [{ externalOrgId: 'rb4-prod' }] })
-    await closePeriodPost(ev({ method: 'POST', session: finops(), body: {}, params: { month: '2026-06' } }))
-    await preflightPost(ev({ method: 'POST', session: finops(), body: {} }))
-    await activatePost(ev({ method: 'POST', session: finops(), body: {} }))
-    await restatePeriodPost(
-      ev({ method: 'POST', session: finops(), body: { reason: 'post-cutover correction' }, params: { month: '2026-06' } }),
-    )
-
-    await expect(
-      rollbackPost(ev({ method: 'POST', session: finops(), body: { reason: 'too late after restatement' } })),
-    ).rejects.toMatchObject({ statusCode: 409, data: { code: 'closed-period-since-activation' } })
-  })
 })
 
 describe('CSRF', () => {

@@ -556,7 +556,7 @@ describe('an axis that cannot carry the Copilot charge SAYS SO, and never invent
       // The label's scope, and the sentence a reader needs.
       expect(d.chargebackCoverage!.providers).toEqual(['anthropic'])
       const gap = d.chargebackCoverage!.gaps.find((g) => g.provider === 'github')!
-      expect(gap.reason).toMatch(/pooled per cost centre/i)
+      expect(gap.reason).toMatch(/pooled per Business Unit/i)
       /*
        * The ENGINE's un-gated default names every axis it can rank, derived from
        * POOLED_CHARGEBACK_AXES rather than typed out. A caller that has not told
@@ -655,10 +655,10 @@ describe('a provider with NOTHING derived for the window is not in the coverage 
     const gap = d.chargebackCoverage!.gaps.find((g) => g.provider === 'github')!
     expect(gap).toBeDefined()
     // A DERIVATION gap, not the structural one — a reader who is told "Copilot
-    // bills pooled per cost centre" would go and break down by Practice, which is
+    // bills pooled per Business Unit" would go and break down by Practice, which is
     // the axis they are already on.
     expect(gap.reason).toMatch(/derived/i)
-    expect(gap.reason).not.toMatch(/pooled per cost centre/i)
+    expect(gap.reason).not.toMatch(/pooled per Business Unit/i)
     expect(gap.reason).not.toMatch(/pending validation|part-month/i)
   })
 
@@ -1074,7 +1074,7 @@ describe('GET /reports/export — the CSV carries every figure the screen render
       ev(finops(), `scope=region&report=drivers&axis=model&lane=chargeback&${MONTH_RANGE}`),
     )) as unknown as string
     expect(csv).toContain('# chargeback_providers=anthropic')
-    expect(csv).toMatch(/# gap · github · .*pooled per cost centre/i)
+    expect(csv).toMatch(/# gap · github · .*pooled per Business Unit/i)
   })
 
   it('adds NO arm block to an attributed export', async () => {

@@ -66,7 +66,7 @@ type Tx = PostgresJsDatabase<Record<string, unknown>>
 export interface DrillScope {
   /** The `?src=` token, echoed back exactly as it was honoured. */
   token: string
-  /** Human words for the provenance line ("Cost centre · AI Apps & Data"). */
+  /** Human words for the provenance line ("Business Unit · AI Apps & Data"). */
   label: string
   /** The §A clamp, over `u.region_id` / `u.org_unit_id` / `u.cost_owning_unit_id`. */
   usage: UsageScope
@@ -156,7 +156,7 @@ export async function resolveDrillScope(
     // endpoint degrades on (reports/project/[code].get.ts) — so the frame took the
     // whole page down. A malformed id is a 400, here, where it is decidable.
     if (!isUuid(ccId)) {
-      throw createError({ statusCode: 400, statusMessage: 'invalid cost centre id' })
+      throw createError({ statusCode: 400, statusMessage: 'invalid Business Unit id' })
     }
     // Anti-IDOR, unchanged: absent / retired / non-cost-owning / foreign / unowned
     // all raise the SAME 403 (cost-centres.ts:183 — an existence oracle over other
@@ -166,7 +166,7 @@ export async function resolveDrillScope(
     })
     return {
       token: src,
-      label: `Cost centre · ${cc.displayName}`,
+      label: `Business Unit · ${cc.displayName}`,
       // The SAME §A clamp the cost-centre burn drill uses
       // (`fetchCostCentreBurnDrill`), so a drill opened from a CC row computes
       // over the population that row was ranked in.

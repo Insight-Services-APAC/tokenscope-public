@@ -181,7 +181,7 @@ function pooledAxisGap(axis: 'teammate' | 'model', offeredAxes: readonly string[
   return {
     provider: POOLED_CHARGEBACK_PROVIDER,
     reason:
-      `Copilot bills pooled per cost centre, so it has no ${noun} charge — this figure is Anthropic's alone.` +
+      `Copilot bills pooled per Business Unit, so it has no ${noun} charge — this figure is Anthropic's alone.` +
       (where ? ` Break down by ${where} to see the Copilot charge.` : ''),
   }
 }
@@ -340,13 +340,13 @@ export async function fetchDrivers(
       gaps.push({
         provider: POOLED_CHARGEBACK_PROVIDER,
         reason:
-          'The Copilot charge is raised monthly and pooled per cost centre, so it is not in this figure for a part-month range — select whole months to include it.',
+          'The Copilot charge is raised monthly and pooled per Business Unit, so it is not in this figure for a part-month range — select whole months to include it.',
       })
     } else if (!billing.financeScope) {
       gaps.push({
         provider: POOLED_CHARGEBACK_PROVIDER,
         reason:
-          'The Copilot charge is not in this figure: this caller resolved no cost-centre scope for the bill lane.',
+          'The Copilot charge is not in this figure: this caller resolved no Business Unit scope for the bill lane.',
       })
     } else {
       extraArms.push(

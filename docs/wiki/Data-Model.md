@@ -751,7 +751,6 @@ longer collapse into (and inflate) the `claude-code` figure.
 | `provider_org_id` | UUID → provider_org | governance key (mig 0103); NULL = governance-unresolved — showback-visible, never chargeable; `ON DELETE SET NULL` |
 | `provider_enterprise_id` | UUID → provider_enterprise | governance key — GitHub billing lives on the enterprise (ADR-0011 D11); `ON DELETE SET NULL` |
 | `governance_key_status` | TEXT | backfill bookkeeping only (`resolved` / `unresolved`); NULL = not yet attempted |
-| `governance_verdict_locked_at` | TIMESTAMPTZ | set when a finance-period close/restate freezes this row's verdict; NULL = open |
 | `governance_verdict_source` | TEXT | provenance of the current `chargeback_exempt` value: `legacy-heuristic` / `governance:billed` / `governance:tracked` / `unresolved` |
 
 Constraint: `UNIQUE (teammate_id, date, tool, source)`
@@ -1058,6 +1057,37 @@ no overlapping invoices per workspace.
 The governance domain (`drizzle/schema/projects.ts`, `governance.ts`;
 migrations 0001, 0007, 0008) holds the registry of projects, who's assigned to
 them, and the budgets that govern spend.
+
+### reporting_snapshot
+
+What a calendar month READ when it was reported, and who recorded it. One row
+per month, once recorded (mig 0128, replacing `finance_period`).
+
+| column | type | notes |
+|---|---|---|
+| `period_month` | DATE PK | first of the month (CHECK) |
+| `closed_at` | TIMESTAMPTZ | when it was recorded |
+| `closed_by` | UUID → teammate | who recorded it |
+| `basis` | TEXT | `project-homed` (default) / `person-placed` — which question the figures answer (CHECK) |
+| `snapshot_version` | SMALLINT | bumped when WHAT is snapshotted changes shape; currently 2 |
+| `attributed_usd` | NUMERIC(14,6) | §A — `v_complete_usage` for the month |
+| `chargeable_usd` | NUMERIC(14,6) | §B — `v_finance_chargeback_month` minus `copilot-unclassified` |
+| `exempt_usd` | NUMERIC(14,6) | `actual_spend` rows flagged `chargeback_exempt` |
+
+**A snapshot is not a lock.** It writes nothing to `actual_spend`, holds no
+trigger and refuses no later write — the bill lands after the month is reported,
+and governance recompute reaches recorded months. Recording the same month twice
+is refused: replacing what was reported the first time is the one thing this
+table exists to prevent.
+
+Its value is the DELTA. `GET /admin/reporting-snapshots/{month}` returns the
+stored figures beside what the month reads now. A `basis` or `snapshot_version`
+difference makes the two incomparable and the arithmetic is withheld rather than
+presenting "we changed how we count" as money moving.
+
+Recording serialises on the `reportingSnapshot` advisory lock (namespace
+ordinal 4, deliberately unchanged across the rename so a rolling deploy contends
+on the same lock space) plus `SELECT … FOR UPDATE`.
 
 ### project
 

@@ -13,7 +13,7 @@
  * ── WHY IT OFFERS A CHOICE OF ATTRIBUTE ───────────────────────────────────────
  * A batch that all share a department usually also shares a company name — and a
  * rule on companyName ("Insight Australia") would route the ENTIRE legal entity
- * into one cost centre. Picking for the admin is how that happens by accident, so
+ * into one Business Unit. Picking for the admin is how that happens by accident, so
  * every attribute the batch actually agrees on is listed, with the value it would
  * match, and the admin picks.
  *
@@ -152,7 +152,7 @@ function existingRuleFor(attribute: string, rawValue: string | null): RuleOfferE
 /**
  * The highest-precedence EXISTING rule that beats a rule on `attribute` for this
  * batch — i.e. one on an attribute the catalog resolves FIRST, matching people in
- * the batch, and pointing at a different cost centre. Pointing at the SAME unit is
+ * the batch, and pointing at a different Business Unit. Pointing at the SAME unit is
  * not a shadow: the outcome the offer promises still happens.
  */
 function shadowFor(attribute: string): RuleShadow | null {
@@ -172,7 +172,7 @@ function shadowFor(attribute: string): RuleShadow | null {
         attribute: higher,
         label: regionAttributeLabel(higher),
         value: rule.match_value_raw,
-        targetName: rule.org_unit_display_name ?? 'another cost centre',
+        targetName: rule.org_unit_display_name ?? 'another Business Unit',
         people,
       }
     }
@@ -280,7 +280,7 @@ async function createRule() {
     </div>
 
     <p v-if="candidates.length > 1" class="text-[11px] text-carbon-3 mt-2 leading-relaxed">
-      They share more than one value. Pick the one that really describes this cost centre —
+      They share more than one value. Pick the one that really describes this Business Unit —
       a rule on a company name routes everyone at that company here, not just this team.
     </p>
 

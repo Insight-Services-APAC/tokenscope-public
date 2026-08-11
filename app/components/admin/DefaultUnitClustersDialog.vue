@@ -10,7 +10,7 @@
  *
  * SO THIS IS A TO-DO LIST, NOT A SCOLD. The occupants who do not belong are
  * grouped by THEIR OWN manager — "12 report to Lee Hughes" — because each cluster
- * is one concrete action: make that manager an owner of the cost centre their team
+ * is one concrete action: make that manager an owner of the Business Unit their team
  * belongs to, or place the cluster by hand from the worklist. Every one the admin
  * does subtracts itself from the number above, which is the property that makes a
  * warning get used instead of dismissed.
@@ -22,7 +22,7 @@
  *
  * ── THE ADVICE IS NOT OFFERED WHERE IT WOULD BACKFIRE ─────────────────────────
  * "Make that manager an owner" is only a fix while the manager owns NOTHING else.
- * Give an existing owner a second active cost centre and the chain walk can no
+ * Give an existing owner a second active Business Unit and the chain walk can no
  * longer tell which of the two a report belongs to: it skips them entirely and
  * they place nobody — on the new unit OR the one they already owned. That is the
  * ambiguity the region page's own ⚠ warning exists to flag, so proposing it here
@@ -168,7 +168,7 @@ watch(
               What to do next
             </h3>
             <p class="text-[11px] text-carbon-3 mb-2 leading-relaxed">
-              Where the manager owns no cost centre yet, making them the owner of the one their
+              Where the manager owns no Business Unit yet, making them the owner of the one their
               team belongs to — and re-resolving — moves the cluster out. Otherwise, place their
               people directly from the worklist.
             </p>
@@ -185,13 +185,13 @@ watch(
                   {{ c.manager_label }}
                 </span>
                 <!-- The action is only a fix while it leaves the manager owning
-                     exactly one cost centre. See the header. -->
+                     exactly one Business Unit. See the header. -->
                 <span
                   v-if="c.manager_owns_unit_count === 0"
                   class="text-[11px] text-carbon-3 shrink-0 text-right"
                   :data-testid="`default-cluster-action-${c.manager_oid ?? 'none'}`"
                 >
-                  Make them the owner of their team's cost centre
+                  Make them the owner of their team's Business Unit
                 </span>
                 <span
                   v-else
@@ -199,7 +199,7 @@ watch(
                   :data-testid="`default-cluster-ambiguous-${c.manager_oid ?? 'none'}`"
                 >
                   Already owns {{ c.manager_owns_unit_count }}
-                  {{ c.manager_owns_unit_count === 1 ? 'cost centre' : 'cost centres' }} — giving
+                  {{ c.manager_owns_unit_count === 1 ? 'Business Unit' : 'Business Units' }} — giving
                   them another makes them ambiguous, and they would place nobody on any of them.
                   Place these people directly instead.
                 </span>

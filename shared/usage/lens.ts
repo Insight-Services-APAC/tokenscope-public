@@ -97,8 +97,8 @@ export const PERSONAL_LENS_COPY: Readonly<Record<SpendLens, SpendLensCopy>> = {
   chargeback: {
     label: 'Chargeback',
     qualifier: 'billed',
-    basis: 'chargeback · what cross-charges to your cost centre · month to date',
+    basis: 'chargeback · what cross-charges to your Business Unit · month to date',
     caption:
-      'What your usage cross-charges to your cost centre. Anthropic bills per person, so this is your Anthropic chargeable spend. Copilot is billed pooled per cost centre and has no per-person charge.',
+      'What your usage cross-charges to your Business Unit. Anthropic bills per person, so this is your Anthropic chargeable spend. Copilot is billed pooled per Business Unit and has no per-person charge.',
   },
 } as const

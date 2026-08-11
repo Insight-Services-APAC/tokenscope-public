@@ -9,7 +9,7 @@
  *
  * ── THE ORDERING TRAP, ON SCREEN ──────────────────────────────────────────────
  * Re-resolving re-derives against CURRENT configuration. If nothing can place
- * anyone yet — no unambiguous cost-centre owner, no unit rule pointing into this
+ * anyone yet — no unambiguous Business Unit owner, no unit rule pointing into this
  * region — everyone is re-derived straight back onto the holding node and the
  * admin concludes the feature is broken. So the server answers that question
  * first and returns `routes.viable`, and when it is false this dialog says FIX
@@ -148,7 +148,7 @@ const nothingToDo = computed(() => Boolean(preview.value) && preview.value!.cand
         <p class="text-sm text-carbon-2 leading-relaxed">
           Re-runs the placement derivation for people in {{ regionName }} who have never
           signed in and have no live session — against the configuration as it stands
-          <em>now</em>. It only ever moves someone <strong>into</strong> a cost centre in this
+          <em>now</em>. It only ever moves someone <strong>into</strong> a Business Unit in this
           region: it never removes a placement, and never moves anyone to another region.
         </p>
 
@@ -167,14 +167,14 @@ const nothingToDo = computed(() => Boolean(preview.value) && preview.value!.cand
           >
             <div class="text-sm font-bold text-carbon">Fix the configuration first.</div>
             <p class="text-sm text-carbon-2 mt-1 leading-relaxed">
-              Nothing in {{ regionName }} can place anyone yet — there is no cost-centre owner
-              the manager chain can use, and no rule pointing at one of this region's cost
-              centres. Running now would re-derive
+              Nothing in {{ regionName }} can place anyone yet — there is no Business Unit owner
+              the manager chain can use, and no rule pointing at one of this region's
+              Business Units. Running now would re-derive
               {{ preview.candidates }} {{ preview.candidates === 1 ? 'person' : 'people' }}
               straight back to where they already are.
             </p>
             <p class="text-sm text-carbon-2 mt-2 leading-relaxed">
-              Assign an owner to a cost centre (an owner of <em>more than one</em> cost centre
+              Assign an owner to a Business Unit (an owner of <em>more than one</em> Business Unit
               is ambiguous and places nobody), or place a cluster by hand and accept the rule
               you are offered afterwards. Then come back here.
             </p>
@@ -213,7 +213,7 @@ const nothingToDo = computed(() => Boolean(preview.value) && preview.value!.cand
                 Another pass is needed for the remaining {{ preview.remaining }}.
               </span>
               <span v-if="preview.out_of_region > 0">
-                “Belong elsewhere” report into another region's cost centre — a cross-region
+                “Belong elsewhere” report into another region's Business Unit — a cross-region
                 move revokes their sessions, so it is not this action's to make.
               </span>
               <!-- HONEST ABOUT THE LIMIT OF THAT LABEL. Telling "belongs elsewhere"
@@ -224,7 +224,7 @@ const nothingToDo = computed(() => Boolean(preview.value) && preview.value!.cand
                    panel says so instead of promising a classification it cannot
                    always make. -->
               <span>
-                A chain that reaches a cost centre you cannot see is counted under “no route
+                A chain that reaches a Business Unit you cannot see is counted under “no route
                 yet”, not “belong elsewhere” — either way nobody is moved across a region
                 boundary.
               </span>
@@ -259,7 +259,7 @@ const nothingToDo = computed(() => Boolean(preview.value) && preview.value!.cand
           >
             {{ skippedTotal }} {{ skippedTotal === 1 ? 'person was' : 'people were' }} left alone at
             the last moment: something changed while the pass was running — a session started, or
-            the destination stopped being an active cost centre in this region. They were not
+            the destination stopped being an active Business Unit in this region. They were not
             moved, and are still waiting.
           </p>
         </template>

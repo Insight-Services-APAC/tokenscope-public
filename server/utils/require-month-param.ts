@@ -1,5 +1,5 @@
 /*
- * requireMonthParam — validate a `YYYY-MM` router param (finance-period
+ * requireMonthParam — validate a `YYYY-MM` router param (reporting-snapshot
  * month key), mirroring require-uuid-param.ts's clean-400 pattern.
  */
 import { createError, getRouterParam, type H3Event } from 'h3'

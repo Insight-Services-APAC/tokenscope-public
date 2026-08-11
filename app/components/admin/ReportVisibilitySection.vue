@@ -7,7 +7,7 @@
  * ONE easy-to-understand knob on top of the full RBAC: three named presets
  * deciding which /reports scopes each persona sees. 'standard' = today's
  * behaviour exactly; the other two progressively let region admins (and then
- * cost-centre owners) see the org-wide reports.
+ * Business Unit owners) see the org-wide reports.
  *
  * Each preset card renders the WHO-SEES-WHAT matrix straight from the GET
  * payload, which the endpoint sources from the SAME shared object enforcement
@@ -112,7 +112,7 @@ async function save() {
     <p class="text-xs text-carbon-3 mb-4 leading-relaxed">
       One org-wide knob on top of the full RBAC: which reporting scopes each persona can see.
       <span class="font-semibold">Standard</span> is today's behaviour exactly; the looser presets
-      progressively let region admins — then cost-centre owners — see the org-wide reports. Only
+      progressively let region admins — then Business Unit owners — see the org-wide reports. Only
       the READ side of <span class="font-mono">/reports</span> is affected; nothing else changes.
     </p>
 

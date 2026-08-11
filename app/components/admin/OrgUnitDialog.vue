@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * OrgUnitDialog — accessible create / edit editor for a region's cost-centre
+ * OrgUnitDialog — accessible create / edit editor for a region's Business Unit
  * (org-unit) tree. Modelled on TagSessionDialog: role="dialog" + aria-modal +
  * aria-labelledby, Escape closes, the first field is focused on open, Tab cycles
  * within the dialog (focus trap), and the error is an aria-live alert.
@@ -145,10 +145,10 @@ async function save() {
       <div class="px-6 py-4 border-b border-calm-2 flex items-start justify-between gap-4">
         <div>
           <p class="text-xs font-bold uppercase tracking-[1.4px] text-brand-harmony">
-            {{ mode === 'create' ? 'New cost centre' : 'Edit cost centre' }}
+            {{ mode === 'create' ? 'New Business Unit' : 'Edit Business Unit' }}
           </p>
           <h2 :id="titleId" class="text-lg font-bold text-carbon mt-0.5">
-            {{ mode === 'create' ? 'Add a cost centre' : displayName }}
+            {{ mode === 'create' ? 'Add a Business Unit' : displayName }}
           </h2>
         </div>
         <UiButton kind="ghost" size="sm" data-testid="oud-close" @click="emit('close')">Close</UiButton>
@@ -248,10 +248,10 @@ async function save() {
           class="mt-1 mb-2 p-3 rounded-md bg-brand-vision-lite/60 border border-brand-vision/30 text-[11px] text-[#1f4ea3] leading-relaxed"
           data-testid="oud-holding-note"
         >
-          <span class="font-bold">This is the holding node for teammates with no cost centre.</span>
+          <span class="font-bold">This is the holding node for teammates with no Business Unit.</span>
           It cannot be made cost-owning: that would home every unplaced teammate's
           spend to a bucket nobody owns, dropping the unhomed figure to zero
-          without placing a single person. Place them into real cost centres from
+          without placing a single person. Place them into real Business Units from
           the Teammates tab instead.
         </div>
 

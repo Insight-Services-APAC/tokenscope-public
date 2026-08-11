@@ -231,35 +231,38 @@ describe('unhomed cause-split panel', () => {
     expect(noReadingBlock).toContain('unhomedError')
   })
 
-  it('renders each month’s close state from that month’s own data', () => {
+  it('renders each month’s RECORDED state from that month’s own data', () => {
     /*
-     * The close state was pinned in the probe and nowhere on the surface, so a
-     * CLOSED month could render "Open" — the single most consequential word in
-     * the trend, since it says whether remediation done today would move the
-     * figure — with the whole suite green.
+     * The state was once pinned in the probe and nowhere on the surface, so a
+     * month could render the wrong word with the whole suite green.
+     *
+     * The words changed with the thing: Open/Closed became Recorded/Not
+     * recorded, because recording a month no longer freezes it. The property
+     * under test is unchanged — each row's word comes from that row's own data,
+     * through one mapping, and no literal is printed in the trend.
      */
     const start = PANEL.indexOf('data-testid="admin-diag-unhomed-history"')
     const hist = PANEL.slice(start, PANEL.indexOf('admin-diag-unhomed-period-note', start))
 
     // The word comes from the month's own state, through one mapping…
-    expect(hist).toContain('FINANCE_PERIOD_WORD[financePeriodKey(h.periodState)]')
-    expect(hist).toContain(':data-period-state="financePeriodKey(h.periodState)"')
+    expect(hist).toContain('SNAPSHOT_WORD[snapshotKey(h.recorded)]')
+    expect(hist).toContain(':data-period-state="snapshotKey(h.recorded)"')
     // …which maps each state to its own word. Swap two and this fails.
-    expect(SRC).toMatch(/closed:\s*'Closed'/)
-    expect(SRC).toMatch(/open:\s*'Open'/)
+    expect(SRC).toMatch(/recorded:\s*'Recorded'/)
+    expect(SRC).toMatch(/'not-recorded':\s*'Not recorded'/)
     expect(SRC).toMatch(/unknown:\s*'Unknown'/)
-    // No literal Open/Closed is printed in the trend, so the cell cannot go
-    // constant while still looking plausible.
-    expect(hist).not.toMatch(/\{\{[^}]*'(Open|Closed)'[^}]*\}\}/)
+    // No literal word is printed in the trend, so the cell cannot go constant
+    // while still looking plausible.
+    expect(hist).not.toMatch(/\{\{[^}]*'(Recorded|Not recorded)'[^}]*\}\}/)
 
-    // A FAILED period read is its own word. It is not "Open": absence of a row is
-    // open, absence of an answer is not, and the two must not render alike — so
-    // the consequence line spells out all three, and the panel prints all three.
-    expect(says(SRC, 'Unknown — the finance period for this month could not be read')).toBe(true)
-    expect(says(SRC, 'This is not “open”')).toBe(true)
-    expect(PANEL).toContain('financePeriodConsequence.unknown')
-    expect(PANEL).toContain('financePeriodConsequence.closed')
-    expect(PANEL).toContain('financePeriodConsequence.open')
+    // A FAILED read is its own word. It is not "not recorded": absence of a row
+    // means never recorded, absence of an ANSWER does not, and the two must not
+    // render alike — so the consequence line spells out all three.
+    expect(says(SRC, 'Unknown — the snapshot read for this month failed')).toBe(true)
+    expect(says(SRC, 'This is not “not recorded”')).toBe(true)
+    expect(PANEL).toContain('snapshotConsequence.unknown')
+    expect(PANEL).toContain('snapshotConsequence.recorded')
+    expect(PANEL).toContain("snapshotConsequence['not-recorded']")
   })
 
   it('reuses the existing report-visibility vocabulary instead of inventing one', () => {

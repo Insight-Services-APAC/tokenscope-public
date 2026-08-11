@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * MoveOrgUnitDialog — reparent a cost-centre (org unit) and its whole subtree to
+ * MoveOrgUnitDialog — reparent a Business Unit (org unit) and its whole subtree to
  * a different parent WITHIN THE SAME REGION. The structural move OrgUnitDialog's
  * edit mode deferred ("coming soon"). Modelled on OrgUnitDialog: role="dialog" +
  * aria-modal + aria-labelledby, Escape closes, the first field is focused on
@@ -106,7 +106,7 @@ async function move() {
     >
       <div class="px-6 py-4 border-b border-calm-2 flex items-start justify-between gap-4">
         <div>
-          <p class="text-xs font-bold uppercase tracking-[1.4px] text-brand-harmony">Move cost centre</p>
+          <p class="text-xs font-bold uppercase tracking-[1.4px] text-brand-harmony">Move Business Unit</p>
           <h2 :id="titleId" class="text-lg font-bold text-carbon mt-0.5">{{ node.display_name }}</h2>
           <code class="text-[11px] bg-calm/40 px-1 rounded font-mono" data-testid="move-current-path">{{ node.path }}</code>
         </div>

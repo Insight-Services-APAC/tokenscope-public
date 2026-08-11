@@ -25,9 +25,27 @@ import { requireRole } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { placeTeammate } from '../../../../../db/place-teammate'
+import { isRealUtcDay } from '#shared/schemas/activity'
 
 const Body = z.object({
   org_unit_id: z.string().uuid(),
+  /*
+   * Move what they ALREADY SPENT with them.
+   *
+   * Absent = placement changes going forward only, which is the sync path's
+   * behaviour and this endpoint's backwards-compatible default. Present = an
+   * admin correcting a mis-placement, so the record was always wrong and
+   * history follows.
+   *
+   * `{ from: 'all' }` is what the admin UI sends by default; a date floor is
+   * for the case where only recent placement was wrong.
+   */
+  rehome: z
+    .union([
+      z.object({ from: z.literal('all') }),
+      z.object({ from: z.string().refine(isRealUtcDay, 'not a real calendar day') }),
+    ])
+    .optional(),
 })
 
 export default defineEventHandler(async (event) => {
@@ -47,12 +65,20 @@ export default defineEventHandler(async (event) => {
       orgUnitId: body.org_unit_id,
       targetPolicy: 'any-active-unit',
       caller: { teammateId: caller.teammateId },
+      rehome: body.rehome,
       ipAddress: ip,
       userAgent: ua,
     })
     // `outcome` is additive and rides the same shared rule as the bulk door:
     // 'noop' means they were already in that unit, so nothing was written and
     // (crucially) the manager-chain provenance was NOT stripped.
-    return { id: placed.id, org_unit_id: placed.orgUnitId, outcome: placed.outcome }
+    return {
+      id: placed.id,
+      org_unit_id: placed.orgUnitId,
+      outcome: placed.outcome,
+      // Present only when history was asked to follow, so an untouched caller's
+      // response shape is byte-identical to before.
+      ...(placed.rehomed ? { rehomed: placed.rehomed } : {}),
+    }
   })
 })

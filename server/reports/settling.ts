@@ -5,7 +5,7 @@
  * fold-ins in 02-owner-decisions.md).
  *
  * There is NO recompute behind this — it is a clock, not a close. The canonical
- * finance_period month-end recompute-and-replace ("close") is deferred, so every
+ * reporting-snapshot month-end recompute-and-replace is deferred, so every
  * state is provisional and `closeRun` is ALWAYS false. The string "finalised" is
  * grep-banned and appears nowhere here.
  *

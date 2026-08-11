@@ -87,7 +87,7 @@
       "gaps": [
         {
           "provider": "github",
-          "reason": "Copilot bills pooled per cost centre, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
+          "reason": "Copilot bills pooled per Business Unit, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
         }
       ]
     }
@@ -180,7 +180,7 @@
       "gaps": [
         {
           "provider": "github",
-          "reason": "Copilot bills pooled per cost centre, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
+          "reason": "Copilot bills pooled per Business Unit, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
         }
       ]
     }
@@ -273,7 +273,7 @@
       "gaps": [
         {
           "provider": "github",
-          "reason": "Copilot bills pooled per cost centre, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
+          "reason": "Copilot bills pooled per Business Unit, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
         }
       ]
     }
@@ -366,7 +366,7 @@
       "gaps": [
         {
           "provider": "github",
-          "reason": "Copilot bills pooled per cost centre, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
+          "reason": "Copilot bills pooled per Business Unit, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
         }
       ]
     }

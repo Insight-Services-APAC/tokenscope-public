@@ -292,7 +292,7 @@ export async function resolveCostCentreDrill(
         type: 'https://tokenscope.example.com/errors/forbidden',
         title: 'Forbidden',
         status: 403,
-        detail: 'cost centre not in your scope',
+        detail: 'Business Unit not in your scope',
       },
     })
   }

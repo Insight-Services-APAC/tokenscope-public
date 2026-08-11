@@ -89,7 +89,7 @@ async function lockCutover(tx: Tx): Promise<void> {
 /**
  * Serialize a billing edit against preflight/activation/rollback without taking
  * the advisory lock. The shared row lock avoids an advisory-order inversion:
- * billing edits may subsequently take finance-period locks while recomputing
+ * billing edits may subsequently take reporting-snapshot locks while recomputing
  * open rows, whereas cutover transitions never do.
  */
 export async function lockGovernanceCutoverForBillingEdit(tx: Tx): Promise<CutoverStatus> {
@@ -392,7 +392,7 @@ export async function activateGovernanceCutover(
 }
 
 /**
- * Rollback: only allowed from `activated`, and only while NO finance_period
+ * Rollback: only allowed from `activated`, and only while NO reporting_snapshot
  * has been closed since activation (design: "allowed only before any closed
  * period uses the new regime"). Does not touch `billing` values — they remain
  * exactly as preflight wrote them; only the read-path activation flag flips
@@ -408,14 +408,19 @@ export async function rollbackGovernanceCutover(
     throw new CutoverError('rollback requires governance to currently be activated', 'wrong-state')
   }
 
+  /*
+   * `restated_at` is gone with the state machine — nothing restates, because
+   * nothing is locked. A month RECORDED under the new regime is still the
+   * signal: someone has read and signed off figures produced by it, and a
+   * rollback would change what those figures mean.
+   */
   const closedSince = await tx.execute<{ period_month: string }>(sql`
-    SELECT period_month::text AS period_month FROM finance_period
+    SELECT period_month::text AS period_month FROM reporting_snapshot
     WHERE closed_at >= ${state.activatedAt}::timestamptz
-       OR restated_at >= ${state.activatedAt}::timestamptz
   `)
   if (closedSince.length > 0) {
     throw new CutoverError(
-      `${closedSince.length} finance period(s) have already been closed under the new governance regime — rollback is no longer safe`,
+      `${closedSince.length} month(s) have already been recorded under the new governance regime — rollback is no longer safe`,
       'closed-period-since-activation',
       closedSince.map((r) => r.period_month),
     )

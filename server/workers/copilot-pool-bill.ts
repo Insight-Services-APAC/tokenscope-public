@@ -53,7 +53,6 @@ import { resolveEnterpriseCredential } from '../reconciliation/credentials'
 import { loadGovernanceResolutionContext, resolveGithubVerdict } from '../governance/verdict'
 import { dispatchInbox } from '../notifications/dispatch'
 import { advisoryXactLock } from '../db/advisory-lock'
-import { getFinancePeriod } from '../governance/finance-period'
 import {
   persistCopilotOverageAllocation,
   type PersistCopilotOverageAllocationResult,
@@ -302,10 +301,6 @@ export interface CopilotPoolBillResult {
    *  distinguishable from the same product in another (r1 finding 8). Counted,
    *  never booked — visible drift, never silence. */
   ignoredProducts: Record<string, Record<string, number>>
-  /** Workstream C (design §8.4 "no silent rewrite"): (enterprise, month) pairs whose
-   *  finance_period is CLOSED — the bill rewrite (and its allocation) was refused, not
-   *  silently applied. Reopen or restate the period first. */
-  monthsSkippedClosedPeriod: number
   /** Workstream C: (enterprise, month) pairs whose overage allocation was recomputed
    *  this run (incl. a $0 clear-only recompute). */
   overageAllocationsComputed: number
@@ -587,7 +582,6 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
     unclassifiedOrgMonths: 0,
     alertsEmitted: 0,
     ignoredProducts: {},
-    monthsSkippedClosedPeriod: 0,
     overageAllocationsComputed: 0,
     overageAllocationsUnallocated: 0,
   }
@@ -808,24 +802,24 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
 
       // Workstream C (design §8.4): the whole (enterprise, month) DELETE + re-INSERT,
       // AND the overage-allocation recompute that must stay consistent with it, run in
-      // ONE transaction, under the financePeriod + copilotOverageAllocation advisory
+      // ONE transaction, under the reportingSnapshot + copilotOverageAllocation advisory
       // locks — the SAME lock persistCopilotOverageAllocation itself takes, so a
       // concurrent admin re-pull (or a second worker tick) for this exact
       // (enterprise, month) can never interleave with this write. A CLOSED finance
       // period refuses the whole rewrite outright (never a silent recost of history —
       // reopen or restate first).
       let txResult:
-        | { skippedClosed: true }
         | { skippedClosed: false; allocation: PersistCopilotOverageAllocationResult }
       try {
         txResult = await db.transaction(async (tx) => {
-          await tx.execute(advisoryXactLock('financePeriod', mk.monthStart))
+          await tx.execute(advisoryXactLock('reportingSnapshot', mk.monthStart))
           await tx.execute(advisoryXactLock('copilotOverageAllocation', `${ent.id}:${mk.monthStart}`))
-          const period = await getFinancePeriod(tx, mk.monthStart)
-          if (period.state === 'closed') {
-            return { skippedClosed: true as const }
-          }
-
+          /*
+           * NO CLOSED-MONTH SKIP. A closed month used to have its bill rewrite
+           * and overage recompute silently declined. The provider is the record
+           * of truth: its corrected bill lands, and the difference against the
+           * month's snapshot is reported as a delta.
+           */
           await tx.execute(sql`
             DELETE FROM copilot_pool_bill
             WHERE provider_enterprise_id = ${ent.id}::uuid AND month = ${mk.monthStart}::date
@@ -871,13 +865,6 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
         continue
       }
 
-      if (txResult.skippedClosed) {
-        result.monthsSkippedClosedPeriod += 1
-        consola.warn(
-          `[copilot-pool-bill] ${ent.external_id} ${mk.monthStart} — finance period is CLOSED; bill rewrite and overage-allocation recompute skipped (no silent rewrite). Reopen or restate the period first.`,
-        )
-        continue
-      }
       result.orgRowsWritten += orgRows.length
       if (residualHasContent) result.residualRowsWritten += 1
       result.overageAllocationsComputed += 1

@@ -60,7 +60,7 @@ export function assertHoldingNodeNotCostOwning(opts: {
       title: 'Unprocessable',
       status: 422,
       detail:
-        'The Unplaced holding node cannot be a cost-owning unit. Marking it one would home every unplaced teammate\'s spend to a cost centre nobody owns — the unhomed figure would drop to zero without a single person being placed. Place the teammates into real cost centres instead.',
+        'The Unplaced holding node cannot be a cost-owning unit. Marking it one would home every unplaced teammate\'s spend to a Business Unit nobody owns — the unhomed figure would drop to zero without a single person being placed. Place the teammates into real Business Units instead.',
     },
   })
 }

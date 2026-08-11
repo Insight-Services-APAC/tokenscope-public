@@ -193,7 +193,7 @@ describe('consumption is rendered BESIDE the billed total, never inside it', () 
     expect(block.text()).toContain('not part of the billed total above')
     // The sentence names OUR grain mismatch, not a provider failing.
     expect(block.text()).toContain('before the included allowance')
-    expect(block.text()).toContain('pooled per cost centre')
+    expect(block.text()).toContain('pooled per Business Unit')
   })
 
   it('leaves the sum-back row footing to the BILLED total alone', () => {
@@ -329,7 +329,7 @@ const ANTHROPIC_ONLY = {
     {
       provider: 'github',
       reason:
-        'Copilot bills pooled per cost centre, so it has no per-model charge — this figure is Anthropic’s alone. Break down by Practice to see the Copilot charge.',
+        'Copilot bills pooled per Business Unit, so it has no per-model charge — this figure is Anthropic’s alone. Break down by Practice to see the Copilot charge.',
     },
   ],
 }
@@ -350,7 +350,7 @@ describe('a partial chargeback figure names its own scope', () => {
     const w = mountTable({ chargebackCoverage: ANTHROPIC_ONLY })
     const note = w.find('[data-testid="drivers-chargeback-gaps"]')
     expect(note.exists()).toBe(true)
-    expect(note.text()).toContain('pooled per cost centre')
+    expect(note.text()).toContain('pooled per Business Unit')
     expect(note.text()).toContain('Break down by Practice')
     // It precedes the table: a caveat under a ranking is read after the number
     // has already been taken as the answer.
@@ -398,7 +398,7 @@ describe('a partial chargeback figure names its own scope', () => {
     })
     expect(w.find('[data-testid="across-top-models-lane"]').text()).toContain('Anthropic only')
     expect(w.find('[data-testid="across-top-models-gaps"]').text()).toContain(
-      'pooled per cost centre',
+      'pooled per Business Unit',
     )
   })
 
@@ -412,7 +412,7 @@ describe('a partial chargeback figure names its own scope', () => {
     })
     expect(w.find('[data-testid="regional-top-models-lane"]').text()).toContain('Anthropic only')
     expect(w.find('[data-testid="regional-top-models-gaps"]').text()).toContain(
-      'pooled per cost centre',
+      'pooled per Business Unit',
     )
 
     // Complete → no qualifier, no note.

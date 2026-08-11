@@ -4,7 +4,7 @@
  *
  * build-design §5 + owner-decisions gate fold-in: nothing in the reporting
  * area is billed-grade, so the copy bank BANS "finalised". `settled` is a clock
- * state ONLY (past the settling horizon) until the `finance_period` close
+ * state ONLY (past the settling horizon) until the reporting-snapshot close
  * machinery ships — it renders the exact provisional copy, never a close claim.
  *
  * Reuses UiBadge (the shared pill primitive) for the state dot; the long

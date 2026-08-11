@@ -119,7 +119,7 @@ import {
   UNASSIGNED_REGION_CODE,
   HOLDING_UNIT_TYPE,
 } from '../../shared/placement/holding-nodes'
-import { getFinancePeriod, type FinancePeriodState } from '../governance/finance-period'
+import { getReportingSnapshot } from '../governance/reporting-snapshot'
 import { UNHOMED_CAUSES, type UnhomedCause } from '../../shared/usage/unhomed-causes'
 
 export { UNHOMED_CAUSES } from '../../shared/usage/unhomed-causes'
@@ -271,8 +271,18 @@ export interface UnhomedMonthRow {
    * from 100%. The panel prints no percentage for it rather than an invented one.
    */
   sharePct: number | null
-  /** null = the finance-period read for THIS month failed. Renders "Unknown", never "Open". */
-  periodState: FinancePeriodState | null
+  /**
+   * Has this month been RECORDED (a reporting snapshot taken)?
+   *
+   * `null` = the read for THIS month failed, and renders "Unknown". Still a
+   * third thing from recorded and not-recorded: absence of a snapshot IS
+   * not-recorded, absence of an ANSWER is not.
+   *
+   * Was `periodState: 'open' | 'closed'`. There is no open/closed axis any
+   * more — closing records a month, it does not lock it — so the honest
+   * question is whether a record exists.
+   */
+  recorded: boolean | null
   selected: boolean
   /** The month has not finished, so its figures are partial by definition. */
   partial: boolean
@@ -1000,11 +1010,11 @@ async function loadEstateFirstMonth(db: Db): Promise<string | null> {
  *
  * The MONEY is already in hand — it came out of the split's own statement, so
  * the anchor month's row and the headline above it are the same expression over
- * the same snapshot. What remains is per-month state, and the finance-period
- * read is fenced PER MONTH: a period read that fails must cost that month its
- * close state, not blank a trend whose money read perfectly well. `periodState:
- * null` renders "Unknown", which is a third thing from "Open" and from
- * "Closed" — absence of a row IS open, absence of an ANSWER is not.
+ * the same snapshot. What remains is per-month state, and the snapshot read is
+ * fenced PER MONTH: a read that fails must cost that month its recorded flag,
+ * not blank a trend whose money read perfectly well. `recorded: null` renders
+ * "Unknown", a third thing from recorded and not-recorded — absence of a row IS
+ * not-recorded, absence of an ANSWER is not.
  */
 async function buildHistory(
   db: Db,
@@ -1030,10 +1040,19 @@ async function buildHistory(
     const chargeable = hit ? Number(hit.chargeable) : 0
     const unhomed = hit ? Number(hit.unhomed) : 0
 
-    // Absence of a finance_period row IS open — never an em-dash. A failed READ
-    // is neither, and must not poison the reads after it (see `fallible`).
-    const period = await fallible(db, (tx) => getFinancePeriod(tx, month))
-    const periodState: FinancePeriodState | null = period?.state ?? null
+    /*
+     * Absence of a snapshot IS not-recorded. A failed READ is neither, and must
+     * not poison the reads after it (see `fallible`).
+     *
+     * `fallible` collapses a failure to null, and `getReportingSnapshot`
+     * legitimately returns null for a month nobody has recorded — so the two are
+     * indistinguishable unless the read reports its own success. It returns a
+     * WRAPPER for that reason: `{ snap }` means the read worked and null means
+     * it did not. The predecessor never needed this because its reader defaulted
+     * absence to 'open' and only ever returned null on failure.
+     */
+    const read = await fallible(db, async (tx) => ({ snap: await getReportingSnapshot(tx, month) }))
+    const recorded: boolean | null = read === null ? null : read.snap !== null
 
     /*
      * SOURCE ROWS, exactly as the panel's `unhomedNothingToSplit` guards the
@@ -1057,7 +1076,7 @@ async function buildHistory(
       // …and the share of a month whose divisor is zero is UNDEFINED, not 0% and
       // not Infinity%. The panel prints no percentage rather than an invented one.
       sharePct: state === 'measured' && chargeable !== 0 ? (unhomed / chargeable) * 100 : null,
-      periodState,
+      recorded,
       selected: month === anchorMonth,
       partial: month >= currentMonth,
     })

@@ -44,7 +44,7 @@ describe('BulkPlaceDialog — partial success', () => {
       results: [
         { teammate_id: 'a', status: 'placed' },
         { teammate_id: 'b', status: 'placed' },
-        { teammate_id: 'c', status: 'failed', reason: 'That cost centre is retired — pick an active one.' },
+        { teammate_id: 'c', status: 'failed', reason: 'That Business Unit is retired — pick an active one.' },
       ],
     }))
 

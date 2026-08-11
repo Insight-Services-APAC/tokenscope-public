@@ -168,15 +168,13 @@ async function upsertCopilotBillRow(
       provider_org_id = EXCLUDED.provider_org_id,
       provider_enterprise_id = EXCLUDED.provider_enterprise_id,
       governance_key_status = EXCLUDED.governance_key_status,
-      -- The chargeback verdict must never move once a finance_period close/restate
-      -- has FROZEN it (governance_verdict_locked_at IS NOT NULL) — a re-poll of an
-      -- already-closed month (a late seat correction) refreshes cost/metadata above
-      -- but leaves the frozen verdict exactly as it was. server/governance/finance-period.ts
-      -- is the ONLY path that may change a locked row's verdict (reopen/restate).
-      chargeback_exempt = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
-        THEN EXCLUDED.chargeback_exempt ELSE actual_spend.chargeback_exempt END,
-      governance_verdict_source = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
-        THEN EXCLUDED.governance_verdict_source ELSE actual_spend.governance_verdict_source END
+      -- The verdict refreshes like any other field. It used to be frozen once a
+      -- period closed, so a late seat correction updated the cost and left a
+      -- stale classification beside it — two halves of one row disagreeing about
+      -- which month they belong to. A recorded month that moves now reports the
+      -- difference (mig 0128) instead of being prevented from moving.
+      chargeback_exempt = EXCLUDED.chargeback_exempt,
+      governance_verdict_source = EXCLUDED.governance_verdict_source
     RETURNING id::text AS id
   `)
   return result.length > 0

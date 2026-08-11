@@ -77,10 +77,10 @@ describe('the arm block names every arm, including the empty one', () => {
   it('carries the coverage statement, gaps included', () => {
     const lines = driverArmCsvLines(undefined, {
       providers: ['anthropic'],
-      gaps: [{ provider: 'github', reason: 'Copilot bills pooled per cost centre.' }],
+      gaps: [{ provider: 'github', reason: 'Copilot bills pooled per Business Unit.' }],
     })
     expect(lines).toContain('# chargeback_providers=anthropic')
-    expect(lines).toContain('# gap · github · Copilot bills pooled per cost centre.')
+    expect(lines).toContain('# gap · github · Copilot bills pooled per Business Unit.')
   })
 
   it('says `none` rather than nothing when no provider answers the axis', () => {

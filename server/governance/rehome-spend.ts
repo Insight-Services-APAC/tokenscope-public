@@ -7,9 +7,8 @@
  * (`tests/unit/server/reports-lane-firewall.test.ts`) rejected it, correctly:
  * that directory is the reporting READ path, where the usage lane may only
  * touch `v_complete_usage`. This module WRITES `attribution_record`. It is a
- * restatement of recorded spend, which is what `finance-period.ts` next door
- * already does for a period — so it belongs with the other operations that
- * rewrite settled facts, not with the queries that read them.
+ * restatement of recorded spend, so it belongs with the other operations that
+ * rewrite settled facts rather than with the queries that read them.
  *
  * ── WHY ──────────────────────────────────────────────────────────────────────
  * `attribution_record.cost_owning_unit_id` is stamped when the row is written,
@@ -65,10 +64,11 @@ type Tx = PostgresJsDatabase<typeof schema>
 /**
  * How far back to restate.
  *
- * `'all'` is NOT a synonym for "every month": a missing `finance_period` row
- * means OPEN by design, so an unbounded range would reach every month nobody
- * ever closed. It therefore requires `confirmUnbounded` at the call site, and
- * the plan still enumerates exactly which periods it would touch.
+ * `'all'` still requires `confirmUnbounded` at the call site. Not because any
+ * month is protected — none are — but because "every month this project has
+ * ever had" is a materially different request from "since March", and an
+ * unbounded restatement should be something the caller said, not something they
+ * defaulted into. The plan enumerates exactly which periods it would touch.
  */
 export type RehomeRange = { from: string } | { from: 'all'; confirmUnbounded: true }
 
@@ -79,8 +79,15 @@ export interface RehomePeriodEffect {
   usd: number
 }
 
-/** Why a period in range is untouchable. Both are REPORTED, never silent. */
-export type RehomeRefusal = 'closed-period' | 'archived'
+/**
+ * Why a period in range is untouchable. REPORTED, never silent.
+ *
+ * `closed-period` is gone: closing a month records what it read, it does not
+ * lock it, so there is no longer a state a month can be in that makes its spend
+ * un-correctable. Archived days remain genuinely untouchable — the raw rows are
+ * not there to move.
+ */
+export type RehomeRefusal = 'archived'
 
 export interface RehomeRefusedPeriod extends RehomePeriodEffect {
   reason: RehomeRefusal
@@ -160,23 +167,19 @@ export async function planRehome(
   const rows = [
     ...(await tx.execute<{
       period_month: string
-      closed: boolean
       archived: boolean
       from_cou: string | null
       rows: string
       usd: string
     }>(sql`
       SELECT date_trunc('month', ar.ts_event AT TIME ZONE 'UTC')::date::text AS period_month,
-             COALESCE(fp.state, 'open') = 'closed'                           AS closed,
              ${archivedExpr}                                                 AS archived,
              ar.cost_owning_unit_id::text                                    AS from_cou,
              COUNT(*)::text                                                  AS rows,
              COALESCE(SUM(ar.cost_usd), 0)::text                             AS usd
         FROM attribution_record ar
-        LEFT JOIN finance_period fp
-               ON fp.period_month = date_trunc('month', ar.ts_event AT TIME ZONE 'UTC')::date
        WHERE ${scopePredicate(opts.projectId, opts.range, opts.toCostOwningUnitId)}
-       GROUP BY 1, 2, 3, 4
+       GROUP BY 1, 2, 3
        ORDER BY 1`)),
   ]
 
@@ -191,9 +194,7 @@ export async function planRehome(
   for (const r of rows) {
     const rowCount = Number(r.rows)
     const usd = Number(r.usd)
-    // Closed outranks archived in the message: it is the deliberate policy, and
-    // the operator's next action differs (reopen vs "there is nothing to move").
-    const reason: RehomeRefusal | null = r.closed ? 'closed-period' : r.archived ? 'archived' : null
+    const reason: RehomeRefusal | null = r.archived ? 'archived' : null
     if (reason) {
       const k = `${r.period_month}:${reason}`
       const prev = refusedByKey.get(k)
@@ -254,7 +255,7 @@ export interface RehomeResult extends RehomePlan {
  * the project's own BU change: a re-home that commits without its move (or the
  * reverse) leaves the ledger disagreeing with the org.
  *
- * Takes the `financePeriod` advisory lock for every period it will touch.
+ * Takes the `reportingSnapshot` advisory lock for every period it will touch.
  * That namespace exists for precisely this shape — its own comment notes the
  * lock "serialises even the 'period row does not exist yet' case, which a
  * row-level lock cannot cover", which is the case here, since an unclosed month
@@ -279,7 +280,7 @@ export async function applyRehome(
    * opposite orders.
    */
   const scouted = await planRehome(tx, opts)
-  for (const p of scouted.affected) await tx.execute(advisoryXactLock('financePeriod', p.periodMonth))
+  for (const p of scouted.affected) await tx.execute(advisoryXactLock('reportingSnapshot', p.periodMonth))
 
   const plan = await planRehome(tx, opts)
   if (opts.expectToken !== undefined && opts.expectToken !== plan.token) throw new RehomePlanStale(plan)
@@ -307,39 +308,49 @@ export async function applyRehome(
     sql`, `,
   )
 
-  const updated = [
-    ...(await tx.execute<{ day: string; usd: string }>(sql`
-      UPDATE attribution_record ar
-         SET cost_owning_unit_id = ${opts.toCostOwningUnitId}::uuid,
-             -- SO THE ROLLUP NOTICES. The incremental window keys on
-             -- ts_recorded; without this the aggregates keep the old BU and
-             -- disagree with the ledger they summarise.
-             ts_recorded = now()
-       WHERE ${scopePredicate(opts.projectId, opts.range, opts.toCostOwningUnitId)}
-         AND date_trunc('month', ar.ts_event AT TIME ZONE 'UTC')::date IN (${plannedMonths})
-         ${notArchived}
-         -- Re-checked in the WRITE, not trusted from the plan: two statements,
-         -- and a period can close between them.
-         AND NOT EXISTS (
-           SELECT 1 FROM finance_period fp
-            WHERE fp.period_month = date_trunc('month', ar.ts_event AT TIME ZONE 'UTC')::date
-              AND fp.state = 'closed')
-      RETURNING (ar.ts_event AT TIME ZONE 'UTC')::date::text AS day,
-                ar.cost_usd::text AS usd`)),
+  /*
+   * AGGREGATED IN SQL, NOT IN NODE.
+   *
+   * This used to `RETURNING` one row per moved record and reduce them here. A
+   * real migration on Dev moved 189,590 rows: every one of them was serialised
+   * over the wire and materialised as a JS object, to produce a count, a sum
+   * and about thirty distinct days. The transaction is already the expensive
+   * part — both mutated columns are indexed, so none of these updates are HOT —
+   * and there is no reason to add a six-figure round trip to it.
+   *
+   * A data-modifying CTE keeps the write and its measurement in one statement,
+   * so the numbers still describe exactly the rows that moved.
+   */
+  const [measured] = [
+    ...(await tx.execute<{ rows: string; usd: string; days: string[] }>(sql`
+      WITH moved AS (
+        UPDATE attribution_record ar
+           SET cost_owning_unit_id = ${opts.toCostOwningUnitId}::uuid,
+               -- SO THE ROLLUP NOTICES. The incremental window keys on
+               -- ts_recorded; without this the aggregates keep the old BU and
+               -- disagree with the ledger they summarise.
+               ts_recorded = now()
+         WHERE ${scopePredicate(opts.projectId, opts.range, opts.toCostOwningUnitId)}
+           AND date_trunc('month', ar.ts_event AT TIME ZONE 'UTC')::date IN (${plannedMonths})
+           ${notArchived}
+        RETURNING (ar.ts_event AT TIME ZONE 'UTC')::date AS day, ar.cost_usd
+      )
+      SELECT COUNT(*)::text                                          AS rows,
+             COALESCE(SUM(cost_usd), 0)::text                        AS usd,
+             COALESCE(ARRAY_AGG(DISTINCT day::text ORDER BY day::text), '{}') AS days
+        FROM moved`)),
   ]
 
   /*
-   * `applied` is measured from the ROWS THAT MOVED, not from the plan. A period
-   * can close while this transaction waits for its lock: the UPDATE then
-   * correctly skips it, and reporting the plan's dollars would have the response
-   * and the audit both claim money moved that did not.
+   * Measured from the ROWS THAT MOVED, not from the plan. A period can close
+   * while this transaction waits for its lock: the UPDATE then correctly skips
+   * it, and reporting the plan's dollars would have the response and the audit
+   * both claim money moved that did not.
    */
-  const appliedUsd = updated.reduce((a, r) => a + Number(r.usd), 0)
-
   return {
     ...plan,
-    updated: updated.length,
-    appliedUsd,
-    affectedDays: [...new Set(updated.map((r) => r.day))].sort(),
+    updated: Number(measured?.rows ?? 0),
+    appliedUsd: Number(measured?.usd ?? 0),
+    affectedDays: measured?.days ?? [],
   }
 }

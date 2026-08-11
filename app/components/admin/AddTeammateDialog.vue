@@ -252,7 +252,7 @@ function errText(e: unknown, fallback: string): string {
             <UiButton kind="ghost" size="sm" data-testid="at-change" @click="clearSelection">Change</UiButton>
           </div>
 
-          <label for="at-orgunit" class="text-[12px] font-semibold text-carbon">Cost-centre placement</label>
+          <label for="at-orgunit" class="text-[12px] font-semibold text-carbon">Business Unit placement</label>
           <p
             v-if="selected.cost_center || selected.department"
             class="text-[11px] text-carbon-3 mt-0.5"

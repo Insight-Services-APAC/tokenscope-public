@@ -137,7 +137,7 @@ export function providerMeasure(provider: string): BilledMeasure {
  */
 export const CONSUMPTION_NOTES: Readonly<Record<string, string>> = {
   github:
-    'Copilot consumption, not a charge — gross AI credits before the included allowance. The Copilot bill is pooled per cost centre, so this is never added to a billed total.',
+    'Copilot consumption, not a charge — gross AI credits before the included allowance. The Copilot bill is pooled per Business Unit, so this is never added to a billed total.',
 }
 
 /** {@link CONSUMPTION_NOTES} for `provider`, or a generic form for a new arm. */

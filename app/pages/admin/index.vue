@@ -79,7 +79,7 @@ const stats = computed(() => [
 const quickActions = computed(() => {
   const region = regionId.value ? `/admin/regions/${regionId.value}` : '/admin/regions'
   const actions = [
-    { key: 'region', label: 'Set up your region', sub: 'Cost centres, owners, leaders, teammates', to: region, accent: 'vision' as const },
+    { key: 'region', label: 'Set up your region', sub: 'Business Units, owners, leaders, teammates', to: region, accent: 'vision' as const },
     { key: 'teammates', label: 'Add a teammate', sub: 'Provision someone from the directory', to: '/admin/users', accent: 'harmony' as const },
     { key: 'projects', label: 'Create a project', sub: 'Set a budget and add members', to: '/admin/projects', accent: 'zeal' as const },
     { key: 'reconciliation', label: 'Review reconciliation', sub: 'Runs, deltas and provider onboarding', to: '/admin/reconciliation', accent: 'harmony' as const },

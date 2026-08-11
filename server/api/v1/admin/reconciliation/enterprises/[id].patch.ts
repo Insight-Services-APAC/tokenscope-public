@@ -213,15 +213,19 @@ export default defineEventHandler(async (event) => {
 
     // ADR-0011 D7 ("dead governance is a defect... ships with the reader that
     // consumes it"): an `overageAllocationPolicy` edit must change the persisted
-    // distribution for every OPEN month this enterprise already has a bill for,
-    // immediately — never wait for the next bill-refresh tick. Closed months are
-    // refused by persistCopilotOverageAllocation itself (require reopen/restate).
+    // distribution for every month this enterprise already has a bill for,
+    // immediately — never wait for the next bill-refresh tick.
+    //
+    // EVERY month, including recorded ones. This used to skip closed months on
+    // the grounds that persistCopilotOverageAllocation would refuse them anyway;
+    // it no longer refuses, because a policy edit that cannot reach the months
+    // it applies to is a policy edit that silently did not happen. A recorded
+    // month that moves reports its delta.
     if (has('overageAllocationPolicy')) {
       const months = await tx.execute<{ month: string }>(sql`
         SELECT DISTINCT b.month::text AS month
         FROM copilot_pool_bill b
-        LEFT JOIN finance_period fp ON fp.period_month = b.month
-        WHERE b.provider_enterprise_id = ${id}::uuid AND COALESCE(fp.state, 'open') = 'open'
+        WHERE b.provider_enterprise_id = ${id}::uuid
         ORDER BY month
       `)
       for (const m of months) {

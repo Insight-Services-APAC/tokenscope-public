@@ -389,10 +389,8 @@ export function makePlacementStore(db: Db): PlacementStore {
               output_tokens = EXCLUDED.output_tokens, raw_payload = EXCLUDED.raw_payload, pulled_at = now(),
               provider_org_id = EXCLUDED.provider_org_id, provider_enterprise_id = EXCLUDED.provider_enterprise_id,
               governance_key_status = EXCLUDED.governance_key_status,
-              chargeback_exempt = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
-                THEN EXCLUDED.chargeback_exempt ELSE actual_spend.chargeback_exempt END,
-              governance_verdict_source = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
-                THEN EXCLUDED.governance_verdict_source ELSE actual_spend.governance_verdict_source END
+              chargeback_exempt = EXCLUDED.chargeback_exempt,
+              governance_verdict_source = EXCLUDED.governance_verdict_source
           `)
         }
 

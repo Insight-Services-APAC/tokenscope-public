@@ -14,19 +14,19 @@ const { roleDisplay } = useAdminAccess()
 
 // Grouped for scannability. `id` matches the AdminHelpLink `anchor` prop.
 const roles = [
-  { id: 'region-admin', term: 'Region admin', enum: 'admin', body: 'Administers ONE region — its teammates, cost centres, projects and connectors. Region-scoped: cannot see or change other regions.' },
+  { id: 'region-admin', term: 'Region admin', enum: 'admin', body: 'Administers ONE region — its teammates, Business Units, projects and connectors. Region-scoped: cannot see or change other regions.' },
   { id: 'global-finance', term: 'Global finance', enum: 'global-finops', body: 'Cross-region finance super-role — sees every region and the finance rollups. This is the role behind the "Finance" persona.' },
   { id: 'platform-admin', term: 'Platform admin', enum: 'platform-admin', body: 'Cross-region super-admin. Satisfies every gate; unbounded data scope. Can rename regions and manage devices across regions.' },
   { id: 'manager-role', term: 'Manager (role)', enum: 'manager', body: 'The RBAC role for a team/practice lead. Distinct from a project manager assignment and from the Entra manager chain (below).' },
-  { id: 'developer', term: 'Developer', enum: 'developer', body: 'The default role. May also hold cost-centre ownership — that is a relationship, not a role (see Cost-centre owner).' },
+  { id: 'developer', term: 'Developer', enum: 'developer', body: 'The default role. May also hold Business Unit ownership — that is a relationship, not a role (see Business Unit owner).' },
   { id: 'finance-retired', term: 'Finance (retired)', enum: 'finance', body: 'A RETIRED role that is never assigned to anyone. It is kept in the enum only so historical data still parses. You may still see the raw value "finance" in old logs, audit rows or API payloads — it is NOT the same as Global finance. It is never offered when assigning a role.' },
 ]
 
 const ownership = [
-  { id: 'cost-centre-owner', term: 'Cost-centre owner', body: 'A person who can SEE a cost-owning unit’s spend and budget (the P&L view). Assigned per cost centre on a region’s page ("Owners"). It is a relationship, not a role — a plain Developer can be a cost-centre owner. It does not change what they can administer.' },
-  { id: 'region-leader', term: 'Region leader', body: 'A placement ANCHOR for a region (e.g. a Region SVP or a shared-function head). Region leaders are used to DERIVE which cost centre an otherwise-unplaced teammate rolls up to — via the Entra manager chain. They are not a role and confer no admin rights. Managed per region ("Region leaders").' },
+  { id: 'cost-centre-owner', term: 'Business Unit owner', body: 'A person who can SEE a cost-owning unit’s spend and budget (the P&L view). Assigned per Business Unit on a region’s page ("Owners"). It is a relationship, not a role — a plain Developer can be a Business Unit owner. It does not change what they can administer.' },
+  { id: 'region-leader', term: 'Region leader', body: 'A placement ANCHOR for a region (e.g. a Region SVP or a shared-function head). Region leaders are used to DERIVE which Business Unit an otherwise-unplaced teammate rolls up to — via the Entra manager chain. They are not a role and confer no admin rights. Managed per region ("Region leaders").' },
   { id: 'project-manager', term: 'Project manager (PM)', body: 'A per-project assignment (the "PM" badge on a project’s members) — may manage that project’s budget and membership. Distinct from the Manager role and the manager chain.' },
-  { id: 'manager-chain', term: 'Manager chain', body: 'The Entra "manager of manager of…" walk. Used only to derive placement (which cost centre a teammate belongs to) when it is not set directly. It is directory data, not a TokenScope role or assignment.' },
+  { id: 'manager-chain', term: 'Manager chain', body: 'The Entra "manager of manager of…" walk. Used only to derive placement (which Business Unit a teammate belongs to) when it is not set directly. It is directory data, not a TokenScope role or assignment.' },
 ]
 
 const structure = [

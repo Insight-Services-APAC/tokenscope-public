@@ -3,7 +3,7 @@
  * AdminHelpLink — a small "?" that deep-links into the Roles & terms glossary
  * at a specific anchor. Touch-friendly (a real link, not a hover tooltip) and
  * labelled for AT. Use it next to a term whose meaning is easy to confuse
- * (Cost-centre owner, Region leader, Manager, …).
+ * (Business Unit owner, Region leader, Manager, …).
  */
 const props = defineProps<{ anchor: string; label: string }>()
 </script>

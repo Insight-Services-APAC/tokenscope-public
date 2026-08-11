@@ -169,6 +169,16 @@ async function save() {
     emit('saved')
   } catch (e: unknown) {
     error.value = apiErrorDetail(e, 'Save failed')
+    /*
+     * A stale-token 409 ships the CURRENT plan precisely so the admin can
+     * re-confirm against what is true now, rather than re-previewing blind.
+     * Swapping it in replaces the figures they were shown with the figures that
+     * refused them — which for the commonest case (a migration that committed
+     * after the browser stopped waiting) reads "0 record(s) · $0.00", the
+     * evidence for the sentence above it.
+     */
+    const fresh = (e as { data?: { data?: { current_plan?: MigratePreview } } })?.data?.data?.current_plan
+    if (fresh) preview.value = fresh
   } finally {
     saving.value = false
   }
@@ -285,7 +295,7 @@ async function save() {
             <span class="ml-2 text-[11px] text-carbon-3">blank = everything recorded</span>
 
             <div class="mt-2">
-              <UiButton kind="ghost" :disabled="previewing" data-testid="pe-migrate-preview" @click="runPreview">
+              <UiButton kind="secondary" size="sm" :disabled="previewing" data-testid="pe-migrate-preview" @click="runPreview">
                 {{ previewing ? 'Checking…' : 'Check what would move' }}
               </UiButton>
             </div>
@@ -303,10 +313,12 @@ async function save() {
                 Nothing recorded in that range is on a different {{ BU_LABEL }}.
               </p>
               <ul v-if="preview.refused.length" class="mt-1 text-carbon-2">
+                <!-- `archived` is the only refusal left: a recorded month is a
+                     snapshot, not a lock, so nothing is refused for being
+                     closed any more. -->
                 <li v-for="r in preview.refused" :key="r.periodMonth + r.reason">
                   {{ r.periodMonth.slice(0, 7) }}: {{ r.rows }} record(s) left alone —
-                  <template v-if="r.reason === 'closed-period'">the finance period is closed</template>
-                  <template v-else>archived; the detail behind it is no longer stored</template>
+                  archived; the detail behind it is no longer stored
                 </li>
               </ul>
               <p class="mt-1 text-carbon-3">

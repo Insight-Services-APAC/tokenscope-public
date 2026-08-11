@@ -438,8 +438,8 @@ interface UnhomedMonthRow {
   unhomedUsd: string | null
   chargeableUsd: string | null
   sharePct: number | null
-  /** null = this month's finance-period read failed. Renders "Unknown", never "Open". */
-  periodState: 'open' | 'closed' | null
+  /** null = this month's snapshot read failed. Renders "Unknown", never inferred. */
+  recorded: boolean | null
   selected: boolean
   partial: boolean
 }
@@ -594,7 +594,7 @@ const UNHOMED_LABELS: Record<UnhomedCause, string> = {
 }
 const UNHOMED_HINTS: Record<UnhomedCause, string> = {
   'no-region':
-    'The platform could not place these people in any region at all: no directory match, no manager chain, no billing region. They sit in the system-wide holding region, so their spend reaches no region’s report and no cost centre.',
+    'The platform could not place these people in any region at all: no directory match, no manager chain, no billing region. They sit in the system-wide holding region, so their spend reaches no region’s report and no Business Unit.',
   'region-no-unit':
     'The region is known; the unit is not. They sit on their region’s holding node, which is deliberately not cost-owning, so their spend reaches the region and stops there.',
   'no-cost-owning-ancestor':
@@ -713,30 +713,38 @@ function unhomedMonthLabel(month: string): string {
 }
 
 /*
- * WHAT CLOSING A PERIOD ACTUALLY FREEZES, which is narrower than this used to
- * say. `finance_period.closed` freezes the governance VERDICTS on that month's
- * rows — whether a row is chargeable at all. It does NOT freeze HOMING: the
- * per-teammate chargeback lane resolves the cost-owning unit live from the
- * teammate's CURRENT placement on every read, so placing someone today moves a
- * closed month's unhomed figure. Month-grain point-in-time homing (D-Homing) is
- * a RATIFIED FUTURE decision, not current behaviour, and this copy said "placing
- * someone now will not change this figure" as though it had already shipped.
+ * RECORDING A MONTH FREEZES NOTHING — narrower again than this used to say, and
+ * the narrowing has gone all the way to zero.
+ *
+ * It once claimed a close froze everything; it was corrected to "only the
+ * governance VERDICTS, not homing"; and now a snapshot records what a month read
+ * and locks nothing at all. Verdicts recompute on any month, the provider's bill
+ * always lands, and placing someone today still moves a recorded month's figure.
+ * What a snapshot buys is that the month can SAY it moved.
  */
-const financePeriodConsequence: Record<'open' | 'closed' | 'unknown', string> = {
-  closed:
-    'Closed — this month’s chargeability verdicts are frozen, and a correction to them needs the audited reopen or restate. Homing is NOT frozen: it is resolved live from where people sit today, so placing someone now still moves this figure for a closed month.',
-  open: 'Open — this month still recomputes, so remediation you do today moves this figure.',
+/*
+ * RECORDED / NOT RECORDED / UNKNOWN. This used to be Open / Closed, where
+ * "Closed" meant the month's verdicts were FROZEN and a correction needed an
+ * audited reopen or restate. Nothing freezes any more: closing records what a
+ * month read, and a month that subsequently moves reports the difference. So
+ * the word had to change with the thing.
+ */
+const snapshotConsequence: Record<'recorded' | 'not-recorded' | 'unknown', string> = {
+  recorded:
+    'Recorded — a snapshot of this month exists. It is not frozen: remediation you do today still moves this figure, and the month will report the difference against what was recorded.',
+  'not-recorded':
+    'Not recorded — no snapshot has been taken of this month. It recomputes like any other, and nothing is being compared against.',
   unknown:
-    'Unknown — the finance period for this month could not be read. This is not “open”: whether the verdicts behind this figure are frozen is unanswered.',
+    'Unknown — the snapshot read for this month failed. This is not “not recorded”: whether a record exists is unanswered.',
 }
 
-/** 'open' | 'closed' | 'unknown' — a failed read is its own state, never "Open". */
-function financePeriodKey(s: 'open' | 'closed' | null): 'open' | 'closed' | 'unknown' {
-  return s ?? 'unknown'
+/** A failed read is its own state, never silently "not recorded". */
+function snapshotKey(recorded: boolean | null): 'recorded' | 'not-recorded' | 'unknown' {
+  return recorded === null ? 'unknown' : recorded ? 'recorded' : 'not-recorded'
 }
-const FINANCE_PERIOD_WORD: Record<'open' | 'closed' | 'unknown', string> = {
-  closed: 'Closed',
-  open: 'Open',
+const SNAPSHOT_WORD: Record<'recorded' | 'not-recorded' | 'unknown', string> = {
+  recorded: 'Recorded',
+  'not-recorded': 'Not recorded',
   unknown: 'Unknown',
 }
 
@@ -1975,11 +1983,11 @@ function pretty(obj: unknown): string {
               <template v-if="Number(abData.diagnostics.unhomedChargeUsd) !== 0">
                 {{ abUsd(abData.diagnostics.unhomedChargeUsd) }} of chargeable spend has no
                 cost-owning unit. It is inside the §B total above, so it does not affect the
-                residual, but it disappears from every per-cost-centre view.
+                residual, but it disappears from every per-Business Unit view.
               </template>
               <template v-else>
                 No chargeable spend is unhomed: every billed dollar resolves to a cost-owning unit,
-                so the per-cost-centre views account for all of §B.
+                so the per-Business Unit views account for all of §B.
               </template>
             </p>
 
@@ -2276,7 +2284,7 @@ function pretty(obj: unknown): string {
                         <strong>None of the
                           {{ unhomedProbe.placementConfig.activeCostOwningUnits }} active
                           cost-owning units carries a directory cost-centre code</strong>, so
-                        the DIRECT cost-centre match can never fire. That is one of two automatic
+                        the DIRECT match on that code can never fire. That is one of two automatic
                         routes: the manager-chain walk below needs no codes and may still place
                         people. If both are unavailable, every bill-driven person lands on a
                         holding node.
@@ -2295,12 +2303,12 @@ function pretty(obj: unknown): string {
                       :data-state="unhomedProbe.placementConfig.activeOwners === 0 ? 'zero' : 'measured'"
                       data-testid="admin-diag-unhomed-config-owners"
                     >
-                      <strong>{{ unhomedProbe.placementConfig.activeOwners }} active cost-centre
+                      <strong>{{ unhomedProbe.placementConfig.activeOwners }} active Business Unit
                         owners across {{ unhomedProbe.placementConfig.unitsWithActiveOwner }}
                         units.</strong>
                       An owner is the person accountable for a unit’s spend, and ownership is also
-                      the signal that places someone by their manager chain when their cost centre
-                      does not match. With no owners, neither the accountability nor that placement
+                      the signal that places someone by their manager chain when
+                      their directory cost-centre code does not match. With no owners, neither the accountability nor that placement
                       path exists.
                       <template v-if="unhomedProbe.placementConfig.activeOwners > 0">
                         {{ unhomedProbe.placementConfig.ownersWithDirectoryIdentity }} of them carry
@@ -2311,15 +2319,15 @@ function pretty(obj: unknown): string {
                   </template>
                 </div>
 
-                <!-- ── Who can see cost-centre reporting right now ──────────── -->
+                <!-- ── Who can see Business Unit reporting right now ──────────── -->
                 <div class="mb-3" data-testid="admin-diag-unhomed-visibility">
-                  <h4 class="text-xs font-bold text-carbon mb-1">Who can see cost-centre reporting right now</h4>
+                  <h4 class="text-xs font-bold text-carbon mb-1">Who can see Business Unit reporting right now</h4>
                   <p class="text-[11px] text-carbon-3 mb-1">
                     Report visibility is set to <strong>{{ abData.visibility.label }}</strong> —
                     {{ abData.visibility.description }} This is the <strong>capability matrix</strong>
                     for that mode — what each role WOULD be granted, computed from the policy, not
                     from this estate. It does not inspect who actually holds those roles, owns a
-                    cost centre, or reads these reports, so it tells you which roles could notice
+                    Business Unit, or reads these reports, so it tells you which roles could notice
                     this spend going missing, never how many people that is or whether anyone
                     occupies them.
                     <strong v-if="!abData.visibility.isDefault" data-testid="admin-diag-unhomed-visibility-nondefault">
@@ -2407,19 +2415,19 @@ function pretty(obj: unknown): string {
                         </td>
                         <td
                           class="py-1 text-carbon-3"
-                          :title="financePeriodConsequence[financePeriodKey(h.periodState)]"
-                          :data-period-state="financePeriodKey(h.periodState)"
+                          :title="snapshotConsequence[snapshotKey(h.recorded)]"
+                          :data-period-state="snapshotKey(h.recorded)"
                         >
-                          {{ FINANCE_PERIOD_WORD[financePeriodKey(h.periodState)] }}
+                          {{ SNAPSHOT_WORD[snapshotKey(h.recorded)] }}
                         </td>
                       </tr>
                     </tbody>
                   </table>
                   <p class="text-[11px] text-carbon-3 mt-1" data-testid="admin-diag-unhomed-period-note">
-                    {{ financePeriodConsequence.closed }}
-                    {{ financePeriodConsequence.open }}
-                    A month with no stored finance-period row is open — absence IS open.
-                    {{ financePeriodConsequence.unknown }}
+                    {{ snapshotConsequence.recorded }}
+                    {{ snapshotConsequence['not-recorded'] }}
+                    A month with no stored snapshot has simply never been recorded — absence is not a state.
+                    {{ snapshotConsequence.unknown }}
                   </p>
                 </div>
 

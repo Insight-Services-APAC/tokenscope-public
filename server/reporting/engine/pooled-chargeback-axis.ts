@@ -168,7 +168,7 @@ function axisSelect(axis: PooledChargebackAxis): {
         join: sql`LEFT JOIN org_unit cou ON cou.id = u.cost_owning_unit_id`,
         groupBy: sql`u.cost_owning_unit_id, cou.display_name`,
         nullKey: '__null_practice',
-        nullLabel: 'No cost centre resolved',
+        nullLabel: 'No Business Unit resolved',
       }
     case 'region':
       return {

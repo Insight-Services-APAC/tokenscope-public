@@ -77,7 +77,7 @@ async function seedRow(day: string, cost: number) {
 
 async function reset() {
   await t.client`DELETE FROM attribution_record`
-  await t.client`DELETE FROM finance_period`
+  await t.client`DELETE FROM reporting_snapshot`
 }
 
 describe('Migrate — re-homing recorded usage onto a new Business Unit', () => {
@@ -98,16 +98,23 @@ describe('Migrate — re-homing recorded usage onto a new Business Unit', () => 
     expect((await couOf())[buOld]).toBeUndefined()
   })
 
-  it('a CLOSED period is refused and NAMED — the money stays where it was', async () => {
+  it('a RECORDED month is migrated like any other — nothing is refused for being closed', async () => {
     /*
-     * The point is not merely that it is skipped: silently declining to move
-     * money somebody asked to move is its own defect, so the refusal has to be
-     * reportable back to the operator.
+     * THE INVERSION. This pair of tests used to prove a closed period was
+     * refused and NAMED, and that the guard could fail. Both are gone with the
+     * lock: recording a month captures what it read, it does not freeze it, so
+     * there is no state a month can be in that makes its spend un-correctable.
+     *
+     * What survives is the property that mattered underneath — a refusal must
+     * never be silent — and it now has only one reason left to give (`archived`,
+     * where the raw rows genuinely are not there to move).
      */
     await reset()
     await seedRow(RECENT, 10)
     await seedRow(OLDER, 5)
-    await t.client`INSERT INTO finance_period (period_month, state) VALUES (${monthFloor(OLDER)}::date, 'closed')`
+    await t.client`
+      INSERT INTO reporting_snapshot (period_month, closed_at, closed_by, basis, snapshot_version)
+      VALUES (${monthFloor(OLDER)}::date, now(), NULL, 'project-homed', 1)`
 
     const res = await applyRehome(t.db, {
       projectId,
@@ -115,41 +122,12 @@ describe('Migrate — re-homing recorded usage onto a new Business Unit', () => 
       range: { from: 'all', confirmUnbounded: true },
     })
 
-    expect(res.updated).toBe(1)
-    expect(res.refused).toEqual([
-      expect.objectContaining({ periodMonth: monthFloor(OLDER), reason: 'closed-period', rows: 1 }),
-    ])
-    // The closed row is still on the OLD BU — proof by data, not by predicate.
-    const rows = await t.client<{ cou: string; day: string }[]>`
-      SELECT cost_owning_unit_id::text AS cou, (ts_event AT TIME ZONE 'UTC')::date::text AS day
-        FROM attribution_record ORDER BY day`
-    expect(rows.find((r) => r.day === OLDER)!.cou).toBe(buOld)
-    expect(rows.find((r) => r.day === RECENT)!.cou).toBe(buNew)
+    expect(res.updated).toBe(2) // BOTH months moved, recorded or not
+    expect(res.refused).toEqual([])
+    expect((await couOf())[buNew]).toBe(2)
+    expect((await couOf())[buOld]).toBeUndefined()
   })
 
-  it('MUTATION: without the closed-period guard the closed row would move', async () => {
-    /*
-     * Runs the same scenario with the guard's predicate removed, to prove the
-     * assertion above can fail. A guard nobody has watched fail is a comment.
-     */
-    await reset()
-    await seedRow(OLDER, 5)
-    await t.client`INSERT INTO finance_period (period_month, state) VALUES (${monthFloor(OLDER)}::date, 'closed')`
-
-    await t.client`UPDATE attribution_record SET cost_owning_unit_id = ${buNew}::uuid
-                    WHERE project_id = ${projectId}::uuid` // the un-guarded write
-    expect((await couOf())[buNew]).toBe(1)
-
-    // …and the guarded one leaves it alone.
-    await t.client`UPDATE attribution_record SET cost_owning_unit_id = ${buOld}::uuid`
-    const res = await applyRehome(t.db, {
-      projectId,
-      toCostOwningUnitId: buNew,
-      range: { from: 'all', confirmUnbounded: true },
-    })
-    expect(res.updated).toBe(0)
-    expect((await couOf())[buOld]).toBe(1)
-  })
 
   it('honours a date floor — earlier months are simply out of range', async () => {
     await reset()

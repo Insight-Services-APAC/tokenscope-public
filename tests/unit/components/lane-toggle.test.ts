@@ -76,7 +76,7 @@ describe('LaneToggle — controlled (the personal surfaces)', () => {
     expect(w.find('[data-testid="lane-caption"]').text()).not.toContain('Provider usage truth')
     await w.setProps({ modelValue: 'chargeback' })
     expect(w.find('[data-testid="lane-caption"]').text()).toContain(
-      'Copilot is billed pooled per cost centre',
+      'Copilot is billed pooled per Business Unit',
     )
   })
 })

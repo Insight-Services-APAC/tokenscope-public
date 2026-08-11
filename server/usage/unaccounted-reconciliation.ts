@@ -168,11 +168,25 @@ export async function reconcileUnaccountedUsage(
       FROM api
       JOIN teammate t ON t.id = api.teammate_id
       LEFT JOIN otel ON otel.teammate_id = api.teammate_id AND otel.day = api.day AND otel.tool = api.tool
+      -- PLACEMENT IS STAMPED AT FIRST WRITE AND LEFT ALONE (issue #44).
+      --
+      -- region_id and org_unit_id used to be refreshed here from the teammate's
+      -- CURRENT placement on every recompute, over the trailing 35-day window.
+      -- That made residual placement neither point-in-time nor live but both by
+      -- turns: a row followed the person for 35 days and then froze wherever it
+      -- happened to be, so the same teammate-day could sit in two org units
+      -- depending on when you asked. Data-Lineage.md called it "not any coherent
+      -- policy", which was exact.
+      --
+      -- It also silently destroys a date-floored correction: an admin fixing
+      -- placement from July onwards would have June rewritten to the new unit by
+      -- the next tick, within the hour.
+      --
+      -- Money still refreshes; only the dimensions freeze — matching
+      -- actual_spend, whose ON CONFLICT list has always omitted them.
       ON CONFLICT (teammate_id, day, tool) DO UPDATE SET
         cost_usd = EXCLUDED.cost_usd,
         tokens = EXCLUDED.tokens,
-        region_id = EXCLUDED.region_id,
-        org_unit_id = EXCLUDED.org_unit_id,
         computed_at = now()
       RETURNING id::text AS id
     `)

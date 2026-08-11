@@ -255,7 +255,7 @@ watch(
                   <span
                     v-if="m.is_cross_cou && m.home_cou_name"
                     class="text-[10px] px-1.5 py-0.5 rounded bg-calm/60 text-carbon-2"
-                    :title="`Home cost centre: ${m.home_cou_name} (cross-CC member)`"
+                    :title="`Home Business Unit: ${m.home_cou_name} (cross-CC member)`"
                   >{{ m.home_cou_name }}</span>
                 </div>
                 <div class="text-[11px] text-carbon-3 truncate">{{ m.email }}</div>

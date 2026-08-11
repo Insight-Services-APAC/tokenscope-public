@@ -30,7 +30,7 @@ import entGet from '../../../server/api/v1/admin/reconciliation/enterprises.get'
 import ratePlansGet from '../../../server/api/v1/admin/reconciliation/enterprises/[id]/copilot-rate-plans.get'
 import ratePlansPost from '../../../server/api/v1/admin/reconciliation/enterprises/[id]/copilot-rate-plans.post'
 import billRepullPost from '../../../server/api/v1/admin/reconciliation/enterprises/[id]/copilot-bill-repull.post'
-import { closeFinancePeriod } from '../../../server/governance/finance-period'
+import { closeReportingSnapshot } from '../../../server/governance/reporting-snapshot'
 import { persistCopilotOverageAllocation } from '../../../server/governance/copilot-overage-allocation'
 
 let t: TestDb
@@ -299,14 +299,25 @@ describe('copilot-bill-repull route', () => {
     ).rejects.toMatchObject({ statusCode: 400 })
   })
 
-  it('409s for a CLOSED finance period — never a silent rewrite', async () => {
+  it('a RECORDED month is re-pulled like any other — the bill always lands', async () => {
+    /*
+     * THE INVERSION. This asserted a 409: a closed month refused the re-pull and
+     * the operator had to reopen or restate first.
+     *
+     * The timeline that killed it — close at +2, the provider corrects its rows
+     * at +6, the bill lands at +10 — meant the product rejected the
+     * authoritative source because of a state we set ourselves. TokenScope is
+     * not the billing system of record.
+     */
     const entId = await mkGithubEnterprise(`closed-ent-${randomUUID().slice(0, 8)}`)
-    await t.db.transaction((tx) => closeFinancePeriod(tx, { periodMonth: '2026-05', actorTeammateId: finopsId }))
-    await expect(
-      billRepullPost(ev({ method: 'POST', session: finops(), params: { id: entId }, body: { month: '2026-05', reason: 'test' } })),
-    ).rejects.toMatchObject({ statusCode: 409 })
-    // clean up so later tests default to open again
-    await t.client`DELETE FROM finance_period WHERE period_month = '2026-05-01'::date`
+    await t.db.transaction((tx) => closeReportingSnapshot(tx, { periodMonth: '2026-05', actorTeammateId: finopsId }))
+
+    const res = (await billRepullPost(
+      ev({ method: 'POST', session: finops(), params: { id: entId }, body: { month: '2026-05', reason: 'test' } }),
+    )) as { month: string }
+    expect(res.month).toBe('2026-05')
+
+    await t.client`DELETE FROM reporting_snapshot WHERE period_month = '2026-05-01'::date`
   })
 
   it('completes as a no-op with no credential configured, for an OPEN month (proves it reaches the scoped worker call)', async () => {

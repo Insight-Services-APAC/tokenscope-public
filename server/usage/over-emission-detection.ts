@@ -208,6 +208,12 @@ export async function detectOverEmission(db: Db, opts: OverEmissionOptions): Pro
     SELECT m.teammate_id, t.region_id, t.org_unit_id, m.day, m.tool,
            m.otel_usd::numeric(14,6), m.api_usd::numeric(14,6), m.over_usd::numeric(14,6), now()
     FROM material m JOIN teammate t ON t.id = m.teammate_id
+    -- PLACEMENT IS ABSENT FROM THIS LIST ON PURPOSE (issue #44). region_id and
+    -- org_unit_id are stamped by the INSERT above and never refreshed, so a flag
+    -- keeps the placement it was raised under. Do not add them: a reorg would
+    -- drag old flags onto the new unit, and a date-floored placement correction
+    -- would be silently undone on the next tick. Asserted in
+    -- tests/integration/usage/placement-freeze.test.ts.
     ON CONFLICT (teammate_id, day, tool) DO UPDATE SET
       otel_usd = EXCLUDED.otel_usd, api_usd = EXCLUDED.api_usd, over_usd = EXCLUDED.over_usd, computed_at = now(),
       -- Re-open a resolved flag when a NEW forgery pushes the over materially past what the

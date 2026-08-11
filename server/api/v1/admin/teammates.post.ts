@@ -189,7 +189,7 @@ export default defineEventHandler(async (event) => {
           type: 'https://tokenscope.example.com/errors/identity-collision',
           title: 'Identity collision',
           status: 409,
-          detail: `${dir.email} is already held by another identity (their other Entra account or an unresolved record). Assign them via the cost-centre / project flows (which resolve dual identities), or resolve the duplicate from the Users table.`,
+          detail: `${dir.email} is already held by another identity (their other Entra account or an unresolved record). Assign them via the Business Unit / project flows (which resolve dual identities), or resolve the duplicate from the Users table.`,
         },
       })
     }

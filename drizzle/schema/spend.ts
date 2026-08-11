@@ -70,8 +70,6 @@ export const actualSpend = pgTable(
     providerEnterpriseId: uuid('provider_enterprise_id').references(() => providerEnterprise.id),
     // Backfill bookkeeping only ('resolved' | 'unresolved'); NULL = not yet attempted.
     governanceKeyStatus: text('governance_key_status'),
-    // Set when a finance_period close/restate freezes this row's verdict; NULL = open.
-    governanceVerdictLockedAt: timestamp('governance_verdict_locked_at', { withTimezone: true }),
     // Provenance of the current chargeback_exempt value. See server/governance/verdict.ts.
     governanceVerdictSource: text('governance_verdict_source'),
   },

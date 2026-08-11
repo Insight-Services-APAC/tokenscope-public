@@ -12,7 +12,7 @@
  *     sweep (catches rows a scoped call never touched: new ingest before this
  *     PR's writer changes deploy, or an operator-triggered governance-key
  *     resweep that just resolved previously-unresolved rows).
- *   - server/governance/finance-period.ts — close/restate call it SCOPED TO THE
+ *   - server/governance/reporting-snapshot.ts — close calls it SCOPED TO THE
  *     PERIOD being closed/restated, inside the SAME advisory-locked transaction,
  *     so the freeze always captures a fully-current snapshot.
  *
@@ -21,7 +21,7 @@
  * time/iteration budget) or simply waits for the next tick — never a
  * single unbounded UPDATE over the whole table.
  */
-import { sql } from 'drizzle-orm'
+import { sql, type SQL } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type * as schema from '../../drizzle/schema'
 import { CLAUDE_FAMILY_TOOLS } from '../../shared/usage/surface'
@@ -130,7 +130,17 @@ export async function recomputeGovernanceVerdicts(
   scope: RecomputeScope = {},
 ): Promise<RecomputeResult> {
   const limit = scope.limit ?? RECOMPUTE_DEFAULT_BATCH
-  const conds = [sql`COALESCE(fp.state, 'open') = 'open'`]
+  /*
+   * NO CLOSED-PERIOD EXCLUSION. Recompute used to structurally skip closed
+   * months so a governance rule change could not move a signed-off verdict.
+   *
+   * That protected our own classification by making the product unable to
+   * correct it — and a closed month is exactly where a correction matters, since
+   * it is the one somebody has already looked at. Closing now RECORDS the month
+   * (reporting_snapshot) rather than freezing it, so a verdict change applies
+   * and shows up as a delta against what was recorded.
+   */
+  const conds: SQL[] = []
   if (scope.providerOrgId) conds.push(sql`a.provider_org_id = ${scope.providerOrgId}::uuid`)
   if (scope.providerEnterpriseId) conds.push(sql`a.provider_enterprise_id = ${scope.providerEnterpriseId}::uuid`)
   if (scope.periodMonth) conds.push(sql`date_trunc('month', a.date)::date = ${scope.periodMonth}::date`)
@@ -146,8 +156,7 @@ export async function recomputeGovernanceVerdicts(
     SELECT a.id::text AS id, a.date::text AS date,
            date_trunc('month', a.date)::date::text AS period_month
     FROM actual_spend a
-    LEFT JOIN finance_period fp ON fp.period_month = date_trunc('month', a.date)::date
-    WHERE ${where}
+    ${conds.length ? sql`WHERE ${where}` : sql``}
     ORDER BY a.date, a.id
     LIMIT ${limit}
   `)
@@ -155,7 +164,7 @@ export async function recomputeGovernanceVerdicts(
 
   const periods = [...new Set(candidates.map((r) => r.period_month))].sort()
   for (const period of periods) {
-    await db.execute(advisoryXactLock('financePeriod', period))
+    await db.execute(advisoryXactLock('reportingSnapshot', period))
   }
 
   const candidateIds = sql.join(candidates.map((r) => sql`${r.id}::uuid`), sql`, `)
@@ -164,9 +173,7 @@ export async function recomputeGovernanceVerdicts(
            a.provider_org_id::text AS provider_org_id, a.provider_enterprise_id::text AS provider_enterprise_id,
            a.chargeback_exempt, a.governance_verdict_source
     FROM actual_spend a
-    LEFT JOIN finance_period fp ON fp.period_month = date_trunc('month', a.date)::date
     WHERE a.id IN (${candidateIds})
-      AND COALESCE(fp.state, 'open') = 'open'
     ORDER BY a.date, a.id
   `)
 
@@ -189,8 +196,7 @@ export async function recomputeGovernanceVerdicts(
     await db.execute(sql`
       UPDATE actual_spend a
       SET chargeback_exempt = v.exempt,
-          governance_verdict_source = v.source,
-          governance_verdict_locked_at = NULL
+          governance_verdict_source = v.source
       FROM (VALUES ${values}) AS v(id, exempt, source)
       WHERE a.id = v.id
     `)

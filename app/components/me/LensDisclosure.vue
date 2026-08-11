@@ -275,7 +275,7 @@ const popoverOpen = ref(false)
         class="inline-flex items-center justify-center w-[18px] h-[18px] shrink-0 rounded-full border border-calm text-[11px] font-bold text-carbon-3 hover:border-brand-harmony hover:text-brand-harmony transition-colors cursor-pointer"
         :aria-expanded="popoverOpen"
         aria-controls="chargeable-breakdown"
-        aria-label="Why this month does or does not reach a cost centre"
+        aria-label="Why this month does or does not reach a Business Unit"
         data-testid="chargeable-info-toggle"
         @click="popoverOpen = !popoverOpen"
       >
@@ -283,12 +283,12 @@ const popoverOpen = ref(false)
       </button>
       <span data-testid="chargeable-line">
         <template v-if="reachesUsd > 0 && costCentre">{{ fmtUsd(d.chargeable_usd) }} of this month reaches {{ costCentre }}</template>
-        <template v-else-if="reachesUsd > 0">{{ fmtUsd(d.chargeable_usd) }} of this month is chargeable, but your placement resolves to no cost centre</template>
+        <template v-else-if="reachesUsd > 0">{{ fmtUsd(d.chargeable_usd) }} of this month is chargeable, but your placement resolves to no Business Unit</template>
         <template v-else-if="costCentre">None of this month reaches {{ costCentre }}</template>
         <!-- Unhomed AND nothing chargeable. The branch above was given a null
              guard and this one was not: a sibling path left half-fixed, which
              rendered "None of this month reaches " with nothing after it. -->
-        <template v-else>Nothing this month is chargeable to a cost centre</template>
+        <template v-else>Nothing this month is chargeable to a Business Unit</template>
       </span>
     </div>
     <div
@@ -345,7 +345,7 @@ const popoverOpen = ref(false)
            declared. -->
       <span class="block" data-testid="lens-disclosure-lead">
         Chargeback follows the provider bill: usage with no invoice behind it is not charged to a
-        cost centre{{ costCentre ? ` (yours is ${costCentre})` : '' }}.
+        Business Unit{{ costCentre ? ` (yours is ${costCentre})` : '' }}.
       </span>
 
       <!-- The declared case: a disclosure, not an alarm. -->

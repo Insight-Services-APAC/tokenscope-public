@@ -842,10 +842,12 @@ describe('unhomed cause split', () => {
     expect(h[5]!.state).toBe('not-measured')
     expect(h[5]!.sharePct).toBeNull()
 
-    // Close state: a stored row says closed; ABSENCE says open, never an em-dash.
-    expect(h.find((x) => x.month === '2026-04')!.periodState).toBe('closed')
-    expect(h.find((x) => x.month === '2026-05')!.periodState).toBe('open')
-    expect(h.find((x) => x.month === '2026-03')!.periodState).toBe('open')
+    // Recorded: a stored snapshot says recorded; ABSENCE says not-recorded,
+    // never an em-dash. There is no open/closed axis any more — recording a
+    // month captures what it read, it does not lock it.
+    expect(h.find((x) => x.month === '2026-04')!.recorded).toBe(true)
+    expect(h.find((x) => x.month === '2026-05')!.recorded).toBe(false)
+    expect(h.find((x) => x.month === '2026-03')!.recorded).toBe(false)
   })
 
   /*
@@ -942,13 +944,13 @@ describe('unhomed cause split', () => {
    * nothing is ever poisoned. This one runs inside a real transaction so the
    * savepoints are load-bearing.
    *
-   * `cou_owner` is read ONLY by the counters and `finance_period` ONLY by the
+   * `cou_owner` is read ONLY by the counters and `reporting_snapshot` ONLY by the
    * trend's close state — neither is touched by any view the money comes from —
    * so each failure has exactly one honest consequence.
    */
   it('contains a failed sub-read to its own section, inside a transaction', async () => {
     await t.client.unsafe('ALTER TABLE cou_owner RENAME TO cou_owner_hidden')
-    await t.client.unsafe('ALTER TABLE finance_period RENAME TO finance_period_hidden')
+    await t.client.unsafe('ALTER TABLE reporting_snapshot RENAME TO reporting_snapshot_hidden')
     try {
       const r = await t.db.transaction(async (tx) =>
         computeUnhomedCauses(tx, KO_MAY_WINDOW, MAY),
@@ -956,7 +958,7 @@ describe('unhomed cause split', () => {
 
       // The two sections that could not be read say NOTHING, rather than 0.
       expect(r.placementConfig).toBeNull()
-      expect(r.history.map((h) => h.periodState)).toEqual([null, null, null, null, null, null])
+      expect(r.history.map((h) => h.recorded)).toEqual([null, null, null, null, null, null])
 
       // …and everything else is untouched: the money, the split, the drill and
       // the trend's own figures all still read exactly as they do above.
@@ -974,13 +976,13 @@ describe('unhomed cause split', () => {
       expect(r.estateFirstMonth).toBe('2026-01')
     } finally {
       await t.client.unsafe('ALTER TABLE cou_owner_hidden RENAME TO cou_owner')
-      await t.client.unsafe('ALTER TABLE finance_period_hidden RENAME TO finance_period')
+      await t.client.unsafe('ALTER TABLE reporting_snapshot_hidden RENAME TO reporting_snapshot')
     }
 
     // Guard the guard: both renames were undone.
     const healed = await computeUnhomedCauses(t.db, KO_MAY_WINDOW, MAY)
     expect(healed.placementConfig).not.toBeNull()
-    expect(healed.history.find((h) => h.month === '2026-04')!.periodState).toBe('closed')
+    expect(healed.history.find((h) => h.month === '2026-04')!.recorded).toBe(true)
   })
 
   /*

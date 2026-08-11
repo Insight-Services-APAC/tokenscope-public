@@ -18,14 +18,14 @@
  * org-homed figure `v_finance_copilot_pool_chargeback` falls back to when no
  * allocation has been computed yet — see the migration rewriting that view).
  *
- * LOCKING + FINANCE-PERIOD (design §8.4): every persist call acquires the
- * `financePeriod` advisory lock (keyed on the month) THEN the
+ * LOCKING + THE MONTH'S SNAPSHOT (design §8.4): every persist call acquires the
+ * `reportingSnapshot` advisory lock (keyed on the month) THEN the
  * `copilotOverageAllocation` lock (keyed on `${enterpriseId}:${month}`) —
  * the SAME lock the copilot-pool-bill worker's bill rewrite takes — before
- * touching any row, so a concurrent close/reopen/restate or a concurrent bill
- * refresh can never race a write here. A CLOSED period refuses the write
- * outright (`CopilotOverageAllocationClosedPeriodError`) — the caller must
- * reopen or restate first; there is no silent rewrite path.
+ * touching any row, so a concurrent snapshot close or bill refresh can never
+ * race a write here. A month that has been CLOSED is not special: the provider
+ * is the record of truth, its corrected bill lands, and the difference against
+ * that month's snapshot surfaces as a delta.
  *
  * WEIGHT SOURCES (never actual_spend's copilot rows — v_teammate_usage_daily
  * itself excludes those in favour of reconciliation_record for exactly this
@@ -48,7 +48,6 @@ import { advisoryXactLock } from '../db/advisory-lock'
 import { recordAuditEvent, type AuditActor } from '../db/audit'
 import { allocateCents } from '../../shared/usage/allocate-cents'
 import type { OverageAllocationPolicy } from '../reconciliation/provider-validation'
-import { getFinancePeriod } from './finance-period'
 import {
   loadGovernanceResolutionContext,
   resolveGithubVerdict,
@@ -63,12 +62,6 @@ function normaliseMonth(month: string): string {
   return `${m[1]}-${m[2]}-01`
 }
 
-export class CopilotOverageAllocationClosedPeriodError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'CopilotOverageAllocationClosedPeriodError'
-  }
-}
 
 export interface CopilotOverageAllocationRecipient {
   costOwningUnitId: string | null
@@ -206,7 +199,7 @@ export interface PersistCopilotOverageAllocationArgs {
 /**
  * Compute and persist the overage allocation for ONE (enterprise, month),
  * idempotent delete-and-replace. MUST be called with `tx` already positioned
- * to run further statements (a transaction) — the finance-period +
+ * to run further statements (a transaction) — the reporting-snapshot +
  * enterprise/month advisory locks are acquired INSIDE this call, so it is
  * safe to call directly from a bare `db.transaction(...)` callback.
  */
@@ -216,18 +209,16 @@ export async function persistCopilotOverageAllocation(
 ): Promise<PersistCopilotOverageAllocationResult> {
   const month = normaliseMonth(args.month)
 
-  // Ascending LOCK_NAMESPACE order (financePeriod=4 before
-  // copilotOverageAllocation=6) — mirrors finance-period.ts's own contract.
-  await tx.execute(advisoryXactLock('financePeriod', month))
+  // Ascending LOCK_NAMESPACE order (reportingSnapshot=4 before
+  // copilotOverageAllocation=6) — mirrors reporting-snapshot.ts's own contract.
+  await tx.execute(advisoryXactLock('reportingSnapshot', month))
   await tx.execute(advisoryXactLock('copilotOverageAllocation', `${args.providerEnterpriseId}:${month}`))
 
-  const period = await getFinancePeriod(tx, month)
-  if (period.state === 'closed') {
-    throw new CopilotOverageAllocationClosedPeriodError(
-      `finance period ${month} is closed — reopen or restate it before recomputing the Copilot overage allocation for enterprise ${args.providerEnterpriseId}`,
-    )
-  }
-
+  /*
+   * NO CLOSED-MONTH THROW. Recomputing an allocation for a closed month is now
+   * ordinary: the month's snapshot records what was reported, and any movement
+   * against it surfaces as a delta rather than being prevented.
+   */
   const [entRows, billRows] = await Promise.all([
     tx.execute<{ policy: OverageAllocationPolicy }>(sql`
       SELECT overage_allocation_policy AS policy FROM provider_enterprise WHERE id = ${args.providerEnterpriseId}::uuid

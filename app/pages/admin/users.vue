@@ -22,6 +22,7 @@ import { computed, ref } from 'vue'
 import { consola } from 'consola'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
 import AddTeammateDialog from '../../components/admin/AddTeammateDialog.vue'
+import PlaceTeammateDialog from '../../components/admin/PlaceTeammateDialog.vue'
 // `#shared/*` is Nuxt 4's alias for the workspace `shared/` directory.
 // Relative paths from app/pages/* don't resolve at server-bundle time
 // (Rollup runs from `.nuxt/dist/server/_nuxt/`, not the source path).
@@ -107,7 +108,7 @@ const usersAsync = useFetch<UsersResp>(
 )
 const { data, refresh, pending } = usersAsync
 
-// Org units for the in-scope region — drive the per-row cost-centre placement
+// Org units for the in-scope region — drive the per-row Business Unit placement
 // select + the Add-teammate dialog. Region admins see their own region; org-wide
 // roles see the selected view region.
 interface OrgUnitNode {
@@ -192,30 +193,71 @@ async function reassignRegion(row: UserRow, newRegionId: string) {
 }
 
 /*
- * Cost-centre placement — PATCH /api/v1/admin/users/:id/org-unit { org_unit_id }.
- * Optimistic: the row's orgUnitName is replaced with the chosen unit's
- * display_name immediately; on error roll back + toast. The server enforces the
- * unit being active in the region (422).
+ * Business Unit placement — PATCH /api/v1/admin/users/:id/org-unit.
+ *
+ * The picker no longer applies on `change`. It opens a confirmation, because
+ * the same control can now also restate months of reported usage
+ * (PlaceTeammateDialog explains why). Cancelling must put the select back:
+ * the options carry `:selected` bindings rather than a v-model, so the element
+ * is uncontrolled and Vue will not reconcile the user's own choice away. The
+ * nonce below is in the select's `:key`, so bumping it re-creates the element
+ * from the row's real placement.
  */
-async function patchOrgUnit(row: UserRow, newUnitId: string) {
-  if (!newUnitId) return
+const pendingMove = ref<{ row: UserRow; unitId: string; unitName: string } | null>(null)
+const pickerNonce = ref(0)
+
+function askOrgUnit(row: UserRow, newUnitId: string) {
+  if (!newUnitId || newUnitId === row.orgUnitId) return
+  const unit = orgUnitOptions.value.find((u) => u.id === newUnitId)
+  if (!unit) return
+  pendingMove.value = { row, unitId: unit.id, unitName: unit.display_name }
+}
+
+function cancelMove() {
+  pendingMove.value = null
+  pickerNonce.value++
+}
+
+/*
+ * Optimistic on the NAME only. `rehome` restates recorded usage, which this
+ * page does not show, so there is nothing to optimistically restate — the
+ * refresh below is what makes the rest of the page agree.
+ */
+async function confirmMove(payload: { rehome?: { from: string } }) {
+  const move = pendingMove.value
+  if (!move) return
+  const { row, unitId, unitName } = move
+  pendingMove.value = null
   const previousName = row.orgUnitName
   const previousId = row.orgUnitId
-  const unit = orgUnitOptions.value.find((u) => u.id === newUnitId)
   const idx = rows.value.findIndex((r) => r.id === row.id)
-  if (idx >= 0 && unit) rows.value[idx] = { ...row, orgUnitName: unit.display_name, orgUnitId: unit.id }
+  if (idx >= 0) rows.value[idx] = { ...row, orgUnitName: unitName, orgUnitId: unitId }
   try {
-    await $fetch(`/api/v1/admin/users/${row.id}/org-unit`, {
-      method: 'PATCH',
-      body: { org_unit_id: newUnitId },
-    })
-    flashToast('ok', `Moved ${row.email} to ${unit?.display_name ?? 'new unit'}`)
-    await refresh()
+    const res = await $fetch<{ rehomed?: { attributionRows: number; rollupRows: number } }>(
+      `/api/v1/admin/users/${row.id}/org-unit`,
+      { method: 'PATCH', body: { org_unit_id: unitId, ...payload } },
+    )
+    flashToast(
+      'ok',
+      res.rehomed
+        ? `Moved ${row.email} to ${unitName}, and their recorded usage with them. Open reports can take a minute to catch up.`
+        : `Moved ${row.email} to ${unitName}`,
+    )
   } catch (err) {
     if (idx >= 0) rows.value[idx] = { ...row, orgUnitName: previousName, orgUnitId: previousId }
-    flashToast('err', apiErrorDetail(err, 'Cost-centre move refused.'))
+    pickerNonce.value++
+    flashToast('err', apiErrorDetail(err, `${BU_LABEL} move refused.`))
     consola.warn('org-unit move failed', err)
+    return
   }
+  /*
+   * OUTSIDE the try, and after the toast. The refresh used to sit beside the
+   * PATCH, so a transient GET failure AFTER a committed move rolled the row back
+   * on screen and told the admin their move was refused — the server moved, the
+   * product said it did not, and the correction most likely to be retried is one
+   * that already succeeded.
+   */
+  await refresh().catch((err) => consola.warn('refresh after placement failed', err))
 }
 
 // Add-teammate dialog (directory provisioning).
@@ -415,16 +457,14 @@ function roleOptionsFor(current: string): Role[] {
               >Last admin</UiBadge>
             </div>
           </td>
-          <td class="px-5 py-3 text-sm text-carbon-2">{{ asUserRow(row).orgUnitName }}</td>
-          <td class="px-5 py-3 text-sm text-carbon-3">{{ fmtTs(asUserRow(row).lastSyncAt) }}</td>
           <td class="px-5 py-3 text-sm">
-            <div class="flex items-center gap-2">
             <select
               v-if="orgUnitOptions.length"
+              :key="`${asUserRow(row).id}-${pickerNonce}`"
               :data-testid="`user-orgunit-${asUserRow(row).id}`"
               class="px-2 py-1 text-sm border border-calm-2 rounded-md bg-white max-w-[180px]"
               :title="`Move this teammate to another ${BU_LABEL}`"
-              @change="(e) => patchOrgUnit(asUserRow(row), (e.target as HTMLSelectElement).value)"
+              @change="(e) => askOrgUnit(asUserRow(row), (e.target as HTMLSelectElement).value)"
             >
               <!-- Keyed on ID. Matching on display_name left the real option
                    unselected (it was compared against the ltree PATH) and could
@@ -440,6 +480,11 @@ function roleOptionsFor(current: string): Role[] {
                 :selected="u.id === asUserRow(row).orgUnitId"
               >{{ u.display_name }}</option>
             </select>
+            <span v-else class="text-carbon-2">{{ asUserRow(row).orgUnitName }}</span>
+          </td>
+          <td class="px-5 py-3 text-sm text-carbon-3">{{ fmtTs(asUserRow(row).lastSyncAt) }}</td>
+          <td class="px-5 py-3 text-sm">
+            <div class="flex items-center gap-2">
             <select
               v-if="isOrgWide"
               :data-testid="`admin-users-region-${asUserRow(row).id}`"
@@ -480,6 +525,16 @@ function roleOptionsFor(current: string): Role[] {
       </span>
       <UiButton kind="ghost" size="sm" :disabled="offset + LIMIT >= (data?.total ?? 0)" @click="nextPage">Next →</UiButton>
     </div>
+
+    <PlaceTeammateDialog
+      :open="!!pendingMove"
+      :teammate-id="pendingMove?.row.id ?? ''"
+      :teammate-label="pendingMove?.row.email ?? ''"
+      :to-unit-id="pendingMove?.unitId ?? ''"
+      :to-unit-name="pendingMove?.unitName ?? ''"
+      @cancel="cancelMove"
+      @confirm="confirmMove"
+    />
 
     <AddTeammateDialog
       :open="addOpen"

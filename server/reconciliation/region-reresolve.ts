@@ -372,7 +372,7 @@ export async function runRegionReresolve(db: Db, opts: ReresolveOpts): Promise<R
       fromOrgUnitId: p.row.org_unit_id,
       fromDisplayName: p.row.org_unit_display_name,
       toOrgUnitId: p.orgUnitId,
-      toDisplayName: targetNames.get(p.orgUnitId) ?? 'that cost centre',
+      toDisplayName: targetNames.get(p.orgUnitId) ?? 'that Business Unit',
       via: p.via,
     })
   }

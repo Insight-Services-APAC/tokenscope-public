@@ -228,7 +228,7 @@ describe('the chargeback figure (§B cost of record, per teammate)', () => {
     expect(Number(await getMyChargeableMtd(t.db, teammateId, NOW))).toBeLessThan(500)
   })
 
-  it('excludes the GitHub lanes — Copilot §B is pooled per cost centre, not per person', async () => {
+  it('excludes the GitHub lanes — Copilot §B is pooled per Business Unit, not per person', async () => {
     expect(Number(await getMyChargeableMtd(t.db, teammateId, NOW))).toBeLessThan(250)
   })
 
@@ -655,7 +655,7 @@ describe('/usage headlines COMPLETE §A usage, not just arms 1 and 2', () => {
    * seam-level tests cannot see a handler summing the wrong two operands.
    *
    * The CODING-AGENT lane is the fixture on purpose. It is arm-3 usage whose §B
-   * bill is pooled per cost centre and firewalled out of the per-person
+   * bill is pooled per Business Unit and firewalled out of the per-person
    * chargeable view (mig 0085), so it moves the usage lane and must leave the
    * chargeback lane untouched — which makes the two independently readable in
    * one fixture.

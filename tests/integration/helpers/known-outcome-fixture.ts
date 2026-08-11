@@ -1173,7 +1173,7 @@ export async function seedUnhomedCausePlantings(t: TestDb, ids: KnownOutcomeIds)
   await c`INSERT INTO actual_spend (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source, chargeback_exempt)
     VALUES (${dave}::uuid, '2026-01-15'::date, 'claude-code', 12000, 12000, 12, 'anthropic-analytics-api', true)`
 
-  // ── a CLOSED month, so both period readings are exercised ───────────────────
-  await c`INSERT INTO finance_period (period_month, state, closed_at, closed_by)
-    VALUES ('2026-04-01'::date, 'closed', now(), ${alice}::uuid)`
+  // ── a RECORDED month, so both snapshot readings are exercised ───────────────
+  await c`INSERT INTO reporting_snapshot (period_month, closed_at, closed_by, basis, snapshot_version)
+    VALUES ('2026-04-01'::date, now(), ${alice}::uuid, 'project-homed', 1)`
 }

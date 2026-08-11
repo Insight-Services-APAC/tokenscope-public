@@ -591,7 +591,7 @@ describe('dashboard — RENDERING what reaches the cost centre (given states)', 
       ;(f.disclosure as Deep).cost_centre = null
     })
     expect(w.find('[data-testid="chargeable-line"]').text()).toBe(
-      '$5.12 of this month is chargeable, but your placement resolves to no cost centre',
+      '$5.12 of this month is chargeable, but your placement resolves to no Business Unit',
     )
   })
 
@@ -609,7 +609,7 @@ describe('dashboard — RENDERING what reaches the cost centre (given states)', 
       d.billing_states = []
     })
     const line = w.find('[data-testid="chargeable-line"]').text()
-    expect(line).toBe('Nothing this month is chargeable to a cost centre')
+    expect(line).toBe('Nothing this month is chargeable to a Business Unit')
     expect(line).not.toContain('reaches ')
   })
 

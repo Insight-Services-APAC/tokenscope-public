@@ -2,9 +2,9 @@
 /*
  * Region detail (feat/admin-region-lifecycle). Absorbs the old admin
  * mega-tab (app/pages/admin/region.vue) into a per-region page reached
- * from /admin/regions, and adds an EDITABLE cost-centre (org-unit) tree.
+ * from /admin/regions, and adds an EDITABLE Business Unit (org-unit) tree.
  *
- * Tabs (URL `?tab=`): Cost centres (default) / Teammates / Setup
+ * Tabs (URL `?tab=`): Business Units (default, slug stays `cost-centres`) / Teammates / Setup
  * checklist / Connectors.
  *
  * RBAC: admin / global-finops / platform-admin. Region scoping is
@@ -12,7 +12,7 @@
  * gets a 403 → the `regionError` state renders. Platform-admin can
  * additionally rename the region inline.
  *
- * Cost-centre edit affordances live in THIS page (a compact depth-
+ * Business Unit edit affordances live in THIS page (a compact depth-
  * indented list) rather than OrgTree, which stays a read-only renderer.
  * Re-parent is deferred server-side, so the UI signposts it as
  * coming-soon rather than hiding it.
@@ -37,6 +37,7 @@ import DefaultUnitClustersDialog from '../../../components/admin/DefaultUnitClus
 import { HOLDING_UNIT_TYPE } from '#shared/placement/holding-nodes'
 import { isPlacementFilter, type PlacementFilter } from '#shared/placement/placement-filter'
 import { regionAttributeLabel } from '#shared/placement/region-attributes'
+import { BU_LABEL_PLURAL } from '#shared/reports/vocabulary'
 definePageMeta({
   layout: 'admin',
   middleware: 'admin',
@@ -136,7 +137,7 @@ const treeAsync = useFetch<{ nodes: OrgNode[]; default_unit_warn_threshold: numb
 const { data: tree, refresh: refreshTree } = treeAsync
 
 /*
- * C5 — the standing rules that place people into THIS region's cost centres.
+ * C5 — the standing rules that place people into THIS region's Business Units.
  *
  * Region-scoped on purpose: the same endpoint's unscoped mode lists org-wide
  * REGION rules, which are global config a region admin can neither edit nor
@@ -260,7 +261,7 @@ async function clearLifecycleOverride() {
 const nodes = computed<OrgNode[]>(() => tree.value?.nodes ?? [])
 
 const tabs = computed<AdminTab[]>(() => [
-  { key: 'cost-centres', label: 'Cost centres', count: nodes.value.length },
+  { key: 'cost-centres', label: BU_LABEL_PLURAL, count: nodes.value.length },
   // The tab count follows the FILTER (C1) — an admin working the unplaced
   // worklist needs the tab to agree with the table in front of them. The
   // unfiltered total stays visible on the filter control below it.
@@ -281,7 +282,7 @@ function flashToast(kind: 'ok' | 'err', message: string) {
   toastTimer = setTimeout(() => { toast.value = null }, 3500)
 }
 
-// ── Cost-centre dialog ────────────────────────────────────────────────────
+// ── Business Unit dialog ────────────────────────────────────────────────────
 const dialog = ref<{ mode: 'create' | 'edit'; node: OrgNode | null } | null>(null)
 function openCreate() { dialog.value = { mode: 'create', node: null } }
 function openEdit(node: OrgNode) { dialog.value = { mode: 'edit', node } }
@@ -296,23 +297,23 @@ function onOwnersChanged() {
 function onSaved() {
   const wasCreate = dialog.value?.mode === 'create'
   dialog.value = null
-  flashToast('ok', wasCreate ? 'Cost centre created.' : 'Cost centre updated.')
+  flashToast('ok', wasCreate ? 'Business Unit created.' : 'Business Unit updated.')
   refreshTree()
   refreshRegion()
 }
 
-// ── Cost-centre move (reparent) ───────────────────────────────────────────
+// ── Business Unit move (reparent) ───────────────────────────────────────────
 const moveFor = ref<OrgNode | null>(null)
 function openMove(node: OrgNode) { moveFor.value = node }
 function onMoved() {
   moveFor.value = null
-  flashToast('ok', 'Cost centre moved.')
+  flashToast('ok', 'Business Unit moved.')
   refreshTree()
   refreshRegion()
 }
 
 async function retire(node: OrgNode) {
-  if (!confirm(`Retire cost centre "${node.display_name}" (${node.code})? This cannot be undone.`)) return
+  if (!confirm(`Retire Business Unit "${node.display_name}" (${node.code})? This cannot be undone.`)) return
   try {
     await $fetch(`/api/v1/admin/org-units/${node.id}`, { method: 'DELETE' })
     flashToast('ok', `Retired ${node.display_name}.`)
@@ -321,7 +322,7 @@ async function retire(node: OrgNode) {
   } catch (err) {
     flashToast(
       'err',
-      apiErrorDetail(err, 'Retire failed — the cost centre may have children, projects or teammates.'),
+      apiErrorDetail(err, 'Retire failed — the Business Unit may have children, projects or teammates.'),
     )
     consola.warn('org-unit retire failed', err)
   }
@@ -369,7 +370,7 @@ function openLeaders() { leadersOpen.value = true }
  */
 const checklistActions: Record<string, { label: string; run: () => void }> = {
   'org-units': {
-    label: 'Add cost centre',
+    label: 'Add Business Unit',
     run: () => { setTab('cost-centres'); openCreate() },
   },
   teammates: {
@@ -429,7 +430,7 @@ function runChecklistAction(key: string) {
  *
  * THE SPEND COLUMN NAMES ITS PROVIDER. It sums v_finance_bill_chargeback, which
  * excludes every Copilot lane by construction (§B Copilot money is pooled per
- * cost centre and has no per-user figure — provider-billing-attribution-model.md
+ * Business Unit and has no per-user figure — provider-billing-attribution-model.md
  * §B). A Copilot-only teammate reads $0.00 and always will, so a generic "Spend"
  * header over this number tells an admin that person costs nothing. It says
  * Claude.
@@ -482,7 +483,7 @@ const teammateRowKey = (row: Record<string, unknown>) => String(row.id)
 
 /*
  * Only cost-owning units are offered as targets: the bulk action's purpose is to
- * make spend reach a cost centre, and the server refuses anything else (422). A
+ * make spend reach a Business Unit, and the server refuses anything else (422). A
  * picker that offers a destination the write will reject is a picker that teaches
  * the admin the feature is broken.
  */
@@ -516,16 +517,26 @@ const ruleOffer = ref<{
 async function onBulkPlaced(summary: {
   placed: number
   noop: number
+  historyRepaired: number
   unitName: string
   unitId: string
   placedIds: string[]
 }) {
   bulkPlaceOpen.value = false
   selectedTeammateIds.value = []
+  /*
+   * THREE OUTCOMES, NAMED SEPARATELY. A repair is not a placement: those people
+   * did not move, their stranded history did. On the estate this exists to fix
+   * most of a batch can be repairs, and folding them into "Placed N" would
+   * report placements that never happened.
+   */
   const already = summary.noop ? ` ${summary.noop} were already there.` : ''
+  const repaired = summary.historyRepaired
+    ? ` ${summary.historyRepaired} were already there and had their recorded usage brought across.`
+    : ''
   flashToast(
     'ok',
-    `Placed ${summary.placed} ${summary.placed === 1 ? 'teammate' : 'teammates'} into ${summary.unitName}.${already}`,
+    `Placed ${summary.placed} ${summary.placed === 1 ? 'teammate' : 'teammates'} into ${summary.unitName}.${already}${repaired}`,
   )
   ruleOffer.value = summary.placedIds.length
     ? {
@@ -624,7 +635,7 @@ async function refreshAfterPlacement() {
             kind="ghost"
             size="sm"
             data-testid="region-leaders-open"
-            title="Placement anchors (SVP / shared function) that decide which cost centre a teammate rolls up to. Not a role, not an owner."
+            title="Placement anchors (SVP / shared function) that decide which Business Unit a teammate rolls up to. Not a role, not an owner."
             @click="openLeaders"
           >
             Region leaders
@@ -680,22 +691,23 @@ async function refreshAfterPlacement() {
 
     <AdminTabs :tabs="tabs" :model-value="activeTab" @update:model-value="setTab" />
 
-    <!-- Cost centres -->
+    <!-- Business Units -->
     <UiCard v-if="activeTab === 'cost-centres'" data-testid="panel-cost-centres">
       <div class="flex items-start justify-between mb-4 gap-3 flex-wrap">
         <p class="text-[11px] text-carbon-3 max-w-xl leading-relaxed m-0">
-          Nested by depth. Projects bill to the nearest <strong>cost-owning
-          unit</strong>. Each cost-owning unit can have <strong>cost-centre
-          owners</strong><AdminHelpLink anchor="cost-centre-owner" label="a cost-centre owner" /> — the people who
-          can see its spend &amp; budget. <em>(Cost-centre owners are different
-          from Region leaders, above.)</em>
+          Nested by depth. Projects bill to the nearest <strong>Business Unit
+          that owns cost</strong> — a unit can group others without carrying
+          spend of its own. Each one can have
+          <strong>owners</strong><AdminHelpLink anchor="cost-centre-owner" label="a Business Unit owner" />
+          — the people who can see its spend &amp; budget, and who are members of
+          it. <em>(Different from Region leaders, above.)</em>
         </p>
         <UiButton kind="primary" size="sm" data-testid="cost-centre-create-open" @click="openCreate">
-          + New cost centre
+          + New Business Unit
         </UiButton>
       </div>
 
-      <!-- Get-started CTA: shown when the cost-centre tree is empty so a new
+      <!-- Get-started CTA: shown when the Business Unit tree is empty so a new
            region admin sees the very first action front-and-centre. -->
       <div
         v-if="!nodes.length"
@@ -766,7 +778,7 @@ async function refreshAfterPlacement() {
               :key="`amb-${o.teammate_id}`"
               class="text-[11px] font-bold text-rag-amber"
               :data-testid="`cc-owner-ambiguous-${node.code}`"
-              :title="`${o.display_name ?? o.email} owns ${o.owns_unit_count} active cost centres, so the manager-chain walk cannot tell which one a report belongs to. It skips them, and they place nobody — on this unit or the other.`"
+              :title="`${o.display_name ?? o.email} owns ${o.owns_unit_count} active Business Units, so the manager-chain walk cannot tell which one a report belongs to. It skips them, and they place nobody — on this unit or the other.`"
             >
               ⚠ Ambiguous owner
             </span>
@@ -811,7 +823,7 @@ async function refreshAfterPlacement() {
               kind="ghost"
               size="sm"
               :data-testid="`move-btn-${node.id}`"
-              title="Move this cost centre (and its subtree) under a different parent in this region."
+              title="Move this Business Unit (and its subtree) under a different parent in this region."
               @click="openMove(node)"
             >
               Move
@@ -827,7 +839,7 @@ async function refreshAfterPlacement() {
       <div v-if="unitRules.length" class="mt-6 pt-5 border-t border-calm-2" data-testid="unit-rules">
         <div class="text-[12px] font-semibold text-carbon uppercase tracking-wide">Placement rules</div>
         <p class="text-xs text-carbon-3 mt-1 mb-3 leading-relaxed">
-          A new joiner whose directory profile matches one of these lands in that cost centre
+          A new joiner whose directory profile matches one of these lands in that Business Unit
           without anyone having to spot them on the unplaced worklist. They outrank the manager
           chain — an admin writing a rule is stating something the chain can only infer.
         </p>
@@ -851,7 +863,7 @@ async function refreshAfterPlacement() {
                 v-if="r.target_placeable === false"
                 class="text-[11px] font-bold text-rag-amber"
                 :data-testid="`unit-rule-inert-${r.id}`"
-                title="This rule's cost centre is retired or is no longer cost-owning, so the rule places nobody. Point it at an active cost-owning unit, or remove it."
+                title="This rule's Business Unit is retired or is no longer cost-owning, so the rule places nobody. Point it at an active cost-owning unit, or remove it."
               >
                 ⚠ Places nobody
               </span>
@@ -880,7 +892,7 @@ async function refreshAfterPlacement() {
       :columns="teammateColumns"
       :total="teammates?.total"
       :row-key="teammateRowKey"
-      :empty-headline="placement === 'unplaced' ? 'Every teammate is in a cost centre' : undefined"
+      :empty-headline="placement === 'unplaced' ? 'Every teammate is in a Business Unit' : undefined"
       :empty-sub="placement === 'unplaced'
         ? `All ${teammates?.unfiltered_total ?? 0} teammates in this region are placed — none are sitting on the holding node.`
         : undefined"
@@ -933,7 +945,7 @@ async function refreshAfterPlacement() {
         <p class="w-full text-[11px] text-carbon-3 m-0 leading-relaxed" data-testid="teammates-column-caveats">
           Department and Company are a <strong>snapshot</strong> taken the last time a
           placement run looked this person up — the “Directory as of” column dates it.
-          Spend is <strong>Claude only</strong>: Copilot is billed pooled per cost centre,
+          Spend is <strong>Claude only</strong>: Copilot is billed pooled per Business Unit,
           so it has no per-teammate figure and a Copilot-only teammate reads $0.00.
         </p>
       </template>
@@ -945,7 +957,7 @@ async function refreshAfterPlacement() {
           data-testid="teammates-bulk-place-open"
           @click="bulkPlaceOpen = true"
         >
-          Place in cost centre
+          Place in Business Unit
         </UiButton>
       </template>
 
@@ -1082,7 +1094,7 @@ async function refreshAfterPlacement() {
       </div>
     </div>
 
-    <!-- Cost-centre create/edit dialog -->
+    <!-- Business Unit create/edit dialog -->
     <OrgUnitDialog
       v-if="dialog"
       :mode="dialog.mode"
@@ -1093,7 +1105,7 @@ async function refreshAfterPlacement() {
       @saved="onSaved"
     />
 
-    <!-- Cost-centre move (reparent) dialog -->
+    <!-- Business Unit move (reparent) dialog -->
     <MoveOrgUnitDialog
       v-if="moveFor"
       :node="moveFor"

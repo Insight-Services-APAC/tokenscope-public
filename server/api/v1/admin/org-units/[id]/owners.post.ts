@@ -247,7 +247,7 @@ export default defineEventHandler(async (event) => {
       translatePgConstraintError(err, {
         '23505': {
           title: 'Already an owner',
-          detail: 'This teammate already actively owns this cost centre.',
+          detail: 'This teammate already actively owns this Business Unit.',
         },
       })
     }

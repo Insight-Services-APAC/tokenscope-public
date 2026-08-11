@@ -33,10 +33,13 @@ twice.
 | `raw_provider_batch` / `_page` | batch · page | batch owns completion; page has an XOR check on body/duplicate | **the untransformed provider response** | anything read by reporting — nothing reads it yet |
 | `attribution_aggregate` | scope · day · tool · model · token type · query source | — | dashboard rollups | finance — it is derived, not a ledger |
 | `spend_rollup_daily` | full contributor grain incl. point-in-time org context | — | **the durable ledger** surviving raw retention | live figures — it is a rollup |
-| `finance_period` | month | `period_month` (first-of-month CHECK) | **whether a month is closed** | any amount |
+| `reporting_snapshot` | month | `period_month` (first-of-month CHECK) | **what a month read when it was reported**, and by whom | any live figure — it is a record, not the source |
 
-**Absence of a `finance_period` row means OPEN** — `finance-period.ts:6-8`,
-mirrored in the trigger at `0116:42-43`. This is easy to get backwards.
+**A snapshot is not a lock.** Recording a month writes down what it read; it
+never refuses a later write (mig 0128 dropped both close-guard triggers). The
+bill lands at +10 days and a month recorded at +2 must accept it — the delta
+against the snapshot is what gets reported, and it refuses to subtract across a
+basis change rather than present a confident wrong number.
 
 ### Views
 
@@ -86,7 +89,6 @@ no `ON CONFLICT` clause can reach (`0116:16-22`).
 | 5 | `placement-store.ts` owed-bill replay | INSERT … ON CONFLICT DO UPDATE | `:377` |
 | 6 | `governance-key-backfill.ts` | 3 × UPDATE | `:75`, `:92`, `:188` |
 | 7 | `governance/recompute.ts` | UPDATE (verdict) | `:190` |
-| 8 | `governance/finance-period.ts` | UPDATE (`governance_verdict_locked_at`) | `:223`, `:272`, `:328` |
 
 ### `attribution_record` — three writers
 
@@ -156,7 +158,7 @@ flowchart LR
 | `raw_payload` | `{day, usage[], cost[]}` | `:618` |
 | `region_id`, `org_unit_id`, `cost_owning_unit_id`, `dimension_source` | teammate's placement **at insert time**; never refreshed | `:222`, `dimension-snapshot.ts:69-78` |
 | `provider_org_id`, `provider_enterprise_id`, `governance_key_status` | resolved once per call | `:223-224` |
-| `chargeback_exempt`, `governance_verdict_source` | `resolveAnthropicVerdict(...)`; **only when `governance_verdict_locked_at IS NULL`** | `:225`, `:236-239` |
+| `chargeback_exempt`, `governance_verdict_source` | `resolveAnthropicVerdict(...)`, unconditionally — mig 0128 dropped the freeze | `:225`, `:236-239` |
 
 **Not on the `actual_spend` row, read by the transform instead.** These fields
 survive into `raw_payload` and are read there by `provider-transform.ts`, which
@@ -381,32 +383,28 @@ The distinction matters: an invariant "enforced" by a comment is a wish.
 | GitHub money is never at model grain | CHECK `provider_usage_fact_github_money_grain_chk`, mig 0120 |
 | a residual model child is non-negative and unique per (parent, model), and dies with its parent | PK + CHECKs + FK `ON DELETE CASCADE`, mig 0123 |
 | rate plans never overlap per enterprise | `EXCLUDE USING gist` |
-| `finance_period.period_month` is first-of-month | CHECK |
+| `reporting_snapshot.period_month` is first-of-month | CHECK |
 | attribution rows scoped by region + org-unit ltree path | RLS policy |
 
-> **Both triggers are attached to `actual_spend` alone** (`0116:165-196`).
+> **THERE ARE NO CLOSE-GUARD TRIGGERS ANY MORE** (mig 0128 dropped both, and
+> `actual_spend.governance_verdict_locked_at` with them). They only ever
+> protected `actual_spend`, so the freeze was asymmetric from the start —
 > `unaccounted_usage`, `over_emission`, `reconciliation_record`,
-> `copilot_pool_bill` and `attribution_record` carry **no close guard**. Closing a
-> month freezes the Anthropic bill rows and the governance verdict — it does not
-> freeze every monetary or usage-derived table. `copilot_pool_bill` is protected
-> instead by an application-level closed-period refusal, not by a trigger.
-
-The INSERT branch of the close trigger has a subtlety worth preserving: a
-`BEFORE INSERT` fires *before* Postgres resolves `ON CONFLICT`, so it cannot
-distinguish a new row from one about to become an UPDATE. Every writer is an
-upsert, so a blanket refusal would reject a routine re-poll and the per-org catch
-would stop the org writing rows **at all**. The trigger therefore lets an
-existing key through to be judged by the UPDATE branch (`0116:97-131`).
+> `copilot_pool_bill` and `attribution_record` never carried one. What ended
+> them was the timeline, not the asymmetry: we recorded a month at +2 days, the
+> provider corrected its rows at +6, the bill arrived at +10, and the product
+> rejected the authoritative source because of a state we had set ourselves.
+> This is not the billing system of record. The bill is right; refusing it never
+> made the month right, it made the month permanently wrong.
 
 ### Enforced by code
 
 | invariant | mechanism |
 |---|---|
-| a verdict never moves once frozen | `CASE WHEN governance_verdict_locked_at IS NULL` in all three upserts |
 | a re-poll never re-homes a historical day | dimension columns omitted from every `ON CONFLICT SET` list |
 | money binds only a non-provisional teammate | `AND NOT provisional` |
 | the prune never fires on a partial pull or broken identity | control flow + ratio guard |
-| close never freezes a partial snapshot | convergence loop **throws** rather than committing |
+| a month is never recorded twice | `closeReportingSnapshot` refuses a second close — the one thing a snapshot exists to preserve is what it said the first time |
 | close/reopen/restate serialise | one advisory lock, taken first in all three |
 | capture can never break ingestion | best-effort writes, hook throws swallowed at the client boundary |
 | an App private key can never be sent as a PAT bearer | `withPat` runs `decodePem` and refuses |
@@ -489,11 +487,13 @@ dimensions all come from the parent).
 
 **Lock ordering**, fixed and load-bearing: `LOCK_NAMESPACE`
 (`server/db/advisory-lock.ts`) is totally ordered — `instance(1)` →
-`principal(2)` → `globalCap(3)` → `financePeriod(4)` → `governanceCutover(5)` →
+`principal(2)` → `globalCap(3)` → `reportingSnapshot(4)` → `governanceCutover(5)` →
 `copilotOverageAllocation(6)` → `personalSubscription(7)` → `directoryRule(8)` →
 `providerTransform(9)` — and every path acquires ascending. On the finance path:
-`financePeriod(4)` → `governanceCutover(5)` → `copilotOverageAllocation(6)`;
-`reopen` does **not** take the cutover lock; `close` and `restate` do. The
+`reportingSnapshot(4)` → `governanceCutover(5)` → `copilotOverageAllocation(6)`.
+**Ordinal 4 is deliberately unchanged across the rename** — the lock id derives
+from the ordinal, not the property name, so old and new replicas contend on the
+same lock space during a rolling deploy. The
 provider transform's lock (9) is acquired last and alone, keyed on its
 `(provider_org, surface)` ownership domain.
 
@@ -537,31 +537,26 @@ tables plus the live `teammate` row.
 | `actual_spend` | teammate at INSERT | **no** — omitted from every `ON CONFLICT SET` |
 | `attribution_record` | `instance_attestation` at join | no (except identity confirmation) |
 | `reconciliation_record` | teammate at insert | no |
-| `unaccounted_usage` | teammate at recompute | **YES** — `region_id`, `org_unit_id` are in the `SET` list |
-| `over_emission` | teammate at recompute | **YES** |
+| `unaccounted_usage` | teammate at first write | **no** — placement omitted from the `ON CONFLICT SET` list (issue #44 closed) |
+| `over_emission` | teammate at first write | **no** — placement was never in its `SET` list |
 | `spend_rollup_daily` | copied from `attribution_record` | no — the durable point-in-time record |
 | `copilot_pool_bill` | `provider_org.cost_owning_unit_id` | rewritten with the month |
 
-> ### Known defect — the freeze is asymmetric. Policy settled, fix outstanding.
+> ### The freeze is symmetric — issue #44 closed
 >
-> `actual_spend` freezes placement deliberately: *"a re-poll must refresh money
-> but never re-home a historical day against a post-reorg placement"*
-> (`analytics-poller.ts:180-184`). But `unaccounted_usage`, which is **derived
-> from `actual_spend`**, re-homes on every recompute, and `over_emission` with it.
+> `actual_spend` has always frozen placement at insert. `unaccounted_usage` and
+> `over_emission` used to refresh it from the teammate's CURRENT placement on
+> every recompute, over the trailing 35-day window — so a residual row followed
+> the person for 35 days and then froze wherever it happened to be. The same
+> teammate-day could sit in two org units depending on when the report ran.
 >
-> Today's behaviour is therefore **not any coherent policy**: after a reorg the
-> residual follows the teammate to their new org unit for 35 days (the trailing
-> reconciliation window), then freezes wherever it happened to be when the window
-> rolled past it. The same teammate-day can sit in two org units at once, and
-> which answer a report gives depends on when it is run.
+> Both now stamp placement on first write and leave it alone. Money still
+> refreshes; only the dimensions are fixed. Asserted in
+> `tests/integration/usage/placement-freeze.test.ts`, mutation-proven.
 >
-> **Owner decision, 2026-08-02: spend stays where it was earned.** Point-in-time
-> homing applies to the residual exactly as it does to the bill row — a closed
-> month must never silently change. The fix is to snapshot `region_id` /
-> `org_unit_id` at first write and drop them from the `ON CONFLICT … SET` list in
-> `unaccounted-reconciliation.ts:129-134`, matching `actual_spend`. Tracked as
-> **issue #44**. Until it lands, treat residual org placement in the last 35 days
-> as reflecting *current* placement, not placement as at the usage date.
+> **Rows written before the fix keep whatever placement their last recompute
+> gave them.** That is not repairable and is not claimed to be — an admin
+> placement correction is the way to move them deliberately.
 
 **Which copy wins.** `v_teammate_usage_daily` resolves a (teammate, day, tool)
 that spans more than one source by taking
@@ -719,6 +714,6 @@ plausibility one. There is no upper sanity check on any provider figure.
 - [Data Flow](Data-Flow.md) — the shape, the principle, the known gaps
 - [Data Model](Data-Model.md) — schema reference; carries the full column docs
   for `provider_usage_fact`, `unaccounted_usage` and `unaccounted_usage_model`.
-  **Still missing there:** `over_emission`, `finance_period`,
+  **Still missing there:** `over_emission`,
   `reconciliation_record`, `copilot_overage_allocation`, `copilot_rate_plan`,
   `pending_placement`, `session_quarantine` and `raw_provider_batch`/`_page`.

@@ -162,8 +162,8 @@ watch(
           leader's <strong>region</strong>.
           <span class="block mt-1 text-carbon-2">
             <span class="font-bold">Sets the region only. Does not place anyone into a
-            cost centre</span> — their spend still reaches the region and stops there. To
-            place people, assign a <em>cost-centre owner</em> on the Cost centres tab, or
+            Business Unit</span> — their spend still reaches the region and stops there. To
+            place people, assign a <em>Business Unit owner</em> on the Business Units tab, or
             place them directly from Teammates.
           </span>
         </p>

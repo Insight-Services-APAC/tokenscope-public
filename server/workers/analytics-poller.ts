@@ -185,18 +185,18 @@ interface ActualSpendAgg {
  * SAME (provider_org_id, provider_enterprise_id) for the whole poll call (one
  * Anthropic org per call — resolved ONCE by the caller, not per row).
  * `governance.verdict` is likewise constant per call because only the provider
- * billing unit can decide §B chargeability. The verdict is guarded behind
- * governance_verdict_locked_at exactly like copilot-bill.ts's
- * upsertCopilotBillRow — a closed period's frozen verdict never moves on a
- * re-poll.
+ * billing unit can decide §B chargeability. The verdict is NO LONGER frozen by a
+ * period close: a re-poll refreshes it like any other field, and a month that
+ * moves after being recorded reports the difference as a delta (mig 0128).
  */
 /*
- * Exported for tests, deliberately. Migration 0116's close guard interacts with
- * the ON CONFLICT clause specifically -- a BEFORE INSERT trigger fires before
- * Postgres resolves the conflict -- and that interaction was missed once
- * already because the guard's tests used raw INSERT/UPDATE instead of the shape
- * production actually issues. Re-implementing this statement in a test would
- * duplicate the very SQL whose behaviour is under test, so the seam is here.
+ * Exported for tests, deliberately — the seam outlived the guard that motivated
+ * it. Migration 0116's close trigger interacted with ON CONFLICT specifically (a
+ * BEFORE INSERT fires before Postgres resolves the conflict), and that was
+ * missed once because the guard's tests used raw INSERT/UPDATE rather than the
+ * shape production issues. 0128 drops the trigger, but "test the statement
+ * production actually runs, not a re-implementation of it" is the lesson worth
+ * keeping.
  */
 export async function upsertActualSpend(
   db: PostgresJsDatabase<typeof schema>,
@@ -232,10 +232,8 @@ export async function upsertActualSpend(
         provider_org_id = EXCLUDED.provider_org_id,
         provider_enterprise_id = EXCLUDED.provider_enterprise_id,
         governance_key_status = EXCLUDED.governance_key_status,
-        chargeback_exempt = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
-          THEN EXCLUDED.chargeback_exempt ELSE actual_spend.chargeback_exempt END,
-        governance_verdict_source = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
-          THEN EXCLUDED.governance_verdict_source ELSE actual_spend.governance_verdict_source END
+        chargeback_exempt = EXCLUDED.chargeback_exempt,
+        governance_verdict_source = EXCLUDED.governance_verdict_source
       RETURNING id::text AS id
     `,
   )

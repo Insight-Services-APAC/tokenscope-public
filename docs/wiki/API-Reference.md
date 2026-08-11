@@ -267,7 +267,8 @@ and emit audit events.
 | PATCH | `/api/v1/admin/users/{id}` | `admin`/`global-finops` + CSRF | Change a teammate's role (region-clamped; last-admin guard). |
 | PATCH | `/api/v1/admin/users/{id}/region` | `global-finops` + CSRF | Move a teammate to another region (org-wide op; region `admin` may not do it). |
 | POST | `/api/v1/admin/users/{id}/revoke-sessions` | `admin`/`global-finops` + CSRF | Force-sign-out a teammate (region-clamped, audited). |
-| PATCH | `/api/v1/admin/users/{id}/org-unit` | `admin`/`global-finops` + CSRF + region scope | Move a teammate to another org-unit (clamped to the caller's region). |
+| PATCH | `/api/v1/admin/users/{id}/org-unit` | `admin`/`global-finops` + CSRF + region scope | Move a teammate to another org-unit (clamped to the caller's region). Optional `rehome` moves their recorded usage with them — see **Correcting a placement** below. |
+| POST | `/api/v1/admin/users/{id}/placement-span` | `admin`/`global-finops` + CSRF + region scope | Read-only: what a placement correction would move, and how many Business Units it spans. |
 | POST | `/api/v1/admin/teammates` | `admin`/`global-finops` + CSRF + region scope | Create/place a teammate (region admin bounded to their own region). |
 | GET | `/api/v1/admin/instances` | `admin`/`global-finops` + region scope | Region-scoped instances/devices grid. |
 | GET | `/api/v1/admin/activity-types` · POST · PATCH `/{id}` | `admin`/`global-finops` (+ CSRF on writes) + region scope | Region-scoped activity-type catalogue: list, create, and edit (`is_standard` org-wide entries are global-only). |
@@ -280,6 +281,8 @@ and emit audit events.
 | POST | `/api/v1/admin/org-units` · DELETE/PATCH `/{id}` · POST `/{id}/move` · POST `/{id}/owners` · DELETE `/{id}/owners/{teammateId}` | `admin`/`global-finops` + CSRF | Org-unit tree writes: create, edit, delete, re-parent (`move`), and owner add/remove. (The read is `GET /api/v1/admin/org-units` above.) |
 | DELETE/PATCH | `/api/v1/admin/projects/{id}` | `admin`/`global-finops` + CSRF | Delete or edit a project (region-clamped). PATCH also accepts `migrate_spend` — see **Migrate** below. |
 | POST | `/api/v1/admin/projects/{id}/migrate-preview` | `admin`/`global-finops` + CSRF | Read-only: what a Migrate would move. See **Migrate** below. |
+| GET | `/api/v1/admin/reporting-snapshots/{month}` | `admin`/`global-finops` | What the month read when it was recorded, plus what it reads now and the movement. `null` = never recorded. |
+| POST | `/api/v1/admin/reporting-snapshots/{month}/close` | `admin`/`global-finops` + CSRF | Record the month. Refused if it has already been recorded. |
 | GET | `/api/v1/admin/projects/{id}/assignments` | `manager`/`admin`/`global-finops` | List a project's teammate assignments (writes are the `assignments` POST/DELETE/PATCH rows above). |
 | GET | `/api/v1/admin/rate-cards` · POST · POST `/{id}/retire` | `admin`/`global-finops` (+ CSRF on writes) | Rate-card registry: list, create-card-with-lines (atomic; region admins bounded to own region, a global card is `global-finops`/`platform-admin`), and retire. No line-mutation endpoint by design — pricing changes mint a new card. (Distinct from the still-unbuilt bare `/api/v1/rate-cards`.) |
 | POST | `/api/v1/admin/regions` · DELETE/PATCH `/{id}` | `platform-admin` + CSRF | Region create / edit / delete — cross-region acts reserved for the super-admin. (The list `GET /api/v1/admin/regions` is above.) |
@@ -346,6 +349,116 @@ treat them as a live API.
 - **`/health/{live,ready,deep}` split** — superseded by the single `GET /api/health`. *Not built.*
 
 
+## Correcting a placement — moving a person's recorded usage with them
+
+Two different moves, on two different axes, and the difference is deliberate:
+
+| | Migrate (below) | Placement correction (here) |
+|---|---|---|
+| axis | the PROJECT's Business Unit | the PERSON's Business Unit |
+| column | `cost_owning_unit_id` | `org_unit_id` (+ `cost_owning_unit_id` where it is the teammate's own) |
+| reached from | `PATCH /admin/projects/{id}` | `PATCH /admin/users/{id}/org-unit`, `POST /admin/users/bulk-place` |
+
+**Who changed the placement decides whether history follows.** A directory or
+graph sync means the person genuinely moved team, so history STAYS — a reorg
+must not hand February's consumption to March's Business Unit. An admin moving
+somebody by hand is almost always correcting a mis-placement, so the record was
+always wrong and history FOLLOWS. Only the two admin doors above can ask for it;
+nothing under `server/reconciliation/**` or `server/workers/**` may even import
+the module, and a test asserts both halves of that.
+
+### `GET /api/v1/admin/reporting-snapshots/{month}`
+
+`admin`/`global-finops`. Returns `null` when the month was never recorded —
+distinct from recorded-and-unchanged, which comes back with
+`chargeableUnchanged: true`.
+
+| field | meaning |
+|---|---|
+| `snapshot` | what the month read when it was recorded, and who recorded it |
+| `current` | what it reads now |
+| `deltaUsd` | the movement, or `null` when the two are not comparable |
+| `incomparableReason` | `basis-changed` / `version-changed` — why the arithmetic was withheld |
+| `chargeableUnchanged` · `attributedMoved` | the two questions a reader actually asks |
+
+The delta is the point of the snapshot: the bill lands after the month is
+reported, so the product's job is to surface the movement rather than refuse the
+correction. `chargeable` reads `v_finance_chargeback_month` (Anthropic ∪ Copilot
+pooled, minus `copilot-unclassified`, which is counted and alerted but never
+charged) — the same query that recorded it, so the delta cannot drift from what
+it measures.
+
+### `POST /api/v1/admin/users/{id}/placement-span`
+
+`admin`/`global-finops` + CSRF + region scope. Writes nothing.
+
+```jsonc
+{ "range": { "from": "all" } }        // or { "from": "2026-06-01" }
+```
+
+| field | meaning |
+|---|---|
+| `sources[]` | `{ orgUnitId, displayName, usd, firstDay, lastDay }` per Business Unit the history sits under, largest first |
+| `usd` | total §A usage in range |
+| `spansMultipleUnits` | more than one source — moving "everything" collapses them into one |
+| `current_org_unit_id` | where the person sits now |
+
+Reads `v_complete_usage`, the same §A lane the Business Units page reads, so the
+preview and the report agree. **Money and days, never rows** — that view fans
+one key into several rows, so a row count is an artefact of the fan-out while
+dollar totals are invariant across it.
+
+There is no preview token (unlike Migrate): this is scoped to one teammate whose
+row the PATCH locks `FOR UPDATE`, so the worst drift is a few dollars of newer
+usage moving too, which is the intended outcome either way.
+
+### `PATCH /api/v1/admin/users/{id}/org-unit` · `POST /api/v1/admin/users/bulk-place`
+
+One additional optional field on each:
+
+```jsonc
+{ "org_unit_id": "<uuid>", "rehome": { "from": "all" } }   // or { "from": "2026-06-01" }
+```
+
+Omit `rehome` and behaviour, response shape and audit payload are unchanged —
+placement moves, history does not.
+
+With it, six tables follow in the same transaction as the `UPDATE teammate`:
+`attribution_record`, `unaccounted_usage`, `over_emission`, `actual_spend`,
+`reconciliation_record`, `spend_rollup_daily`. Three exclusions are deliberate:
+
+- **`region_id` is never written.** Both doors are intra-region by construction;
+  cross-region moves go through the region PATCH.
+- **`attribution_record.cost_owning_unit_id` is never written.** On that table
+  the column is the PROJECT's Business Unit and belongs to Migrate. Writing it
+  here would silently re-home project spend as a side effect of moving a person.
+  On `actual_spend` and `reconciliation_record` the same column IS the
+  teammate's own, so it does follow, and `dimension_source` becomes
+  `admin-correction`. It resolves to the **nearest active cost-owning ancestor**
+  of the target, not the target itself: the endpoint allows placing somebody on
+  a plain team node, and a team node bills to nothing. NULL when the ancestry
+  has none — the `no-cost-owning-ancestor` diagnostic exists to surface exactly
+  that, and inventing a value would hide it.
+- **`provider_usage_fact` stays out.** §B homing is its own decision.
+
+`spend_rollup_daily` is a MERGE, not an update: `org_unit_id` is part of its
+unique grain, so amounts ADD onto any row the teammate already has under the
+target. **The source is aggregated before the merge** — a teammate with rows
+under two historical Business Units on one grain would otherwise feed two rows
+into one target key and abort the whole statement ("ON CONFLICT DO UPDATE
+command cannot affect row a second time"), taking the placement change with it.
+That is what any second correction of the same person produces.
+
+**Every day, including cold ones.** The archive floor marks when a day becomes
+eligible for archiving, not that it was archived — and `v_complete_usage` reads
+`attribution_record` directly, so a skipped row that still exists would leave
+the rollup on the new Business Unit and every §A report on the old one. "All
+history" means all history.
+
+A `noop` (already in that unit) writes nothing and never re-homes. The response
+gains `rehomed` with a per-table count; the audit row records what actually
+moved, not what was asked for.
+
 ## Migrate — re-homing a project's recorded spend
 
 `attribution_record.cost_owning_unit_id` is stamped when a usage row is written
@@ -369,13 +482,14 @@ Writes nothing. Returns:
 | field | meaning |
 |---|---|
 | `affected[]` | `{ periodMonth, rows, usd }` per period that would change |
-| `refused[]` | `{ periodMonth, rows, usd, reason }` — `closed-period` or `archived`; left alone and named |
+| `refused[]` | `{ periodMonth, rows, usd, reason }` — `archived` is the only reason; left alone and named |
 | `fromCostOwningUnits[]` | every BU the rows are moving away from, with rows and dollars |
 | `totalRows` / `totalUsd` | totals over `affected` only |
 | `token` | binds this preview to the row set it described |
 
-`from: "all"` means every OPEN period and requires `confirm_unbounded: true`; a
-month with no `finance_period` row counts as open.
+`from: "all"` means every recorded period and requires `confirm_unbounded: true`.
+A month that has been snapshotted is still migrated: recording a month is a
+snapshot, not a lock.
 
 ### `PATCH /api/v1/admin/projects/{id}`
 
@@ -393,11 +507,18 @@ Omit `migrate_spend` and behaviour, response shape and audit payload are
 unchanged.
 
 The migrate runs in the same transaction as the project update, holds a
-`financePeriod` advisory lock for each period it touches, bumps `ts_recorded`
-so the rollup worker recomputes, and skips closed periods and archived days.
-On success the response gains `migrated` (`rows_updated`, `usd_moved`,
+`reportingSnapshot` advisory lock for each period it touches, bumps
+`ts_recorded` so the rollup worker recomputes, and skips archived days. On
+success the response gains `migrated` (`rows_updated`, `usd_moved`,
 `periods_affected`, `periods_refused`). The report cache is dropped after
 commit.
+
+A stale `migrate_expect_token` returns **409** with the CURRENT plan in
+`data.current_plan`, so the caller can re-confirm against what is true now. When
+that plan is empty **and refuses nothing** the spend is already on the destination — the commonest cause
+is a large migration whose transaction committed after the client stopped
+waiting — and the 409 says so rather than blaming a concurrent write. Re-running
+is safe: the write is a stamp move, never an increment.
 
 **409** when the token no longer matches the current plan — the response carries
 `current_plan` so the caller can re-confirm. **400** when `migrate_spend` is sent

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Admin → Regions. The list of regions, each owning its own cost-centre
+ * Admin → Regions. The list of regions, each owning its own Business Unit
  * tree, projects, and teammates. "Manage" deep-links into the per-region
  * page (/admin/regions/:id).
  *
@@ -135,7 +135,7 @@ async function createRegion() {
     <UiPageHead
       eyebrow="Administration"
       title="Regions"
-      sub="Each region owns its cost-centre tree, projects, and teammates."
+      sub="Each region owns its Business Unit tree, projects, and teammates."
     />
 
     <div class="mb-4 flex items-center justify-between gap-3">

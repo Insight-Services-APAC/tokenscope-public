@@ -252,7 +252,7 @@ function nullLabelFor(axis: BilledAxis): string {
     case 'region':
       return 'Unassigned'
     case 'practice':
-      return 'No cost centre resolved'
+      return 'No Business Unit resolved'
     case 'teammate':
       // The provider billed this and we cannot yet say who for. It is NOT
       // "Unattributed" in the model sense and NOT an untagged budget: it is an

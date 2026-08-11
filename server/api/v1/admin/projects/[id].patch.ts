@@ -58,9 +58,9 @@ const Body = z
      * is a different act. Only reachable here; `placement-service.ts` cannot
      * see this field.
      *
-     * `from: 'all'` needs `confirm_unbounded` because a missing finance_period
-     * row means OPEN by design, so "every open period" reaches every month
-     * nobody ever closed.
+     * `from: 'all'` needs `confirm_unbounded` because "every month this project
+     * has ever had" is a materially different request from "since March", and an
+     * unbounded restatement should be stated rather than defaulted into.
      */
     migrate_spend: z
       .union([
@@ -271,18 +271,37 @@ export default defineEventHandler(async (event) => {
         })
       } catch (e) {
         if (e instanceof RehomePlanStale) {
-          // 409, not 500: nothing is wrong, the world moved between preview and
-          // apply. The CURRENT plan rides along so the UI can re-confirm rather
-          // than making the admin start again blind.
+          /*
+           * 409, not 500: nothing is wrong, the world moved between preview and
+           * apply. The CURRENT plan rides along so the UI can re-confirm rather
+           * than making the admin start again blind.
+           *
+           * NAME THE CASE THAT ACTUALLY HAPPENS. `scopePredicate` excludes rows
+           * already sitting on the destination, so a re-plan finding NOTHING
+           * means the spend is already there. The most common way to reach that
+           * is a first attempt whose transaction committed after the browser
+           * gave up waiting — a large migration takes minutes and nothing on
+           * the server aborts it. Telling that admin "usage was recorded, moved
+           * or closed" describes three things that did not happen and hides the
+           * one that did: their change landed.
+           *
+           * `refused` MUST be empty for that claim to hold. `totalRows` counts
+           * `affected` only, so a plan whose rows all fell below the archive
+           * floor between preview and apply also reads zero — and those rows did
+           * NOT move. Promising an admin their change landed when it was refused
+           * is worse than the vague message this replaces.
+           */
+          const alreadyThere = e.current.totalRows === 0 && e.current.refused.length === 0
           throw createError({
             statusCode: 409,
             statusMessage: 'Migration preview is stale',
             data: {
               type: 'https://tokenscope.example.com/errors/conflict',
-              title: 'The spend to migrate changed',
+              title: alreadyThere ? 'That spend has already moved' : 'The spend to migrate changed',
               status: 409,
-              detail:
-                'Usage was recorded, moved or closed since the preview, so the migration was not applied. Re-check the figures and confirm again.',
+              detail: alreadyThere
+                ? 'Every record in that range is already on the new Business Unit, so there was nothing left to move and nothing was applied. If an earlier attempt appeared to time out, it did land.'
+                : 'Usage was recorded, moved or closed since the preview, so the migration was not applied. Re-check the figures and confirm again.',
               current_plan: e.current,
             },
           })

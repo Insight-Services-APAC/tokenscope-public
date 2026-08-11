@@ -616,9 +616,10 @@ the point of the mechanism: a single shared GitHub org's overage can now split
 across every practice that actually consumed. `server/governance/copilot-
 overage-allocation.ts`'s `persistCopilotOverageAllocation` is idempotent
 delete-and-replace under the same enterprise/month advisory lock the
-copilot-pool-bill worker's bill rewrite takes, refuses a CLOSED finance period
-outright, and asserts cent-exact conservation from a post-persistence
-read-back. `v_finance_copilot_pool_chargeback`'s `copilot-usage` lane reads this
+copilot-pool-bill worker's bill rewrite takes, and asserts cent-exact
+conservation from a post-persistence read-back. A month that has been recorded
+is NOT special: the provider is the record of truth, its corrected bill lands,
+and the difference surfaces as a delta against that month's snapshot. `v_finance_copilot_pool_chargeback`'s `copilot-usage` lane reads this
 allocation once it exists for an (enterprise, month) — replacing, never
 alongside, the org-homed `overage_net_usd` fallback (structurally mutually
 exclusive; same total either way). The existing informational per-teammate
@@ -765,7 +766,7 @@ force an immediate live recheck per enterprise
 (`POST /api/v1/admin/reconciliation/github/coverage-recheck`) rather than wait
 for the next scheduled sweep.
 
-## 6b. Governance cutover and finance periods (Workstream B) — [BUILT]
+## 6b. Governance cutover and reporting snapshots (Workstream B) — [BUILT]
 
 Two mechanisms close the "governance settings are decorative" defect (design
 §1.2) and the arithmetic-safety gap in freezing a chargeback month.
@@ -784,30 +785,40 @@ verifies the freshly-written data reproduces the exact same verdict before
 recording success. `activate` re-verifies against current data (catching drift
 since preflight) and then — and only then — every money path switches to
 reading `billing` authoritatively; the heuristic is never consulted again
-(`server/governance/verdict.ts`). `rollback` is allowed only before any closed
-finance period has used the new regime. Admin surface:
+(`server/governance/verdict.ts`). `rollback` is allowed only before any recorded
+month has used the new regime. Admin surface:
 `/admin/policies/provider-governance` (global-finops only); API:
 `/api/v1/admin/governance-cutover/{preflight,activate,rollback}`.
 
-**Finance periods** (`finance_period`, one row per calendar month once
-touched — absence means open) freeze `actual_spend.chargeback_exempt` at
-close: `close` recomputes to convergence against current governance one final
-time, stamps `governance_verdict_locked_at`, then locks. Recompute
-(`server/governance/recompute.ts`) only ever touches OPEN rows — closed rows
-are structurally excluded from its query, not merely convention. `reopen`
-unlocks for an extended correction window (does not itself recompute);
-`restate` is the single-shot audited alternative — recompute-then-refreeze in
-one call, for a known correction (e.g. a late bill anchor) without leaving the
-month open to arbitrary future drift. Both require a reason and are audited.
-Close/reopen/restate serialise on the period via the `financePeriod` advisory
-lock + `SELECT ... FOR UPDATE`, so a concurrent recompute (a billing PATCH's
-inline scoped call, or the periodic worker) can never observe — or leave — a
-half-frozen period.
+**Reporting snapshots** (`reporting_snapshot`, one row per calendar month once
+recorded) write down what a month READ when it was reported, and by whom:
+`attributedUsd`, `chargeableUsd`, `exemptUsd`, the `basis` it was read on, and
+the actor. Recording a month is refused a second time — silently replacing what
+was reported the first time is the one thing a snapshot exists to prevent.
 
-`chargeback_exempt`'s provenance is now explicit on the row itself:
+**A snapshot is not a lock, and this is deliberate** (mig 0128, replacing
+`finance_period`). It writes nothing to `actual_spend`, holds no trigger and
+refuses no later write. TokenScope is not the billing system of record: we
+record a month at +2 days, the provider corrects its rows at +6, the invoice
+lands at +10. A product that refuses the bill because of a state it set itself
+does not protect the month — it guarantees the month stays wrong. Governance
+recompute reaches a recorded month for the same reason: a rule change matters
+most on the month somebody actually read.
+
+What a snapshot buys is the DELTA. `reportingSnapshotDelta` reports the month
+against what was recorded — chargeable movement, a verdict flip that moves
+nothing on its own (`chargeable` down by exactly what `exempt` gains) — so a
+finance reader is told when a reported month has moved instead of discovering
+it. It **refuses to subtract across a `basis` change**: a month recorded
+`project-homed` and read `person-placed` has not moved by the difference, the
+difference is what changing the question costs. Both figures are returned and
+only the arithmetic is withheld.
+
+Recording serialises on the period via the `reportingSnapshot` advisory lock +
+`SELECT ... FOR UPDATE`, so a concurrent governance recompute can never be
+half-captured. `chargeback_exempt`'s provenance stays explicit on the row via
 `governance_verdict_source` (`legacy-heuristic` | `governance:billed` |
-`governance:tracked` | `unresolved`) and
-`governance_verdict_locked_at` (frozen-at timestamp, `NULL` = open).
+`governance:tracked` | `unresolved`).
 
 ## 7. Where the numbers live
 

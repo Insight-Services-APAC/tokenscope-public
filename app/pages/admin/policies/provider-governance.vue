@@ -4,7 +4,7 @@
  * surfaces the design's rollout/rollback runbook depends on:
  *   1. Governance cutover — preflight / activate / rollback the GitHub
  *      heuristic → governance-data switch (ADR-0011 D1/D2/D11).
- *   2. Finance periods — close / reopen / restate a calendar month's
+ *   2. Reporting snapshots — record what a calendar month's
  *      chargeback verdict freeze.
  *   3. Governance-unresolved — the operator diagnostic for money rows whose
  *      governance key could not be resolved, with a recheck action.
@@ -95,31 +95,49 @@ async function rollback() {
   }
 }
 
-// ── Finance periods ─────────────────────────────────────────────────────
+// ── Reporting snapshots ─────────────────────────────────────────────────
+/*
+ * RECORD A MONTH. There is no reopen and no restate: mig 0128 demoted the close
+ * from a freeze to a snapshot, and this card still called
+ * `/admin/finance-periods/{month}/{close,reopen,restate}` — four endpoints that
+ * no longer exist. Every button here 404'd.
+ *
+ * What replaces them is one action and one question. Recording a month writes
+ * down what it read; asking for it again returns that plus what the month reads
+ * NOW and the movement between them, because the bill lands after the month is
+ * reported and the product's job is to surface that, not to refuse it.
+ */
 function lastCompleteMonth(): string {
   const now = new Date()
   const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0))
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`
 }
 const periodMonth = ref(lastCompleteMonth())
-interface FinancePeriod {
+interface SnapshotDelta {
+  // `periodMonth`, `closedAt` and `basis` are TOP-LEVEL on the delta; `snapshot`
+  // carries only the three figures. Reading `snapshot.closedAt` rendered
+  // "Recorded Invalid Date" on every recorded month.
   periodMonth: string
-  state: 'open' | 'closed'
-  closedAt: string | null
-  reopenedAt: string | null
-  restatedAt: string | null
+  closedAt: string
+  snapshotVersion: number
+  snapshot: { attributedUsd: number; chargeableUsd: number; exemptUsd: number }
+  current: { attributedUsd: number; chargeableUsd: number; exemptUsd: number }
+  deltaUsd: { attributed: number; chargeable: number; exempt: number } | null
+  incomparableReason: string | null
+  chargeableUnchanged: boolean
+  attributedMoved: boolean
 }
-const period = ref<FinancePeriod | null>(null)
+/** null = never recorded. Distinct from recorded-and-unchanged. */
+const period = ref<SnapshotDelta | null>(null)
 const periodBusy = ref(false)
 const periodError = ref<string | null>(null)
-const periodReason = ref('')
 
 async function loadPeriod() {
   periodError.value = null
   try {
-    period.value = await $fetch<FinancePeriod>(`/api/v1/admin/finance-periods/${periodMonth.value}`)
+    period.value = await $fetch<SnapshotDelta | null>(`/api/v1/admin/reporting-snapshots/${periodMonth.value}`)
   } catch (e: unknown) {
-    periodError.value = apiErrorDetail(e, 'Failed to load period')
+    periodError.value = apiErrorDetail(e, 'Failed to load the snapshot')
   }
 }
 if (isOrgWide.value) await loadPeriod()
@@ -128,42 +146,19 @@ async function closePeriod() {
   periodBusy.value = true
   periodError.value = null
   try {
-    await $fetch(`/api/v1/admin/finance-periods/${periodMonth.value}/close`, { method: 'POST', body: {} })
+    await $fetch(`/api/v1/admin/reporting-snapshots/${periodMonth.value}/close`, { method: 'POST', body: {} })
     await loadPeriod()
   } catch (e: unknown) {
-    periodError.value = apiErrorDetail(e, 'Close failed')
+    // A second close is refused on purpose — replacing what was reported the
+    // first time is the one thing a snapshot exists to prevent.
+    periodError.value = apiErrorDetail(e, 'Could not record the month')
   } finally {
     periodBusy.value = false
   }
 }
-async function reopenPeriod() {
-  if (!periodReason.value.trim()) return
-  periodBusy.value = true
-  periodError.value = null
-  try {
-    await $fetch(`/api/v1/admin/finance-periods/${periodMonth.value}/reopen`, { method: 'POST', body: { reason: periodReason.value.trim() } })
-    periodReason.value = ''
-    await loadPeriod()
-  } catch (e: unknown) {
-    periodError.value = apiErrorDetail(e, 'Reopen failed')
-  } finally {
-    periodBusy.value = false
-  }
-}
-async function restatePeriod() {
-  if (!periodReason.value.trim()) return
-  periodBusy.value = true
-  periodError.value = null
-  try {
-    await $fetch(`/api/v1/admin/finance-periods/${periodMonth.value}/restate`, { method: 'POST', body: { reason: periodReason.value.trim() } })
-    periodReason.value = ''
-    await loadPeriod()
-  } catch (e: unknown) {
-    periodError.value = apiErrorDetail(e, 'Restate failed')
-  } finally {
-    periodBusy.value = false
-  }
-}
+
+const money = (n: number) =>
+  n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
 
 // ── Governance-unresolved diagnostics ────────────────────────────────────
 interface UnresolvedDiagnostics {
@@ -325,7 +320,6 @@ interface RepullResponse {
     residualRowsWritten: number
     overageAllocationsComputed: number
     overageAllocationsUnallocated: number
-    monthsSkippedClosedPeriod: number
     enterprisesErrored: number
   }
 }
@@ -408,10 +402,12 @@ async function triggerRepull() {
     </UiCard>
 
     <UiCard class="mt-5" data-testid="finance-period-card">
-      <UiEyebrow>Finance periods</UiEyebrow>
+      <UiEyebrow>Reporting snapshots</UiEyebrow>
       <p class="text-sm text-carbon-2 mt-1">
-        A closed period freezes every open row's chargeback verdict. Reopen for an extended correction window;
-        restate for a single audited recompute-then-refreeze.
+        Recording a month writes down what it read, and who recorded it. It does
+        <strong>not</strong> lock anything — the provider corrects its rows and the bill
+        lands after we report, so a recorded month still accepts both. What you get back
+        is the movement since.
       </p>
       <div class="mt-3 flex items-center gap-2">
         <label for="period-month" class="text-[12px] font-semibold text-carbon">Month</label>
@@ -423,47 +419,56 @@ async function triggerRepull() {
           data-testid="period-month"
           @change="loadPeriod"
         >
-        <UiBadge :kind="period?.state === 'closed' ? 'rag-red' : 'rag-green'" data-testid="period-state-badge">
-          {{ period?.state ?? 'open' }}
+        <UiBadge :kind="period ? 'rag-green' : 'neutral'" data-testid="period-state-badge">
+          {{ period ? 'recorded' : 'not recorded' }}
         </UiBadge>
       </div>
+
+      <div v-if="period" class="mt-3 text-[12px] text-carbon" data-testid="period-delta">
+        <!-- Version 0 = closed under the old machinery, which stored a state and
+             no figures. Rendering its zero defaults as "attributed $0.00" would
+             be a fabricated number rather than a missing one. -->
+        <p v-if="period.snapshotVersion === 0">
+          Recorded {{ new Date(period.closedAt).toLocaleString() }} — figures not
+          recorded (closed before this system captured them).
+        </p>
+        <p v-else>
+          Recorded {{ new Date(period.closedAt).toLocaleString() }} —
+          attributed {{ money(period.snapshot.attributedUsd) }} ·
+          chargeable {{ money(period.snapshot.chargeableUsd) }}
+        </p>
+        <!-- The reason the snapshot exists. A month that has not moved says so;
+             one that has says by how much, and one that cannot be compared says
+             why instead of showing a difference that is not movement. -->
+        <p v-if="period.incomparableReason" class="mt-1 text-rag-amber">
+          Not comparable ({{ period.incomparableReason }}) — the month now reads
+          {{ money(period.current.chargeableUsd) }} chargeable, but the difference is what
+          changing how we count costs, not money moving.
+        </p>
+        <p v-else-if="period.chargeableUnchanged && !period.attributedMoved" class="mt-1 text-carbon-3">
+          Unchanged since it was recorded.
+        </p>
+        <p v-else class="mt-1 text-rag-amber">
+          Moved since recording — chargeable {{ money(period.deltaUsd?.chargeable ?? 0) }},
+          exempt {{ money(period.deltaUsd?.exempt ?? 0) }},
+          attributed {{ money(period.deltaUsd?.attributed ?? 0) }}.
+        </p>
+      </div>
+
       <div class="mt-4 flex flex-wrap items-end gap-2">
         <UiButton
           kind="primary"
           size="sm"
-          :disabled="periodBusy || period?.state === 'closed'"
+          :disabled="periodBusy || !!period"
           data-testid="close-period"
           @click="closePeriod"
         >
-          Close period
+          Record this month
         </UiButton>
-        <div class="flex-1 min-w-[14rem]">
-          <input
-            v-model="periodReason"
-            type="text"
-            placeholder="Reason (required for reopen/restate)"
-            class="w-full border border-calm-2 rounded-md px-2 py-2 text-sm"
-            data-testid="period-reason"
-          >
-        </div>
-        <UiButton
-          kind="secondary"
-          size="sm"
-          :disabled="periodBusy || period?.state !== 'closed' || !periodReason.trim()"
-          data-testid="reopen-period"
-          @click="reopenPeriod"
-        >
-          Reopen
-        </UiButton>
-        <UiButton
-          kind="secondary"
-          size="sm"
-          :disabled="periodBusy || period?.state !== 'closed' || !periodReason.trim()"
-          data-testid="restate-period"
-          @click="restatePeriod"
-        >
-          Restate
-        </UiButton>
+        <p v-if="period" class="text-[11px] text-carbon-3">
+          Already recorded. A month is recorded once — re-recording would overwrite
+          what was reported.
+        </p>
       </div>
       <p v-if="periodError" class="text-xs text-rag-red mt-2" data-testid="period-error">{{ periodError }}</p>
     </UiCard>

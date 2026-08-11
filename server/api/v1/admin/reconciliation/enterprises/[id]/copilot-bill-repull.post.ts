@@ -14,11 +14,11 @@
  * path server/workers/copilot-pool-bill.ts's scheduled tick uses, scoped to
  * this one enterprise + month via `explicitMonths`), then recomputes the
  * overage allocation for that month in the SAME transaction — both under the
- * financePeriod + copilotOverageAllocation advisory locks.
+ * reportingSnapshot + copilotOverageAllocation advisory locks.
  *
  * FINANCE-PERIOD INTEGRATION: a CLOSED month is refused outright (409) — the
  * caller must reopen or restate the period first (server/governance/
- * finance-period.ts); there is no silent recost path. This route never
+ * reporting-snapshot.ts). This route never
  * itself reopens/restates — it only ever operates on an OPEN period.
  *
  * RBAC: requireRole(admin, global-finops) + assertSameOrigin. Audited
@@ -33,7 +33,6 @@ import { withRequestRls } from '../../../../../../db/request-rls'
 import { requireUuidParam } from '../../../../../../utils/require-uuid-param'
 import { readValidated } from '../../../../../../utils/validated-body'
 import { recordAuditEvent } from '../../../../../../db/audit'
-import { getFinancePeriod } from '../../../../../../governance/finance-period'
 import { runCopilotPoolBill } from '../../../../../../workers/copilot-pool-bill'
 
 const MAX_LOOKBACK_MONTHS = 36
@@ -116,22 +115,20 @@ export default defineEventHandler(async (event) => {
       badRequest("the enterprise's reconciliation_mode must be 'reconciled' to re-pull its bill.")
     }
 
-    // Fast, friendly fail BEFORE hitting the GitHub API: a closed month must be reopened or
-    // restated first — never silently recost. (The write path re-checks under lock regardless.)
-    const period = await getFinancePeriod(db, body.month)
-    if (period.state === 'closed') {
-      throw createError({
-        statusCode: 409,
-        statusMessage: 'Finance period is closed',
-        data: {
-          type: 'https://tokenscope.example.com/errors/finance-period-closed',
-          title: 'Finance period is closed',
-          status: 409,
-          detail: `Finance period ${body.month} is closed. Reopen or restate it (POST /api/v1/admin/finance-periods/${body.month}/reopen or .../restate) before re-pulling the Copilot bill for this month.`,
-        },
-      })
-    }
-
+    /*
+     * NO CLOSED-MONTH REFUSAL. This used to 409 a re-pull of a closed month and
+     * tell the operator to reopen or restate first.
+     *
+     * The timeline that killed it: we close at +2 after month end, Copilot
+     * corrects its billing rows at +6, the bill lands at +10 — and the product
+     * rejected the authoritative source because of a state we set ourselves.
+     * TokenScope is not the billing system of record. The bill is right; we are
+     * not, and refusing it does not protect the month, it guarantees the month
+     * stays wrong until somebody performs a ceremony.
+     *
+     * The bill always lands. If the month was closed, the snapshot it was closed
+     * at is unchanged and the difference is reported as a delta.
+     */
     await recordAuditEvent(db, {
       eventType: 'copilot-bill-repull-triggered',
       actorTeammateId: caller.teammateId,
@@ -148,29 +145,8 @@ export default defineEventHandler(async (event) => {
       explicitMonths: [monthStart],
     })
 
-    if (result.monthsSkippedClosedPeriod > 0) {
-      // Raced closed between the pre-check above and the locked write (an operator closed
-      // the period mid-request) — never silently swallowed.
-      await recordAuditEvent(db, {
-        eventType: 'copilot-bill-repull-failed',
-        actorTeammateId: caller.teammateId,
-        subjectKind: 'provider-enterprise',
-        subjectId: providerEnterpriseId,
-        payload: { month: body.month, reason: body.reason, failure: 'finance-period-closed' },
-        ipAddress: ip,
-        userAgent: ua,
-      })
-      throw createError({
-        statusCode: 409,
-        statusMessage: 'Finance period closed during re-pull',
-        data: {
-          type: 'https://tokenscope.example.com/errors/finance-period-closed',
-          title: 'Finance period closed during re-pull',
-          status: 409,
-          detail: `Finance period ${body.month} was closed while this re-pull was running. No rewrite was applied. Reopen or restate the period and retry.`,
-        },
-      })
-    }
+    // The raced-close 409 went with the pre-flight one: there is no longer a
+    // state a month can race INTO that would make its bill unwelcome.
 
     if (result.enterprisesErrored > 0) {
       await recordAuditEvent(db, {

@@ -67,16 +67,19 @@ export const LOCK_NAMESPACE = {
    */
   globalCap: 3,
   /**
-   * One `finance_period` row, keyed on `period_month` (YYYY-MM-01). Serialises
-   * close / reopen / restate against each other AND against a concurrent
-   * governance recompute scoped to the same period (design §8.4: "Period close
-   * /reopen and governance recomputation serialize on the period... prevents a
-   * billing edit or recompute from being frozen halfway through"). Combined
-   * with `SELECT ... FOR UPDATE` on the finance_period row itself (belt +
-   * braces: the advisory lock serialises even the "period row does not exist
-   * yet" case, which a row-level lock cannot cover).
+   * One `reporting_snapshot` row, keyed on `period_month` (YYYY-MM-01).
+   * Serialises taking a month's snapshot against a concurrent governance
+   * recompute scoped to that month, so a snapshot can never record a
+   * half-recomputed set of verdicts. Combined with `SELECT ... FOR UPDATE` on
+   * the row itself (belt + braces: the advisory lock serialises even the "row
+   * does not exist yet" case, which a row-level lock cannot cover).
+   *
+   * ORDINAL 4 IS DELIBERATELY UNCHANGED across the finance_period rename
+   * (mig 0128). The lock id derives from the ordinal, not the property name, so
+   * old and new replicas contend on the same lock space during a rolling
+   * deploy — and the documented total order over namespaces is untouched.
    */
-  financePeriod: 4,
+  reportingSnapshot: 4,
   /**
    * The single `governance_cutover_state` row (id=1). Serialises
    * preflight/activate/rollback against each other — these are rare,
@@ -97,10 +100,10 @@ export const LOCK_NAMESPACE = {
    *     [id]/copilot-bill-repull.post.ts), which reuses the same worker path,
    *   - the overage-allocation compute+persist that follows the bill rewrite,
    *     in the SAME transaction (server/governance/copilot-overage-allocation.ts).
-   * Acquired alongside the `financePeriod` lock (ascending order: financePeriod
+   * Acquired alongside the `reportingSnapshot` lock (ascending order: reportingSnapshot
    * THEN this) so a concurrent close/reopen/restate for the same month can
    * never race a bill/allocation rewrite — mirrors the "billing-edit inline
-   * recompute" pattern documented on `financePeriod` above.
+   * recompute" pattern documented on `reportingSnapshot` above.
    */
   copilotOverageAllocation: 6,
   /**

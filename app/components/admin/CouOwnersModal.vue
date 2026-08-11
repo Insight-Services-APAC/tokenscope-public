@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /*
- * CouOwnersModal — assign / revoke cost-centre owners from the region
- * page's Cost centres tab (J4, mig 0048). Mirrors ProjectMembersModal:
+ * CouOwnersModal — assign / revoke Business Unit owners from the region
+ * page's Business Units tab (J4, mig 0048). Mirrors ProjectMembersModal:
  *   GET    …/admin/org-units?region={id}        (owners ride the tree payload)
  *   POST   …/admin/org-units/{id}/owners        { teammate_id }
  *   DELETE …/admin/org-units/{id}/owners/{teammateId}
@@ -143,7 +143,7 @@ watch(
     <div class="w-full max-w-lg bg-white rounded-xl shadow-xl max-h-[85vh] overflow-y-auto">
       <div class="px-6 py-4 border-b border-calm-2 flex items-start justify-between gap-4">
         <div>
-          <p class="text-xs font-bold uppercase tracking-[1.4px] text-brand-harmony">Cost-centre owners</p>
+          <p class="text-xs font-bold uppercase tracking-[1.4px] text-brand-harmony">Business Unit owners</p>
           <h2 class="text-lg font-bold text-carbon mt-0.5">{{ cou.display_name }}</h2>
           <code class="text-[11px] bg-calm/40 px-1 rounded">{{ cou.code }}</code>
         </div>
@@ -167,11 +167,11 @@ watch(
              placement, and it never is. -->
         <p class="text-[11px] text-carbon-3 mt-1 leading-relaxed">
           <span class="font-bold text-carbon-2">People whose manager chain reaches this
-          owner are placed into this cost centre.</span>
+          owner are placed into this Business Unit.</span>
           Owners also get the P&amp;L view of its projects — their role is unchanged.
           <span class="block mt-1">
             This is different from a <em>Region leader</em>, which sets the region only
-            and places nobody into a cost centre.
+            and places nobody into a Business Unit.
           </span>
         </p>
         <ul v-if="results.length" class="mt-2 border border-calm-2 rounded-md divide-y divide-calm-2">
@@ -216,10 +216,10 @@ watch(
                   class="text-[11px] text-rag-amber leading-relaxed mt-0.5"
                   :data-testid="`cou-owner-ambiguous-${o.teammate_id}`"
                 >
-                  ⚠ Places nobody. This person owns {{ o.owns_unit_count }} active cost
-                  centres, so the manager-chain walk cannot tell which one a report
+                  ⚠ Places nobody. This person owns {{ o.owns_unit_count }} active
+                  Business Units, so the manager-chain walk cannot tell which one a report
                   belongs to — it skips them entirely, on every unit they own. Leave
-                  them on one cost centre only, or place their people directly.
+                  them on one Business Unit only, or place their people directly.
                 </div>
                 <div
                   v-else-if="o.placement_status === 'inert'"
@@ -243,7 +243,7 @@ watch(
                 >
                   {{ o.places_count ?? 0 }} recorded
                   {{ (o.places_count ?? 0) === 1 ? 'placement' : 'placements' }} into this
-                  cost centre name this owner.
+                  Business Unit name this owner.
                   <span class="block text-carbon-3">
                     Placements already made, not a re-derivation against today's manager
                     chain — if the chain has since changed, this count has not.

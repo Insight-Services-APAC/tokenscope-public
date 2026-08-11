@@ -24,9 +24,8 @@ import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import * as schema from '../../../drizzle/schema'
 import {
   persistCopilotOverageAllocation,
-  CopilotOverageAllocationClosedPeriodError,
 } from '../../../server/governance/copilot-overage-allocation'
-import { closeFinancePeriod, reopenFinancePeriod } from '../../../server/governance/finance-period'
+import { closeReportingSnapshot } from '../../../server/governance/reporting-snapshot'
 
 let t: TestDb
 let regionId: string
@@ -69,7 +68,7 @@ beforeEach(async () => {
   await t.client`DELETE FROM copilot_pool_bill`
   await t.client`DELETE FROM reconciliation_record`
   await t.client`DELETE FROM actual_spend`
-  await t.client`DELETE FROM finance_period`
+  await t.client`DELETE FROM reporting_snapshot`
   await t.client`DELETE FROM provider_enterprise WHERE external_id = ${ENT}`
   const [ent] = await t.db
     .insert(schema.providerEnterprise)
@@ -358,23 +357,28 @@ describe('copilot-overage-allocation', () => {
     expect(Number(auditAfter)).toBe(Number(auditBefore) + 1)
   })
 
-  it('(I) a CLOSED finance period refuses the write; reopening unblocks it', async () => {
+  it('(I) a month that has been CLOSED still accepts the write — the bill always lands', async () => {
+    /*
+     * THE INVERSION. This used to assert the opposite: a closed period REFUSED
+     * the write and the operator had to reopen or restate first.
+     *
+     * The timeline that killed that rule: we close at +2 after month end, the
+     * provider corrects its billing rows at +6, the bill lands at +10 — and the
+     * product rejected the authoritative source because of a state we set
+     * ourselves. TokenScope is not the billing system of record. Refusing the
+     * bill never protected the month; it guaranteed the month stayed wrong.
+     *
+     * Closing now records what was reported and blocks nothing, so what used to
+     * be the refusal is the proof that the correction is accepted.
+     */
     const tmA = await mkTeammate(couA)
     await seedUsage(tmA, couA, 100)
     await seedBill(50)
 
-    await t.db.transaction((tx) => closeFinancePeriod(tx, { periodMonth: MONTH, actorTeammateId: financeActorId }))
-
-    await expect(
-      t.db.transaction((tx) =>
-        persistCopilotOverageAllocation(tx, { providerEnterpriseId: entId, enterpriseExternalId: ENT, month: MONTH, actorSystem: 'test' }),
-      ),
-    ).rejects.toBeInstanceOf(CopilotOverageAllocationClosedPeriodError)
-    expect(await sumAllocated()).toBe(0) // nothing was written
-
     await t.db.transaction((tx) =>
-      reopenFinancePeriod(tx, { periodMonth: MONTH, actorTeammateId: financeActorId, reason: 'test reopen' }),
+      closeReportingSnapshot(tx, { periodMonth: MONTH, actorTeammateId: financeActorId }),
     )
+
     const result = await t.db.transaction((tx) =>
       persistCopilotOverageAllocation(tx, { providerEnterpriseId: entId, enterpriseExternalId: ENT, month: MONTH, actorSystem: 'test' }),
     )

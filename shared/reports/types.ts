@@ -543,8 +543,10 @@ export type ProviderVendor = 'anthropic' | 'github' | 'usage'
 
 // A clock state, NOT a finalisation state (build-design §5, warning 1; owner
 // gate-warning fold-in). "finalised" is grep-banned. 'settled' means "past every
-// settling horizon" — still provisional, because no month-end close machinery
-// (finance_period) exists yet.
+// settling horizon" — still provisional, and PERMANENTLY so: `reporting_snapshot`
+// records what a month read, it does not finalise it. There is no close machinery
+// to wait for (mig 0128), because the bill lands after we report and the product's
+// job is to show the movement rather than refuse the correction.
 export type SettlingState = 'estimated' | 'settling' | 'settled'
 
 export interface ProviderState {
