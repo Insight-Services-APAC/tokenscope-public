@@ -29,12 +29,22 @@
  *   TOKENSCOPE_API_BASE — the TokenScope server base URL (e.g. https://ts.example.com).
  *                         Required unless --api-base is passed or --redeem-url is absolute.
  */
-import { writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, renameSync, rmSync } from 'node:fs'
+import {
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  chmodSync,
+  renameSync,
+  rmSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import https from 'node:https'
 import http from 'node:http'
+import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
+import { discoverMcpOrigin } from './mcp-origin.mjs'
 
 // ── constants ────────────────────────────────────────────────────────────────
 const BLOCK_START = '# >>> TokenScope >>>'
@@ -64,9 +74,45 @@ function writeFileAtomic(path, content, mode) {
     if (mode != null) chmodSync(tmp, mode) // defeat umask
     renameSync(tmp, path)
   } catch (err) {
-    try { rmSync(tmp, { force: true }) } catch { /* best-effort cleanup */ }
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      /* best-effort cleanup */
+    }
     throw err
   }
+}
+
+// ── API-base discovery ───────────────────────────────────────────────────────
+/**
+ * Derive the TokenScope server base from the plugin's OWN .mcp.json.
+ *
+ * On a FRESH device neither --api-base nor TOKENSCOPE_API_BASE is set, and
+ * provision_emit returns `redeem_url` as the RELATIVE '/api/v1/setup/redeem'
+ * (deliberately — the server must not bake a Front-Door host). That left the
+ * helper with nothing to resolve against, so first-time setup died at the redeem
+ * step with "Cannot resolve a safe redeem URL" and no instruction anywhere
+ * mentioned the flag (reproduced live 2026-07-28).
+ *
+ * The .mcp.json sitting beside this script is an authoritative, always-present
+ * answer: provision_emit could only have been called THROUGH that server, so its
+ * URL is by construction the right base. Its URL is required to be a literal
+ * (Copilot CLI does not expand ${VAR}), so no interpolation is needed.
+ *
+ * Resolution is relative to the SCRIPT directory, never cwd, so a repository
+ * cannot poison it. Returns an origin (scheme + host + port) or null. The caller
+ * still runs assertSafeEndpoint over the result, so a poisoned .mcp.json is
+ * refused exactly like a poisoned --api-base — this widens convenience, never
+ * the trust model.
+ */
+function discoverApiBaseFromMcpJson() {
+  // Delegates to the shared resolver so BOTH redeem helpers search the same
+  // places in the same order. This used to look only at the plugin's own
+  // bundled .mcp.json, i.e. the baked default — correct for a stock install and
+  // exactly wrong for an operator who registered the MCP server at their own
+  // URL, whose handoff would then be minted by their server and redeemed
+  // against ours.
+  return discoverMcpOrigin(fileURLToPath(new URL('.', import.meta.url)), { client: 'copilot' })
 }
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
@@ -74,11 +120,21 @@ function parseArgs(argv) {
   const out = { handoffCode: null, redeemUrl: null, apiBase: null, shellRc: null, remove: false }
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
-      case '--handoff-code': out.handoffCode = argv[++i]; break
-      case '--redeem-url':   out.redeemUrl = argv[++i]; break
-      case '--api-base':     out.apiBase = argv[++i]; break
-      case '--shell-rc':     out.shellRc = argv[++i]; break
-      case '--remove':       out.remove = true; break
+      case '--handoff-code':
+        out.handoffCode = argv[++i]
+        break
+      case '--redeem-url':
+        out.redeemUrl = argv[++i]
+        break
+      case '--api-base':
+        out.apiBase = argv[++i]
+        break
+      case '--shell-rc':
+        out.shellRc = argv[++i]
+        break
+      case '--remove':
+        out.remove = true
+        break
       default:
         // Accept a bare positional argument as the handoff code (documented usage).
         if (!argv[i].startsWith('--') && !out.handoffCode) out.handoffCode = argv[i]
@@ -88,32 +144,63 @@ function parseArgs(argv) {
 }
 
 // ── HTTP helper (no external deps) ───────────────────────────────────────────
+/**
+ * POST a JSON body to `urlStr`, resolve the parsed JSON response. The URL is
+ * validated via assertSafeEndpoint (S2 — closes the Copilot leg of
+ * client-plugins:mitm:0003) BEFORE any request is built: this used to pick
+ * `http` for ANY non-https URL with no complaint (the "plain-http fallback"),
+ * which would silently downgrade a poisoned redeem endpoint (a bad --api-base,
+ * or a redeemUrl derived from one) to plaintext instead of refusing it —
+ * leaking the handoff code, and the server's response (which carries the
+ * durable OAuth refresh token), off-box unencrypted. allowLoopback:true
+ * mirrors claude-redeem.mjs's httpsPostJson (plugin-runtime.mjs) — a
+ * locally-running dev server (TOKENSCOPE_API_BASE=http://localhost:3450)
+ * legitimately answers on 127.0.0.1/::1.
+ */
 function httpsPost(urlStr, body) {
   return new Promise((resolve, reject) => {
-    const url = new URL(urlStr)
+    let url
+    try {
+      url = assertSafeEndpoint(urlStr, { allowLoopback: true })
+    } catch (err) {
+      // Redact HERE, at the boundary, not at the caller. This promise's
+      // rejection is printed by a generic top-level handler that interpolates
+      // err.message, so rejecting with the raw guard error would put the
+      // rejected endpoint on stderr. Redacting at the throw site makes the
+      // property hold no matter which handler ends up printing it.
+      reject(unsafeEndpointError('Redeem URL', err))
+      return
+    }
     const bodyBuf = Buffer.from(JSON.stringify(body), 'utf8')
     const mod = url.protocol === 'https:' ? https : http
-    const req = mod.request({
-      method: 'POST',
-      hostname: url.hostname,
-      port: url.port || undefined,
-      path: url.pathname + url.search,
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': bodyBuf.length,
-        Accept: 'application/json',
+    const req = mod.request(
+      {
+        method: 'POST',
+        hostname: url.hostname,
+        port: url.port || undefined,
+        path: url.pathname + url.search,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': bodyBuf.length,
+          Accept: 'application/json',
+        },
       },
-    }, (res) => {
-      let data = ''
-      res.on('data', (c) => data += c)
-      res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          try { resolve(JSON.parse(data)) } catch { reject(new Error(`Non-JSON response: ${data.slice(0, 200)}`)) }
-        } else {
-          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`))
-        }
-      })
-    })
+      (res) => {
+        let data = ''
+        res.on('data', (c) => (data += c))
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              resolve(JSON.parse(data))
+            } catch {
+              reject(new Error(`Non-JSON response: ${data.slice(0, 200)}`))
+            }
+          } else {
+            reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`))
+          }
+        })
+      },
+    )
     req.setTimeout(HTTP_TIMEOUT_MS, () => {
       req.destroy(new Error(`request timed out after ${HTTP_TIMEOUT_MS}ms`))
     })
@@ -157,8 +244,14 @@ function removeBlock(content) {
   const out = []
   let inBlock = false
   for (const line of lines) {
-    if (line.trim() === BLOCK_START) { inBlock = true; continue }
-    if (line.trim() === BLOCK_END) { inBlock = false; continue }
+    if (line.trim() === BLOCK_START) {
+      inBlock = true
+      continue
+    }
+    if (line.trim() === BLOCK_END) {
+      inBlock = false
+      continue
+    }
     if (!inBlock) out.push(line)
   }
   // Normalize trailing newlines: if the original ended with \n, keep exactly one.
@@ -189,9 +282,7 @@ function upsertBlock(content, envLines) {
  */
 export function armOtelExporterRc(rcTargets, { log } = {}) {
   const otelFilePath = join(PROJECT_LOCAL_DIR, 'copilot-otel.jsonl')
-  const envLines = [
-    `export COPILOT_OTEL_FILE_EXPORTER_PATH=${JSON.stringify(otelFilePath)}`,
-  ]
+  const envLines = [`export COPILOT_OTEL_FILE_EXPORTER_PATH=${JSON.stringify(otelFilePath)}`]
   // Write to EVERY target (login + non-login init files) so the export loads no
   // matter how Copilot's shell is launched. upsertBlock is idempotent per file.
   for (const rcPath of rcTargets) {
@@ -263,8 +354,14 @@ export function detectEnvChange(existingConfig, newBundle) {
   const changed = Boolean(oldHost) && Boolean(newHost) && oldHost !== newHost
   return {
     changed,
-    oldLabel: emitEnvLabel(existingConfig?.bearer_endpoint, existingConfig?.logs_endpoint) ?? oldHost ?? null,
-    newLabel: emitEnvLabel(newBundle?.TOKENSCOPE_BEARER_ENDPOINT, newBundle?.TOKENSCOPE_LOGS_ENDPOINT) ?? newHost ?? null,
+    oldLabel:
+      emitEnvLabel(existingConfig?.bearer_endpoint, existingConfig?.logs_endpoint) ??
+      oldHost ??
+      null,
+    newLabel:
+      emitEnvLabel(newBundle?.TOKENSCOPE_BEARER_ENDPOINT, newBundle?.TOKENSCOPE_LOGS_ENDPOINT) ??
+      newHost ??
+      null,
   }
 }
 
@@ -356,7 +453,47 @@ function writeTokenscopeConfig(bundle, oauthRefreshToken, oauthClientId, overrid
   return envChange
 }
 
-
+// ── redeem-bundle endpoint validation ─────────────────────────────────────────
+/**
+ * Validate the redeem response's server-supplied endpoint bundle is safe to
+ * persist — called BEFORE writeTokenscopeConfig writes it into config.json.
+ * Mirrors claude-redeem.mjs's assertClaudeRedeemResponse (S1 fix 3 — "S1's fix
+ * said 'both redeem paths'; this is the second one"): a compromised/MITM'd
+ * redeem response could otherwise plant a plaintext or malformed endpoint into
+ * config.json, and every SUBSEQUENT bearer mint (otel-headers-helper.sh, every
+ * ~29 min) or span forward (copilot-forwarder.mjs's httpsPost, every tick) would
+ * then send the durable credential / span data wherever that endpoint points.
+ * Loopback allowed — a locally-running dev server legitimately returns its own
+ * loopback address. Throws a descriptive Error on the first unsafe/missing
+ * field (assertSafeEndpoint's own "endpoint is empty" covers an absent field,
+ * so this doubles as the presence check writeTokenscopeConfig itself does not
+ * do). Exported for unit testing.
+ */
+export function assertSafeRedeemBundle(bundle) {
+  for (const [label, value] of [
+    ['TOKENSCOPE_BEARER_ENDPOINT', bundle?.TOKENSCOPE_BEARER_ENDPOINT],
+    ['TOKENSCOPE_LOGS_ENDPOINT', bundle?.TOKENSCOPE_LOGS_ENDPOINT],
+    ['TOKENSCOPE_OAUTH_TOKEN_ENDPOINT', bundle?.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT],
+  ]) {
+    try {
+      assertSafeEndpoint(value, { allowLoopback: true })
+    } catch (err) {
+      // REASON ONLY, never the value. This bundle is SERVER-supplied and the
+      // whole point of validating it is that we do not trust it; echoing the
+      // rejected value into a log (which the caller prints) would carry
+      // untrusted bytes to a clear-text sink. The field label plus a stable
+      // reason code is enough to diagnose.
+      //
+      // This previously attached `{ cause: err }` on the belief that a cause is
+      // kept "for a debugger without printing it". That belief was FALSE — Node
+      // prints the cause chain both for console.error(err) and for an uncaught
+      // throw, so the rejected value reached a clear-text sink through a field
+      // this call site never named (CodeQL js/clear-text-logging #7).
+      // unsafeEndpointError() now enforces the redaction structurally.
+      throw unsafeEndpointError(`Redeem bundle's ${label}`, err)
+    }
+  }
+}
 
 // ── main ─────────────────────────────────────────────────────────────────────
 async function main() {
@@ -384,12 +521,42 @@ async function main() {
     process.exit(1)
   }
 
-  // Resolve the full redeem URL
-  const apiBase = args.apiBase ?? process.env.TOKENSCOPE_API_BASE ?? ''
+  // Resolve the full redeem URL. S2 fix: a naive startsWith('http') guard accepts
+  // http:// as readily as https:// — replaced with assertSafeEndpoint so a
+  // misconfigured (or MITM'd) --api-base/TOKENSCOPE_API_BASE is refused with a
+  // clear message here, rather than relying solely on httpsPost's own downstream
+  // check. allowLoopback:true — local dev legitimately targets :3450.
+  // `??` alone is wrong here: it only skips null/undefined, so an EMPTY
+  // TOKENSCOPE_API_BASE='' (a very common shape — an unset var exported by a
+  // wrapper script, or a blanked-out shell rc line) is treated as an
+  // authoritative answer and suppresses the .mcp.json fallback entirely, putting
+  // the fresh-device path straight back into the "Cannot resolve a safe redeem
+  // URL" failure it exists to prevent. Normalise blanks to null first so each
+  // source is consulted only when it actually carries a value.
+  const nonBlank = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+  //
+  // TOKENSCOPE_API_BASE is deliberately NOT in this chain. It is repo-settable,
+  // and this is the request that carries a live single-use handoff code whose
+  // answer is a durable emit credential; letting a cloned repository name that
+  // destination is the trust-boundary breach the sibling Claude helper closes
+  // the same way. --api-base survives because a human types it, and discovery
+  // reads only files outside the repository, so local dev against :3450 keeps
+  // working through either.
+  const apiBase = nonBlank(args.apiBase) ?? discoverApiBaseFromMcpJson() ?? ''
   const redeemPath = args.redeemUrl ?? '/api/v1/setup/redeem'
   const redeemUrl = redeemPath.startsWith('http') ? redeemPath : `${apiBase}${redeemPath}`
-  if (!redeemUrl.startsWith('http')) {
-    console.error('[tokenscope] Cannot resolve redeem URL — pass --api-base or TOKENSCOPE_API_BASE')
+  try {
+    assertSafeEndpoint(redeemUrl, { allowLoopback: true })
+  } catch (err) {
+    // Route through unsafeEndpointError for the SAME reason the bundle-field
+    // sites do: assertSafeEndpoint's own message embeds the rejected value, and
+    // this one is resolved partly from .mcp.json, so interpolating err.message
+    // here prints an untrusted endpoint to stderr. The reason code is all a user
+    // needs to fix their --api-base.
+    const safe = unsafeEndpointError('Resolved redeem URL', err)
+    console.error(
+      `[tokenscope] Cannot resolve a safe redeem URL — pass --api-base (${safe.reason})`,
+    )
     process.exit(1)
   }
 
@@ -405,8 +572,17 @@ async function main() {
   // Validate Copilot bundle — do NOT log the raw response (it contains oauth_refresh_token).
   const bundle = resp.telemetry?.copilot
   if (!bundle || !bundle.instance_id || !bundle.TOKENSCOPE_BEARER_ENDPOINT) {
-    console.error('[tokenscope] Redeem did not return a Copilot bundle — was provision_emit called with tool=copilot-cli?')
-    console.error('[tokenscope] Validation: bundle=' + (!!bundle) + ' instance_id=' + (!!bundle?.instance_id) + ' bearer_endpoint=' + (!!bundle?.TOKENSCOPE_BEARER_ENDPOINT))
+    console.error(
+      '[tokenscope] Redeem did not return a Copilot bundle — was provision_emit called with tool=copilot-cli?',
+    )
+    console.error(
+      '[tokenscope] Validation: bundle=' +
+        !!bundle +
+        ' instance_id=' +
+        !!bundle?.instance_id +
+        ' bearer_endpoint=' +
+        !!bundle?.TOKENSCOPE_BEARER_ENDPOINT,
+    )
     process.exit(1)
   }
   // M3 fix: validate top-level OAuth fields before writing config.json.
@@ -414,11 +590,23 @@ async function main() {
   // writing config.json without oauth_refresh_token would silently re-introduce the
   // B1 defect (mintBearer passes undefined to otel-headers-helper.sh → exits 1).
   if (!resp.oauth_refresh_token || typeof resp.oauth_refresh_token !== 'string') {
-    console.error('[tokenscope] Redeem response missing oauth_refresh_token — server may be out of date')
+    console.error(
+      '[tokenscope] Redeem response missing oauth_refresh_token — server may be out of date',
+    )
     process.exit(1)
   }
   if (!resp.oauth_client_id || typeof resp.oauth_client_id !== 'string') {
-    console.error('[tokenscope] Redeem response missing oauth_client_id — server may be out of date')
+    console.error(
+      '[tokenscope] Redeem response missing oauth_client_id — server may be out of date',
+    )
+    process.exit(1)
+  }
+  // S2 fix — validate the server-supplied endpoint bundle BEFORE persisting it
+  // (see assertSafeRedeemBundle above). Must run before writeTokenscopeConfig.
+  try {
+    assertSafeRedeemBundle(bundle)
+  } catch (err) {
+    console.error(`[tokenscope] ${err.message}`)
     process.exit(1)
   }
 
@@ -430,7 +618,9 @@ async function main() {
   if (envChange?.changed) {
     const from = envChange.oldLabel ?? 'previous'
     const to = envChange.newLabel ?? 'new'
-    console.log(`[tokenscope] Environment changed: ${from} → ${to} — wrote a fresh config for the new environment (old credentials and endpoints dropped).`)
+    console.log(
+      `[tokenscope] Environment changed: ${from} → ${to} — wrote a fresh config for the new environment (old credentials and endpoints dropped).`,
+    )
   }
   console.log(`[tokenscope] Wrote credentials to ${TOKENSCOPE_DIR}`)
 

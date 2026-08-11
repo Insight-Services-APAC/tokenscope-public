@@ -51,6 +51,26 @@ async function runMigrations(client: ReturnType<typeof postgres>): Promise<void>
   }
 }
 
+/*
+ * PRODUCTION'S CONNECTION CONFIG, and the suite now runs it.
+ *
+ * `server/db/index.ts` pins `connection: { TimeZone: 'UTC' }` on the pool that
+ * serves every request and every in-process worker. That single line is what
+ * holds ~23 bare `timestamptz::date` day-bucket casts correct
+ * (`clock-rot-audit.md` §A) — they are LATENT, not broken, and the fix is this
+ * pin plus a test, not 23 query rewrites.
+ *
+ * These helpers omitted it, so 237 integration tests ran a connection
+ * configuration production does not use. Two consequences, both bad: the suite
+ * could not catch a session-TZ bug, and DELETING THE PRODUCTION PIN TURNED ZERO
+ * TESTS RED. `tests/integration/db/utc-pin.test.ts` closes the second half;
+ * this closes the first.
+ *
+ * `postgres.js` sends `connection:` keys as wire-protocol STARTUP PARAMETERS, so
+ * this applies to every physical connection the pool opens, reconnects included.
+ */
+const PROD_CONNECTION = { TimeZone: 'UTC' } as const
+
 export async function startTestDb(): Promise<TestDb> {
   const external = process.env.TEST_PG_URL
   if (external) {
@@ -75,7 +95,7 @@ export async function startTestDb(): Promise<TestDb> {
     }
     u.pathname = `/${dbName}`
     const url = u.toString()
-    const client = postgres(url, { max: 4, idle_timeout: 5 })
+    const client = postgres(url, { max: 4, idle_timeout: 5, connection: PROD_CONNECTION })
     const db = drizzle(client, { schema })
     await runMigrations(client)
     return {
@@ -97,6 +117,15 @@ export async function startTestDb(): Promise<TestDb> {
   // Disable Ryuk — rootless podman in the cw worker can't bind-mount the
   // docker socket into Ryuk's container (statfs perm denied). Our afterAll
   // hooks own teardown explicitly, so the reaper isn't load-bearing here.
+  // RYUK IS DISABLED — and that makes container cleanup entirely dependent on
+  // stopTestDb() running in afterAll. Ryuk is testcontainers' reaper sidecar; it
+  // needs to bind-mount the container runtime socket, which does not work in this
+  // rootless-podman setup. The consequence to know about: if a test process is
+  // KILLED (SIGKILL, a killed CI step, `pkill -f vitest`), afterAll never runs and
+  // the postgres container LEAKS. One interrupted mutation-sweep left 100 orphans
+  // saturating the host's podman healthchecks. Reap with:
+  //     npm run test:reap
+  // (tools/mutation-sweep.mjs reaps automatically between mutations.)
   if (!process.env.TESTCONTAINERS_RYUK_DISABLED) {
     process.env.TESTCONTAINERS_RYUK_DISABLED = 'true'
   }
@@ -113,6 +142,39 @@ export async function startTestDb(): Promise<TestDb> {
     .withDatabase('tokenscope_test')
     .withUsername('tokenscope')
     .withPassword('tokenscope')
+    /*
+     * AUTO-REMOVE IS THE ONLY CLEANUP THAT SURVIVES SIGKILL.
+     *
+     * Ryuk is disabled above (rootless podman cannot bind-mount the socket into
+     * it), so cleanup otherwise depends entirely on stopTestDb() in afterAll —
+     * and afterAll does not run when the process is SIGKILLed. That is not a
+     * hypothetical: on 2026-08-02 five parallel agents ran full suites, the host
+     * ran out of memory, the OOM killer SIGKILLed vitest, and 17 postgres
+     * containers leaked (three of them Exited(137) — killed mid-run). The leak
+     * then held the memory that caused the next kill, and the host's window
+     * manager went down with it.
+     *
+     * withAutoRemove puts removal in the DAEMON's hands: the container is torn
+     * down when it exits, whatever happened to the process that started it. Our
+     * explicit teardown still runs on the happy path and still drops the DB.
+     */
+    .withAutoRemove(true)
+
+  // OWNERSHIP LABEL. With Ryuk disabled (above), orphan cleanup is manual — and a
+  // cleaner that reaps by the generic org.testcontainers label cannot tell OUR
+  // container from one another CW on this shared host started a second ago. Stamp
+  // the owning session so a reaper can scope precisely to what it created.
+  // tools/mutation-sweep.mjs sets TOKENSCOPE_TEST_SESSION and reaps only that value.
+  // ALWAYS label, not only when a sweep set the env var. The generic
+  // `org.testcontainers=true` label cannot distinguish OUR container from one
+  // another CW started on this shared host a second ago, so a reaper scoped to it
+  // is a cross-project kill. `tokenscope.test=true` is ours and only ours;
+  // `tokenscope.test-session` narrows further to one run.
+  const sessionLabel = process.env.TOKENSCOPE_TEST_SESSION ?? `pid-${process.pid}`
+  builder = builder.withLabels({
+    'tokenscope.test': 'true',
+    'tokenscope.test-session': sessionLabel,
+  })
 
   if (usingCw) {
     builder = builder
@@ -129,7 +191,7 @@ export async function startTestDb(): Promise<TestDb> {
   } else {
     url = container.getConnectionUri()
   }
-  const client = postgres(url, { max: 4, idle_timeout: 5 })
+  const client = postgres(url, { max: 4, idle_timeout: 5, connection: PROD_CONNECTION })
   const db = drizzle(client, { schema })
 
   await runMigrations(client)

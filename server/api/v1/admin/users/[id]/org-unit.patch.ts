@@ -10,20 +10,21 @@
  * endpoint must NOT bump revoked_at: the teammate's live sessions stay
  * valid.
  *
- * Admin / global-finops only. A region admin is bound to the teammate's
- * own region (load the teammate first, then requireRegionScope to it).
- * The target org_unit must be ACTIVE (retired_at IS NULL) and in the
- * teammate's region — 422 otherwise.
+ * Admin / global-finops only. Everything below the request parsing —
+ * the region-scope check, the target-unit containment, the provenance
+ * strip and the audit row — is server/db/place-teammate.ts, SHARED with
+ * POST /admin/users/bulk-place so the two surfaces cannot drift on who
+ * may move whom. This one keeps the 'any-active-unit' target policy: it
+ * is a general per-row move, not the "get spend to a cost centre" bulk
+ * action, and moving someone onto a plain team node is legitimate here.
  */
 import { defineEventHandler, createError, getRouterParam, getRequestIP, getHeader } from 'h3'
 import { readValidated } from '../../../../../utils/validated-body'
-import { sql } from 'drizzle-orm'
 import { z } from 'zod'
-import { requireRole, requireRegionScope } from '../../../../../auth/rbac'
+import { requireRole } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
-import { recordAuditEvent } from '../../../../../db/audit'
-import { assertOrgUnitInRegion } from '../../../../../db/org-units'
+import { placeTeammate } from '../../../../../db/place-teammate'
 
 const Body = z.object({
   org_unit_id: z.string().uuid(),
@@ -41,62 +42,17 @@ export default defineEventHandler(async (event) => {
   const ua = getHeader(event, 'user-agent') ?? null
 
   return await withRequestRls(event, async (tx) => {
-    const targetRows = await tx.execute<{
-      id: string
-      region_id: string
-      org_unit_id: string
-      email: string
-    }>(sql`
-      SELECT id::text AS id, region_id::text AS region_id, org_unit_id::text AS org_unit_id, email
-      FROM teammate WHERE id = ${teammateId}::uuid LIMIT 1
-    `)
-    const target = [...targetRows][0]
-    if (!target) throw createError({ statusCode: 404, statusMessage: 'Teammate not found' })
-
-    // Region admin is bound to the teammate's region.
-    await requireRegionScope(event, target.region_id)
-
-    // Target unit must be active and in the teammate's region.
-    await assertOrgUnitInRegion(tx, {
+    const placed = await placeTeammate(event, tx, {
+      teammateId,
       orgUnitId: body.org_unit_id,
-      regionId: target.region_id,
-      mustBeActive: true,
-      statusMessage: 'org_unit is not an active unit in the teammate region',
-      data: {
-        type: 'https://tokenscope.example.com/errors/unprocessable',
-        title: 'Unprocessable',
-        status: 422,
-        detail: 'org_unit_id must reference an active org unit in the teammate\'s region.',
-      },
-    })
-
-    await recordAuditEvent(tx, {
-      eventType: 'teammate-org-unit-changed',
-      actorTeammateId: caller.teammateId,
-      actorSystem: 'admin-ui',
-      subjectKind: 'teammate',
-      subjectId: target.id,
-      payload: {
-        targetEmail: target.email,
-        region_id: target.region_id,
-        previousOrgUnitId: target.org_unit_id,
-        newOrgUnitId: body.org_unit_id,
-        sessionsRevoked: false,
-      },
+      targetPolicy: 'any-active-unit',
+      caller: { teammateId: caller.teammateId },
       ipAddress: ip,
       userAgent: ua,
     })
-
-    // Intra-region move: change org_unit_id only. Do NOT touch revoked_at. Clear the
-    // manager-chain placement provenance — an admin move overrides the derivation, so
-    // region-reenrichment must not re-derive this teammate back to the chain's unit.
-    await tx.execute(sql`
-      UPDATE teammate
-      SET org_unit_id = ${body.org_unit_id}::uuid,
-          metadata = (coalesce(metadata, '{}'::jsonb) - 'placedVia' - 'placedOwnerOid' - 'placedAt')
-      WHERE id = ${target.id}::uuid
-    `)
-
-    return { id: target.id, org_unit_id: body.org_unit_id }
+    // `outcome` is additive and rides the same shared rule as the bulk door:
+    // 'noop' means they were already in that unit, so nothing was written and
+    // (crucially) the manager-chain provenance was NOT stripped.
+    return { id: placed.id, org_unit_id: placed.orgUnitId, outcome: placed.outcome }
   })
 })

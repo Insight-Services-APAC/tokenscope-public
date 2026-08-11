@@ -5,7 +5,38 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    # S12: let a freshly-published release age 7 days before dependabot
+    # proposes it — cheap hardening against a compromised-maintainer publish
+    # landing here on day zero, before the wider ecosystem has had a chance
+    # to notice and yank it. Not a substitute for review; just a delay.
+    cooldown:
+      default-days: 7
+    # NOTE — reviewing an @types/node MAJOR bump.
+    #
+    # @types/node's major tracks the Node.js runtime major, not "latest npm",
+    # and dependabot cannot see the Dockerfile. The rule is NOT "always take
+    # the newest": @types/node must match the major we actually build and run
+    # on (Dockerfile `FROM node:<major>-slim` + `node-version` in ci.yml).
+    # That coupling is what makes `npm run typecheck` a real guard on which
+    # Node APIs exist in production — a mismatched major declares members the
+    # runtime does not have and drops ones it does.
+    #
+    # So: accept an @types/node major ONLY as part of a runtime move, and move
+    # the runtime only to a line that Node CURRENTLY lists as Active or
+    # Maintenance LTS — never one still labelled Current. Look the status up at
+    # review time (https://nodejs.org/en/about/previous-releases, or the raw
+    # https://github.com/nodejs/Release/blob/main/schedule.json); do not trust
+    # a date remembered from a comment, this one included. If the proposed
+    # major is ahead of the Dockerfile, close the PR.
+    #
+    # There is deliberately no `ignore:` entry here. An ignore also suppresses
+    # the major we DO want when the runtime moves (it blocked 22 -> 24), and a
+    # silently-suppressed bump is worse than one that has to be declined.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    # S12: same reasoning as the npm block above — 7-day cooldown before a
+    # freshly-published action release is proposed. No `ignore:` here either.
+    cooldown:
+      default-days: 7

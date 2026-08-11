@@ -46,13 +46,17 @@ beforeAll(async () => {
   regionA = await mkRegion('mga', 'Mgr Region A')
   regionB = await mkRegion('mgb', 'Mgr Region B')
 
-  const mkUnit = async (region: string, path: string, code: string) => {
-    await t.client`INSERT INTO org_unit (region_id, path, code, display_name, unit_type, is_cost_owning_unit)
-      VALUES (${region}::uuid, ${path}::ltree, ${code}, ${code}, 'bu', true)`
+  const mkUnit = async (region: string, path: string, code: string, parent: string | null = null) => {
+    await t.client`INSERT INTO org_unit (region_id, parent_id, path, code, display_name, unit_type, is_cost_owning_unit)
+      VALUES (${region}::uuid, ${parent}::uuid, ${path}::ltree, ${code}, ${code}, 'bu', true)`
     const [r] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM org_unit WHERE region_id=${region}::uuid AND code=${code}`
     return r!.id
   }
-  const aBu = await mkUnit(regionA, 'a.bu', 'a-bu')
+  // S3 part (a): 'a' is a genuine parent of 'a.bu' — used below as a MANAGER's own
+  // placement, which now must pass placedBelowRegionRootPredicate() (parent_id IS
+  // NOT NULL) or the manager gets a false "zero" subtree.
+  const aRoot = await mkUnit(regionA, 'a', 'default')
+  const aBu = await mkUnit(regionA, 'a.bu', 'a-bu', aRoot)
   const bBu = await mkUnit(regionB, 'b.bu', 'b-bu')
 
   const mkTeammate = async (region: string, unit: string, email: string) => {

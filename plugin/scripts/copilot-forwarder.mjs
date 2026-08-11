@@ -63,6 +63,8 @@ import {
   encodeExportLogsServiceRequest,
 } from './otlp-logs.mjs'
 import { resolveRepoProjectCode, computeCodeHash } from './tokenscope-project.mjs'
+import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
+import { detectManagedTelemetry } from './managed-telemetry.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -87,7 +89,8 @@ function projectLocalDir(cwd = process.cwd()) {
 // PID lock + offset live in the PROJECT-local dir (per-project singleton + offset).
 // The TOKENSCOPE_FWD_PID_FILE / TOKENSCOPE_FWD_OFFSET_FILE env vars override the paths
 // (used by unit tests for isolation); otherwise they resolve under <cwd>/.tokenscope.local.
-const PID_FILE = process.env.TOKENSCOPE_FWD_PID_FILE ?? join(projectLocalDir(), 'copilot-forwarder.pid')
+const PID_FILE =
+  process.env.TOKENSCOPE_FWD_PID_FILE ?? join(projectLocalDir(), 'copilot-forwarder.pid')
 /**
  * Persisted byte-offset, stored as JSON {offset, ino} where ino is the inode
  * of the span file at the time the offset was last written (L2).
@@ -95,7 +98,8 @@ const PID_FILE = process.env.TOKENSCOPE_FWD_PID_FILE ?? join(projectLocalDir(), 
  * has shrunk, the stored offset is stale — discard it and start from 0.
  * TOKENSCOPE_FWD_OFFSET_FILE env var overrides the path (used by unit tests).
  */
-const OFFSET_FILE = process.env.TOKENSCOPE_FWD_OFFSET_FILE ?? join(projectLocalDir(), 'forwarder-offset')
+const OFFSET_FILE =
+  process.env.TOKENSCOPE_FWD_OFFSET_FILE ?? join(projectLocalDir(), 'forwarder-offset')
 /**
  * Clamp a raw TOKENSCOPE_FORWARD_INTERVAL_MS value to a sane interval. A garbage
  * value (Number(bad) → NaN) would otherwise degrade setInterval to 1ms hot-loop
@@ -145,22 +149,60 @@ function mintBearer(force = false) {
     TOKENSCOPE_OAUTH_REFRESH_TOKEN: cfg.oauth_refresh_token,
     TOKENSCOPE_STATE_DIR: TOKENSCOPE_DIR,
   }
-  const out = execFileSync('sh', [helperPath], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'inherit'] })
+  const out = execFileSync('sh', [helperPath], {
+    encoding: 'utf8',
+    env,
+    stdio: ['ignore', 'pipe', 'inherit'],
+  })
   cachedBearer = JSON.parse(out).Authorization
   return cachedBearer
 }
 
 // ── HTTP forward ───────────────────────────────────────────────────────────────
+/**
+ * POST the protobuf batch to `urlStr`. The URL is validated via assertSafeEndpoint
+ * (S2 — closes the Copilot leg of client-plugins:mitm:0003) BEFORE any request is
+ * built: this used to pick `http` for ANY non-https URL with no complaint (the
+ * "plain-http fallback"), which would silently downgrade a poisoned logs_endpoint
+ * (or a MITM'd config.json) into plaintext instead of refusing it — leaking the
+ * batch (and, on retry, the Azure bearer) off-box unencrypted. allowLoopback:true
+ * mirrors every other TokenScope-own-endpoint call site in this plugin
+ * (plugin-runtime.mjs's httpsPostJson, otlp-forwarder.mjs's readDceEndpoint) — a
+ * locally-running dev collector legitimately answers on 127.0.0.1/::1.
+ */
 function httpsPost(urlStr, headers, body) {
   return new Promise((resolve, reject) => {
-    const url = new URL(urlStr)
+    let url
+    try {
+      url = assertSafeEndpoint(urlStr, { allowLoopback: true })
+    } catch (err) {
+      // Redact HERE, at the boundary, not at the caller. assertSafeEndpoint's
+      // message embeds the REJECTED endpoint, and this rejection is printed by
+      // the forwarder's generic retry handler with String(err), so rejecting
+      // the raw guard error puts a server-supplied endpoint on stderr in clear
+      // text (the CodeQL js/clear-text-logging class). Redacting at the throw
+      // site makes the property hold no matter which handler prints it, which
+      // is the same fix copilot-redeem.mjs's httpsPost already carries.
+      reject(unsafeEndpointError('OTLP endpoint', err))
+      return
+    }
     const mod = url.protocol === 'https:' ? https : http
-    const h = { ...headers, 'content-type': 'application/x-protobuf', 'content-length': body.length }
+    const h = {
+      ...headers,
+      'content-type': 'application/x-protobuf',
+      'content-length': body.length,
+    }
     const req = mod.request(
-      { method: 'POST', hostname: url.hostname, port: url.port || undefined, path: url.pathname + url.search, headers: h },
+      {
+        method: 'POST',
+        hostname: url.hostname,
+        port: url.port || undefined,
+        path: url.pathname + url.search,
+        headers: h,
+      },
       (res) => {
         let b = ''
-        res.on('data', (c) => b += c)
+        res.on('data', (c) => (b += c))
         res.on('end', () => resolve({ status: res.statusCode, body: b.slice(0, 200) }))
       },
     )
@@ -261,7 +303,7 @@ export function parseGithubOrg(remote) {
     // only if it looks like one (has a dot, or is localhost); otherwise it IS the org,
     // so a bare "org/repo" is not mistaken for host/path.
     const head = s.slice(0, slash)
-    path = (/\./.test(head) || head === 'localhost') ? s.slice(slash + 1) : s
+    path = /\./.test(head) || head === 'localhost' ? s.slice(slash + 1) : s
   } else {
     return null
   }
@@ -273,7 +315,11 @@ export function parseGithubOrg(remote) {
 
 /** True if `cwd` is a git work tree root (a `.git` entry — dir or worktree file). */
 function isGitRepo(cwd = process.cwd()) {
-  try { return fs.existsSync(join(cwd, '.git')) } catch { return false }
+  try {
+    return fs.existsSync(join(cwd, '.git'))
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -404,12 +450,18 @@ export function loadPersistedOffset(filePath) {
   try {
     const stored = JSON.parse(fs.readFileSync(OFFSET_FILE, 'utf8'))
     let currentIno = null
-    try { currentIno = fs.statSync(filePath).ino } catch { return }
+    try {
+      currentIno = fs.statSync(filePath).ino
+    } catch {
+      return
+    }
     if (stored.ino === currentIno && Number.isFinite(stored.offset) && stored.offset >= 0) {
       offset = stored.offset
     }
     // If inode differs: span file was recreated — offset stays 0.
-  } catch { /* first run or absent — offset stays 0 */ }
+  } catch {
+    /* first run or absent — offset stays 0 */
+  }
 }
 
 /**
@@ -419,9 +471,15 @@ export function loadPersistedOffset(filePath) {
 export function persistOffset(filePath) {
   try {
     let ino = 0
-    try { ino = fs.statSync(filePath).ino } catch { /* best effort */ }
+    try {
+      ino = fs.statSync(filePath).ino
+    } catch {
+      /* best effort */
+    }
     fs.writeFileSync(OFFSET_FILE, JSON.stringify({ offset, ino }), { encoding: 'utf8' })
-  } catch { /* best effort */ }
+  } catch {
+    /* best effort */
+  }
 }
 
 /** Reset module-level state — only called by unit tests. */
@@ -436,13 +494,98 @@ export function _getLastBatchRepo() {
   return lastBatchRepo
 }
 
+// ── span-file provenance (S2 — closes client-plugins:idor:0002) ───────────────
+// Root cause: the forwarder tails <repo>/.tokenscope.local/copilot-otel.jsonl with
+// no provenance check. On the FIRST run in a fresh clone the offset starts at 0
+// (loadPersistedOffset finds no stash), so a file COMMITTED INTO THE REPOSITORY —
+// planted by a hostile contributor, surviving a stale/missing .gitignore, or
+// simply present before ensureGitignored's self-heal ever ran — is read from byte
+// 0 and POSTed to the ingest endpoint under the DEVELOPER'S OWN emit bearer. This
+// extends the distrust decision 3.8 already applies to span DATA (otlp-logs.mjs
+// refuses instance_id from a span) to the FILE ITSELF: a span file this process
+// does not own, or that git tracks, is refused outright — never partially trusted.
+//
+// Cost-ordered per the story (cheapest check first, short-circuits the rest):
+//   (1) uid — the file's owner must match this process's uid (statSync is free;
+//       already paid for by the shrink/size check below).
+//   (2) git-tracked — `git ls-files --error-unmatch` (one subprocess) kills the
+//       committed-file vector directly: ensureGitignored keeps a HEALTHY project's
+//       .tokenscope.local/ out of git, so a tracked span file means either a repo
+//       that predates/bypasses that self-heal or an actively hostile commit.
+//   (3) a per-spawn byte-offset baseline (inode+size+ctime at daemon start,
+//       forward only bytes appended after it) is DELIBERATELY NOT shipped this
+//       sprint. Copilot's own exporter writes on its own schedule — a baseline
+//       enforced from day one risks dropping genuine spend written between
+//       process start and the first tick. Ship (1)+(2) now; measure real-world
+//       write timing before enforcing (3) (tracked follow-up, not a v1 behaviour).
+//
+// Both checks run on EVERY read (not just at daemon spawn): cheap (one stat + one
+// short-lived git subprocess, no worse than resolveGithubOrg's existing per-batch
+// git call below) and it catches a file that becomes untrustworthy MID-SESSION
+// (e.g. `git add .tokenscope.local` run after the daemon already started tailing
+// a legitimate file) — not only the first-run case. A refusal returns [] WITHOUT
+// touching offset/buf/the persisted offset, so the file is simply never read —
+// fail closed — for as long as it stays untrustworthy; if it later becomes safe
+// (uid fixed, `git rm --cached` run) reading resumes from the same position.
+
+/**
+ * True if `st` (a fs.Stat for the span file) is NOT owned by this process's uid.
+ * Fails OPEN on platforms/environments where the check is meaningless (no
+ * process.getuid — Windows) rather than refusing every read there; fails CLOSED
+ * (refuses) only on a confident, confirmed mismatch. Exported for unit testing.
+ */
+export function isForeignOwned(st) {
+  if (typeof process.getuid !== 'function') return false
+  return typeof st?.uid === 'number' && st.uid !== process.getuid()
+}
+
+/**
+ * True if `filePath` is tracked by git (staged or committed) in its containing
+ * repo — the committed-file vector this guard exists to kill. `git ls-files
+ * --error-unmatch` exits 0 iff the path is tracked; anything else (not a repo, git
+ * absent, untracked, any spawn failure) is treated as "not tracked" — this check
+ * NEVER throws, so a missing git binary degrades to "no extra protection", not a
+ * crashed forwarder. Exported for unit testing.
+ */
+export function isGitTracked(filePath) {
+  try {
+    execFileSync('git', ['ls-files', '--error-unmatch', filePath], {
+      cwd: dirname(filePath),
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * Read new lines from the file since last offset. Returns chat spans found.
  * NEVER truncates the file (Copilot holds the handle open mid-session).
  */
 export function readNewSpans(filePath) {
   let st
-  try { st = fs.statSync(filePath) } catch { return [] }
+  try {
+    st = fs.statSync(filePath)
+  } catch {
+    return []
+  }
+
+  // Provenance guard — see the block comment above. A refusal is silent-to-the-
+  // batch (empty array) but loud on stderr so a genuinely misplaced/hostile file
+  // is debuggable rather than a mysterious "nothing forwards".
+  if (isForeignOwned(st)) {
+    console.error(
+      `[tokenscope-fwd] refusing ${filePath}: not owned by this process's uid (provenance guard)`,
+    )
+    return []
+  }
+  if (isGitTracked(filePath)) {
+    console.error(
+      `[tokenscope-fwd] refusing ${filePath}: file is tracked by git — a committed span file is never forwarded (provenance guard)`,
+    )
+    return []
+  }
 
   // L2: detect file shrink (truncation by external tool) or recreation (different
   // inode, already handled in loadPersistedOffset). If the file is smaller than
@@ -479,7 +622,11 @@ export function readNewSpans(filePath) {
   for (const line of lines) {
     if (!line.trim()) continue
     let obj
-    try { obj = JSON.parse(line) } catch { continue }
+    try {
+      obj = JSON.parse(line)
+    } catch {
+      continue
+    }
     if (obj.type !== 'span') continue
     const r = repoFromSpan(obj)
     if (r) batchRepo = r
@@ -509,7 +656,9 @@ export function readPidRecord() {
   try {
     const rec = JSON.parse(fs.readFileSync(PID_FILE, 'utf8'))
     if (rec && typeof rec === 'object' && Number.isFinite(rec.heartbeatAt)) return rec
-  } catch { /* missing / corrupt / legacy plain-pid format */ }
+  } catch {
+    /* missing / corrupt / legacy plain-pid format */
+  }
   return null
 }
 
@@ -533,7 +682,9 @@ export function writeHeartbeat(startedAt) {
       JSON.stringify({ pid: process.pid, startedAt, heartbeatAt: Date.now() }),
       { encoding: 'utf8' },
     )
-  } catch { /* best effort */ }
+  } catch {
+    /* best effort */
+  }
 }
 
 /**
@@ -569,49 +720,77 @@ export function claimSingleton() {
 }
 
 function removePidFile() {
-  try { fs.unlinkSync(PID_FILE) } catch { /* best effort */ }
+  try {
+    fs.unlinkSync(PID_FILE)
+  } catch {
+    /* best effort */
+  }
 }
 
 // ── .gitignore self-heal (per-project telemetry must never be committed) ───────
 /**
- * Idempotently ensure `<cwd>/.gitignore` ignores `.tokenscope.local/`. Per-project
- * telemetry (span file, offset, lock) lives in `<project-root>/.tokenscope.local/`, so
- * without this it would land in `git status` and risk being committed. Appends the
- * entry only when missing (matched flexibly: a `.tokenscope.local` line with optional
- * leading `/` and trailing `/`). Best-effort: a missing/unwritable .gitignore or a
- * non-git dir is a no-op, never an error (the forwarder must not fail over this).
+ * Idempotently ensure `<cwd>/.gitignore` contains `entry`. Appends it only when
+ * missing (matched flexibly: with an optional leading `/`, and — for a DIRECTORY
+ * entry ending in `/` — also matched against the bare name without the trailing
+ * slash, the common alternate .gitignore spelling). Best-effort: a
+ * missing/unwritable .gitignore or a non-git dir is a no-op, never an error (a
+ * caller must not fail its primary write over .gitignore hygiene).
+ *
+ * PARAMETERISED (S2 — carried over from S1's fix 4): this used to be hardcoded to
+ * ONE entry (`.tokenscope.local/`, the per-project telemetry dir). S1 needed the
+ * same idempotent-append shape for a DIFFERENT entry (`.claude/settings.local.json`,
+ * the credential-bearing repo tag) but couldn't import this file (outside that
+ * story's ownership boundary), so it wrote a same-shaped independent copy
+ * (`tag-repo.mjs`'s `ensureRepoTagGitignored`) and documented the follow-up. This
+ * IS that follow-up: the entry + comment are now parameters (defaulting to the
+ * original telemetry-dir values, so the call below is unchanged) so a caller that
+ * CAN reach this module has exactly one implementation to call, not a reason to
+ * write a second one. (tag-repo.mjs's own call site is outside this story's
+ * ownership boundary too — the reciprocal case — so switching it over is a
+ * follow-up for whoever owns that file next; flagged in this story's report.)
  *
  * @param {string} [cwd] — the project root (defaults to process.cwd()).
+ * @param {{ entry?: string, comment?: string }} [opts]
+ *   @param {string} [opts.entry] — the .gitignore line to ensure. Defaults to the
+ *     per-project telemetry dir (`.tokenscope.local/`).
+ *   @param {string} [opts.comment] — the explanatory comment line written above a
+ *     NEWLY-appended entry (never itself checked for presence).
  * @returns {boolean} true if it appended (or would have), false if already present/skipped.
  */
-export function ensureGitignored(cwd = process.cwd()) {
+export function ensureGitignored(
+  cwd = process.cwd(),
+  {
+    entry = `${PROJECT_LOCAL_DIRNAME}/`,
+    comment = '# TokenScope per-project telemetry (do not commit)',
+  } = {},
+) {
   // Only touch a real git work tree — never create a .gitignore in a non-git dir
   // (e.g. $HOME), which would be surprising noise in the user's filesystem.
   if (!isGitRepo(cwd)) return false
-  const entry = `${PROJECT_LOCAL_DIRNAME}/`
+  // A directory entry (trailing '/') is also matched WITHOUT the slash — the
+  // common alternate .gitignore spelling. A file entry (e.g.
+  // `.claude/settings.local.json`) has no such alternate form.
+  const bare = entry.endsWith('/') ? entry.slice(0, -1) : null
   const gitignorePath = join(cwd, '.gitignore')
   try {
     let content = ''
-    try { content = fs.readFileSync(gitignorePath, 'utf8') } catch { /* absent → create */ }
-    // Already ignored? Match any line that is exactly `.tokenscope.local` with an
-    // optional leading slash and/or trailing slash (the common .gitignore forms).
+    try {
+      content = fs.readFileSync(gitignorePath, 'utf8')
+    } catch {
+      /* absent → create */
+    }
+    // Already ignored? Match any line that is exactly `entry`, with an optional
+    // leading slash, and (for a directory entry) the bare form too.
     const already = content.split(/\r?\n/).some((line) => {
       const t = line.trim().replace(/#.*$/, '').trim()
-      return t === PROJECT_LOCAL_DIRNAME ||
-             t === entry ||
-             t === `/${PROJECT_LOCAL_DIRNAME}` ||
-             t === `/${entry}`
+      return t === entry || t === `/${entry}` || (bare !== null && (t === bare || t === `/${bare}`))
     })
     if (already) return false
-    const prefix = content === '' ? '' : (content.endsWith('\n') ? '' : '\n')
-    fs.appendFileSync(
-      gitignorePath,
-      `${prefix}# TokenScope per-project telemetry (do not commit)\n${entry}\n`,
-      { encoding: 'utf8' },
-    )
+    const prefix = content === '' ? '' : content.endsWith('\n') ? '' : '\n'
+    fs.appendFileSync(gitignorePath, `${prefix}${comment}\n${entry}\n`, { encoding: 'utf8' })
     return true
   } catch {
-    return false // best-effort: never fail the forwarder over .gitignore hygiene
+    return false // best-effort: never fail the caller over .gitignore hygiene
   }
 }
 
@@ -701,7 +880,9 @@ async function main() {
   // on every pre-provision session. Guard once here at main() entry so it covers
   // BOTH start and stop, not only the stop path that exhibited the failure.
   if (!fs.existsSync(CONFIG_PATH)) {
-    console.error(`[tokenscope-fwd] not provisioned (${CONFIG_PATH} absent) — run the tokenscope-setup skill to enable forwarding; skipping.`)
+    console.error(
+      `[tokenscope-fwd] not provisioned (${CONFIG_PATH} absent) — run the tokenscope-setup skill to enable forwarding; skipping.`,
+    )
     process.exit(0)
   }
 
@@ -732,7 +913,7 @@ async function main() {
   if (process.cwd() === homedir() || !isGitRepo(process.cwd())) {
     console.error(
       `[tokenscope-fwd] WARNING: cwd ${process.cwd()} is not a project root (no .git / is $HOME) — ` +
-      'per-project telemetry may land in the wrong directory. Launch copilot from the project root.',
+        'per-project telemetry may land in the wrong directory. Launch copilot from the project root.',
     )
   }
   // Self-heal .gitignore so the project-local telemetry dir is never committed.
@@ -755,10 +936,40 @@ async function main() {
   loadPersistedOffset(filePath)
   const startedAt = claimSingleton()
   process.on('exit', removePidFile)
-  process.on('SIGTERM', () => { removePidFile(); process.exit(0) })
-  process.on('SIGINT',  () => { removePidFile(); process.exit(0) })
+  process.on('SIGTERM', () => {
+    removePidFile()
+    process.exit(0)
+  })
+  process.on('SIGINT', () => {
+    removePidFile()
+    process.exit(0)
+  })
 
-  console.error(`[tokenscope-fwd] started (pid=${process.pid}), tailing ${filePath} every ${FORWARD_INTERVAL_MS}ms`)
+  console.error(
+    `[tokenscope-fwd] started (pid=${process.pid}), tailing ${filePath} every ${FORWARD_INTERVAL_MS}ms`,
+  )
+
+  // Workstream D §10.1 — an enterprise-managed `telemetry` block can silently kill
+  // the file exporter Copilot writes to (this forwarder's ENTIRE input) while the
+  // emit credential still mints a healthy bearer. Check ONCE at start (best-effort,
+  // NEVER blocks/aborts startup — a detection failure must not stop real forwarding)
+  // and log LOUDLY so this is diagnosable from forwarder.log even though nothing else
+  // here would ever explain "zero spans forever" on its own.
+  try {
+    const managed = await detectManagedTelemetry()
+    if (managed.classification === 'hostile') {
+      console.error(
+        `[tokenscope-fwd] WARNING: an enterprise-managed Copilot telemetry setting (source: ${managed.source}) is HOSTILE to the file exporter — Copilot itself may never write to ${filePath} regardless of COPILOT_OTEL_FILE_EXPORTER_PATH. Run the tokenscope-status skill for detail; this is a policy-level block, not a credential problem.`,
+      )
+    } else if (managed.classification === 'unknown') {
+      console.error(
+        `[tokenscope-fwd] managed-telemetry check was inconclusive (source: ${managed.source}) — cannot confirm the file exporter is unblocked. ${managed.serverManagedNote}`,
+      )
+    }
+  } catch (err) {
+    // Best-effort diagnostic only — never let a detector bug break real forwarding.
+    console.error(`[tokenscope-fwd] managed-telemetry check itself failed (non-fatal): ${String(err)}`)
+  }
 
   // Catch-up forward first (may have orphaned spans from a prior killed session).
   await catchUpForward(filePath)
@@ -769,7 +980,12 @@ async function main() {
   // Keep the process alive until a SIGTERM / SIGINT.
   // The timer is unref'd so it won't prevent exit — we keep ourselves alive
   // by a keep-alive interval that IS ref'd.
-  setInterval(() => { /* keepalive */ }, 60 * 60 * 1000)
+  setInterval(
+    () => {
+      /* keepalive */
+    },
+    60 * 60 * 1000,
+  )
 }
 
 // Only run main() when executed directly (not when imported as a module for testing).

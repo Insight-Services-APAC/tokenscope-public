@@ -13,11 +13,23 @@ interface SettingsResp {
   auth: {
     devMode: boolean
     allowPersonaOverride: boolean
-    bootstrapAdminEmail: string
+    // S8: the address itself is no longer served — knowing WHETHER a bootstrap
+    // admin is configured is the operational question; the address is an
+    // account identifier the region-admin tier has no reason to read.
+    bootstrapAdminConfigured: boolean
     deployEnv: string
     demoCapable: boolean
   }
-  build: { commitSha: string | null; imageTag: string | null }
+  build: { commitSha: string | null }
+  sessionStore: {
+    driver: string
+    durable: boolean
+    reachable: boolean
+    error: string | null
+    sessions: number
+    probes: number
+    newestSessionAt: string | null
+  }
   entra: { tenantId: string; clientId: string; redirectUri: string }
   features: Record<string, boolean>
   region: { id: string; code: string; displayName: string } | null
@@ -84,8 +96,10 @@ const flagBadge = (v: boolean) =>
             </dd>
           </div>
           <div class="flex items-center justify-between">
-            <dt class="text-carbon-2">Bootstrap admin email</dt>
-            <dd class="font-mono text-xs text-carbon">{{ data.auth.bootstrapAdminEmail || '—' }}</dd>
+            <dt class="text-carbon-2">Bootstrap admin</dt>
+            <dd class="font-mono text-xs text-carbon" data-testid="admin-settings-bootstrap-admin">
+              {{ data.auth.bootstrapAdminConfigured ? 'configured' : 'not configured' }}
+            </dd>
           </div>
           <div class="flex items-center justify-between">
             <dt class="text-carbon-2">NODE_ENV</dt>
@@ -151,18 +165,66 @@ const flagBadge = (v: boolean) =>
               data-testid="admin-settings-build-commit-sha"
             >{{ data.build.commitSha ?? 'unknown' }}</dd>
           </div>
-          <div>
-            <dt class="text-carbon-2 mb-1">Image tag / revision</dt>
-            <dd
-              class="font-mono text-xs break-all"
-              :class="data.build.imageTag ? 'text-carbon' : 'text-carbon-3 italic'"
-              data-testid="admin-settings-build-image-tag"
-            >{{ data.build.imageTag ?? 'unknown' }}</dd>
-          </div>
         </dl>
         <p class="text-[11px] text-carbon-3 mt-4 leading-relaxed italic">
           Commit SHA is baked into the image at build time and may be overridden at deploy time
           via the GIT_COMMIT_SHA env var. <code class="font-mono">unknown</code> means neither path populated a value.
+        </p>
+      </UiCard>
+
+      <!-- Session store (mig 0097) -->
+      <UiCard
+        :accent="data.sessionStore.durable && data.sessionStore.reachable ? 'harmony' : 'zeal'"
+        data-testid="admin-session-store"
+      >
+        <UiEyebrow>Session store</UiEyebrow>
+        <h2 class="text-lg font-bold text-carbon mt-1 mb-4">Sign-in durability</h2>
+        <dl class="space-y-3 text-sm">
+          <div>
+            <dt class="text-carbon-2 mb-1">Status</dt>
+            <dd
+              class="font-semibold"
+              :class="data.sessionStore.durable && data.sessionStore.reachable ? 'text-rag-green' : 'text-rag-red'"
+              data-testid="admin-session-store-status"
+            >
+              <template v-if="data.sessionStore.durable && data.sessionStore.reachable">
+                Durable — sessions survive deploys and extra replicas
+              </template>
+              <template v-else-if="!data.sessionStore.durable">
+                IN-MEMORY — every deploy signs everyone out, and users loop at /login once a second replica runs
+              </template>
+              <template v-else>
+                Mounted but unreachable — sign-in will error
+              </template>
+            </dd>
+          </div>
+          <div>
+            <dt class="text-carbon-2 mb-1">Driver</dt>
+            <dd class="font-mono text-xs text-carbon" data-testid="admin-session-store-driver">
+              {{ data.sessionStore.driver }}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-carbon-2 mb-1">Live rows</dt>
+            <dd class="text-carbon" data-testid="admin-session-store-rows">
+              {{ data.sessionStore.sessions }} session{{ data.sessionStore.sessions === 1 ? '' : 's' }} ·
+              {{ data.sessionStore.probes }} boot probe{{ data.sessionStore.probes === 1 ? '' : 's' }}
+            </dd>
+          </div>
+          <div v-if="data.sessionStore.error">
+            <dt class="text-carbon-2 mb-1">Error</dt>
+            <dd class="text-xs text-rag-red break-all" data-testid="admin-session-store-error">
+              {{ data.sessionStore.error }}
+            </dd>
+          </div>
+        </dl>
+        <p class="text-[11px] text-carbon-3 mt-4 leading-relaxed italic">
+          Checked live on each load: a write and read-back through whatever driver is actually
+          mounted — which reaches <code class="font-mono">kv_store</code> only when the status above
+          says Durable. That distinction is the point: an in-memory fallback passes the round trip
+          too, which is why it is reported separately rather than as one "healthy". Row counts come
+          from <code class="font-mono">kv_store</code>; one boot probe row appears per replica that
+          started recently, so this also shows how many replicas are serving.
         </p>
       </UiCard>
 

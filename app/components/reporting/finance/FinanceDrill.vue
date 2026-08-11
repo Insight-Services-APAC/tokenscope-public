@@ -18,19 +18,71 @@
 import { computed } from 'vue'
 import UiCard from '../../ui/Card.vue'
 import UiBadge from '../../ui/Badge.vue'
+import type { DriverRow } from '#shared/reports/types'
 import DriversTable, { type AxisOption } from '../DriversTable.vue'
+import {
+  projectDrillTarget,
+  dimFact, teammateDrillTarget,
+  NO_DRILL_GRANTS,
+  type DrillFrame,
+  type DrillGrants,
+  type DrillTarget,
+} from '../drill-contract'
 import FinanceKpiTile from './FinanceKpiTile.vue'
 import { fmtUsd, fmtPct } from '../../../composables/useFormat'
 import { vendorLaneColor, VENDOR_LANE_COLORS } from '../../../composables/useChartScale'
 import { dominantLaneOf, type DominantLane } from './drill-lanes'
+import { BUDGET_LABEL } from '#shared/reports/vocabulary'
 import type { Vendor } from '#shared/usage/vendor'
 import type { FinanceDrill } from '../finance-report-types'
 
-const props = defineProps<{ drill: FinanceDrill }>()
+const props = withDefaults(
+  defineProps<{
+    drill: FinanceDrill
+    /** THE DRILL CONTRACT (D29/D30) — from the container; fail-closed defaults. */
+    drillGrants?: DrillGrants
+    drillWindow?: Omit<DrillFrame, 'src'>
+  }>(),
+  { drillGrants: () => NO_DRILL_GRANTS, drillWindow: () => ({}) },
+)
 
 const emit = defineEmits<{ clearDrill: [] }>()
 
-const PROJECT_AXIS: AxisOption[] = [{ value: 'project', label: 'Project' }]
+/*
+ * THE DRILL CONTRACT (D29, fix 7). The finance pack is whole-company and
+ * region-unbounded by design, so its frame token is `finance` — the grant that
+ * admits this pack IS the frame a drill from it is computed under. The window
+ * carried is the BILLING month the pack is on (useReportState owns it), so the
+ * §A view a reader lands on covers the same period as the invoice they came
+ * from.
+ *
+ * The overage rows are INFORMATIONAL shares of a pooled invoice, never a charge
+ * — drilling one asks "who is this person, in §A terms", which is a different
+ * question and lands on a page that says so.
+ */
+const drillGrants = computed(() => props.drillGrants)
+const drillFrame = computed<DrillFrame>(() => ({ ...props.drillWindow, src: 'finance' }))
+function projectDrillable(row: DriverRow): DrillTarget | null {
+  return projectDrillTarget(drillGrants.value, row.dims?.project_code ?? null, drillFrame.value)
+}
+function teammateDrillable(row: DriverRow): DrillTarget | null {
+  if (row.key.startsWith('__null')) return null
+  return teammateDrillTarget(
+    drillGrants.value,
+    {
+      id: row.key,
+      isActive: dimFact(row.dims, 'teammate_active'),
+      // Server-carried (r4-H2): an unconfirmed shadow identity 403s at the
+      // destination, so its row is a NAME, never a door.
+      isProvisional: dimFact(row.dims, 'teammate_provisional'),
+    },
+    drillFrame.value,
+  )
+}
+
+// The KEY stays `'project'` (the wire, the export column and every saved
+// `?axis=` URL); only the WORD is the product's own — shared/reports/vocabulary.ts.
+const PROJECT_AXIS: AxisOption[] = [{ value: 'project', label: BUDGET_LABEL }]
 const OVERAGE_AXIS: AxisOption[] = [{ value: 'teammate', label: 'Teammate' }]
 
 // ── Dominant-lane badge per teammate row (lane-visuals V3, r1-F7/r2-5) ────────
@@ -128,7 +180,7 @@ function othersTitle(b: DominantLane): string {
     <!-- Anthropic per-teammate charges -->
     <UiCard data-testid="finance-anthropic-charges">
       <div class="text-sm font-semibold text-carbon-1 mb-1">Anthropic — per-teammate charges</div>
-      <div class="text-[11px] text-carbon-3 mb-3">The bill names the person (settling-provisional). Homed to the current cost-owning structure.</div>
+      <div class="text-[11px] text-carbon-3 mb-3">Homed to the current cost-owning structure.</div>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead>
@@ -193,7 +245,11 @@ function othersTitle(b: DominantLane): string {
     <!-- Copilot: per-org pooled lines (chargeback mode) OR pool-utilisation card -->
     <UiCard v-if="drill.copilot.pooledLines" data-testid="finance-copilot-pooled-lines">
       <div class="text-sm font-semibold text-carbon-1 mb-1">Copilot — per-org pooled lines</div>
-      <div class="text-[11px] text-carbon-3 mb-3">Read from the bill (license net + overage net), homed org → CoU. Pooled — never a per-user charge. Unclassified lines are visible but never chargeable.</div>
+      <!-- Both kept facts name money the reader can see in this table and would
+           otherwise misread: the lines are pooled (so no per-user charge exists),
+           and the Unclassified column is shown but never charged. Where the
+           figures are read from went to the comment. -->
+      <div class="text-[11px] text-carbon-3 mb-3">Pooled — never a per-user charge. Unclassified lines are shown but never chargeable.</div>
       <div class="overflow-x-auto">
         <table class="w-full text-sm min-w-[560px]">
           <thead>
@@ -239,7 +295,7 @@ function othersTitle(b: DominantLane): string {
     <UiCard v-else-if="drill.copilot.poolUtilisation" data-testid="finance-copilot-pool-card">
       <div class="text-sm font-semibold text-carbon-1 mb-1">Copilot — pool utilisation</div>
       <div class="text-[11px] text-carbon-3 mb-3" data-testid="finance-copilot-pending-note">
-        pooled — pending correct writer. Chargeback is held back until validated on Dev (Σ=bill); usage vs the pool allowance is shown as an estimate.
+        Chargeback is held back until validated; usage against the pool allowance is an estimate.
       </div>
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <FinanceKpiTile label="Gross usage" :value="fmtUsd(drill.copilot.poolUtilisation.usageGrossUsd)" sub="ai-credit gross (estimate)" />
@@ -275,6 +331,7 @@ function othersTitle(b: DominantLane): string {
         axis="project"
         :axis-options="PROJECT_AXIS"
         denominator-label="Anthropic chargeable"
+        :drillable="projectDrillable"
       />
     </UiCard>
 
@@ -282,10 +339,8 @@ function othersTitle(b: DominantLane): string {
     <UiCard v-if="drill.overageDrivers" data-testid="finance-overage-drivers">
       <div class="text-sm font-semibold text-carbon-1 mb-1">Overage drivers</div>
       <div class="text-[11px] text-carbon-3 mb-3" data-testid="finance-overage-note">
-        Informational — a proportional INDICATIVE share of the paid pooled overage
-        ({{ fmtUsd(drill.overageDrivers.overageNetUsd) }}), by excess above the
-        per-seat share ({{ fmtUsd(drill.overageDrivers.perSeatShareUsd) }}). NEVER a
-        charge — per-user charging is out of scope. Export lets finance distribute manually.
+        Indicative share of the {{ fmtUsd(drill.overageDrivers.overageNetUsd) }} pooled overage —
+        never a charge.
       </div>
       <DriversTable
         :rows="drill.overageDrivers.rows"
@@ -293,6 +348,7 @@ function othersTitle(b: DominantLane): string {
         axis="teammate"
         :axis-options="OVERAGE_AXIS"
         denominator-label="paid overage (informational)"
+        :drillable="teammateDrillable"
       />
     </UiCard>
   </div>

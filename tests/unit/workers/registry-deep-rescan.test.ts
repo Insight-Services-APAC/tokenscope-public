@@ -18,20 +18,32 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 // vi.mock is hoisted above imports, so the mock fns must be created inside
 // vi.hoisted() (which is hoisted with it) — a plain top-level const would be in
 // the temporal dead zone when the factory runs.
-const { runReadJoiner, shouldDeepRescan, selectRecentJoinableSessionIds } = vi.hoisted(() => ({
+const { runReadJoiner, shouldDeepRescan, selectJoinableInstances } = vi.hoisted(() => ({
   runReadJoiner: vi.fn(async () => ({ deepRescan: false })),
   shouldDeepRescan: vi.fn(async () => false),
-  selectRecentJoinableSessionIds: vi.fn(async () => ['inst-1']),
+  selectJoinableInstances: vi.fn(async () => ({ ids: ['inst-1'], capHit: null as number | null })),
 }))
 
+// The factory must export EVERY name registry.ts imports: vitest throws on an
+// unlisted export at USE site, so a missing one hides whichever branch touches
+// it (R2 caught exactly that on the zero-session path).
 vi.mock('../../../server/workers/azure-monitor-reader', () => ({
   runReadJoiner,
   shouldDeepRescan,
-  selectRecentJoinableSessionIds,
+  selectJoinableInstances,
 }))
-vi.mock('../../../server/azure/reader', () => ({
-  getTelemetryReader: () => ({ getSessionUsage: async () => [] }),
+// getTelemetryReader is a SPY, not a zero-arg stub: the registry passes it the
+// operator's lookbackDays, and a stub that discards its argument makes that
+// threading structurally untestable (R4 proved the whole recovery route could be
+// deleted with the suite green). resolveLookbackDays is the real implementation —
+// the result must report the window actually applied, not the one requested.
+const { getTelemetryReader } = vi.hoisted(() => ({
+  getTelemetryReader: vi.fn((_opts?: { lookbackDays?: number }) => ({ getSessionUsage: async () => [] })),
 }))
+vi.mock('../../../server/azure/reader', async () => {
+  const actual = await vi.importActual<typeof import('../../../server/azure/reader')>('../../../server/azure/reader')
+  return { getTelemetryReader, resolveLookbackDays: actual.resolveLookbackDays }
+})
 
 // vi.mock is hoisted above this import, so it must follow — the import/first rule
 // is disabled for exactly that vitest idiom.
@@ -59,7 +71,8 @@ describe('registry azure-monitor-read — deepRescan threading', () => {
   beforeEach(() => {
     runReadJoiner.mockClear()
     shouldDeepRescan.mockClear()
-    selectRecentJoinableSessionIds.mockClear()
+    selectJoinableInstances.mockClear()
+    selectJoinableInstances.mockResolvedValue({ ids: ['inst-1'], capHit: null })
     shouldDeepRescan.mockResolvedValue(false)
   })
 
@@ -97,5 +110,79 @@ describe('registry azure-monitor-read — deepRescan threading', () => {
     await azureMonitorRead().run(fakeDb)
     expect(shouldDeepRescan).toHaveBeenCalledTimes(1)
     expect(threadedDeepRescan()).toBe(true)
+  })
+})
+
+describe('registry azure-monitor-read — selection cap-hit + recovery threading', () => {
+  beforeEach(() => {
+    getTelemetryReader.mockClear()
+    runReadJoiner.mockClear()
+    shouldDeepRescan.mockClear()
+    selectJoinableInstances.mockClear()
+    shouldDeepRescan.mockResolvedValue(false)
+    selectJoinableInstances.mockResolvedValue({ ids: ['inst-1'], capHit: null })
+  })
+
+  it('threads the selection cap hit into runReadJoiner (so it reaches worker_run.result)', async () => {
+    selectJoinableInstances.mockResolvedValue({ ids: ['inst-1'], capHit: 500 })
+    await azureMonitorRead().run(fakeDb, { runId: null })
+    const opts = runReadJoiner.mock.calls[0]![2] as { selectionCapHit?: number | null }
+    expect(opts.selectionCapHit).toBe(500)
+  })
+
+  it('passes null when the cap was not hit', async () => {
+    await azureMonitorRead().run(fakeDb, { runId: null })
+    const opts = runReadJoiner.mock.calls[0]![2] as { selectionCapHit?: number | null }
+    expect(opts.selectionCapHit).toBeNull()
+  })
+
+  it('RECOVERY: threads the operator lookbackDays into the reader and reports what was applied', async () => {
+    // R4: every line of this route was deletable with the full suite green.
+    // These assertions are the deletion test made permanent.
+    await azureMonitorRead().run(fakeDb, {
+      runId: null,
+      opts: { lookbackDays: 90, sessionIds: ['11111111-1111-4111-8111-111111111111'] },
+    })
+    // The reader is what applies the window (and reports it back in the result),
+    // so the threading assertion belongs on the constructor call.
+    expect(getTelemetryReader).toHaveBeenCalledWith({ lookbackDays: 90 })
+    const opts = runReadJoiner.mock.calls[0]![2] as { scoped?: boolean; sessionIds?: string[] }
+    expect(opts.scoped).toBe(true)
+  })
+
+  it('RECOVERY: an operator sessionIds override REPLACES the scheduled selection', async () => {
+    const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222']
+    await azureMonitorRead().run(fakeDb, { runId: null, opts: { sessionIds: ids, lookbackDays: 30 } })
+    expect(selectJoinableInstances).not.toHaveBeenCalled() // the whole point of scoping
+    const opts = runReadJoiner.mock.calls[0]![2] as { sessionIds?: string[]; selectionCapHit?: number | null }
+    expect(opts.sessionIds).toEqual(ids)
+    expect(opts.selectionCapHit).toBeNull() // no selection ran, so no cap to report
+  })
+
+  it('a normal tick builds an UNWIDENED reader and is not marked scoped', async () => {
+    // A malformed signed body is dropped fail-soft, so a run meant as a 90-day
+    // recovery can execute as a 7-day tick and still return 200 with rows. The
+    // applied window is the field that tells them apart after the fact.
+    await azureMonitorRead().run(fakeDb, { runId: null })
+    // No override → the reader is built with no lookback, so it applies its own
+    // 7-day default and reports that in the result (asserted in joiner.test.ts).
+    expect(getTelemetryReader).toHaveBeenCalledWith({ lookbackDays: undefined })
+    const opts = runReadJoiner.mock.calls[0]![2] as { scoped?: boolean }
+    expect(opts.scoped).toBe(false)
+  })
+
+  it('ZERO-SESSION branch: returns a well-formed result with no cap hit and never joins', async () => {
+    // This branch was previously unreachable in test — the mock omitted an
+    // export registry.ts imports, so vitest threw before the assertions ran.
+    selectJoinableInstances.mockResolvedValue({ ids: [], capHit: null })
+    const res = (await azureMonitorRead().run(fakeDb, { runId: null })) as Record<string, unknown>
+    expect(runReadJoiner).not.toHaveBeenCalled()
+    expect(res.sessionsProcessed).toBe(0)
+    expect(res.selectionCapHit).toBeNull()
+    expect(res.deepRescan).toBe(false) // a zero-session tick must not claim the daily deep pass
+    // No reader was constructed and no query ran, so there is no applied window
+    // to report — reporting one would be a fabricated recovery record.
+    expect(res.lookbackDaysApplied).toBeNull()
+    expect(res.scoped).toBe(false)
   })
 })

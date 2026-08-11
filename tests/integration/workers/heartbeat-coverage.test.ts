@@ -105,6 +105,7 @@ async function addEvent(
   conversationId: string,
   ts: Date,
   costUsd = '1.000000',
+  tool = 'claude-code',
 ): Promise<void> {
   await t.db.insert(schema.attributionRecord).values({
     instanceId,
@@ -113,7 +114,7 @@ async function addEvent(
     regionId,
     orgUnitId: buId,
     costOwningUnitId: buId,
-    tool: 'claude-code',
+    tool,
     model: 'claude-opus-4-1',
     tokenType: 'output',
     tokens: 1000n,
@@ -180,6 +181,63 @@ describe('runHeartbeatCoverage', () => {
     const inst = await t.client<{ ts_actual_end: string | null }[]>`
       SELECT ts_actual_end FROM instance_attestation WHERE instance_id = ${instanceId}::uuid`
     expect(inst[0]!.ts_actual_end).toBeNull()
+  })
+
+  it('NEVER resolves a dev-confirmed FORGERY row (shared unique key, different lane)', async () => {
+    // session_quarantine has ONE unique key (conversation_id, instance_id) shared
+    // between this worker's informational 'no-covering-heartbeat' rows and the
+    // dev-confirmed 'api-uncorroborated' forgery rows written by
+    // /me/over-emission/resolve — the rows that keep forged spend OUT of
+    // v_complete_usage. Before the reason guard, one COVERED tick silently
+    // resolved the forgery, re-admitting that spend to every §A surface (and,
+    // since budget-alert/velocity-watch now read the view, to a PM's page).
+    const teammateId = await createTeammate('forgery-victim')
+    const instanceId = await createInstance(teammateId, { tsStart: ago(3 * HOUR), lastBearerAt: ago(60_000) })
+    const conv = `conv-forgery-${randomUUID()}`
+    // A session that IS covered (events well inside the heartbeat window).
+    await addEvent(instanceId, teammateId, conv, ago(30 * 60_000))
+
+    // The dev confirmed this conversation is a forgery.
+    await t.client.unsafe(`
+      INSERT INTO session_quarantine
+        (conversation_id, instance_id, teammate_id, region_id, org_unit_id,
+         session_ts_start, session_ts_end, instance_ts_start, last_bearer_at,
+         cost_usd, tokens, reason, detected_at, updated_at, resolved_at)
+      VALUES
+        ('${conv}', '${instanceId}', '${teammateId}', '${regionId}', '${buId}',
+         NOW() - INTERVAL '30 minutes', NOW() - INTERVAL '30 minutes',
+         NOW() - INTERVAL '3 hours', NOW(),
+         99.000000, 0, 'api-uncorroborated', NOW(), NOW(), NULL)
+    `)
+
+    await runHeartbeatCoverage(t.db, { now: NOW, graceMinutes: GRACE })
+
+    const rows = await t.client<{ reason: string; resolved_at: string | null; cost_usd: string }[]>`
+      SELECT reason, resolved_at, cost_usd::text AS cost_usd
+        FROM session_quarantine WHERE conversation_id = ${conv}`
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.reason).toBe('api-uncorroborated') // lane untouched
+    expect(rows[0]!.resolved_at).toBeNull() // STILL open — the forgery stands
+    expect(Number(rows[0]!.cost_usd)).toBeCloseTo(99, 4) // cost not overwritten
+  })
+
+  it('NEVER quarantines a copilot-cli session, even in the exact spoof shape', async () => {
+    // copilot-cli mints /bearer reactively (~hourly), so last_bearer_at lags a
+    // long session and the Claude-tuned grace would false-quarantine it. This
+    // worker is claude-only; Copilot spoof-defense is §A reconciliation. The
+    // fixture is byte-for-byte the QUARANTINES case above but tool='copilot-cli'.
+    const teammateId = await createTeammate('copilot-dev')
+    const instanceId = await createInstance(teammateId, { tsStart: ago(5 * HOUR), lastBearerAt: ago(3 * HOUR) })
+    const conv = `conv-copilot-${randomUUID()}`
+    await addEvent(instanceId, teammateId, conv, ago(40 * 60_000), '1.000000', 'copilot-cli')
+    await addEvent(instanceId, teammateId, conv, ago(30 * 60_000), '2.500000', 'copilot-cli')
+
+    await runHeartbeatCoverage(t.db, { now: NOW, graceMinutes: GRACE })
+    // Assert on THIS conversation (the run-global count is polluted by sibling
+    // tests' claude rows in the shared lookback window). A claude row in this
+    // exact shape WOULD be quarantined (the test above proves it); the only
+    // difference here is tool='copilot-cli', so a 0 is the tool filter working.
+    expect(await quarantineRows(conv, false)).toBe(0)
   })
 
   it('historical guard: an instance with last_bearer_at IS NULL is never quarantined', async () => {

@@ -23,47 +23,25 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
 import { createError, getHeader, readRawBody } from 'h3'
+import { requireStrongEnvKey } from './key-strength'
 
 const REPLAY_WINDOW_SECONDS = 300
-const KEY_MIN_LENGTH = 32
-const KEY_MIN_ENTROPY = 3.5
 
 let cachedKey: Buffer | null = null
 
 export function getInternalHmacKey(): Buffer {
   if (cachedKey) return cachedKey
-  const raw = process.env.NUXT_INTERNAL_WORKER_HMAC_KEY
-  if (!raw || raw.length < KEY_MIN_LENGTH) {
-    throw new Error(
-      `NUXT_INTERNAL_WORKER_HMAC_KEY is missing or too short (need >= ${KEY_MIN_LENGTH} chars). ` +
-        'Generate via: openssl rand -base64 48',
-    )
-  }
-  const entropy = shannonEntropyBitsPerByte(raw)
-  if (entropy < KEY_MIN_ENTROPY) {
-    throw new Error(
-      `NUXT_INTERNAL_WORKER_HMAC_KEY has insufficient entropy (${entropy.toFixed(2)} bits/byte; need >= ${KEY_MIN_ENTROPY}). ` +
-        'Generate via: openssl rand -base64 48',
-    )
-  }
+  // Length + entropy floor (>= 32 chars, >= 3.5 bits/byte) — see
+  // server/auth/key-strength.ts for the rationale and the shared
+  // implementation (this used to be a verbatim-duplicated local copy,
+  // identical to server/auth/hmac.ts's).
+  const raw = requireStrongEnvKey('NUXT_INTERNAL_WORKER_HMAC_KEY')
   cachedKey = Buffer.from(raw, 'utf8')
   return cachedKey
 }
 
 export function resetInternalHmacKeyForTests(): void {
   cachedKey = null
-}
-
-function shannonEntropyBitsPerByte(s: string): number {
-  if (s.length === 0) return 0
-  const counts = new Map<string, number>()
-  for (const ch of s) counts.set(ch, (counts.get(ch) ?? 0) + 1)
-  let h = 0
-  for (const c of counts.values()) {
-    const p = c / s.length
-    h -= p * Math.log2(p)
-  }
-  return h
 }
 
 export function signInternalRequest(opts: {

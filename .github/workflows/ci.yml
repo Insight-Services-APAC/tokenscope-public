@@ -15,6 +15,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# S12: least-privilege default. None of the three jobs push, comment, or
+# otherwise need write access — infra.yml and deploy.yml already scope
+# GITHUB_TOKEN explicitly; this brings ci.yml in line.
+permissions:
+  contents: read
+
 env:
   NUXT_TELEMETRY_DISABLED: '1'
 
@@ -24,15 +30,58 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: '22'
+          # S12: full history (all branches) so check-plugin-version-bump.mjs
+          # can diff against origin/main — a shallow (default depth-1) clone
+          # only has this ref's own commit and no origin/main to compare.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
           cache: 'npm'
       - name: Install
+        # This IS a clean install: a fresh checkout with no node_modules, so
+        # `npm ci` builds the tree from package-lock.json alone. setup-node's
+        # `cache: 'npm'` only restores ~/.npm (the tarball cache) — it never
+        # restores node_modules, so it cannot mask a desynced lockfile.
         run: npm ci --no-audit --no-fund
+      - name: Check package-lock.json is in sync with package.json
+        # Guards the class of breakage found in #196: the lock described a tree
+        # that could not be built, `npm ci` was broken on a clean checkout, and
+        # CI stayed green through it.
+        #
+        # `npm ci` on its own does NOT catch this, which is the whole reason
+        # this step exists. Verified against the broken commit (d8cc132) on
+        # Node 24 / npm 11.16.0: `npm ci` PASSES there. npm 11 tolerates lock
+        # nodes that are missing but only reachable through optional peer
+        # edges; npm 10 rejects the same lock with EUSAGE "Missing: cac@6.7.14".
+        # Adding another `npm ci` — cache-cold or not — would have reproduced
+        # the same green.
+        #
+        # What does catch it is a FIXPOINT check: re-resolve the lock and
+        # require it not to move. On d8cc132 this comes back 60 lines dirty
+        # (six @tailwindcss/oxide-wasm32-wasi nodes absent from the lock);
+        # on a correctly regenerated lock it is byte-identical.
+        #
+        # Cost is a few seconds — no network beyond metadata, no node_modules
+        # write (--package-lock-only), and it reuses the install above.
+        #
+        # To fix a failure here: run `npm install` locally on Node 24 and
+        # commit the resulting package-lock.json. If the diff is large, the
+        # lock had drifted and regenerating it is the point.
+        run: |
+          npm install --package-lock-only --no-audit --no-fund
+          git diff --exit-code -- package-lock.json
       - name: Typecheck
         run: npm run typecheck
+      - name: Typecheck the type-level assertions (*.test-d.ts)
+        # `npm run typecheck` runs vue-tsc against the NUXT tsconfig, whose
+        # include covers app/, shared/ and tests/nuxt/ but NOT tests/ — so a
+        # @ts-expect-error under tests/ is never evaluated and enforces nothing.
+        # Found the hard way: removing the §A/§B lane firewall left the main
+        # typecheck green. This is the checker that actually fails.
+        run: npm run typecheck:types
       - name: Lint
         run: npm run lint
       - name: Check copilot-plugin/scripts/ in sync with plugin/scripts/
@@ -43,21 +92,84 @@ jobs:
         # Fails if the MCP prompt source .md changed without regenerating.
         # Run `npm run sync:skill-prompts` to regenerate.
         run: npm run check:skill-prompts-sync
+      - name: Check plugin version bumped when plugin code changed (S12)
+        # Claude Code / Copilot CLI only auto-reinstall a plugin when its
+        # marketplace-entry version INCREASES. tests/unit/plugin/version-sync.test.ts
+        # (npm run test:unit) only asserts plugin.json and the marketplace entry
+        # agree with each other — it never asserts either one goes up, so a
+        # same-version plugin edit is invisible to it and strands the fleet
+        # silently (#174, #115). This is the missing half.
+        run: node scripts/check-plugin-version-bump.mjs
+      - name: Check the approved prototype was not edited alongside implementation code
+        # PR #238 edited docs/design/reporting-consolidation/prototype.html AND
+        # CcDrill.vue in one commit, dropped a rendered card from the build, left
+        # it in the prototype, and said nothing in its message. If the artefact an
+        # implementation is measured against can be rewritten by that
+        # implementation, approval has no fixed point.
+        run: npm run check:prototype-frozen
+      - name: Check GitHub Actions are pinned to a commit SHA (S12)
+        # A floating tag (@v4) can be retargeted without the version string
+        # changing; .github/workflows/wiki-publish.yml already pins correctly
+        # — this stops a new/edited workflow regressing to a floating tag.
+        run: node scripts/check-workflow-pins.mjs
+      - name: Check tracked files contain no NUL bytes
+        # server/reporting/across-regions.ts shipped two literal NUL bytes as a
+        # composite map-key separator, which made the file `data` rather than
+        # text: ripgrep skipped it as binary, so every grep-based audit over the
+        # largest whole-company query module silently under-reported with no
+        # signal. Two more files carried the same byte, found only by this check.
+        # Write the \u0000 escape instead: identical runtime character, plain source.
+        #
+        # Enumerates `git ls-files` minus known binary assets, NOT a directory
+        # allowlist -- the allowlist form silently missed plugin/, copilot-plugin/,
+        # infra/, every root-level file and every .sh/.css/.bicep/.py file.
+        run: node scripts/check-source-files-are-text.mjs
+      - name: Check for new direct getDb() calls in server/api/** handlers (S12 / UF-1(a))
+        # FORCE ROW LEVEL SECURITY is not enabled yet (S11/UF-1): 47 handlers
+        # call getDb() directly instead of the RLS-context wrapper
+        # withRequestRls(), so their queries would run with no RLS session
+        # GUCs. This does not fix those 47 — it only stops the count growing
+        # while UF-1 waits on FORCE.
+        run: node scripts/check-handler-rls-context.mjs
+      - name: Check .gitignore covers env/secret files without shadowing tracked examples (S12)
+        # Regression guard for the S12 .gitignore collapse: the enumerated
+        # form it replaced let .env.dev/.env.prod/.env.production/.env.staging/
+        # .env.bak/.env.old/.tokenscope.env/.env.sandbox slip through
+        # untracked. Assert every one of them IS ignored, and that the two
+        # tracked .example templates are NOT — including .tokenscope.env,
+        # which an earlier draft's assertion list omitted (so the regression
+        # it would have caused would have been invisible to its own check).
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in .env.dev .env.prod .env.production .env.staging .env.bak .env.old .tokenscope.env .env.sandbox; do
+            if ! git check-ignore -q "$f"; then
+              echo "::error::$f is NOT ignored by .gitignore (expected ignored — credential/env file)"
+              fail=1
+            fi
+          done
+          for f in .env.example .env.sandbox.example; do
+            if git check-ignore -q "$f"; then
+              echo "::error::$f IS ignored by .gitignore (expected tracked — it's a template, not a secret)"
+              fail=1
+            fi
+          done
+          exit $fail
       - name: Validate docker-compose schema
         # Cheap: protects the Epic 1 verifiable end state ("docker compose up
         # brings the 5 sibling containers up cleanly") against YAML typos
         # without actually starting the containers.
         run: docker compose config -q
 
-      - name: Install Bicep
-        run: |
-          curl -Lo bicep https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64
-          chmod +x bicep
-          sudo mv bicep /usr/local/bin/bicep
       - name: Validate Bicep modules
         # Compile-only check; deploy is gated behind the manual
-        # .github/workflows/deploy.yml.
-        run: bicep build infra/main.bicep --outdir /tmp/bicep-out
+        # .github/workflows/deploy.yml. Uses `az bicep build` (Azure CLI is
+        # preinstalled on ubuntu-latest and auto-installs the Bicep CLI
+        # extension on first use) instead of curl-ing the raw
+        # bicep-linux-x64 binary from a "latest" GitHub release with no
+        # checksum verification — matches infra.yml's compile-gate step
+        # (:110-113), the only other place this repo compiles Bicep.
+        run: az bicep build --file infra/main.bicep --outdir /tmp/bicep-out
       - name: Check persona-override params match the demo-capable allowlist
         # Single trust root: allowPersonaOverride=true is permitted ONLY in the
         # sandbox bicepparam (the only demo-capable deploy target). Fails LOUDLY on
@@ -65,15 +177,41 @@ jobs:
         # already neutralizes it at runtime.
         run: node scripts/check-persona-override-params.mjs
 
+  unit:
+    name: Unit (vitest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Unit
+        # S12: this is the sprint's regression net. 157 files / 1820 tests
+        # (baseline) previously ran nowhere in CI — every test any story adds
+        # is decorative until this job is blocking. Never continue-on-error:
+        # that restores the exact illusion of coverage this job exists to end.
+        run: npm run test:unit
+
   integration:
     name: Integration (testcontainers Postgres)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 241 files, each starting its own testcontainers Postgres. This ran 19.2
+    # and 19.6 min green on 2026-08-06/07 and then crossed 20, so the job began
+    # being CANCELLED at the ceiling with zero failing tests — on `main` too,
+    # not just on a branch. A cancelled job reads exactly like a broken one,
+    # which is the worst failure mode a gate can have. 35 gives real headroom
+    # rather than moving the cliff by a minute; the standing fix is to shard or
+    # trim the suite, which is its own change.
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
       - name: Install
         run: npm ci --no-audit --no-fund
@@ -91,10 +229,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
       - name: Install
         # `playwright-chromium` downloads chromium during its own postinstall,
@@ -103,5 +241,12 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npx playwright install-deps chromium
+      - name: Check the prototype inventory is current
+        # Lives HERE, not in Static: emitting the inventory RUNS the approved
+        # prototype in chromium, and this is the only job with a browser. The
+        # parity gate itself (tests/unit/reporting/prototype-parity.test.ts) reads
+        # the checked-in inventory.json and needs no browser, so it stays in Unit.
+        # This step is what stops that JSON drifting from the artefact it came from.
+        run: npm run check:prototype-inventory
       - name: Smoke
         run: npm run test:smoke

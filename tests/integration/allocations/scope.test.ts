@@ -32,6 +32,11 @@ let devAlphaId: string
 let devBetaId: string
 let allocAlphaId: string
 let allocBetaId: string
+// S3 part (c) — a second region, so the region-clamp fix to allocationScopePredicate
+// (previously `role IN ('admin','global-finops')` was FULLY unbounded across every
+// region) has something to actually clamp against.
+let regionBId: string
+let allocRegionBId: string
 
 const ROOT_PATH = 'apac'
 const ALPHA_PATH = 'apac.alpha'
@@ -70,15 +75,24 @@ beforeAll(async () => {
     .returning()
   regionId = region!.id
 
-  const [root, alpha, beta] = await t.db
+  const [root] = await t.db
     .insert(schema.orgUnit)
-    .values([
-      { regionId, path: ROOT_PATH, code: 'apac-root', displayName: 'APAC', unitType: 'region' },
-      { regionId, path: ALPHA_PATH, code: 'alpha', displayName: 'Alpha', unitType: 'bu' },
-      { regionId, path: BETA_PATH, code: 'beta', displayName: 'Beta', unitType: 'bu' },
-    ])
+    .values({ regionId, path: ROOT_PATH, code: 'apac-root', displayName: 'APAC', unitType: 'region' })
     .returning()
   rootOuId = root!.id
+
+  // S3 part (a): alpha/beta are genuine, parented children of `root` — parent_id
+  // set (not just a path that LOOKS nested) — so a manager/developer whose own
+  // home is alpha/beta passes placedBelowRegionRootPredicate() and this fixture
+  // actually exercises the subtree clamp rather than accidentally passing
+  // vacuously the way an un-parented "child" would now fail closed.
+  const [alpha, beta] = await t.db
+    .insert(schema.orgUnit)
+    .values([
+      { regionId, parentId: rootOuId, path: ALPHA_PATH, code: 'alpha', displayName: 'Alpha', unitType: 'bu' },
+      { regionId, parentId: rootOuId, path: BETA_PATH, code: 'beta', displayName: 'Beta', unitType: 'bu' },
+    ])
+    .returning()
   alphaOuId = alpha!.id
   betaOuId = beta!.id
 
@@ -104,6 +118,24 @@ beforeAll(async () => {
 
   allocAlphaId = await makeAllocation(projAlpha!.id, '10000.00')
   allocBetaId = await makeAllocation(projBeta!.id, '20000.00')
+
+  // S3 part (c) — a SECOND region (fixture pattern: tests/integration/admin/
+  // region-rbac.test.ts:20-45), so allocationScopePredicate's region clamp has
+  // something real to clamp against: before S3, `role IN ('admin','global-finops')`
+  // was unbounded across EVERY region, so a region-A admin could see/act on a
+  // region-B allocation. This unit is its own genuine (parentless) region root —
+  // no test places a manager/developer caller there, so it needs no parent_id.
+  const [regionB] = await t.db.insert(schema.region).values({ code: 'emea-s', displayName: 'EMEA' }).returning()
+  regionBId = regionB!.id
+  const [ouB] = await t.db
+    .insert(schema.orgUnit)
+    .values({ regionId: regionBId, path: 'emea', code: 'emea-root', displayName: 'EMEA', unitType: 'region' })
+    .returning()
+  const [projRegionB] = await t.db
+    .insert(schema.project)
+    .values({ code: 'P-EMEA', codeHash: 'h-emea', displayName: 'EMEA Project', type: 'billable', regionId: regionBId, costOwningUnitId: ouB!.id })
+    .returning()
+  allocRegionBId = await makeAllocation(projRegionB!.id, '5000.00')
 
   // Velocity needs attribution rows in the current week for each dev.
   const [rc] = await t.db
@@ -225,6 +257,60 @@ describe('allocation detail/patch scope predicate', () => {
       },
     )
     expect(seen?.id).toBe(allocAlphaId)
+  })
+})
+
+describe('allocation scope predicate — region clamp (S3 part c)', () => {
+  // Before S3, allocationScopePredicate short-circuited TRUE for role IN
+  // ('admin','global-finops') with NO region term at all — a region-A admin could
+  // list, count, AND act on a region-B allocation. The fix wraps the region clamp
+  // around the ownership check exactly like orgSubtreeScopePredicate; admin stays
+  // unbounded WITHIN their own region, never across regions.
+  it("a region-A admin's list AND count exclude the region-B allocation", async () => {
+    const ids = await listAllocationIds('admin', ALPHA_PATH)
+    expect(ids).toContain(allocAlphaId)
+    expect(ids).not.toContain(allocRegionBId)
+
+    const count = await withRlsContext(
+      t.db as never,
+      { userRole: 'admin' as never, userOrgPath: ALPHA_PATH, userRegionId: regionId, userTeammateId: mgrAlphaId },
+      async (tx) => {
+        const rows = await tx.execute<{ n: string }>(sql`
+          SELECT COUNT(*)::text AS n FROM allocation a WHERE ${allocationScopePredicate('a')}
+        `)
+        return Number([...rows][0]!.n)
+      },
+    )
+    // Exactly alpha + beta — never the region-B allocation (paging count parity
+    // with the list, allocations/index.get.ts:48/:55).
+    expect(count).toBe(2)
+  })
+
+  it('a region-A admin cannot resolve the region-B allocation by id', async () => {
+    const seen = await withRlsContext(
+      t.db as never,
+      { userRole: 'admin' as never, userOrgPath: ALPHA_PATH, userRegionId: regionId, userTeammateId: mgrAlphaId },
+      async (tx) => {
+        const rows = await tx.execute<{ id: string }>(sql`
+          SELECT a.id::text AS id
+          FROM allocation a
+          WHERE a.id = ${allocRegionBId}::uuid
+            AND ${allocationScopePredicate('a')}
+          LIMIT 1
+        `)
+        return [...rows][0]
+      },
+    )
+    // No row → the WRITE handlers ([id].patch.ts, topups.post.ts) 404 before any
+    // UPDATE/INSERT — the exact "escalation via cross-region write" this fix closes.
+    expect(seen).toBeUndefined()
+  })
+
+  it('global-finops sees allocations in BOTH regions (unbounded by design)', async () => {
+    const ids = await listAllocationIds('global-finops', ALPHA_PATH)
+    expect(ids).toContain(allocAlphaId)
+    expect(ids).toContain(allocBetaId)
+    expect(ids).toContain(allocRegionBId)
   })
 })
 

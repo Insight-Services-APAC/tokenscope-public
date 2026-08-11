@@ -19,3 +19,26 @@ index d81e265..c67b53b 100644
        })
      });
    });
+diff --git a/node_modules/nuxt-oidc-auth/dist/runtime/server/utils/redirect.js b/node_modules/nuxt-oidc-auth/dist/runtime/server/utils/redirect.js
+index 1b8f472..1856955 100644
+--- a/node_modules/nuxt-oidc-auth/dist/runtime/server/utils/redirect.js
++++ b/node_modules/nuxt-oidc-auth/dist/runtime/server/utils/redirect.js
+@@ -2,10 +2,16 @@ export function sanitizeCallbackRedirectUrl(value) {
+   if (typeof value !== "string") {
+     return void 0;
+   }
+-  if (!value.startsWith("/") || value.startsWith("//")) {
++  let u;
++  try {
++    u = new URL(value, "http://x");
++  } catch {
+     return void 0;
+   }
+-  return value;
++  if (u.origin !== "http://x") {
++    return void 0;
++  }
++  return u.pathname + u.search + u.hash;
+ }
+ export function resolveCallbackRedirectUrl({
+   configuredCallbackRedirectUrl,

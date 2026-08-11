@@ -69,17 +69,39 @@ const rows = computed<CompareRow[]>(() => {
       unsettled: unsettledFor('github'),
       pending: props.copilotPending,
     },
-  ].filter((r) => r.billUsd > 0.005 || r.chargebackUsd > 0.005)
+    // A provider whose chargeback is HELD BACK (pooled Copilot pending cutover) is
+    // kept even at $0.00 — the prototype's finance band lists it explicitly as
+    // "GitHub Copilot · Pooled net — pending cutover". Dropping it made the whole
+    // comparison card disappear on a period whose only Copilot state was "pending",
+    // which reads as "this provider does not exist" rather than "not charged yet".
+  ].filter((r) => hasMoney(r) || r.pending)
 })
 
 const max = computed(() =>
   rows.value.reduce((m, r) => Math.max(m, r.billUsd, r.chargebackUsd), 0),
 )
-const hasData = computed(() => rows.value.length > 0 && max.value > 0)
+/*
+ * The card renders whenever there is a provider row to show — INCLUDING a pending
+ * row whose bars are both $0.00. Gating on `max > 0` as well meant a period with a
+ * pending-cutover Copilot and no Anthropic bill silently removed the entire
+ * "Bill vs chargeback" band from the Finance report, with nothing in its place.
+ * With no rows at all the card still stands down: FinanceBillCheck above already
+ * carries "No provider bill for this period yet", and that fact keeps one home.
+ */
+const hasData = computed(() => rows.value.length > 0)
 
 function pct(v: number): string {
   const p = max.value > 0 ? Math.min(100, (v / max.value) * 100) : 0
   return `${p.toFixed(2)}%`
+}
+/**
+ * Does this row carry any money at all? A row at $0.00 on BOTH bars is kept only
+ * because it is pending, and it must make no reconciliation claim: "✓ matched" over
+ * $0.00 vs $0.00 is arithmetically true and completely vacuous — a green tick on a
+ * provider that has not been charged yet reads as a settled month.
+ */
+function hasMoney(r: { billUsd: number; chargebackUsd: number }): boolean {
+  return r.billUsd > 0.005 || r.chargebackUsd > 0.005
 }
 function delta(r: CompareRow): number {
   return r.chargebackUsd - r.billUsd
@@ -165,23 +187,28 @@ const TRACK: Record<'hunger' | 'vision', string> = {
               class="px-1.5 py-px rounded bg-rag-amber/12 text-[#92400E] text-[10px] font-bold uppercase tracking-wide"
               title="Copilot pooled chargeback is held back from the per-CoU column until validated on Dev (Σ=bill)."
             >pending cutover</span>
-            <span
-              v-if="matched(r)"
-              class="inline-flex items-center gap-1 text-[11px] text-carbon-3 font-semibold tabular-nums"
-            >
-              <svg viewBox="0 0 20 20" fill="none" class="w-3 h-3" aria-hidden="true">
-                <path d="M4 10.5l4 4 8-9" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-              matched
-            </span>
-            <span
-              v-else-if="r.unsettled"
-              class="text-[11px] text-rag-amber font-bold"
-            >unsettled</span>
-            <span
-              v-else
-              class="text-[11px] text-rag-red font-bold tabular-nums"
-            >Δ {{ fmtUsd(delta(r)) }}</span>
+            <!-- The reconciliation verdict is withheld on a row with no money on
+                 either bar (kept only because it is pending). "matched" there would
+                 be $0.00 against $0.00 — true, vacuous, and read as a settled month. -->
+            <template v-if="hasMoney(r)">
+              <span
+                v-if="matched(r)"
+                class="inline-flex items-center gap-1 text-[11px] text-carbon-3 font-semibold tabular-nums"
+              >
+                <svg viewBox="0 0 20 20" fill="none" class="w-3 h-3" aria-hidden="true">
+                  <path d="M4 10.5l4 4 8-9" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+                matched
+              </span>
+              <span
+                v-else-if="r.unsettled"
+                class="text-[11px] text-rag-amber font-bold"
+              >unsettled</span>
+              <span
+                v-else
+                class="text-[11px] text-rag-red font-bold tabular-nums"
+              >Δ {{ fmtUsd(delta(r)) }}</span>
+            </template>
           </div>
         </div>
 

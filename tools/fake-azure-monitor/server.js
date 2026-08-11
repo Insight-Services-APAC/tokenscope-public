@@ -1,9 +1,9 @@
-/* eslint-disable no-console */
 // fake-azure-monitor — local stand-in for the sandbox telemetry path
 // (Path B: Claude → OTel Collector → Log Analytics → KQL). Locally it
 // plays BOTH the collector and the queryable store: it RECEIVES Claude
 // Code's real OTLP/HTTP and NORMALISES it into UsageRecords keyed on the
-// `tokenscope.session_id` resource attribute, then serves them to the
+// `tokenscope.instance_id` resource attribute (legacy `tokenscope.session_id`
+// still accepted), then serves them to the
 // read joiner. See docs/development/claude-code-telemetry-contract.md.
 //
 // Endpoints:
@@ -75,7 +75,13 @@ function ingestOtlpLogs(payload) {
   let recordsAdded = 0
   for (const rl of payload.resourceLogs ?? []) {
     const resource = attrsToObject(rl.resource?.attributes)
-    const sid = resource['tokenscope.session_id']
+    // `tokenscope.instance_id` is the CURRENT wire attribute; every live client
+    // emits it. `tokenscope.session_id` is the pre-migration name, still read so
+    // an old capture replayed against this stub keeps working. Reading only the
+    // retired name made the stub drop 100% of real OTLP traffic in silence: the
+    // POST still returned 200 with records_normalised: 0, so a local stack
+    // looked healthy and simply never produced attribution.
+    const sid = resource['tokenscope.instance_id'] ?? resource['tokenscope.session_id']
     if (!sid) continue // not one of ours — skip
     // ADR-0004 "B′": project.code_hash is a per-RESOURCE attribute (one per repo).
     // The same DEVICE_SID may appear across resourceLogs carrying different hashes.
@@ -96,7 +102,15 @@ function ingestOtlpLogs(payload) {
         // conversation. Fall back to the instance id when no session.id is emitted.
         const convKey = a['session.id'] || sid
         // Per-conversation summary metadata (per-event user.email is the owner).
-        const meta = sessionMeta.get(convKey) ?? { email: '', firstEvent: ts, lastEvent: ts, costUsd: 0, models: new Set(), instanceId: sid, tokens: 0 }
+        const meta = sessionMeta.get(convKey) ?? {
+          email: '',
+          firstEvent: ts,
+          lastEvent: ts,
+          costUsd: 0,
+          models: new Set(),
+          instanceId: sid,
+          tokens: 0,
+        }
         if (a['user.email']) meta.email = a['user.email']
         if (ts < meta.firstEvent) meta.firstEvent = ts
         if (ts > meta.lastEvent) meta.lastEvent = ts
@@ -105,17 +119,33 @@ function ingestOtlpLogs(payload) {
         meta.instanceId = sid
         sessionMeta.set(convKey, meta)
         // github.copilot.nano_aiu: present on Copilot-transcoded api_request events.
-        const nanoAiu = a['github.copilot.nano_aiu'] != null ? Number(a['github.copilot.nano_aiu']) : undefined
+        const nanoAiu =
+          a['github.copilot.nano_aiu'] != null ? Number(a['github.copilot.nano_aiu']) : undefined
         // mig 0045 capture: per-event query_source lane + Claude's own cost_usd
         // (duplicated onto each token-type row, like the sandbox KQL mv-expand).
         const querySource = a['query_source'] || undefined
-        const lawCostUsd = a['cost_usd'] != null && Number.isFinite(Number(a['cost_usd'])) ? Number(a['cost_usd']) : undefined
+        const lawCostUsd =
+          a['cost_usd'] != null && Number.isFinite(Number(a['cost_usd']))
+            ? Number(a['cost_usd'])
+            : undefined
         for (const [field, unit] of Object.entries(TOKEN_FIELD_TO_UNIT)) {
-        const tokens = Number(a[field] ?? 0)
-        if (!Number.isFinite(tokens) || tokens <= 0) continue
-        addUsage(sid, { tokens, tokenType: unit, model, tsEvent: ts, sourceRunId: runId, organizationId: a['organization.id'], projectCodeHash, claudeSessionId: a['session.id'], nanoAiu, querySource, lawCostUsd })
-        meta.tokens += tokens
-        recordsAdded += 1
+          const tokens = Number(a[field] ?? 0)
+          if (!Number.isFinite(tokens) || tokens <= 0) continue
+          addUsage(sid, {
+            tokens,
+            tokenType: unit,
+            model,
+            tsEvent: ts,
+            sourceRunId: runId,
+            organizationId: a['organization.id'],
+            projectCodeHash,
+            claudeSessionId: a['session.id'],
+            nanoAiu,
+            querySource,
+            lawCostUsd,
+          })
+          meta.tokens += tokens
+          recordsAdded += 1
         }
       }
     }
@@ -126,7 +156,8 @@ function ingestOtlpLogs(payload) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
   const method = req.method ?? 'GET'
-  if (req.headers['authorization']) lastBearerSeen = String(req.headers['authorization']).slice(0, 24)
+  if (req.headers['authorization'])
+    lastBearerSeen = String(req.headers['authorization']).slice(0, 24)
 
   if (method === 'GET' && url.pathname === '/') {
     return send(res, 200, {
@@ -145,7 +176,13 @@ const server = createServer(async (req, res) => {
       const n = ingestOtlpLogs(payload)
       return send(res, 200, { partialSuccess: {}, records_normalised: n })
     } catch (err) {
-      return send(res, 400, { error: 'bad otlp logs', detail: String(err) })
+      // Detail goes to THIS process's stderr, not into the HTTP response.
+      // Even in a dev stub, echoing a thrown error back to the caller ships
+      // internals (parser internals, paths, stack frames) to whoever POSTed
+      // (CodeQL js/stack-trace-exposure #4). stderr keeps the debug value —
+      // it is right there in the dev-stack logs — without the exposure.
+      console.error('[fake-azure-monitor] /v1/logs rejected:', err)
+      return send(res, 400, { error: 'bad otlp logs' })
     }
   }
   // Metrics/traces accepted + ignored — api_request events are the source of truth.
@@ -160,11 +197,19 @@ const server = createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}')
       const sid = body.session_id
       if (typeof sid !== 'string' || !sid) return send(res, 400, { error: 'session_id required' })
-      const incoming = Array.isArray(body.usage) ? body.usage : Array.isArray(body.spans) ? body.spans : []
+      const incoming = Array.isArray(body.usage)
+        ? body.usage
+        : Array.isArray(body.spans)
+          ? body.spans
+          : []
       for (const r of incoming) addUsage(sid, r)
-      return send(res, 201, { session_id: sid, total_usage: (usageBySession.get(sid) ?? []).length })
+      return send(res, 201, {
+        session_id: sid,
+        total_usage: (usageBySession.get(sid) ?? []).length,
+      })
     } catch (err) {
-      return send(res, 400, { error: 'invalid body', detail: String(err) })
+      console.error('[fake-azure-monitor] /admin/ingest rejected:', err)
+      return send(res, 400, { error: 'invalid body' })
     }
   }
 

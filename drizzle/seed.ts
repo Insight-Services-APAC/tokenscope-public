@@ -16,8 +16,8 @@
  * then re-inserts. Safe to re-run on the same dev DB.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import postgres from 'postgres'
 import { drizzle } from 'drizzle-orm/postgres-js'
+import { createDbClient } from './connect'
 import * as schema from './schema'
 import { runBudgetAlert } from '../server/workers/budget-alert'
 import { runVelocityWatch } from '../server/workers/velocity-watch'
@@ -42,7 +42,7 @@ async function main() {
     process.exit(1)
   }
 
-  const client = postgres(url, { max: 1, idle_timeout: 5 })
+  const client = createDbClient(url, { max: 1, idle_timeout: 5 })
   const db = drizzle(client, { schema })
 
   // Guard the destructive reset path. Default is append-only — running
@@ -436,7 +436,7 @@ async function main() {
       ])
     }
 
-    // ── 3 allocations ────────────────────────────────────────────────
+    // ── Allocations ──────────────────────────────────────────────────
     // Need a synthetic audit_event for the FK — write three events first.
     const [allocEvent1, allocEvent2, allocEvent3] = await db
       .insert(schema.auditEvent)
@@ -455,8 +455,13 @@ async function main() {
 
     // J5: AFL-AII also gets a CURRENT-month baseline so the PM journey
     // (viewer.budget_allocation_id → /allocations/{id} editor) and the
-    // allocation bars have a live budget — the May rows alone leave every
-    // "currently effective" read empty once the calendar rolls.
+    // allocation bars have a live budget. Derive the range from the real clock:
+    // a hard-coded "current" month silently expires and makes the E2E fixture
+    // report "no budget" when the calendar rolls.
+    const now = new Date()
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+    const nextMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
+    const currentMonthEffective = `[${monthStart.toISOString()},${nextMonthStart.toISOString()})`
     const [allocEvent4] = await db
       .insert(schema.auditEvent)
       .values([{ eventType: 'allocation-created', actorSystem: 'seed', payload: { note: 'seed-current' } }])
@@ -476,7 +481,7 @@ async function main() {
         scopeType: 'project',
         scopeId: proj1.id,
         budgetUsd: '12500.00',
-        effective: '[2026-06-01T00:00:00+00,2026-07-01T00:00:00+00)',
+        effective: currentMonthEffective,
         allocationKind: 'baseline',
         auditEventId: allocEvent4.id,
       },
@@ -520,8 +525,6 @@ async function main() {
     // and ISO-week. The producer workers use `new Date()` internally;
     // matching that here keeps the seed honest — change the clock and
     // the demo data still satisfies the producer thresholds.
-    const now = new Date()
-    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
     const currentWeekStart = isoWeekStartUtc(now)
 
     // Priya's 5-week velocity ramp on AFL-DRP — 4 prior weeks of ~$100

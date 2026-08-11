@@ -5,11 +5,13 @@
  * round-trip + the signature-verification path that protects against
  * a browser-side mutation flipping the impersonator identity.
  */
-import { describe, it, expect, beforeAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterEach } from 'vitest'
+import { createHmac } from 'node:crypto'
 import {
   setPersonaOverrideCookie,
   readPersonaOverrideCookie,
   clearPersonaOverrideCookie,
+  PERSONA_OVERRIDE_COOKIE_NAME,
   type PersonaOverridePayload,
 } from '../../../server/utils/persona-override-cookie'
 
@@ -121,5 +123,63 @@ describe('persona-override sidecar cookie encode/decode', () => {
 
     const got = readPersonaOverrideCookie(event as unknown as Parameters<typeof readPersonaOverrideCookie>[0])
     expect(got).toBeNull()
+  })
+})
+
+describe('persona-override sidecar cookie — NUXT_SESSION_SECRET strength floor', () => {
+  const ORIGINAL = process.env.NUXT_SESSION_SECRET
+
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.NUXT_SESSION_SECRET
+    else process.env.NUXT_SESSION_SECRET = ORIGINAL
+  })
+
+  /**
+   * Hand-mint the wire format directly (bypassing encode(), which is
+   * allowed to throw loudly on a weak secret — see getSecret()'s doc
+   * comment in persona-override-cookie.ts) so these tests exercise
+   * ONLY decode()'s fail-closed contract, independent of encode()'s.
+   */
+  function mintRaw(secret: string, payload: PersonaOverridePayload): string {
+    const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
+    const sig = createHmac('sha256', secret).update(body).digest('hex')
+    return `${body}.${sig}`
+  }
+
+  it("a 32-char LOW-ENTROPY secret ('a'.repeat(32)) is REJECTED — decode() fails closed (returns null), never throws", () => {
+    // Length passes (32 chars) but entropy does not — the exact shape
+    // the pre-existing length-only check would have missed.
+    const weakSecret = 'a'.repeat(32)
+    process.env.NUXT_SESSION_SECRET = weakSecret
+    const event = makeEvent()
+    event.cookies.set(PERSONA_OVERRIDE_COOKIE_NAME, mintRaw(weakSecret, VALID))
+
+    expect(() =>
+      readPersonaOverrideCookie(event as unknown as Parameters<typeof readPersonaOverrideCookie>[0]),
+    ).not.toThrow()
+    expect(
+      readPersonaOverrideCookie(event as unknown as Parameters<typeof readPersonaOverrideCookie>[0]),
+    ).toBeNull()
+  })
+
+  it('a random base64 secret (>= 3.5 bits/byte) is ACCEPTED — round-trips normally', () => {
+    process.env.NUXT_SESSION_SECRET = 'xK9mQ2vN8pL4wR7tY1zA5bC3dE6fG0hJiUoPsXcVnBmLkJhGfDsA=='
+    const event = makeEvent()
+    setPersonaOverrideCookie(event as unknown as Parameters<typeof setPersonaOverrideCookie>[0], VALID)
+    const got = readPersonaOverrideCookie(event as unknown as Parameters<typeof readPersonaOverrideCookie>[0])
+    expect(got).toEqual(VALID)
+  })
+
+  it('still throws (unchanged, pre-existing behaviour) for a missing/too-short secret — only the entropy arm fails closed', () => {
+    const shortSecret = 'too-short'
+    process.env.NUXT_SESSION_SECRET = shortSecret
+    const event = makeEvent()
+    // A cookie must be PRESENT for decode()/getSecret() to even run —
+    // readPersonaOverrideCookie short-circuits to null on a missing
+    // cookie before ever touching the secret.
+    event.cookies.set(PERSONA_OVERRIDE_COOKIE_NAME, mintRaw(shortSecret, VALID))
+    expect(() =>
+      readPersonaOverrideCookie(event as unknown as Parameters<typeof readPersonaOverrideCookie>[0]),
+    ).toThrow(/missing or too short/)
   })
 })

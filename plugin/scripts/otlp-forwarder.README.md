@@ -46,9 +46,37 @@ first with the re-test below, then bump the plugin version to ship it.
 | `TOKENSCOPE_OTLP_PROXY` | CLI version | Behaviour |
 |---|---|---|
 | unset (default) | in a broken range | **AUTO-ON** — endpoint repointed to the forwarder, forwarder spawned, one-line session-start note. |
-| unset (default) | fixed / unknown | **OFF** — direct emission. Auto-restores a still-proxied endpoint from the DCE stash. |
+| unset (default) | fixed / unknown | **OFF** — direct emission. Auto-restores a still-proxied endpoint from the durable revert key (below). |
 | `1` | any | **Forced ON** (a suspected regression not yet in the table). |
 | `0` | any | **Forced OFF** (escape hatch). |
+
+## The durable revert key (two copies, shared fate)
+
+A pin lives in the **persistent** `~/.claude/settings.json`; the DCE stash the
+forwarder reads (`~/.tokenscope/otlp-forward.json`) can live in an **ephemeral**
+state dir — a CW container bind-mounts `~/.claude` from the host while
+`~/.tokenscope` is container-local. The 2026-07-24 cold-start wedge was exactly
+that split: a container rebuild destroyed the stash, the pin survived, and the
+dormant auto-revert had nothing to restore — emission was dead until a manual
+re-provision.
+
+Since 0.1.26 every pin records the real DCE in **both** places: the stash file
+(what the forwarder process reads) and `TOKENSCOPE_DCE_LOGS_ENDPOINT` in the same
+settings `env` block as the pin, so the revert key cannot outlive-diverge from
+the pin. Each session `applyOtlpProxyRepoint` reconciles the two: a lost stash is
+re-materialized from the env copy, a legacy (pre-0.1.26) pin gets the env copy
+backfilled from its live stash, and the dormant revert restores from the env copy
+first, stash second (removing the copy — the endpoint itself is durable again).
+The forwarder also falls back to the env copy at relay time if the stash file is
+unreadable, and counts it toward `/healthz`'s `ready`. The copy reaches the
+forwarder **explicitly** — `spawnOtlpForwarder` reads the merged settings env
+from disk and injects `TOKENSCOPE_DCE_LOGS_ENDPOINT` into the spawn env (never
+relying on Claude exporting settings env into hook subprocesses) — so the
+fallback applies to forwarders spawned once the durable copy exists; a
+long-lived forwarder born under an older plugin relies on its stash until
+replaced. The loud session-start warning ("cannot self-revert — re-provision")
+now only fires when **neither** copy survives: a legacy pin whose state dir was
+wiped before any session could backfill it.
 
 ## Shared-home hosts (multiple CWs, mixed CLI versions)
 
@@ -78,13 +106,15 @@ mixed-version host mid-migration.
 
 Don't rely on a table edit alone — confirm the current CLI is actually broken:
 ```bash
-bash plugin/scripts/retest-72671.sh
+bash tools/otlp-72671/retest-72671.sh
 ```
 It reports `FIX #1 (Content-Length…): PASS|FAIL`. A **FAIL** means the CLI is
 affected — add its version to a range in `OTLP_BROKEN_RANGES` (or force
 `TOKENSCOPE_OTLP_PROXY=1` locally). Confirm the running forwarder with
-`curl -s http://127.0.0.1:14318/healthz` (`ready:true`, `dir` ends in your real
-`~/.tokenscope`).
+`curl -s "http://127.0.0.1:14318/healthz?dir=$HOME/.tokenscope"` (`ready:true`,
+`dirMatches:true`). `/healthz` reports neither a raw pid nor the absolute state
+dir (S1 hardening) — pass your own expected dir via `?dir=` and read the
+boolean back.
 
 Wiring: `plugin/scripts/otlp-shim-policy.mjs` (the decision) →
 `plugin/hooks/session-start.mjs` (`spawnOtlpForwarder`,

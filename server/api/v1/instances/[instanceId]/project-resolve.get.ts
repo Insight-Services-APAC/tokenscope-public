@@ -41,8 +41,10 @@ export default defineEventHandler(async (event) => {
 
   const db = getDb()
 
-  // Same gate as /bearer + /health — the emit credential, scope + revocation checked.
-  const teammate = await requireOAuthBearer(event, 'tokenscope.emit', db as never)
+  // Same gate as /bearer + /health — the emit credential, scope + revocation
+  // checked, AND instance-bound (sid) so a different instance's emit
+  // credential 401s instead of degrading to a per-teammate check.
+  const teammate = await requireOAuthBearer(event, 'tokenscope.emit', db as never, sid)
 
   // Ownership: the bound teammate MUST own this instance (mirrors /health).
   const [row] = await db
@@ -54,14 +56,11 @@ export default defineEventHandler(async (event) => {
     .where(eq(schema.instanceAttestation.instanceId, sid))
     .limit(1)
 
-  if (!row) {
+  // Not-found AND not-owned collapse to the SAME 404 (mirrors /bearer, /health,
+  // /end, and me/instances/[instanceId]/revoke.post.ts) — the fourth handler
+  // the original audit missed.
+  if (!row || !row.teammateId || row.teammateId !== teammate.teammateId) {
     throw createError({ statusCode: 404, statusMessage: 'Instance not found' })
-  }
-  if (!row.teammateId || row.teammateId !== teammate.teammateId) {
-    throw createError({
-      statusCode: 403,
-      statusMessage: 'This credential does not own the requested instance',
-    })
   }
 
   // Membership-gated resolution. Match → billable; no match (unknown OR not a

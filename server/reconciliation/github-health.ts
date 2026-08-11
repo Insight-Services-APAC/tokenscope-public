@@ -31,6 +31,7 @@ import { GithubAppAuth, type FetchLike } from './adapters/github-app-auth'
 import { resolveGithubRoster } from './adapters/github'
 import { resilientFetch, type ResilientFetchOptions } from '../utils/resilient-fetch'
 import type { CredentialKind } from './credentials'
+import { loadPersistedEnterpriseCoverage } from './coverage-store'
 
 // The resolver + roster reader use only db.execute(sql`…`) (the raw escape hatch), so this
 // works on either the schema-typed getDb() handle OR the RLS-bound request tx (widened).
@@ -133,6 +134,38 @@ export interface GithubEnterpriseHealth {
   }
   verdict: GithubVerdict
   color: HealthColor
+  /*
+   * Coverage stage (Workstream D, design §6/§8.4: "wire coverage into the Verify
+   * ladder"). Deliberately reads the PERSISTED latest observation
+   * (coverage-store.ts) rather than recomputing live — a live pull (paginated census
+   * + one installation probe per org) does not fit the ladder's tight per-attempt
+   * fetch budget/deadline (PROBE_FETCH_OPTS/STAGE_DEADLINE_MS above), which is sized
+   * for the four fixed, single-call stages this probe already makes. An admin who
+   * wants a FRESH read uses the dedicated recheck action (coverage-recheck.post.ts),
+   * which is exactly what the "clear remediation path" requirement asks the UI to
+   * surface, not a second, slower Verify. Always populated for every branch below
+   * (even a probe that failed at an earlier stage still gets a coverage read) —
+   * coverage is independent of whether the REST of the ladder succeeded.
+   */
+  coverage: CoverageStage
+}
+
+/** The Verify-ladder's coverage stage — a thin, cheap read of the persisted latest
+ *  observation (never a live recompute; see the field doc above). */
+export interface CoverageStage {
+  available: boolean
+  capped: boolean
+  reason: string | null
+  /** Null whenever no honest "N of M" claim can be made (unavailable/capped/stale). */
+  denominator: number | null
+  connected: number
+  /** Count of every non-connected state, summed — the ladder/banner trigger. */
+  nonConnected: number
+  /** True when the persisted observation itself has expired (requirement 5: an
+   *  expired reading is never presented as still-current). */
+  stale: boolean
+  /** ISO timestamp of the last observation, or null if never swept/rechecked. */
+  observedAt: string | null
 }
 
 /*
@@ -480,11 +513,11 @@ export interface ComputeGithubHealthOpts {
  *                    with a doomed egress/rate-limit reason (L5).
  *   6. verdict     — synthesised (see synthesiseVerdict).
  */
-export async function computeGithubEnterpriseHealth(
+export async function computeGithubEnterpriseHealthStages(
   db: Db,
   ent: GithubEnterpriseRow,
   opts: ComputeGithubHealthOpts = {},
-): Promise<GithubEnterpriseHealth> {
+): Promise<Omit<GithubEnterpriseHealth, 'coverage'>> {
   const now = opts.now ?? new Date()
   const resolveCredential = opts.resolveCredential ?? resolveEnterpriseCredential
   const buildClient = opts.probeClient ?? realProbeClient
@@ -509,7 +542,7 @@ export async function computeGithubEnterpriseHealth(
    * CORRECT stage: a roster/infra failure AFTER the credential resolved must not paint the
    * credential stage ✗ — the modal's failure marker lands where the failure actually was.
    */
-  const preProbe = (reason: StageReason, keyPresent: boolean, credentialOk = false): GithubEnterpriseHealth => {
+  const preProbe = (reason: StageReason, keyPresent: boolean, credentialOk = false): Omit<GithubEnterpriseHealth, 'coverage'> => {
     const verdict = verdictForReason(reason)
     return {
       ...base,
@@ -672,6 +705,63 @@ export async function computeGithubEnterpriseHealth(
 
   const verdict = synthesiseVerdict(stages)
   return { ...base, keyPresent: true, stages, verdict, color: colorFor(verdict) }
+}
+
+/** A stage-level result whose coverage read itself failed (a bug in this module, not
+ *  the pipeline) — never impersonates a real coverage claim. */
+const COVERAGE_STAGE_UNREADABLE: CoverageStage = {
+  available: false,
+  capped: false,
+  reason: null,
+  denominator: null,
+  connected: 0,
+  nonConnected: 0,
+  stale: false,
+  observedAt: null,
+}
+
+/** Read the persisted coverage observation and project it into the Verify-ladder's
+ *  cheap CoverageStage shape. Never throws — a read failure degrades to the
+ *  unreadable sentinel above rather than crashing the whole Verify probe over a
+ *  problem in an ADDITIONAL, independent stage. */
+async function loadCoverageStage(db: Db, enterpriseId: string): Promise<CoverageStage> {
+  try {
+    const persisted = await loadPersistedEnterpriseCoverage(db, enterpriseId)
+    const nonConnectedCount = persisted.orgs.filter((o) => o.state !== 'connected').length
+    const connectedCount = persisted.orgs.filter((o) => o.state === 'connected').length
+    return {
+      available: persisted.census.available,
+      capped: persisted.census.capped,
+      reason: persisted.census.reason,
+      denominator: persisted.census.available && !persisted.census.capped ? persisted.census.orgCount : null,
+      connected: connectedCount,
+      nonConnected: nonConnectedCount,
+      stale: persisted.census.stale,
+      observedAt: persisted.census.observedAt,
+    }
+  } catch {
+    return COVERAGE_STAGE_UNREADABLE
+  }
+}
+
+/*
+ * Compute health for ONE github enterprise, INCLUDING the coverage stage (Workstream
+ * D). Thin wrapper over computeGithubEnterpriseHealthStages (the original ladder,
+ * unchanged) — attaches a cheap, persisted-only coverage read (loadCoverageStage)
+ * uniformly to EVERY outcome, including a probe that failed at an earlier stage:
+ * coverage is an independent signal from whether the rest of the ladder succeeded, so
+ * a credential/egress failure must not hide it (or vice versa).
+ */
+export async function computeGithubEnterpriseHealth(
+  db: Db,
+  ent: GithubEnterpriseRow,
+  opts: ComputeGithubHealthOpts = {},
+): Promise<GithubEnterpriseHealth> {
+  const [stages, coverage] = await Promise.all([
+    computeGithubEnterpriseHealthStages(db, ent, opts),
+    loadCoverageStage(db, ent.enterpriseId),
+  ])
+  return { ...stages, coverage }
 }
 
 /** How many of `logins` (case-insensitively) map to a teammate in the roster. */

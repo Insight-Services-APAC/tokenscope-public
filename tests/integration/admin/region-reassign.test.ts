@@ -82,6 +82,12 @@ function makeEvent(opts: { body?: unknown; routerParams?: Record<string, string>
 const finopsSession = (): Session => ({ teammateId: finopsId, email: 'rr-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId: regionAId, orgPath: 'rr-a.svc' })
 const adminSession = (): Session => ({ teammateId: adminAId, email: 'rr-adm@x.test', displayName: 'Adm', role: 'admin', regionId: regionAId, orgPath: 'rr-a.svc' })
 
+async function unplacedIdFor(rid: string): Promise<string> {
+  const [row] = await t.client<{ id: string }[]>`
+    SELECT id::text AS id FROM org_unit WHERE region_id = ${rid}::uuid AND code = '__UNPLACED__'`
+  return row!.id
+}
+
 describe('PATCH users/:id/region', () => {
   it('global-finops moves a teammate to another region (re-homes org_unit, revokes, audits, clears chain provenance)', async () => {
     // Pre-stamp manager-chain provenance so we can assert the admin move clears it (so
@@ -93,7 +99,12 @@ describe('PATCH users/:id/region', () => {
              metadata->>'placedVia' AS via, metadata->>'keep' AS keep
       FROM teammate WHERE id = ${devAId}::uuid`
     expect(rows[0]!.region_id).toBe(regionBId)
-    expect(rows[0]!.org_unit_id).toBe(ouBId) // lex-first org_unit in B
+    // S3: an implicit (no explicit org_unit_id) move lands on region B's
+    // __UNPLACED__ holding node, not "the lexicographically-first org_unit in
+    // B" — that was the region ROOT (ouBId), whose subtree is the whole
+    // region (server/auth/placement-home.ts).
+    expect(rows[0]!.org_unit_id).toBe(await unplacedIdFor(regionBId))
+    expect(rows[0]!.org_unit_id).not.toBe(ouBId)
     expect(rows[0]!.revoked).toBe(true)
     expect(rows[0]!.via).toBeNull() // provenance stripped by the admin move
     expect(rows[0]!.keep).toBe('x') // ... but other metadata keys preserved

@@ -19,6 +19,10 @@
 
 import { computed, ref, watch } from 'vue'
 import { consola } from 'consola'
+// Render-boundary sanitizer for a self-registered client_name — see S6: names
+// registered before the bounds fix shipped may still carry control/bidi
+// characters, so this strips them defensively wherever the name is displayed.
+import { sanitizeClientNameForDisplay } from '#shared/schemas/oauth'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface Teammate extends Record<string, unknown> {
@@ -28,7 +32,9 @@ interface Teammate extends Record<string, unknown> {
 }
 interface GrantRow extends Record<string, unknown> {
   id: string
+  client_id: string
   client_name: string
+  client_registered_at: string
   scopes: string[]
   scope_labels: string[]
   state: 'active' | 'inactive' | 'revoked' | 'expired'
@@ -99,14 +105,19 @@ function flashToast(kind: 'ok' | 'err', message: string) {
 const revoking = ref<Set<string>>(new Set())
 async function revokeGrant(g: GrantRow) {
   const who = selected.value?.email ?? 'this teammate'
+  // Never interpolate client-authored text (g.client_name) into a native
+  // confirm() dialog — a self-registered name could otherwise spoof or
+  // obscure the dialog itself (S6; account.vue's revokeGrant is the correct
+  // sibling — static text only). The row above already shows the client's
+  // name + id; the dialog only needs to say WHOSE connection this revokes.
   const msg = g.is_emit
-    ? `Revoke ${who}'s emit connection (${g.client_name})? It stops their device emitting immediately.`
-    : `Revoke ${who}'s connection (${g.client_name})? It logs that client out.`
+    ? `Revoke ${who}'s emit connection? It stops their device emitting immediately.`
+    : `Revoke ${who}'s connection? It logs that client out.`
   if (!confirm(msg)) return
   revoking.value = new Set([...revoking.value, g.id])
   try {
     await $fetch(`/api/v1/admin/grants/${g.id}/revoke`, { method: 'POST', body: {} })
-    flashToast('ok', `Connection revoked: ${g.client_name}`)
+    flashToast('ok', `Connection revoked: ${sanitizeClientNameForDisplay(g.client_name)}`)
     await refresh()
   } catch (err) {
     flashToast('err', apiErrorDetail(err, 'Revoke refused.'))
@@ -217,7 +228,12 @@ function fmtTs(v: string | null): string {
             >
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
-                  <span class="text-sm font-medium text-carbon truncate">{{ g.client_name }}</span>
+                  <span class="text-sm font-medium text-carbon truncate">{{ sanitizeClientNameForDisplay(g.client_name) }}</span>
+                  <code
+                    class="text-[10px] bg-calm/40 px-1 rounded text-carbon-3"
+                    :title="`Client registered ${fmtTs(g.client_registered_at)}`"
+                    :data-testid="`admin-grant-client-id-${g.id}`"
+                  >{{ g.client_id.slice(0, 8) }}</code>
                   <UiBadge :kind="grantBadge(g).kind" :data-testid="`admin-grant-state-${g.id}`">
                     {{ grantBadge(g).label }}
                   </UiBadge>

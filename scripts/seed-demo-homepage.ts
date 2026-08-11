@@ -12,11 +12,11 @@
  *   DATABASE_URL=... tsx scripts/seed-demo-homepage.ts
  */
 import { randomUUID } from 'node:crypto'
-import postgres from 'postgres'
+import { createDbClient } from '../drizzle/connect'
 import { currentServerDeployEnv, isDemoCapableEnv } from '../shared/env/deploy-env'
 
 const MARK = 'demo-homepage-seed'
-const db = postgres(process.env.DATABASE_URL!, { max: 1 })
+const db = createDbClient(process.env.DATABASE_URL!, { max: 1 })
 
 const now = new Date()
 const mStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString()
@@ -123,9 +123,18 @@ async function main() {
   // ── actuals (reconciliation source) ──
   const attributed = Object.values(PROJECT_PLAN).reduce((a, p) => a + p.spend, 0)
   const untaggedTotal = UNTAGGED.reduce((a, u) => a + u.cost, 0)
+  // Dimension snapshot (mig 0101): stamped at seed time from Priya's own
+  // placement — 'ingest-snapshot', matching a real writer (the poller / bill
+  // writers), not the migration's legacy backfill label.
   await db`
-    INSERT INTO actual_spend (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source)
-    VALUES (${tm.id}::uuid, ${today}::date, 'claude-code', 5000000, 1500000, ${(attributed + untaggedTotal).toFixed(6)}, ${MARK})`
+    INSERT INTO actual_spend (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source,
+        region_id, org_unit_id, cost_owning_unit_id, dimension_source)
+    VALUES (${tm.id}::uuid, ${today}::date, 'claude-code', 5000000, 1500000, ${(attributed + untaggedTotal).toFixed(6)}, ${MARK},
+        ${tm.region_id}::uuid, ${tm.org_unit_id}::uuid,
+        (SELECT anc.id FROM org_unit home JOIN org_unit anc ON home.path <@ anc.path
+           WHERE home.id = ${tm.org_unit_id}::uuid AND anc.is_cost_owning_unit AND anc.retired_at IS NULL
+           ORDER BY nlevel(anc.path) DESC LIMIT 1),
+        'ingest-snapshot')`
 
   console.warn(`Seeded demo homepage for ${tm.email}: ${projects.length} budgeted projects, ${UNTAGGED.length} unallocated (${UNTAGGED.filter((u) => u.activity).length} tagged/spill), via attribution_record.`)
   await db.end()

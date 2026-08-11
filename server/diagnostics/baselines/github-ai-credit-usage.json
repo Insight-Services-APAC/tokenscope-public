@@ -1,0 +1,22 @@
+{
+  "endpoint": "github-ai-credit-usage",
+  "provenance": "schema-derived",
+  "capturedAt": null,
+  "note": "Transcribed from AiCreditUsageSchema / UsageItemSchema in server/reconciliation/adapters/github-client.ts. This records what TokenScope ASSUMES, not what has been observed. That file lists the wire facts verified live on 2026-06-08 (unitType, pricePerUnit, the 400 on org+user, seat.organization) — `model` is NOT among them, which is why this baseline asserts no presence for it. timePeriod is typed as a record of dynamic keys, so its individual keys are not declared here and will show up as added.",
+  "paths": [
+    { "path": "timePeriod", "types": ["object"], "presentRate": null },
+    { "path": "usageItems", "types": ["array"], "presentRate": null, "defaulted": true },
+    { "path": "usageItems[]", "types": ["object"], "presentRate": 1 },
+    { "path": "usageItems[].discountAmount", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "usageItems[].discountQuantity", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "usageItems[].grossAmount", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "usageItems[].grossQuantity", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "usageItems[].model", "types": ["string"], "presentRate": null },
+    { "path": "usageItems[].netAmount", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "usageItems[].netQuantity", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "usageItems[].pricePerUnit", "types": ["number"], "presentRate": null },
+    { "path": "usageItems[].product", "types": ["string"], "presentRate": null },
+    { "path": "usageItems[].sku", "types": ["string"], "presentRate": null },
+    { "path": "usageItems[].unitType", "types": ["string"], "presentRate": null }
+  ]
+}

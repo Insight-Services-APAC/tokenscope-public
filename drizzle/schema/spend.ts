@@ -12,7 +12,8 @@ import {
   customType,
   uniqueIndex,
 } from 'drizzle-orm/pg-core'
-import { teammate, orgUnit } from './identity'
+import { teammate, orgUnit, region } from './identity'
+import { providerOrg, providerEnterprise } from './governance'
 
 const tstzrange = customType<{ data: string }>({
   dataType() {
@@ -42,6 +43,37 @@ export const actualSpend = pgTable(
     chargebackExempt: boolean('chargeback_exempt').notNull().default(false),
     pulledAt: timestamp('pulled_at', { withTimezone: true }).notNull().defaultNow(),
     rawPayload: jsonb('raw_payload'),
+    // Historical-homing dimension snapshot (mig 0101, Workstream A §3.1
+    // "Historical homing uses source snapshots"). Nullable + independent of
+    // teammate's CURRENT placement: a writer stamps these at write/replay
+    // time (dimensionSource='ingest-snapshot') and NEVER updates them on a
+    // later re-poll of the same row, so a teammate reorg cannot move a
+    // historical day's homing. Migration 0101's one-time backfill of
+    // pre-existing rows labels them 'legacy-current-placement' instead (no
+    // point-in-time evidence exists for them). v_teammate_usage_daily's arm 1
+    // carries these through so v_complete_usage's third (ingest-only) union
+    // arm can home usage AS AT THE USAGE DATE rather than re-deriving it live.
+    regionId: uuid('region_id').references(() => region.id),
+    orgUnitId: uuid('org_unit_id').references(() => orgUnit.id),
+    costOwningUnitId: uuid('cost_owning_unit_id').references(() => orgUnit.id),
+    // 'ingest-snapshot' | 'legacy-current-placement' — see dimension-snapshot.ts.
+    dimensionSource: text('dimension_source'),
+    // Governance key (mig 0103, Workstream B §4.0/R1-H9). NULL = governance
+    // -unresolved: showback-visible, never chargeable. See
+    // server/reconciliation/governance-keys.ts + server/governance/verdict.ts.
+    // ON DELETE SET NULL is in 0103 (Drizzle def omits the FK action, matching
+    // the workerRun.runId precedent below) — provider_org/-enterprise stay
+    // deletable leaves; a delete un-resolves any row that referenced them
+    // rather than orphan-blocking the delete or destroying money history.
+    providerOrgId: uuid('provider_org_id').references(() => providerOrg.id),
+    // GitHub billing lives on the ENTERPRISE (ADR-0011 D11), not the org.
+    providerEnterpriseId: uuid('provider_enterprise_id').references(() => providerEnterprise.id),
+    // Backfill bookkeeping only ('resolved' | 'unresolved'); NULL = not yet attempted.
+    governanceKeyStatus: text('governance_key_status'),
+    // Set when a finance_period close/restate freezes this row's verdict; NULL = open.
+    governanceVerdictLockedAt: timestamp('governance_verdict_locked_at', { withTimezone: true }),
+    // Provenance of the current chargeback_exempt value. See server/governance/verdict.ts.
+    governanceVerdictSource: text('governance_verdict_source'),
   },
   (t) => [
     uniqueIndex('actual_spend_teammate_date_tool_source_unique').on(

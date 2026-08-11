@@ -14,6 +14,7 @@
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
+import { consola } from 'consola'
 import type { ReconcileProvider } from './types'
 
 // The resolver body uses only db.execute(sql`…`) (the raw escape hatch), so it works
@@ -98,6 +99,14 @@ export interface ResolvedCredential {
   kind?: CredentialKind
   /** App mode only: provider_enterprise.github_app_id (the JWT `iss`). */
   appId?: string
+  /** PAT mode only (S9 silent-mirror guard): true when an App private key IS wired
+   *  under this secret name (NUXT_GITHUB_APP_KEY_<NAME>) even though github_app_id is
+   *  NULL — i.e. an App key was provisioned but the enterprise never opted in. The PAT
+   *  path is still selected (do not refuse on the first ship — PAT is a documented,
+   *  owner-accepted fallback), but this makes a probably-forgotten App-mode cutover
+   *  visible instead of a silent downgrade. Callers should surface it (reconciliation-sync
+   *  counts it onto worker_run.result). Undefined/false in every other case. */
+  appKeyMirrorWarning?: boolean
   /** Anthropic org grain only: which API reconciles this org (provider_org.api_kind,
    *  mig 0063). Carried so reconciliation-sync can thread it onto AdapterScope and
    *  the anthropic adapter can branch. Null for github / pre-0063 rows. */
@@ -216,6 +225,22 @@ export async function resolveEnterpriseCredential(
 
   // PAT mode (default): unchanged behaviour.
   const value = readSecret(args.provider, secretName)
-  if (value && secretName) return { secretName, value, level: 'enterprise', kind: 'github-pat' }
-  return null
+  if (!value || !secretName) return null
+
+  // SILENT-MIRROR GUARD (S9): an App private key can be sitting under the SAME secret
+  // name (NUXT_GITHUB_APP_KEY_<NAME>) while github_app_id is still NULL — e.g. mid
+  // App-mode cutover, or a key wired ahead of the DB flip. Without this check the PAT
+  // path is selected SILENTLY even though an App key already exists unused, which is a
+  // real downgrade an operator would want to see — warn loudly (do NOT refuse on the
+  // first ship; the PAT lane is a documented, owner-accepted fallback) and hand the
+  // signal back so the caller can record it on worker_run.result.
+  const appKeyMirrorWarning = args.provider === 'github' && readGithubAppKey(secretName) != null
+  if (appKeyMirrorWarning) {
+    consola.warn(
+      `[credentials] github enterprise '${args.externalId}' (credential_secret_name '${secretName}') has an ` +
+        'App private key wired but github_app_id is NULL — selecting the PAT path. If App mode was intended, ' +
+        'set provider_enterprise.github_app_id.',
+    )
+  }
+  return { secretName, value, level: 'enterprise', kind: 'github-pat', appKeyMirrorWarning }
 }

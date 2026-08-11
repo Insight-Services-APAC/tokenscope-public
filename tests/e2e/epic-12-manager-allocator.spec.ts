@@ -15,7 +15,7 @@
 import { test, expect } from '@playwright/test'
 
 // Reporting cutover: this spec asserts the now-deleted legacy Team rollup page (/rollups)
-// as the manager's entry point. Skipped pending a rewrite against /reporting?scope=regional
+// as the manager's entry point. Skipped pending a rewrite against /reporting?scope=region
 // (needs the browser E2E suite, not runnable in CI here). Tracked as a cutover follow-up.
 test.beforeEach(() => {
   test.skip(true, 'reporting cutover — rewrite this spec against /reporting (see cutover PR)')

@@ -15,8 +15,8 @@
  *
  * Ctrl-C to stop; closes the postgres pool cleanly on SIGINT/SIGTERM.
  */
-import postgres from 'postgres'
 import { drizzle } from 'drizzle-orm/postgres-js'
+import { createDbClient } from '../drizzle/connect'
 import * as schema from '../drizzle/schema'
 import { LocalCollectorReader } from '../server/azure/reader'
 import { emitTick } from './emit-data'
@@ -40,7 +40,7 @@ async function main() {
     process.exit(1)
   }
 
-  const client = postgres(dbUrl, { max: 1, idle_timeout: 5 })
+  const client = createDbClient(dbUrl, { max: 1, idle_timeout: 5 })
   const db = drizzle(client, { schema })
   const reader = new LocalCollectorReader(endpoint)
 

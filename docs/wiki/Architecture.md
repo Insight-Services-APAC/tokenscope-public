@@ -1,8 +1,10 @@
 # Architecture
 
-TokenScope attributes Claude Code token spend to projects. It is a Nuxt 3 / Nitro app with Drizzle + PostgreSQL, deployed on Azure Container Apps. The attribution surface is **OTel log events read from Log Analytics via KQL** — not metrics, not spans.
+TokenScope attributes AI coding-assistant token spend — **Claude Code and GitHub Copilot CLI** — to projects and cost centres. It is a Nuxt 3 / Nitro app with Drizzle + PostgreSQL, deployed on Azure Container Apps. The telemetry surface is **OTel log events read from Log Analytics via KQL** — not metrics, not spans — and the provider APIs supply the complete spend truth alongside it.
 
-> Sibling pages hold the detail: [Data Model](Data-Model.md), [Authentication & Security](Authentication-and-Security.md), [Background Workers](Background-Workers.md), [Claude Code Client](Claude-Code-Client.md), [Deployment & Operations](Deployment-and-Operations.md).
+> **Where the money comes from is now its own page.** [Data Flow](Data-Flow.md) holds the ingest paths, the §A/§B split, and how spend is valued; [Data Lineage](Data-Lineage.md) holds every table, column, transformation and invariant. This page stays at the component/topology level — where the two disagree, **Data Flow wins** (it was rewritten from a full code trace on 2026-08-02).
+
+> Sibling pages hold the rest of the detail: [Data Model](Data-Model.md), [Authentication & Security](Authentication-and-Security.md), [Background Workers](Background-Workers.md), [Claude Code Client](Claude-Code-Client.md), [Deployment & Operations](Deployment-and-Operations.md).
 
 ## Terminology
 
@@ -23,15 +25,22 @@ and spend is attributed per record.
   Claude's own `session.id`, captured as `attribution_record.claude_session_id`
   and `session_assignment.claude_session_id`. Subagents share their PARENT
   session's id (they are not separate sessions). This is the user-facing unit
-  ("Recent sessions") and the unit of retroactive project assignment. There is
-  no finer granularity than a session.
+  (the **session** rows of the Activity list) and the unit of retroactive
+  project assignment. There is no finer granularity than a session. A
+  provider-recorded day is NOT a session — it is a `(teammate, day, tool)`
+  bucket with no conversation and no instant behind it, which is why Activity
+  holds both kinds of row and is not called "Sessions".
 - **Project** — what the spend bills to. Resolved per record by the emitted
   `project.code_hash` (the ADR-0004 "B′" model — a claim), membership-gated
   ("tag proposes, membership disposes"). Untagged spend is retroactively
   assigned per-session via `session_assignment` (`claude_session_id →
   project_id`), also membership-gated.
 - **Attribution** — `attribution_record`, one row per (instance, session, event,
-  token-type, model), priced by rate card.
+  token-type, model, **request**). Priced **provider-first**: the provider's own
+  cost is the span total, and the rate card only *slices* that total across the
+  token-type rows. The card sets the amount solely as a fallback when the
+  provider sent none — which in practice never happens
+  (0 of 21,839 spans on Dev). See [Data Flow §4](Data-Flow.md#4-how-money-is-valued--and-the-rate-cards-real-job).
 
 ## Logical architecture
 
@@ -47,7 +56,7 @@ flowchart TB
         ST["1. MCP server + OAuth 2.1<br/>/api/v1/mcp · provision_emit → setup/redeem"]
         BR["2. Bearer-refresh endpoint<br/>instances/{instanceId}/bearer"]
         APP["5. App: attribution + costing<br/>engine, dashboard, REST API"]
-        WK["6. Read joiner + 25-worker registry<br/>scheduler-invoked"]
+        WK["6. Read joiner + 31-worker registry<br/>scheduler-invoked"]
     end
 
     AM["3+4. Azure Monitor OTLP endpoint<br/>(DCE + DCR) → OTelLogs in LAW"]
@@ -69,33 +78,46 @@ flowchart TB
 - **Native OTel emitter** — Claude Code emits `api_request` **log events** directly to Azure Monitor with our injected `OTEL_RESOURCE_ATTRIBUTES` (`tokenscope.instance_id`, `project.code_hash`, `tool`). No TokenScope code runs in the CLI process.
 - **Azure Monitor OTLP endpoint → LAW** — DCE + DCR route the built-in OTel log stream into the `OTelLogs` table on a Log Analytics Workspace.
 - **TokenScope app** — attribution + costing engine, registry, dashboard, REST API, worker registry.
-- **Read joiner + workers** — a static registry of **25 workers** invoked by an external scheduler; the `azure-monitor-read` worker is the read joiner. See [Background Workers](Background-Workers.md) for the full roster.
+- **Read joiner + workers** — a static registry of **31 workers** invoked by an external scheduler; the `azure-monitor-read` worker is the read joiner. See [Background Workers](Background-Workers.md) for the full roster.
 - **TokenScope DB** — the authoritative *derived* state and the join source-of-truth.
 
 ## Attribution data flow
 
-Two ingestion paths feed attribution: the **per-event telemetry path** (live signal) and the **Analytics API poller** (batch billing truth).
+> **This section is a summary. [Data Flow](Data-Flow.md) is the authority** — it
+> carries the full diagrams, the §A/§B split, the cost ladder and the known gaps.
+
+**Three** live ingest paths feed the spend surfaces, not two:
 
 ```mermaid
 flowchart LR
-    CC["Claude Code"] -->|"OTLP api_request<br/>log events (4 token counts)"| OTLP["Azure Monitor<br/>OTLP endpoint (DCR)"]
-    OTLP -->|dataFlow| LAW[("Log Analytics<br/>OTelLogs table")]
-    LAW -->|"KQL on tokenscope.instance_id"| RJ["Read joiner<br/>(azure-monitor-read worker)"]
+    CC["Claude Code /<br/>Copilot CLI"] -->|"OTLP api_request<br/>log events"| LAW[("Log Analytics<br/>OTelLogs")]
+    LAW -->|"KQL on tokenscope.instance_id"| RJ["read joiner<br/>(azure-monitor-read)"]
 
     SA[("instance_attestation")] -->|join key| RJ
     PA[("project_assignment")] -->|membership gate| RJ
     PO[("provider_org")] -->|org-lane fidelity| RJ
 
     RJ -->|writes| AR[("attribution_record")]
-    AR --> WEB["Web app:<br/>budgets · rollups · untagged worklist"]
 
-    ANT["Anthropic Analytics API"] -->|batch poll, reconciled orgs| AP["analytics-poll worker"]
-    AP -->|"actual_spend (billing ceiling)"| AR
+    ANT["Anthropic<br/>Enterprise Analytics"] -->|"reconciled orgs"| AP["analytics-poll"]
+    AP -->|writes| AS[("actual_spend")]
+
+    GH["GitHub Copilot"] --> RS["reconciliation-sync ·<br/>copilot-pool-bill"]
+    RS --> RR[("reconciliation_record ·<br/>copilot_pool_bill")]
+
+    AS & RR -->|"raw payloads, hourly"| PT["provider-transform<br/>(+ github arm)"]
+    PT -->|writes| PUF[("provider_usage_fact")]
+
+    AR & AS & RR --> AGG["rollups + views<br/>v_complete_usage · chargeback"]
+    PUF -->|"billed axis · model split"| AGG
+    AGG --> WEB["Web app:<br/>budgets · rollups · worklist"]
 ```
 
-- **Telemetry path (live):** Claude Code → OTLP log events → Azure Monitor → `OTelLogs` → read joiner. The joiner queries `OTelLogs` via KQL, joins on the TokenScope-minted `tokenscope.instance_id` (the device/enrolment INSTANCE id, not Claude's own per-SESSION `session.id`, which is captured per-record as `claude_session_id`), applies the membership gate and org-lane selection, computes cost, and writes `attribution_record`.
-- **Analytics path (batch truth):** the `analytics-poll` worker polls each *reconciled* Anthropic org from month-start through today; idempotent daily rows upsert into `actual_spend` and act as the per-org billing ceiling. Each row lands in a **per-surface tool lane** (#142) — Claude Code plus the non-Code surfaces (chat, Cowork, Office agents, Chrome, Design, Slack; unknowns in a labelled `claude-other` fallback) — so non-Code spend is a chargeback lane of its own, not part of the `claude-code` figure. Zero reconciled orgs = clean no-op. See [Background Workers](Background-Workers.md).
-- The read joiner is **pull-and-rejoin**, not write-once — it re-scans recent joinable sessions each tick, so late-arriving events get picked up when LAW recovers.
+- **Telemetry path (detail, ~5% of the estate):** the joiner queries `OTelLogs` via KQL, joining on the TokenScope-minted `tokenscope.instance_id` (the device/enrolment INSTANCE id — not Claude's own per-SESSION `session.id`, which is captured per-record as `claude_session_id`), applies the membership gate and org-lane selection, costs each span, and writes `attribution_record`. A membership failure does **not** discard the row: it is written with `project_id` NULL, i.e. unallocated.
+- **Anthropic Analytics path (truth, 100%):** `analytics-poll` polls each *reconciled* org over a **trailing 30-day window** (`[now−30d, now]` — *not* month-start), one UTC day at a time, and upserts idempotent daily rows into `actual_spend`. Each row lands in a **per-surface tool lane** (#142). Zero reconciled orgs = clean no-op.
+- **Copilot path:** `reconciliation-sync` writes per-teammate §A usage to `reconciliation_record`; `copilot-pool-bill` writes the pooled §B bill to `copilot_pool_bill`. Copilot rows in `actual_spend` are **showback-only** and are firewalled out of every chargeback view by name.
+- **Billed lane:** the hourly `provider-transform` worker (plus its GitHub arm) derives `provider_usage_fact` — per-(teammate, day, tool, **model**, cost_type, context_window) facts — from the captured provider payloads (`actual_spend.raw_payload`; `reconciliation_record` for Copilot). The billed/chargeback reporting axes and the model split read it. `server/reporting/engine/` (scope, kpis, drivers, billed-axis, budget-axis, …) is the reporting read layer every `/api/v1/reports/*` route composes.
+- The read joiner is **pull-and-rejoin**, not write-once. It re-scans joinable sessions each tick with a **5-minute** watermark overlap — events later than that are recovered only by the ~24 h deep rescan or an operator `telemetry-recovery` run, **not** automatically on the next tick.
 
 ## Technical / deployment topology
 
@@ -107,7 +129,7 @@ flowchart TB
     WAF -->|forwards to internal VIP| TSAPP
 
     subgraph ACA["Azure Container Apps — ingress internal: true (private VIP)"]
-        TSAPP["TokenScope app + 25-worker registry"]
+        TSAPP["TokenScope app + 31-worker registry"]
     end
 
     SCHED["External ACA cron jobs (caj-ts-*)"] -->|"HMAC-signed POST<br/>internal/run-worker/{name}"| TSAPP
@@ -132,14 +154,17 @@ flowchart TB
 - **PostgreSQL Flexible Server** (private endpoint) holds derived state (RLS + audit-trigger append-only). **Log Analytics** is the read-only attribution surface. **Key Vault** (private endpoint) is the single secrets surface; **Redis** (private endpoint) holds sessions/cache only; **ACR** (private endpoint) serves container images.
 - The concrete region and the exact private-endpoint resource set for the Insight instance are in your deployment's own configuration.
 
-## The two ingestion paths
+## The ingestion paths
 
 | Path | Source | Cadence | Role |
 |---|---|---|---|
-| **Telemetry** | Claude Code OTLP log events → `OTelLogs` | continuous (joiner runs ~every 5 min) | Live per-session attribution signal |
-| **Analytics API** | Anthropic Analytics API (per reconciled org) | batch (poller ~every 15 min) | Billing ceiling / reconciliation truth |
+| **Telemetry** | Claude Code + Copilot CLI OTLP log events → `OTelLogs` | joiner ~every 5 min | The **detail** axis: session, project, activity, model. Covers only enrolled devices (~5%) |
+| **Anthropic Analytics** | Enterprise Analytics API, per reconciled org | poller ~every 15 min | **§A usage truth** — complete, day grain |
+| **GitHub Copilot** | metrics report (§A) + enterprise billing usage (§B) | `reconciliation-sync`, `copilot-pool-bill` | §A usage and the §B pooled bill |
 
-The telemetry path is full-fidelity (log events ingested in full, unsampled). The Analytics path supplies the authoritative spend that reconciliation reconciles the telemetry estimate against.
+Telemetry is unsampled **at ingest** but is not "full fidelity" at read: zero-token rows are pruned, an unparseable timestamp or an unsafe `model` drops the row, and a span with neither a provider cost nor a rate line is not written at all. Every drop is counted.
+
+The provider APIs supply the authoritative spend. **They are not a "ceiling" against a telemetry estimate** — since the cost-precedence work both sides carry the provider's own figure, and `actual_spend` is directly displayed usage money via `v_complete_usage`. See [Data Flow](Data-Flow.md).
 
 ## Trust model
 
@@ -151,9 +176,12 @@ The telemetry path is full-fidelity (log events ingested in full, unsampled). Th
 
 | Lane | Fidelity / cost basis | Billing |
 |---|---|---|
-| **reconciled** | tier-1, cost estimated (Analytics API = ceiling) | billed |
+| **reconciled** | tier-1, `cost_basis = provider-reported` (or `estimated` only if the rate card had to price it) | billed |
 | **indicative** | tier-2 / telemetry-only | tracked, excluded from billing |
 | **unknown org** | tier-2 / telemetry-only, best-effort + `attribution-org-unclassified` audit event | never billed |
+| **any `/tokenscope:backfill` re-emit** | forced tier-2 / telemetry-only regardless of org | never billed |
+
+The table describes the **Claude** lane. `tool = 'copilot-cli'` skips the `provider_org` lookup entirely and is unconditionally tier-2 / telemetry-only in v1.
 
 ## Region & RBAC
 
@@ -166,10 +194,10 @@ The telemetry path is full-fidelity (log events ingested in full, unsampled). Th
 **Built (shipped):**
 - **Claude Code client** — MCP server + OAuth 2.1 client backbone (PKCE consent, dynamic registration, grant lifecycle / revoke), `provision_emit`→`/setup/redeem` device provisioning + bearer-refresh, native OTel log-event ingestion, logs→LAW→KQL read joiner with membership gate + org-lane reconciliation.
 - **GitHub Copilot CLI client** — same MCP/OAuth backbone + `copilot-plugin/` (three skills, `hooks.json`), singleton file-forwarder (`copilot-forwarder.mjs`) that tails the Copilot OTEL file, filters `chat` spans (double-count guard), transcodes to `api_request` OTLP-logs protobuf, and forwards to Azure Monitor every ~60s. Provisioning writes `~/.tokenscope/config.json`. Copilot v1 spend is **indicative** (tier-2/telemetry-only), priced at 1 AI credit = $0.01 USD.
-- 25-worker scheduler-driven registry, dashboard with budgets/rollups/untagged worklist, RLS + trigger-enforced audit log, internal ACA ingress behind an upstream WAF.
+- 31-worker scheduler-driven registry, dashboard with budgets/rollups/untagged worklist, RLS + trigger-enforced audit log, internal ACA ingress behind an upstream WAF.
 
 **Planned (future-state, not built):**
-- **GitHub-billing-API reconciliation** — lifts Copilot spend from tier-2 to tier-1 (the F2 worker).
+- **F2 — promoting Copilot telemetry from tier-2 to tier-1.** Note the *reconciliation itself is built*: the GitHub billing adapter, `copilot-bill` and `copilot-pool-bill` all ship today and produce the §B pooled chargeback. What remains is lifting the **telemetry** lane's fidelity, and re-confirming the estate-global identity links before Copilot becomes §B-chargeable.
 - Financial (FIN) connectors — full Polaris/Workday/SAP adapters (only the `connector-health` worker against `sync_conflict` rows shipped).
 - BullMQ/Redis job queues + audit-log mirror to Log Analytics.
 - Foundry-routed AI coaching.

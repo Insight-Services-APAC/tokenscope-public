@@ -3,6 +3,7 @@ import { pgTable, uuid, text, numeric, date, jsonb, timestamp, index } from 'dri
 import { teammate, region, orgUnit } from './identity'
 import { project } from './projects'
 import { workerRun } from './worker-run'
+import { providerOrg, providerEnterprise } from './governance'
 
 /*
  * reconciliation_record — the signed-delta reconciliation ledger (migration 0038).
@@ -54,6 +55,12 @@ export const reconciliationRecord = pgTable(
     // The worker_run that wrote this row (0042) — powers "what did this run produce?".
     // ON DELETE SET NULL is in 0042 (Drizzle def omits the FK action).
     runId: uuid('run_id').references(() => workerRun.id),
+    // Governance key (mig 0103, Workstream B §4.0). See actual_spend's twin
+    // columns in drizzle/schema/spend.ts for the full contract. ON DELETE SET
+    // NULL is in 0103 (Drizzle def omits the FK action, same precedent as runId above).
+    providerOrgId: uuid('provider_org_id').references(() => providerOrg.id),
+    providerEnterpriseId: uuid('provider_enterprise_id').references(() => providerEnterprise.id),
+    governanceKeyStatus: text('governance_key_status'),
   },
   (t) => [
     index('reconciliation_record_teammate_period_idx').on(t.teammateId, t.periodDate),

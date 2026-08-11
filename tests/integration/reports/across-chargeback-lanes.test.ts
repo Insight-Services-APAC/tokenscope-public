@@ -2,9 +2,9 @@
 /*
  * Across-Regions §B chargeback LANE widening (lane-visuals V2, Across scope) —
  * the two widened endpoints exercised against a real Postgres:
- *   - GET /reports/across-regions/trend → `chargeLanes` (per-(day, lane) bill
+ *   - GET /reports/region/trend (region=all) → `chargeLanes` (per-(day, lane) bill
  *     series, `v_finance_bill_chargeback` GROUP BY tool → registry lanes);
- *   - GET /reports/across-regions → `chargebackLanes` (per-lane window totals:
+ *   - GET /reports/region (region=all) → `chargebackLanes` (per-lane window totals:
  *     Anthropic day-grained + the pooled Copilot §B lanes on the KPI's gate).
  *
  * The BLANKET CONSERVATION RULE (r1-F6) is the point of this file: for every
@@ -19,8 +19,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
 import type { Session } from '../../../server/utils/auth'
-import acrossHandler from '../../../server/api/v1/reports/across-regions/index.get'
-import trendHandler from '../../../server/api/v1/reports/across-regions/trend.get'
+import acrossHandler from '../../../server/api/v1/reports/region/index.get'
+import trendHandler from '../../../server/api/v1/reports/region/trend.get'
 
 let t: TestDb
 let regionA = ''
@@ -42,6 +42,15 @@ const ev = (session: Session, query = '') => {
   injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], session)
   return e as unknown as Parameters<typeof acrossHandler>[0]
 }
+/*
+ * The WHOLE-COMPANY width of the merged `/reports/region*` family (was the
+ * separate `/reports/across-regions*` routes). `region=all` is not an optional
+ * extra here — it is what selects the unclamped engine scope, so every call that
+ * used to reach an across route reaches it through this.
+ */
+const evAll = (session: Session, query = '') =>
+  ev(session, query ? `${query}&region=all` : 'region=all')
+
 const gfo = (): Session =>
   ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role: 'global-finops', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
 
@@ -103,9 +112,9 @@ interface AcrossResp {
   chargebackLanes: LaneRow[]
 }
 
-describe('GET /reports/across-regions/trend — chargeLanes (per-lane §B daily series)', () => {
+describe('GET /reports/region/trend (region=all) — chargeLanes (per-lane §B daily series)', () => {
   it('CONSERVATION: Σ lanes per day == chargeSeries[day], cent-exact, every day', async () => {
-    const r = (await trendHandler(ev(gfo(), 'month=2026-07'))) as unknown as TrendResp
+    const r = (await trendHandler(evAll(gfo(), 'month=2026-07'))) as unknown as TrendResp
     const laneSumByDay = new Map<string, number>()
     for (const p of r.chargeLanes) laneSumByDay.set(p.day, (laneSumByDay.get(p.day) ?? 0) + p.chargeUsd)
     for (const d of r.chargeSeries) {
@@ -119,7 +128,7 @@ describe('GET /reports/across-regions/trend — chargeLanes (per-lane §B daily 
   })
 
   it('lanes are registry lane ids; the §A copilot row NEVER surfaces (mig-0085 firewall)', async () => {
-    const r = (await trendHandler(ev(gfo(), 'month=2026-07'))) as unknown as TrendResp
+    const r = (await trendHandler(evAll(gfo(), 'month=2026-07'))) as unknown as TrendResp
     const lanes = new Set(r.chargeLanes.map((p) => p.lane))
     expect(lanes).toEqual(new Set(['claude', 'claude-ai']))
     // The $99 copilot-cli actual_spend row is §A vocabulary — firewalled out of
@@ -135,7 +144,7 @@ describe('GET /reports/across-regions/trend — chargeLanes (per-lane §B daily 
   })
 
   it('windows to a custom range like the total series', async () => {
-    const r = (await trendHandler(ev(gfo(), 'from=2026-07-02&to=2026-07-02'))) as unknown as TrendResp
+    const r = (await trendHandler(evAll(gfo(), 'from=2026-07-02&to=2026-07-02'))) as unknown as TrendResp
     expect(r.chargeLanes).toEqual([
       { day: '2026-07-02', lane: 'claude', chargeUsd: 1.11 },
       { day: '2026-07-02', lane: 'claude-ai', chargeUsd: 5.55 },
@@ -143,10 +152,10 @@ describe('GET /reports/across-regions/trend — chargeLanes (per-lane §B daily 
   })
 })
 
-describe('GET /reports/across-regions — chargebackLanes (per-lane §B window totals)', () => {
+describe('GET /reports/region (region=all) — chargebackLanes (per-lane §B window totals)', () => {
   it('pending mode: Anthropic lanes only; Σ == anthropicChargeableUsd == chargeableUsd, cent-exact', async () => {
     delete process.env.NUXT_COPILOT_CHARGEBACK_ENABLED
-    const r = (await acrossHandler(ev(gfo(), 'month=2026-07'))) as unknown as AcrossResp
+    const r = (await acrossHandler(evAll(gfo(), 'month=2026-07'))) as unknown as AcrossResp
     expect(r.chargebackLanes.map((l) => l.lane)).toEqual(['claude', 'claude-ai'])
     const sum = r.chargebackLanes.reduce((a, l) => a + l.chargeUsd, 0)
     expect(cents(sum)).toBe(cents(r.kpis.anthropicChargeableUsd))
@@ -157,7 +166,7 @@ describe('GET /reports/across-regions — chargebackLanes (per-lane §B window t
   it('chargeback mode (month window): Copilot §B lanes ride along; Σ(chargeable lanes) == chargeableUsd; unclassified VISIBLE but NEVER charged', async () => {
     process.env.NUXT_COPILOT_CHARGEBACK_ENABLED = 'true'
     try {
-      const r = (await acrossHandler(ev(gfo(), 'month=2026-07'))) as unknown as AcrossResp
+      const r = (await acrossHandler(evAll(gfo(), 'month=2026-07'))) as unknown as AcrossResp
       const byLane = new Map(r.chargebackLanes.map((l) => [l.lane, l.chargeUsd]))
       expect(byLane.get('copilot-license')).toBe(100)
       expect(byLane.get('copilot-usage')).toBe(20)
@@ -181,7 +190,7 @@ describe('GET /reports/across-regions — chargebackLanes (per-lane §B window t
   it('chargeback mode + partial-month range: pooled lanes withheld (the KPI gate), Σ == chargeableUsd', async () => {
     process.env.NUXT_COPILOT_CHARGEBACK_ENABLED = 'true'
     try {
-      const r = (await acrossHandler(ev(gfo(), 'from=2026-07-01&to=2026-07-15'))) as unknown as AcrossResp
+      const r = (await acrossHandler(evAll(gfo(), 'from=2026-07-01&to=2026-07-15'))) as unknown as AcrossResp
       expect(r.copilot.partialMonthUnavailable).toBe(true)
       // No pooled lane may be sliced into a partial month — Anthropic lanes only.
       expect(r.chargebackLanes.map((l) => l.lane)).toEqual(['claude', 'claude-ai'])

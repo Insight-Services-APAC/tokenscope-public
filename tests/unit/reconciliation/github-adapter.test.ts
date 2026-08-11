@@ -13,11 +13,13 @@ import {
   enumerateDays,
   categoriseSku,
   seatLicenseOrg,
+} from '../../../server/reconciliation/adapters/github'
+import {
   isChargebackExemptOrg,
   chargebackExemptOrgSet,
   isNfrDemoOrg,
   nfrDemoOrgSet,
-} from '../../../server/reconciliation/adapters/github'
+} from '../../../server/reconciliation/legacy-chargeback-heuristic'
 import type { GithubSeat, GithubUsageItem } from '../../../server/reconciliation/adapters/github-client'
 
 function usageItem(over: Partial<GithubUsageItem> = {}): GithubUsageItem {

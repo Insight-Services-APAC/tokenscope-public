@@ -21,6 +21,7 @@
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { readValidated } from '../../../../../utils/validated-body'
 import { sql } from 'drizzle-orm'
+import { advisoryXactLock } from '../../../../../db/advisory-lock'
 import { z } from 'zod'
 import { requireRole, requireRegionScope } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
@@ -157,6 +158,81 @@ export default defineEventHandler(async (event) => {
           status: 422,
           detail:
             'This teammate belongs to another region. Only global-finops / platform-admin may assign cross-region cost-centre owners.',
+        },
+      })
+    }
+
+    /*
+     * ONE OWNER, ONE BUSINESS UNIT (owner ruling, 2026-08-10).
+     *
+     * `cou_owner` is 1..n owners per unit — which is fine and stays — but it was
+     * also unbounded the OTHER way: one person could actively own several BUs.
+     * That is not a shape the org has, and it breaks things that assume it does:
+     * the manager-chain placement walk treats an owner of >1 active unit as
+     * AMBIGUOUS and skips them entirely (`region-derivation.ts`), so a
+     * multi-BU owner silently places nobody, and the picker's "(yours)" becomes
+     * a list rather than a destination.
+     *
+     * Enforced HERE rather than by a partial-unique index, deliberately: Dev
+     * already holds violations (several BUs are named "CTO Office" across
+     * regions and one person owns more than one), and a migration that cannot
+     * apply to the live database is not a constraint, it is an outage. The
+     * index follows once `GET /admin/diagnostics/multi-bu-owners` reports clean.
+     */
+    /*
+     * Serialised on the TEAMMATE, because the read below and the insert after it
+     * are two statements: two concurrent grants for the same person and
+     * different BUs would each see no existing ownership and both succeed. The
+     * `(org_unit_id, teammate_id)` unique index cannot catch that — the rows
+     * differ in org_unit_id. Same `principal` namespace the enrol path uses to
+     * serialise one human.
+     */
+    await tx.execute(advisoryXactLock('principal', ownerTeammateId))
+
+    /*
+     * COUNTED ACROSS REGIONS, via the SECURITY DEFINER aggregate (mig 0111).
+     *
+     * A direct `SELECT … FROM cou_owner` is filtered by the `cou_owner_admin`
+     * RLS policy, so a REGION admin cannot see an ownership a global admin
+     * granted elsewhere — and would sail past this check and create exactly the
+     * second BU it exists to prevent. `owner_active_unit_counts()` returns
+     * counts only, never the hidden unit, which is why it can span regions
+     * without leaking one.
+     *
+     * It already applies the same eligibility this rule means: real oids only,
+     * cost-owning and non-retired units, active grants.
+     */
+    const [ownedElsewhere] = [
+      ...(await tx.execute<{ n: string }>(sql`
+        SELECT COALESCE(c.unit_count, 0)::text AS n
+          FROM teammate t
+          LEFT JOIN owner_active_unit_counts() c ON c.owner_oid = t.entra_oid
+         WHERE t.id = ${ownerTeammateId}::uuid`)),
+    ]
+    /*
+     * The count INCLUDES this unit when the caller is re-granting one they
+     * already own (the `(org_unit_id, teammate_id)` unique index turns that
+     * into its own 409 below), so the bar is "already owns one that is not this
+     * one" — expressed as a count exceeding what this grant would justify.
+     */
+    const [alreadyHere] = [
+      ...(await tx.execute<{ n: string }>(sql`
+        SELECT count(*)::text AS n FROM cou_owner
+         WHERE teammate_id = ${ownerTeammateId}::uuid
+           AND org_unit_id = ${id}::uuid AND revoked_at IS NULL`)),
+    ]
+    if (Number(ownedElsewhere?.n ?? 0) - Number(alreadyHere?.n ?? 0) > 0) {
+      throw createError({
+        statusCode: 409,
+        statusMessage: 'Already owns a Business Unit',
+        data: {
+          type: 'https://tokenscope.example.com/errors/already-owns-a-bu',
+          title: 'Already owns a Business Unit',
+          status: 409,
+          // The unit is deliberately NOT named: it can be in a region this
+          // caller may not see, and the count is the only thing safe to expose.
+          detail:
+            'This teammate already owns a Business Unit. A person may own at most one — revoke the existing ownership first. If you cannot see it, it is in another region; ask a global administrator.',
         },
       })
     }

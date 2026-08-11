@@ -39,6 +39,7 @@ import { orgSubtreeScopePredicate } from '../../../auth/org-subtree-scope'
 import { buildRollupTree, type RollupUnit, type UnitSpend } from '../../../utils/org-tree-rollup'
 import { monthStartIso } from '../../../utils/period'
 import { vendorCostSql } from '../../../../shared/usage/vendor'
+import { UNASSIGNED_REGION_CODE, HOLDING_UNIT_TYPE } from '../../../../shared/placement/holding-nodes'
 
 const Query = z.object({
   ouId: z.string().uuid().optional(),
@@ -76,7 +77,7 @@ export default defineEventHandler(async (event) => {
       const rows = await tx.execute<{ id: string; path: string; region_id: string }>(sql`
         SELECT id::text AS id, path::text AS path, region_id::text AS region_id
         FROM org_unit
-        WHERE id = ${ouId}::uuid AND retired_at IS NULL AND unit_type <> 'holding'
+        WHERE id = ${ouId}::uuid AND retired_at IS NULL AND unit_type <> ${HOLDING_UNIT_TYPE}
           AND ${orgSubtreeScopePredicate('org_unit')}
         LIMIT 1`)
       // A holding node (__UNPLACED__) is not a drillable root — it's excluded from the tree and
@@ -90,7 +91,7 @@ export default defineEventHandler(async (event) => {
       if (crossRegion) {
         const rgRows = await tx.execute<{ id: string; code: string; display_name: string }>(sql`
           SELECT id::text AS id, code, display_name FROM region
-          WHERE code <> '__unassigned__' ORDER BY display_name`)
+          WHERE code <> ${UNASSIGNED_REGION_CODE} ORDER BY display_name, code`)
         regionOptions = [...rgRows].map((r) => ({ id: r.id, code: r.code, displayName: r.display_name }))
       }
       // Effective region: a validated explicit pick wins; else the caller's home if it's a real
@@ -98,9 +99,20 @@ export default defineEventHandler(async (event) => {
       // homed in the synthetic __unassigned__ region still lands on a real, selectable region and
       // selectedRegionId always appears in regionOptions. admin always uses its own region.
       let effectiveRegionId: string
-      if (crossRegion && requestedRegionId) effectiveRegionId = requestedRegionId
-      else if (crossRegion) effectiveRegionId = regionOptions.find((o) => o.id === caller.regionId)?.id ?? regionOptions[0]?.id ?? caller.regionId
-      else effectiveRegionId = caller.regionId
+      if (crossRegion && requestedRegionId) {
+        // S3: validate ?regionId against the SAME regionOptions the picker returned (mirrors
+        // resolveRegionalScope's region-param check) — else a cross-region caller could target
+        // an existing-but-hidden region (e.g. __unassigned__, excluded from regionOptions on
+        // purpose) that a raw "does this region id exist" check would silently accept.
+        if (!regionOptions.some((o) => o.id === requestedRegionId)) {
+          throw createError({ statusCode: 404, statusMessage: 'region not found' })
+        }
+        effectiveRegionId = requestedRegionId
+      } else if (crossRegion) {
+        effectiveRegionId = regionOptions.find((o) => o.id === caller.regionId)?.id ?? regionOptions[0]?.id ?? caller.regionId
+      } else {
+        effectiveRegionId = caller.regionId
+      }
 
       const rg = await tx.execute<{ display_name: string }>(sql`
         SELECT display_name FROM region WHERE id = ${effectiveRegionId}::uuid LIMIT 1`)
@@ -109,17 +121,23 @@ export default defineEventHandler(async (event) => {
       scope = { kind: 'region', regionId: effectiveRegionId, regionName: name }
     } else {
       // developer / manager default — their own org node (region-clamped so a colliding path
-      // in another region can never be selected).
+      // in another region can never be selected). S3: also require parent_id IS NOT NULL AND
+      // code <> 'default' — the same structural+naming conjunction placedBelowRegionRootPredicate()
+      // applies elsewhere — so a caller whose own placement IS the region root (JIT/directory/
+      // enroll default) falls through to the SAME empty-tree branch a holding-node caller already
+      // gets below, rather than resolving a "root" whose subtree is the whole region.
       const rows = await tx.execute<{ id: string; path: string; region_id: string }>(sql`
         SELECT id::text AS id, path::text AS path, region_id::text AS region_id
         FROM org_unit
         WHERE path = current_setting('app.user_org_path', true)::ltree
-          AND region_id = ${caller.regionId}::uuid AND retired_at IS NULL AND unit_type <> 'holding'
+          AND region_id = ${caller.regionId}::uuid AND retired_at IS NULL AND unit_type <> ${HOLDING_UNIT_TYPE}
+          AND parent_id IS NOT NULL AND code <> 'default'
         LIMIT 1`)
       const r = [...rows][0]
       if (!r) {
-        // No normal org node (e.g. the caller sits on a holding node, whose own path won't match
-        // a non-holding row) — empty tree rather than a buildRollupTree "root not loaded" throw.
+        // No normal org node (e.g. the caller sits on a holding node, or on the region root,
+        // whose own path won't match a non-holding non-root row) — empty tree rather than a
+        // buildRollupTree "root not loaded" throw.
         return { period: 'mtd', source: 'emitted', root: null, orphanCostUsd: 0, orphanTokens: 0, unplaced: null }
       }
       scope = { kind: 'node', rootId: r.id, rootPath: r.path, regionId: r.region_id }
@@ -138,7 +156,7 @@ export default defineEventHandler(async (event) => {
       SELECT id::text AS id, parent_id::text AS parent_id,
              code, display_name, unit_type, is_cost_owning_unit
       FROM org_unit
-      WHERE ${unitScope} AND retired_at IS NULL AND unit_type <> 'holding'
+      WHERE ${unitScope} AND retired_at IS NULL AND unit_type <> ${HOLDING_UNIT_TYPE}
       ORDER BY path`)
 
     const spendScope: SQL = scope.kind === 'node'
@@ -163,7 +181,7 @@ export default defineEventHandler(async (event) => {
              array_agg(DISTINCT ar.teammate_id::text) AS teammate_ids
       FROM v_complete_usage ar
       JOIN org_unit ou ON ou.id = ar.org_unit_id
-      WHERE ar.ts_event >= ${monthStart}::timestamptz AND ${spendScope} AND ou.unit_type <> 'holding'
+      WHERE ar.ts_event >= ${monthStart}::timestamptz AND ${spendScope} AND ou.unit_type <> ${HOLDING_UNIT_TYPE}
       GROUP BY ar.org_unit_id`)
 
     const units: RollupUnit[] = [...unitRows].map((u) => ({
@@ -205,7 +223,7 @@ export default defineEventHandler(async (event) => {
         FROM v_complete_usage ar
         JOIN org_unit ou ON ou.id = ar.org_unit_id
         WHERE ar.ts_event >= ${monthStart}::timestamptz
-          AND ou.unit_type = 'holding' AND ou.region_id = ${scope.regionId}::uuid`)
+          AND ou.unit_type = ${HOLDING_UNIT_TYPE} AND ou.region_id = ${scope.regionId}::uuid`)
       const up = [...upRows][0]
       unplaced = { costUsd: Number(up?.cost_usd ?? 0), tokens: Number(up?.tokens ?? 0) }
     }

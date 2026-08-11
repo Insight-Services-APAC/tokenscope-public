@@ -13,7 +13,9 @@ import * as schema from '../../../drizzle/schema'
 import { injectTestSession } from '../../helpers/auth'
 import type { Session } from '../../../server/utils/auth'
 import assignHandler from '../../../server/api/v1/me/sessions/[sid]/assign.post'
-import recentHandler from '../../../server/api/v1/me/sessions/recent.get'
+// §F4: /me/sessions/recent retired; the split cue now rides the Activity list.
+import activityHandler from '../../../server/api/v1/me/activity.get'
+import type { ActivityListResponse, ActivitySessionRow } from '../../../shared/schemas/activity'
 
 let t: TestDb
 let devId: string
@@ -115,15 +117,15 @@ async function counts() {
   return rows[0]!
 }
 
-// recent.get is a GET with no sid param; minimal event wrapper.
+// activity.get is a GET with no sid param; minimal event wrapper.
 function recentEv(session: Session) {
   const headers: Record<string, string> = { host: 'localhost:3450', origin: 'http://localhost:3450' }
   const e = {
     method: 'GET',
-    path: '/x',
+    path: '/x?kind=session',
     context: {},
     node: {
-      req: { method: 'GET', url: '/x', socket: { remoteAddress: '127.0.0.1' }, get headers() { return headers } },
+      req: { method: 'GET', url: '/x?kind=session', socket: { remoteAddress: '127.0.0.1' }, get headers() { return headers } },
       res: {
         _headers: {} as Record<string, string | string[]>,
         statusCode: 200,
@@ -136,17 +138,15 @@ function recentEv(session: Session) {
     },
   }
   injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], session)
-  return e as unknown as Parameters<typeof recentHandler>[0]
+  return e as unknown as Parameters<typeof activityHandler>[0]
 }
 async function convRow() {
-  const out = (await recentHandler(recentEv(devSession()))) as {
-    sessions: Array<{ session_id: string; partly_ended: boolean; ended_project_code: string | null }>
-  }
-  return out.sessions.find((s) => s.session_id === CONV)!
+  const out = (await activityHandler(recentEv(devSession()))) as ActivityListResponse
+  return out.rows.find((r) => r.kind === 'session' && r.id === CONV) as ActivitySessionRow
 }
 
 describe('re-tag boundary guard', () => {
-  it('recent flags partly_ended for the boundary-spanning conversation (pre-re-tag)', async () => {
+  it('Activity flags partly_ended for the boundary-spanning conversation (pre-re-tag)', async () => {
     const r = await convRow()
     expect(r.partly_ended).toBe(true) // ended-X row + unallocated row
     expect(r.ended_project_code).toBe('AL-X')
@@ -167,7 +167,7 @@ describe('re-tag boundary guard', () => {
     expect(Number(c.unalloc)).toBe(0)
   })
 
-  it('recent STILL flags partly_ended after the re-tag (X ended + Y active, no unallocated)', async () => {
+  it('Activity STILL flags partly_ended after the re-tag (X ended + Y active, no unallocated)', async () => {
     // The conversation now has a row on ended X and a row on active Y, zero
     // unallocated. The old "ended + unallocated" indicator would have gone false
     // here, hiding the split; the corrected "ended + non-ended" must stay true.

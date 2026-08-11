@@ -21,6 +21,7 @@
  * live emit credential for that device.
  */
 import { createError, defineEventHandler, readValidatedBody, setResponseHeaders } from 'h3'
+import { assertTrustedPublicOrigin } from '../../../utils/public-url'
 import { z } from 'zod'
 import { sql } from 'drizzle-orm'
 import { getDb } from '../../../db'
@@ -29,9 +30,9 @@ import {
   consumeEmitHandoff,
   issueInstanceEmitCredentialTx,
   buildOtelBundle,
+  requireEmitTool,
 } from '../../../auth/emit-provision'
 import { recordAuditEvent } from '../../../db/audit'
-import { getPublicRequestURL } from '../../../utils/public-url'
 
 const Body = z.object({
   handoff_code: z.string().min(10).max(512),
@@ -43,6 +44,11 @@ const Body = z.object({
 
 export default defineEventHandler(async (event) => {
   setResponseHeaders(event, { 'Cache-Control': 'no-store', Pragma: 'no-cache' })
+  // BEFORE anything is consumed. This request commits its transaction before the
+  // bundle is built, and that transaction spends the ONE-TIME handoff code. So
+  // discovering an untrusted origin at bundle-build time would cost the caller a
+  // single-use code they cannot get back, for a purely server-side fault.
+  assertTrustedPublicOrigin(event)
   const { handoff_code, instance_id } = await readValidatedBody(event, (d) => Body.parse(d))
   const db = getDb()
 
@@ -52,11 +58,14 @@ export default defineEventHandler(async (event) => {
   // device can simply retry instead of being bricked. The consume CAS and the
   // per-instance advisory xact lock (issueInstanceEmitCredentialTx) both work
   // inside it.
-  const { claimed, att, emit } = await db.transaction(async (tx) => {
+  const { claimed, att, emit, tool } = await db.transaction(async (tx) => {
     // Atomic single-use claim. Unknown / expired / already-used → null → 401.
     const claimed = await consumeEmitHandoff(tx as never, handoff_code)
     if (!claimed) {
-      throw createError({ statusCode: 401, statusMessage: 'Invalid, expired, or already-used handoff code' })
+      throw createError({
+        statusCode: 401,
+        statusMessage: 'Invalid, expired, or already-used handoff code',
+      })
     }
     // Bound-instance check (defence-in-depth; the handoff already carries it).
     if (instance_id && instance_id !== claimed.instanceId) {
@@ -76,6 +85,11 @@ export default defineEventHandler(async (event) => {
     if (!att) {
       throw createError({ statusCode: 401, statusMessage: 'Handoff references a missing instance' })
     }
+    // Narrow the stored tool HERE, inside the transaction, rather than casting
+    // it after the commit. A cast asserts instead of checking, and doing the
+    // check after the commit would burn the one-time handoff over a broken row.
+    // Throwing here rolls the whole thing back to a still-redeemable code.
+    const tool = requireEmitTool(att.tool)
 
     // Mint the durable emit credential, bound to this instance and rotating out any
     // prior live emit credential for it. Scope stays tokenscope.emit ONLY.
@@ -95,18 +109,14 @@ export default defineEventHandler(async (event) => {
       payload: { oauth_emit_credential: true, tool: att.tool ?? 'claude-code' },
     })
 
-    return { claimed, att, emit }
+    return { claimed, att, emit, tool }
   })
 
-  const tool = (att.tool ?? 'claude-code') as 'claude-code' | 'copilot-cli'
-
-  // PUBLIC origin (pinned APP_PUBLIC_ORIGIN, else the Front Door host, else the
-  // request Host — see getPublicRequestURL) so the baked bearer/OTLP endpoints
-  // are reachable, not the firewalled internal CA FQDN. Same discipline as
-  // setup/exchange.
-  const origin = getPublicRequestURL(event).origin
+  // buildOtelBundle derives the PUBLIC origin from the event itself and refuses
+  // to bake an untrusted one — the endpoints it returns are durable, so an
+  // unreachable host here means a silently dead enrolment. See its docstring.
   const { bearerEndpoint, oauthTokenEndpoint, bundle } = buildOtelBundle(
-    origin,
+    event,
     claimed.instanceId,
     att.project_code_hash,
     tool,

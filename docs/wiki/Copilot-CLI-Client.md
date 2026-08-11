@@ -54,6 +54,24 @@ committed. It:
    credentials from `~/.tokenscope/config.json` only — **no dependency on
    `~/.claude`**.
 
+Two guards sit on that loop, both because the span file lives **inside a
+repository** the forwarder does not control:
+
+- **Span-file provenance.** Before reading, the forwarder checks that the file's
+  owner uid matches its own process and that git does **not** track it
+  (`git ls-files --error-unmatch`). A file it does not own, or one that is
+  committed, is **refused outright** rather than partially trusted — on a fresh
+  clone the byte offset starts at 0, so a span file planted by a hostile
+  contributor (or surviving a stale `.gitignore`) would otherwise be transcoded
+  and forwarded as this device's usage. The forwarder still self-heals the
+  project's `.gitignore` on start; the provenance check is what makes that
+  self-heal non-load-bearing.
+- **Https-only egress.** Every credential-bearing call routes through the same
+  `assertSafeEndpoint()` validator the Claude lane uses — the file is vendored
+  verbatim into `copilot-plugin/scripts/endpoint-guard.mjs` by the sync script
+  rather than reimplemented, so the two lanes cannot drift. Off-box plaintext is
+  refused; loopback is exempt only where a caller explicitly opts in.
+
 A **Stop hook** triggers a final flush so the last turn is always captured (the
 daemon lives on — it is a container-lifetime singleton shared by every session in the
 project). A **SessionStart hook** starts the forwarder as a **heartbeat-guarded
@@ -73,13 +91,13 @@ Summing both would double the token count. The transcoder filters on
 
 ## Attribution identity
 
-| What | Where it comes from | Why |
-|------|---------------------|-----|
-| `instance_id` (teammate binding) | `~/.tokenscope/config.json` (minted by `provision_emit`) | Unspoofable — written by the local redeem helper, never by the Copilot client itself |
-| `claude_session_id` (session grouping) | `gen_ai.conversation.id` span attr | Copilot's own session id; subagents share the parent's id |
-| `project.code_hash` (project claim, B′) | Derived **per batch** from the project-root `.tokenscope` (the daemon's cwd), via `resolveRepoProjectCode` + `computeCodeHash` | The forwarder hashes the committed `.tokenscope` in the project root — the SAME shared resolver Claude Code uses, so both hash an identical repo to the same value. The config stamp is **explicitly not read** (a host-wide config hash is the per-HOME footgun the per-project model removes); no `.tokenscope` → untagged |
-| `github.org` (+ mirrored `github.repository`) | The project's **git remote** (`remote.origin.url`), with an `invoke_agent` span-attr (`github.copilot.git.repository`) fallback | Stamped for org→enterprise keying (F2). Lowercased org; omitted when neither source yields one (untagged-enterprise is acceptable). Not an identity factor |
-| `tool` | always `copilot-cli` (hardcoded by the forwarder) | Fixed — not controllable by the Copilot client |
+| What                                          | Where it comes from                                                                                                             | Why                                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `instance_id` (teammate binding)              | `~/.tokenscope/config.json` (minted by `provision_emit`)                                                                        | Unspoofable — written by the local redeem helper, never by the Copilot client itself                                                                                                                                                                                                                                         |
+| `claude_session_id` (session grouping)        | `gen_ai.conversation.id` span attr                                                                                              | Copilot's own session id; subagents share the parent's id                                                                                                                                                                                                                                                                    |
+| `project.code_hash` (project claim, B′)       | Derived **per batch** from the project-root `.tokenscope` (the daemon's cwd), via `resolveRepoProjectCode` + `computeCodeHash`  | The forwarder hashes the committed `.tokenscope` in the project root — the SAME shared resolver Claude Code uses, so both hash an identical repo to the same value. The config stamp is **explicitly not read** (a host-wide config hash is the per-HOME footgun the per-project model removes); no `.tokenscope` → untagged |
+| `github.org` (+ mirrored `github.repository`) | The project's **git remote** (`remote.origin.url`), with an `invoke_agent` span-attr (`github.copilot.git.repository`) fallback | Stamped for org→enterprise keying (F2). Lowercased org; omitted when neither source yields one (untagged-enterprise is acceptable). Not an identity factor                                                                                                                                                                   |
+| `tool`                                        | always `copilot-cli` (hardcoded by the forwarder)                                                                               | Fixed — not controllable by the Copilot client                                                                                                                                                                                                                                                                               |
 
 > **Attribution is split by concern.** `instance_id` (the security invariant) and the
 > emit endpoints come from `~/.tokenscope/config.json`, never from process env — that
@@ -185,6 +203,7 @@ copilot-plugin/
   hooks/hooks.json      SessionStart (start forwarder) + Stop (final flush)
   hooks/forwarder-lifecycle.mjs   hook driver → ../scripts/copilot-forwarder.mjs (co-located)
   scripts/copilot-forwarder.mjs   the shipped per-project forwarder (+ otlp-logs.mjs, copilot-redeem.mjs)
+  scripts/managed-telemetry.mjs   enterprise-managed `telemetry`-setting detector (hostile/benign/none/unknown)
   skills/tokenscope-setup/SKILL.md
   skills/project/SKILL.md
   skills/usage/SKILL.md
@@ -194,6 +213,28 @@ The skills reuse the same MCP tools (`provision_emit`, `my_usage`,
 `list_my_projects`, `resolve_repo_project`, `tag_session`) as the Claude Code
 prompts. The `tokenscope-setup` skill passes `tool: 'copilot-cli'` to
 `provision_emit` and describes the Copilot-specific redeem flow.
+
+### Enterprise-managed `telemetry` detection (not to be confused with Distribution below)
+
+A DIFFERENT "managed settings" concern from the plugin-distribution one below:
+GitHub Copilot CLI itself honours an enterprise-managed `telemetry` key
+(`managed-settings.json` — file-based / native-MDM / server-managed) that can
+silently disable telemetry or reroute it away from the file exporter this
+whole client depends on, **while a valid TokenScope credential still mints a
+healthy bearer** — the same false-healthy shape as a valid-but-undelivered
+credential. `scripts/managed-telemetry.mjs` (canonical source
+`plugin/scripts/managed-telemetry.mjs`, vendored verbatim per the sync
+mechanism above) checks every LOCALLY-readable channel (the well-known per-OS
+file-based path; best-effort Windows registry / macOS managed preferences;
+Linux has no native-MDM channel at all) and classifies `hostile` /
+`benign` / `none` / `unknown` — never printing header/endpoint values, and
+never guessing at server-managed settings (not locally readable at all; every
+result says so explicitly). Wired into `scripts/status.mjs` (a new
+`emission_healthy` field, distinct from `emitting`: `true` only when the
+credential is valid AND no hostile setting was found) and `scripts/enroll.mjs`
+(a best-effort post-enrol check, logged loudly, never blocking). See
+`docs/design/usage-completeness-and-provider-governance.md` §10.1 for the full
+design rationale and the exact hostile/benign key list.
 
 ---
 
@@ -205,22 +246,45 @@ with `extraKnownMarketplaces` pointing at this repo and `enabledPlugins` referen
 `copilot-plugin/` as the path. The plugin installs automatically on auth.
 
 **Individual/Pro (manual):** run, in a terminal (one at a time):
+
 ```bash
 copilot plugin marketplace add Insight-Services-APAC/tokenscope-public
 copilot plugin install tokenscope-copilot@tokenscope
 ```
+
 Then run the `tokenscope-setup` skill inside a `copilot` session (type `/` to list
-TokenScope's skills).
+TokenScope's skills). Open a **new** terminal (the emit config is read at launch), then
+**verify** by running the `tokenscope-status` skill — the Copilot analogue of Claude's
+`/tokenscope:status` (Copilot CLI has no always-on status line): it confirms emitting,
+landing, and attribution. Ingestion takes ~4–5 min.
 
 > There is no `--path` flag. Install a subdirectory plugin either via the
 > marketplace form above (preferred) or directly with the `owner/repo:path` form:
 > `copilot plugin install Insight-Services-APAC/tokenscope-public:copilot-plugin`
 > (direct installs are flagged deprecated in a future Copilot CLI release).
 
+The published version is declared in both `copilot-plugin/plugin.json` and the
+repo-root `.claude-plugin/marketplace.json`. Read it from there rather than from
+this page: a version restated in prose drifts on the next bump, and this
+paragraph did drift (it named 0.1.7 after the manifests had moved on).
+Like the Claude plugin, an installed copy is cached by version and replaced only
+when the number **increases** — a fix that ships without a bump reaches no
+enrolled device. CI fails a plugin-code change with no version bump, and a
+separate guard asserts the vendored `copilot-plugin/scripts/*` copies still match
+the sources they are synced from.
+
 ---
 
 ## Deferred items (not built in v1)
 
+- **Enterprise flat-seat showback under the GitHub App** — the enterprise seats
+  pull still presents a Bearer PAT header regardless of how the client was
+  constructed, so an App-mode enterprise gets a loud `401` (isolated to that
+  scope) and **no flat-seat showback row**. It fails safe, not silently, and
+  chargeback is unaffected — Copilot bills pooled per cost-centre and is
+  firewalled out of every chargeback view by migration `0085`. The fix is to route
+  the seats pull through the per-org App path the identity lanes already use. This
+  becomes live the moment an enterprise flips from PAT to the App.
 - **GitHub-billing-API reconciliation** — lifts Copilot spend to tier-1.
 - **VS Code Copilot Chat** — same file-forwarder approach, pending client-level
   `COPILOT_OTEL_FILE_EXPORTER_PATH` availability in the VS Code extension.

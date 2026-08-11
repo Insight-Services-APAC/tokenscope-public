@@ -24,16 +24,60 @@
  */
 import { randomBytes, randomUUID } from 'node:crypto'
 import { createError } from 'h3'
+import type { H3Event } from 'h3'
 import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { hashSessionToken } from './hmac'
+import { advisoryGlobalCapLock, advisoryXactLock } from '../db/advisory-lock'
 import { REFRESH_TOKEN_TTL_MS } from './oauth'
+import { getPublicRequestURL, assertTrustedPublicOrigin } from '../utils/public-url'
 import { currentServerDeployEnv } from '../../shared/env/deploy-env'
+// Reach the sibling's shape rather than redefining a second CapExceeded type
+// (both files' cap checks return the same discriminated shape; type-only, so
+// this is not a runtime circular import — enroll-provision.ts imports
+// `type EmitTool` from THIS file the same way).
+import type { CapExceeded } from './enroll-provision'
 
 type Db = PostgresJsDatabase<Record<string, unknown>>
 
 /** Handoff TTL: ~5 min, single-use (docs §"short-TTL (~5 min) handoff code"). */
 export const EMIT_HANDOFF_TTL_MS = 5 * 60 * 1000
+
+/**
+ * Per-teammate live-instance cap on the AUTHENTICATED self-provision path
+ * (provision_emit → locateOrCreateInstance's create branch) — the mint side
+ * had no quota of any kind while its sibling (enroll-provision.ts's
+ * locateOrCreateProvisionalInstance, the unauthenticated claimed-email path)
+ * has had two since the emit-on-install slice. An instance is per-HOST
+ * (AGENTS.md §Domain shortcuts) — one person legitimately holds several
+ * (laptop, a couple of CWs, a CI box) — so the ceiling sits in the TENS, not
+ * the ones. Env-overridable via MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE.
+ *
+ * Deliberately NOT folded into the enrol caps' identity_state='provisional'
+ * count: this path only ever mints 'confirmed' (authenticated) attestations
+ * — a different, much smaller population than the unauthenticated
+ * claimed-email enrol path. Widening the enrol caps to include 'confirmed'
+ * rows would conflate an unauthenticated-enrolment concern with an
+ * authenticated-self-provision one.
+ */
+export const DEFAULT_MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE = 50
+/**
+ * Global backstop across ALL confirmed (non-provisional) live instances,
+ * mirroring DEFAULT_MAX_PROVISIONAL_INSTANCES's role for the enrol path.
+ * Generous: real teammates number in the low thousands, and a few dozen
+ * devices each still leaves headroom. Env-overridable via
+ * MAX_LIVE_EMIT_INSTANCES.
+ */
+export const DEFAULT_MAX_LIVE_EMIT_INSTANCES = 50_000
+
+export function maxLiveInstancesPerTeammate(): number {
+  const raw = Number(process.env.MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE)
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE
+}
+export function maxLiveInstancesGlobal(): number {
+  const raw = Number(process.env.MAX_LIVE_EMIT_INSTANCES)
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MAX_LIVE_EMIT_INSTANCES
+}
 
 /** The teammate identity provision_emit derives an attestation from (the bearer). */
 export interface ProvisioningTeammate {
@@ -77,6 +121,44 @@ export async function loadProvisioningTeammate(
 export type EmitTool = 'claude-code' | 'copilot-cli'
 
 /**
+ * The tools buildOtelBundle actually knows how to serve.
+ *
+ * This is the SINGLE source of the list. It had been written out separately in
+ * the MCP tool's Zod enum and in the database trigger; three copies of a closed
+ * set drift, and each copy that lags admits a value the others reject, which is
+ * how a row reaches a reader that cannot serve it. The Zod enum now derives
+ * from here, and tests/integration/setup/cross-tool-guard.test.ts pins the
+ * trigger's list against it, so adding a tool in one place fails loudly until
+ * it is added in all of them.
+ */
+export const EMIT_TOOLS = ['claude-code', 'copilot-cli'] as const satisfies readonly EmitTool[]
+
+/**
+ * Narrow a stored `instance_attestation.tool` to a tool we can serve.
+ *
+ * The read sites used to cast (`as 'claude-code' | 'copilot-cli'`), which
+ * asserts rather than checks: the value comes from the database, TypeScript
+ * erases at runtime, and the column's trigger only required non-blank until
+ * migration 0100. An unknown value therefore satisfied the cast, missed the
+ * 'copilot-cli' branch, and fell through to the CLAUDE bundle -- a device that
+ * looks enrolled, is handed endpoints and an env block shaped for a client that
+ * is not running, and never emits.
+ *
+ * Fails closed for the same reason the cross-tool guard does: serving the wrong
+ * bundle is worse than refusing, because refusing is visible and has a recovery
+ * (re-run provision_emit for a fresh device) while the silent version is only
+ * ever found by someone noticing missing spend weeks later.
+ */
+export function requireEmitTool(stored: string | null | undefined): EmitTool {
+  const tool = stored ?? 'claude-code'
+  if ((EMIT_TOOLS as readonly string[]).includes(tool)) return tool as EmitTool
+  throw createError({
+    statusCode: 409,
+    statusMessage: `This device is bound to an unrecognised tool, so no emit configuration can be built for it; re-run provision_emit to mint a fresh device.`,
+  })
+}
+
+/**
  * Locate-or-create the instance_attestation for (teammate, instanceId).
  *
  * Idempotency (docs §F2.3): if `instanceId` is supplied AND a LIVE attestation
@@ -106,19 +188,54 @@ export type EmitTool = 'claude-code' | 'copilot-cli'
  *   unlike the public origin host (container-app.bicep:223: host is NOT the env
  *   signal, NUXT_DEPLOY_ENV is). Defaults to the running deployment's env — callers
  *   (e.g. tests) MAY override.
- * @returns the instance_id to mint the handoff against, and whether it was reused.
+ * @param tx MUST be an open transaction. The advisory lock taken at the very
+ *   top is pg_advisory_xact_lock (released at commit/rollback), and — because
+ *   the create branch's INSERT now runs in the SAME transaction as the
+ *   caller's downstream work (mcp.ts's provision_emit: handoff rotate, mint,
+ *   audit) — a mid-sequence failure anywhere in that sequence rolls the
+ *   INSERT back too. Previously this ran against a bare (autocommitting) db
+ *   handle OUTSIDE the caller's transaction, so a downstream failure (e.g.
+ *   the audit write) left a committed orphan instance_attestation with no
+ *   handoff ever issued for it — a leak that compounds every time the cap
+ *   below is exercised. Passing a non-transaction handle (as the
+ *   cross-env-guard tests do, which never race and never fail
+ *   mid-sequence) still works — pg_advisory_xact_lock is valid on any
+ *   connection — it just loses the cross-statement locking guarantee.
+ * @returns the instance_id to mint the handoff against and whether it was
+ *   reused, OR CapExceeded when the CREATE branch would exceed the
+ *   per-teammate or global live-instance cap (idempotent reuse never
+ *   consumes quota — see below). The caller maps CapExceeded to a
+ *   quota-exceeded tool response.
  */
 export async function locateOrCreateInstance(
-  db: Db,
+  tx: Db,
   tm: ProvisioningTeammate,
   instanceId: string | undefined,
   tool: EmitTool = 'claude-code',
   deployEnv: string = currentServerDeployEnv(),
-): Promise<{ instanceId: string; reused: boolean }> {
+): Promise<{ instanceId: string; reused: boolean } | CapExceeded> {
   const currentEnv = deployEnv?.trim() || null
+
+  // Advisory lock FIRST — before any read, and before the cap-gated INSERT —
+  // so the whole locate-or-create decision is serialized. Keyed on the
+  // supplied instanceId when re-provisioning (the SAME key mcp.ts's handoff
+  // rotate+mint used to take in a SEPARATE, later transaction; folded in here
+  // now that the whole sequence shares one transaction, so a concurrent
+  // re-provision of the SAME device can no longer interleave with it), or on
+  // the teammate id for a fresh mint. Namespaced via server/db/advisory-lock.ts:
+  // the previous single-argument hashtext form put instance ids and teammate
+  // ids in ONE key space, so a collision between the two could invert lock
+  // order between transactions and deadlock. Namespaces are acquired in
+  // ascending order (instance, then principal, then globalCap).
+  await tx.execute(advisoryXactLock('instance', instanceId ?? tm.teammateId))
+
   if (instanceId) {
-    const existing = await db.execute<{ instance_id: string; deployment_env: string | null }>(sql`
-      SELECT instance_id::text AS instance_id, deployment_env
+    const existing = await tx.execute<{
+      instance_id: string
+      deployment_env: string | null
+      tool: string | null
+    }>(sql`
+      SELECT instance_id::text AS instance_id, deployment_env, tool
         FROM instance_attestation
        WHERE instance_id = ${instanceId}::uuid
          AND teammate_id = ${tm.teammateId}::uuid
@@ -128,6 +245,24 @@ export async function locateOrCreateInstance(
     const row = [...existing][0]
     if (row) {
       const storedEnv = row.deployment_env?.trim() || null
+      const storedTool = row.tool?.trim() || null
+      // Cross-TOOL guard: an instance is bound to ONE emit tool. Re-provisioning
+      // it under a DIFFERENT tool used to fall through to `reused: true`, and the
+      // caller then rotated the durable credential and built a bundle for the
+      // wrong tool. The redeem helper rejected that bundle CLIENT-side — after
+      // the rotation had already committed — so the old secret was dead on disk
+      // and the new one was never written. Net effect: attempting to set up one
+      // CLI silently destroyed the OTHER CLI's working emitting on the same host
+      // (instances are per-HOST, `tool` is per-instance). Reproduced live
+      // 2026-07-28: a copilot-cli provision against a claude-code instance broke
+      // Claude Code emitting. Refuse BEFORE any rotation; the message names the
+      // recovery exactly as the cross-env guard does.
+      if (storedTool !== null && storedTool !== tool) {
+        throw createError({
+          statusCode: 409,
+          statusMessage: `This device id is already provisioned for '${storedTool}'; omit instance_id to mint a fresh device for '${tool}'. Re-provisioning it under a different tool would revoke the '${storedTool}' credential.`,
+        })
+      }
       // Cross-env guard: a non-null stored deploy-env that differs from this
       // deployment means the id was minted elsewhere. Refuse — do NOT silently
       // mint a duplicate (the old silent fall-through). The message tells the
@@ -143,15 +278,92 @@ export async function locateOrCreateInstance(
       // subsequent re-provision is guarded too. Only stamps when we actually
       // know the current env.
       if (storedEnv === null && currentEnv !== null) {
-        await db.execute(sql`
+        await tx.execute(sql`
           UPDATE instance_attestation
              SET deployment_env = ${currentEnv}
            WHERE instance_id = ${row.instance_id}::uuid
              AND deployment_env IS NULL
         `)
       }
+      // A stored tool we cannot read is a tool we cannot prove ownership of.
+      // `tool` is NOT NULL and every writer goes through the `EmitTool` union, so
+      // a blank/whitespace value should be unreachable — but that is a
+      // compile-time guarantee, not a database one. Migration 0099 adds a
+      // BEFORE INSERT OR UPDATE OF tool trigger behind it — a trigger rather
+      // than a CHECK because a CHECK re-validates the whole row on EVERY
+      // update, which would make a pre-existing blank row impossible to revoke,
+      // purge, or otherwise maintain. This branch still covers rows written
+      // before that migration, and any future raw-SQL backfill.
+      //
+      // The earlier version of this branch ADOPTED the caller's tool here and
+      // returned `reused: true`, which fails OPEN: the caller then rotates the
+      // durable credential of an instance whose owning tool is unknown, which is
+      // precisely the destructive outcome the guard above exists to prevent. A
+      // degenerate row must fail CLOSED. Refusing costs nothing, because the
+      // recovery is the same one every other 409 here names and it always works:
+      // omit instance_id and mint a fresh device.
+      if (storedTool === null) {
+        throw createError({
+          statusCode: 409,
+          statusMessage: `This device id has no readable tool binding, so re-provisioning it could revoke another CLI's credential; omit instance_id to mint a fresh device for '${tool}'.`,
+        })
+      }
       return { instanceId: row.instance_id, reused: true }
     }
+  }
+
+  // We are now committed to the CREATE branch, and the lock taken at the top of
+  // this function does not bound it. That lock keys on `instanceId ?? teammateId`,
+  // so a caller supplying an instance id we do NOT own (or one already ended)
+  // holds a lock on that UUID, falls through to here, and never serialises
+  // against anything. N concurrent requests carrying N distinct unknown UUIDs
+  // therefore each take a different lock, all read the same pre-insert counts,
+  // and all insert: both caps below are bypassed by an authenticated caller who
+  // simply varies the id. The comment on that lock claimed it "bounds concurrent
+  // creates by the SAME teammate against the cap below", which is true only when
+  // no instance id was supplied.
+  //
+  // Take the teammate key explicitly before counting. pg_advisory_xact_lock is
+  // re-entrant within a transaction, so the no-instance-id path (which already
+  // holds the equivalent key in the `instance` namespace) pays nothing here.
+  await tx.execute(advisoryXactLock('principal', tm.teammateId))
+
+  // The GLOBAL cap needs its own lock, and a per-teammate one cannot supply it.
+  // The count below reads the whole table, so N concurrent creates by N
+  // DIFFERENT teammates hold N different principal locks, all read the same
+  // pre-insert total, and all insert past the cap. A fixed key is the point:
+  // every caller must contend on the same one. Acquired after `principal` to
+  // hold the ascending namespace order that keeps these three locks
+  // deadlock-free (see server/db/advisory-lock.ts).
+  await tx.execute(advisoryGlobalCapLock('confirmed'))
+
+  // Caps apply ONLY to the create branch — idempotent reuse above never
+  // consumes quota (mirrors enroll-provision.ts's
+  // locateOrCreateProvisionalInstance). Per-teammate first, then a global
+  // backstop. Both counts filter to LIVE rows only (ts_actual_end IS NULL AND
+  // ts_purged IS NULL) — counting ENDED instances would refuse
+  // re-provisioning for anyone who has ever revoked a device.
+  const liveRows = await tx.execute<{ count: string }>(sql`
+    SELECT COUNT(*)::text AS count FROM instance_attestation
+     WHERE teammate_id = ${tm.teammateId}::uuid AND ts_actual_end IS NULL AND ts_purged IS NULL
+  `)
+  if (Number([...liveRows][0]?.count ?? 0) >= maxLiveInstancesPerTeammate()) {
+    return { capExceeded: true }
+  }
+  // identity_state='confirmed' is LOAD-BEARING, not decoration. This cap's own
+  // docstring says it covers confirmed instances and is deliberately NOT folded
+  // in with the provisional population — but an unfiltered COUNT(*) counts both.
+  // Provisional rows come from the UNAUTHENTICATED enrol door, which an attacker
+  // drives with arbitrary claimed emails up to that door's own 50k cap. Without
+  // this filter, filling the provisional cap also fills this one, and
+  // authenticated self-provisioning stops working deployment-wide for everyone.
+  // That is precisely the conflation the docstring promises to avoid.
+  const globalRows = await tx.execute<{ count: string }>(sql`
+    SELECT COUNT(*)::text AS count FROM instance_attestation
+     WHERE identity_state = 'confirmed' AND ts_actual_end IS NULL AND ts_purged IS NULL
+  `)
+  if (Number([...globalRows][0]?.count ?? 0) >= maxLiveInstancesGlobal()) {
+    return { capExceeded: true }
   }
 
   // Fresh device. Mint a new instance id (server-chosen, a real UUIDv4 — the
@@ -161,7 +373,7 @@ export async function locateOrCreateInstance(
   // is detected (the cross-env guard above).
   const newId = randomUUID()
   const tsExpectedEnd = new Date(Date.now() + REFRESH_TOKEN_TTL_MS)
-  await db.execute(sql`
+  await tx.execute(sql`
     INSERT INTO instance_attestation
       (instance_id, principal_oid, principal_email, teammate_id, tool,
        ts_expected_end, region_id, org_unit_id, attestation_state, deployment_env)
@@ -275,17 +487,36 @@ export interface CopilotBundle {
 
 /**
  * Build the OTel telemetry bundle for an instance — the EXACT shape
- * setup/exchange.post returns (so the redeem endpoint mirrors it). `origin` MUST
- * be the PUBLIC origin (getPublicRequestURL) so the baked bearer/OTLP endpoints
- * are reachable behind Front Door. `projectCodeHash` null ⇒ untagged (no
- * project.code_hash in the resource attrs).
+ * setup/exchange.post returns (so the redeem endpoint mirrors it).
+ * `projectCodeHash` null ⇒ untagged (no project.code_hash in the resource attrs).
+ *
+ * Takes the EVENT, not an origin string, deliberately. What this function bakes
+ * is DURABLE: the bearer and OTLP endpoints land in the device's
+ * `~/.claude/settings.json` / `~/.tokenscope/config.json` and are re-read for
+ * the life of the enrolment, long after this request is forgotten. An origin
+ * that is merely wrong (Container Apps rewrites `Host` to the internal CA FQDN,
+ * which no developer machine can resolve) produces an enrolment that reports
+ * success and then emits nothing, forever, with no error surfaced anywhere —
+ * the failure mode that motivated APP_PUBLIC_ORIGIN in the first place. An
+ * origin that is attacker-influenced is worse.
+ *
+ * Deriving it here rather than accepting a caller-supplied string means a future
+ * third call site cannot forget the trust check: there is no parameter to get
+ * wrong. Callers previously computed an identical
+ * `getPublicRequestURL(event).origin` and passed it in, so this costs them
+ * nothing.
  */
 export function buildOtelBundle(
-  origin: string,
+  event: H3Event,
   instanceId: string,
   projectCodeHash: string | null,
   tool: EmitTool = 'claude-code',
 ): { bearerEndpoint: string; oauthTokenEndpoint: string; bundle: OtelBundle | CopilotBundle } {
+  // Belt and braces: both callers assert this at the top of the request, before
+  // anything is consumed. Repeating it here means a future caller that forgets
+  // cannot bake an untrusted origin into a durable credential.
+  assertTrustedPublicOrigin(event)
+  const origin = getPublicRequestURL(event).origin
   const bearerEndpoint = `${origin}/api/v1/instances/${instanceId}/bearer`
   const oauthTokenEndpoint = `${origin}/api/v1/oauth/token`
   const logsEndpoint =
@@ -355,7 +586,10 @@ export async function issueInstanceEmitCredential(
   db: Db,
   teammateId: string,
   instanceId: string,
-  issue: (db: Db, teammateId: string) => Promise<{ clientId: string; tokens: { refresh_token: string } }>,
+  issue: (
+    db: Db,
+    teammateId: string,
+  ) => Promise<{ clientId: string; tokens: { refresh_token: string } }>,
 ): Promise<{ clientId: string; refreshToken: string }> {
   // ONE transaction, serialized per instance. The rotate→issue→bind sequence has a
   // TOCTOU window: the freshly-INSERTed credential is invisible to the rotate's
@@ -380,7 +614,10 @@ export async function issueInstanceEmitCredentialTx(
   tx: Db,
   teammateId: string,
   instanceId: string,
-  issue: (db: Db, teammateId: string) => Promise<{ clientId: string; tokens: { refresh_token: string } }>,
+  issue: (
+    db: Db,
+    teammateId: string,
+  ) => Promise<{ clientId: string; tokens: { refresh_token: string } }>,
 ): Promise<{ clientId: string; refreshToken: string }> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${instanceId}))`)
   await tx.execute(sql`

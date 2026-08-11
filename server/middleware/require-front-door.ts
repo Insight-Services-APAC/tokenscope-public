@@ -24,6 +24,15 @@
  * The env var rather than a hard-coded value lets the same image deploy
  * to sandbox / staging / production with each env's own AFD instance.
  *
+ * AZURE_FRONT_DOOR_REQUIRED (code half only — inert until an operator/UF-4
+ * wires it): when `'true'` AND `AZURE_FRONT_DOOR_ID` is still empty, the
+ * middleware REFUSES every request except EXCLUDED_PATHS instead of
+ * no-op'ing. This exists so an operator can close the phase-1/2 window
+ * explicitly (no AFD id yet, but direct access must not be allowed) without
+ * this middleware ever trying to INFER "this looks like production" on its
+ * own. Unset REQUIRED preserves the exact three-phase no-op above — do not
+ * remove that no-op, `UF-4` depends on it during initial provisioning.
+ *
  * Excluded paths (allowed to bypass the check):
  *   - /api/health — Container Apps' internal LB calls this directly
  *     (not via AFD); blocking it would loop-restart the replicas.
@@ -50,38 +59,18 @@ const FRONT_DOOR_HEADER = 'x-azure-fdid'
 // every excluded path is an attack surface that skips the WAF.
 const EXCLUDED_PATHS = new Set<string>(['/api/health'])
 
-export default defineEventHandler((event) => {
-  const expected = process.env.AZURE_FRONT_DOOR_ID
-  // Empty env var = pre-AFD deploy phase (1 + 2 of the three-phase
-  // rollout). The container app is reachable directly and the
-  // middleware is a deliberate no-op until the operator wires the
-  // instance ID via the workflow's `frontDoorId` input.
-  if (!expected || expected.length === 0) return
-
-  const path = getRequestURL(event).pathname
-  if (EXCLUDED_PATHS.has(path)) return
-
-  const received = getHeader(event, FRONT_DOOR_HEADER)
-
-  // Header present AND matches → allow. Constant-time comparison isn't
-  // needed here: the AFD instance ID isn't a secret (it's discoverable),
-  // and there is no timing-attack surface — the attacker either knows
-  // the ID (allowed) or doesn't (denied).
-  if (typeof received === 'string' && received === expected) return
-
-  // Reject. Log path + coarse header-presence signal so an operator
-  // can debug "the API stopped responding from my laptop" without us
-  // dumping the expected value to logs.
-  console.warn(
-    `[require-front-door] rejected request path=${path} headerPresent=${typeof received === 'string'}`,
-  )
-
-  // We `throw createError(...)` rather than `sendError(...)`. The h3
-  // dispatcher catches the thrown H3Error and writes the RFC-9457
-  // response envelope; using sendError() here would write the response
-  // but let middleware execution fall through, which can produce
-  // double-responses in downstream handlers. h3's own docstring
-  // recommends throw createError for the rejection path.
+// Reject. Log path + coarse header-presence signal so an operator can
+// debug "the API stopped responding from my laptop" without us dumping
+// the expected value to logs.
+//
+// We `throw createError(...)` rather than `sendError(...)`. The h3
+// dispatcher catches the thrown H3Error and writes the RFC-9457 response
+// envelope; using sendError() here would write the response but let
+// middleware execution fall through, which can produce double-responses
+// in downstream handlers. h3's own docstring recommends throw createError
+// for the rejection path.
+function reject(path: string, headerPresent: boolean): never {
+  console.warn(`[require-front-door] rejected request path=${path} headerPresent=${headerPresent}`)
   throw createError({
     statusCode: 403,
     statusMessage:
@@ -94,4 +83,36 @@ export default defineEventHandler((event) => {
         'This request did not arrive through the Azure Front Door distribution that fronts TokenScope. The Container App rejects direct-to-origin traffic. If you are an operator debugging from the *.azurecontainerapps.io URL, hit /api/health (excluded) or unset AZURE_FRONT_DOOR_ID locally.',
     },
   })
+}
+
+export default defineEventHandler((event) => {
+  const expected = process.env.AZURE_FRONT_DOOR_ID
+  const required = process.env.AZURE_FRONT_DOOR_REQUIRED === 'true'
+
+  // Empty env var = pre-AFD deploy phase (1 + 2 of the three-phase
+  // rollout). The container app is reachable directly and the
+  // middleware is a deliberate no-op until the operator wires the
+  // instance ID via the workflow's `frontDoorId` input — UNLESS
+  // AZURE_FRONT_DOOR_REQUIRED='true' has been explicitly set, in which
+  // case the operator has said "no direct access, ever" even before the
+  // ID is wired.
+  if (!expected || expected.length === 0) {
+    if (!required) return
+    const path = getRequestURL(event).pathname
+    if (EXCLUDED_PATHS.has(path)) return
+    reject(path, false)
+  }
+
+  const path = getRequestURL(event).pathname
+  if (EXCLUDED_PATHS.has(path)) return
+
+  const received = getHeader(event, FRONT_DOOR_HEADER)
+
+  // Header present AND matches → allow. Constant-time comparison isn't
+  // needed here: the AFD instance ID isn't a secret (it's discoverable),
+  // and there is no timing-attack surface — the attacker either knows
+  // the ID (allowed) or doesn't (denied).
+  if (typeof received === 'string' && received === expected) return
+
+  reject(path, typeof received === 'string')
 })

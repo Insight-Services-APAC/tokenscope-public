@@ -16,45 +16,18 @@
  * cached in memory.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto'
+import { requireStrongEnvKey } from './key-strength'
 
 let cachedKey: Buffer | null = null
 
 export function getHmacKey(): Buffer {
   if (cachedKey) return cachedKey
-  const raw = process.env.NUXT_HMAC_SESSION_KEY
-  if (!raw || raw.length < 32) {
-    throw new Error(
-      'NUXT_HMAC_SESSION_KEY is missing or too short (need >= 32 chars). ' +
-        'Generate via: openssl rand -base64 48',
-    )
-  }
-  // Entropy floor — Shannon entropy across the raw bytes. A 32-char
-  // repeated string (e.g. 'a'*32) has near-zero entropy and would pass
-  // the length check. Require >= 3.5 bits per byte: random base64
-  // output hits ~5.85 bits (well clear); diceware-style passphrases hit
-  // ~3.6-4.0; trivially-weak keys (`changeme-changeme-changeme-1234`)
-  // fall below 1.0 bit/byte and are rejected.
-  const entropy = shannonEntropyBitsPerByte(raw)
-  if (entropy < 3.5) {
-    throw new Error(
-      `NUXT_HMAC_SESSION_KEY has insufficient entropy (${entropy.toFixed(2)} bits/byte; need >= 3.5). ` +
-        'Generate via: openssl rand -base64 48',
-    )
-  }
+  // Length + entropy floor (>= 32 chars, >= 3.5 bits/byte) — see
+  // server/auth/key-strength.ts for the rationale and the shared
+  // implementation (this used to be a verbatim-duplicated local copy).
+  const raw = requireStrongEnvKey('NUXT_HMAC_SESSION_KEY')
   cachedKey = Buffer.from(raw, 'utf8')
   return cachedKey
-}
-
-function shannonEntropyBitsPerByte(s: string): number {
-  if (s.length === 0) return 0
-  const counts = new Map<string, number>()
-  for (const ch of s) counts.set(ch, (counts.get(ch) ?? 0) + 1)
-  let h = 0
-  for (const c of counts.values()) {
-    const p = c / s.length
-    h -= p * Math.log2(p)
-  }
-  return h
 }
 
 export function resetHmacKeyForTests(): void {

@@ -12,6 +12,21 @@ export default defineConfig({
       'server/**/__tests__/**/*.test.ts',
       'shared/**/__tests__/**/*.test.ts',
     ],
+    /*
+     * CONTAINER CONCURRENCY IS A MEMORY BUDGET, NOT A SPEED KNOB.
+     *
+     * 205 test files each start their own testcontainers Postgres. Vitest's
+     * default forks pool runs as many files in parallel as there are cores, so
+     * an unbounded run holds that many postgres containers at once — and several
+     * agents running suites concurrently multiplies it again. On 2026-08-02 that
+     * exhausted the host, the OOM killer took vitest mid-run, and the containers
+     * it had not yet stopped leaked (see tests/integration/helpers/db.ts).
+     *
+     * Cap it. Override with VITEST_MAX_FORKS on a machine with room to spare.
+     */
+    poolOptions: {
+      forks: { maxForks: Number(process.env.VITEST_MAX_FORKS) || 4 },
+    },
     // Each integration test file spins up its own testcontainers Postgres
     // (slow startup, ~5-10 s); allow plenty of room for the hook + tests.
     hookTimeout: 180_000,

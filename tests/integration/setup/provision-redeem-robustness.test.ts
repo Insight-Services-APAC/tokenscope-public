@@ -40,16 +40,33 @@ beforeAll(async () => {
   process.env.NUXT_SESSION_SECRET = 'robustness-test-padded-to-thirty-two-chars!'
   process.env.NUXT_HMAC_SESSION_KEY = 'robustness-test-hmac-key-padded-well-beyond-32-chars'
 
-  const [r] = await t.db.insert(schema.region).values({ code: 'rb', displayName: 'RB Region' }).returning()
+  const [r] = await t.db
+    .insert(schema.region)
+    .values({ code: 'rb', displayName: 'RB Region' })
+    .returning()
   regionId = r!.id
   const [ou] = await t.db
     .insert(schema.orgUnit)
-    .values({ regionId, path: 'rb.svc', code: 'rb-svc', displayName: 'RB Svc', unitType: 'bu', isCostOwningUnit: true })
+    .values({
+      regionId,
+      path: 'rb.svc',
+      code: 'rb-svc',
+      displayName: 'RB Svc',
+      unitType: 'bu',
+      isCostOwningUnit: true,
+    })
     .returning()
   ouId = ou!.id
   const [tm] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'rb-oid-1', email: 'rb-user@example.com', displayName: 'RB User', role: 'developer', regionId, orgUnitId: ouId })
+    .values({
+      entraOid: 'rb-oid-1',
+      email: 'rb-user@example.com',
+      displayName: 'RB User',
+      role: 'developer',
+      regionId,
+      orgUnitId: ouId,
+    })
     .returning()
   teammateId = tm!.id
 }, 90_000)
@@ -105,8 +122,8 @@ async function provision(client: Client, instanceId?: string) {
   return { res, body: parseToolJson(res) }
 }
 
-function ev(body: unknown) {
-  const headers: Record<string, string> = { host: 'localhost:3450' }
+function ev(body: unknown, host = 'localhost:3450') {
+  const headers: Record<string, string> = { host }
   return {
     method: 'POST',
     path: '/x',
@@ -123,17 +140,27 @@ function ev(body: unknown) {
       res: {
         _headers: {} as Record<string, string | string[]>,
         statusCode: 200,
-        getHeader(n: string) { return this._headers[n.toLowerCase()] },
-        setHeader(n: string, v: string | string[]) { this._headers[n.toLowerCase()] = v },
-        removeHeader(n: string) { this._headers[n.toLowerCase()] = '' },
-        appendHeader(n: string, v: string | string[]) { this._headers[n.toLowerCase()] = v },
-        get headersSent() { return false },
+        getHeader(n: string) {
+          return this._headers[n.toLowerCase()]
+        },
+        setHeader(n: string, v: string | string[]) {
+          this._headers[n.toLowerCase()] = v
+        },
+        removeHeader(n: string) {
+          this._headers[n.toLowerCase()] = ''
+        },
+        appendHeader(n: string, v: string | string[]) {
+          this._headers[n.toLowerCase()] = v
+        },
+        get headersSent() {
+          return false
+        },
       },
     },
   }
 }
-async function redeem(body: unknown) {
-  return redeemHandler(ev(body) as unknown as Parameters<typeof redeemHandler>[0])
+async function redeem(body: unknown, host?: string) {
+  return redeemHandler(ev(body, host) as unknown as Parameters<typeof redeemHandler>[0])
 }
 
 /** Block inserts of one audit event_type (NOT VALID skips existing rows). */
@@ -257,5 +284,108 @@ describe('AUTH-2 — provision_emit revoke→mint→audit is one serialized tran
     // The surviving (first) code still redeems.
     const out = (await redeem({ handoff_code: firstCode })) as { instance_id: string }
     expect(out.instance_id).toBe(instanceId)
+  })
+})
+
+/*
+ * The origin gate must refuse BEFORE the handoff is spent.
+ *
+ * redeem.post.ts commits its transaction and only then builds the OTel bundle.
+ * A trust check that lived solely inside the bundle builder would fire after
+ * the one-time code was consumed and the durable credential minted, so a purely
+ * server-side misconfiguration would cost the developer their single-use code
+ * and leave an orphaned credential behind. The enrol path has the equivalent
+ * test; without this one, removing redeem's early guard is a false green.
+ */
+describe('AUTH-1b — an untrusted origin costs the caller nothing', () => {
+  it('refuses before consuming the handoff, leaving it redeemable and the old credential live', async () => {
+    const client = await connectClient()
+    const first = await provision(client)
+    const instanceId = first.body.instance_id as string
+    await redeem({ handoff_code: first.body.handoff_code as string })
+    const credentialsBefore = await liveEmitCredentials(instanceId)
+
+    const second = await provision(client, instanceId)
+    const handoffCode = second.body.handoff_code as string
+    expect(await redeemableHandoffs(instanceId)).toBe(1)
+
+    const priorOrigin = process.env.APP_PUBLIC_ORIGIN
+    const priorFd = process.env.AZURE_FRONT_DOOR_ID
+    delete process.env.APP_PUBLIC_ORIGIN
+    delete process.env.AZURE_FRONT_DOOR_ID
+    try {
+      await expect(
+        redeem({ handoff_code: handoffCode }, 'internal.a1b2c3.eastus.azurecontainerapps.io'),
+      ).rejects.toMatchObject({ statusCode: 500 })
+
+      // Nothing was spent: the code still redeems and no credential was rotated.
+      expect(await redeemableHandoffs(instanceId)).toBe(1)
+      expect(await liveEmitCredentials(instanceId)).toBe(credentialsBefore)
+    } finally {
+      if (priorOrigin === undefined) delete process.env.APP_PUBLIC_ORIGIN
+      else process.env.APP_PUBLIC_ORIGIN = priorOrigin
+      if (priorFd === undefined) delete process.env.AZURE_FRONT_DOOR_ID
+      else process.env.AZURE_FRONT_DOOR_ID = priorFd
+    }
+
+    // And the SAME code still works once the deployment is configured.
+    process.env.APP_PUBLIC_ORIGIN = 'https://tokenscope.example.com'
+    try {
+      await redeem({ handoff_code: handoffCode }, 'internal.a1b2c3.eastus.azurecontainerapps.io')
+      expect(await redeemableHandoffs(instanceId)).toBe(0)
+    } finally {
+      delete process.env.APP_PUBLIC_ORIGIN
+    }
+  })
+})
+
+// ── AUTH-1c: a row whose tool we cannot serve is refused, not mis-served ──────
+
+describe('AUTH-1c — an unserveable stored tool is refused, and refusing costs nothing', () => {
+  it('redeem 409s on an unknown tool instead of handing back a Claude bundle', async () => {
+    const client = await connectClient()
+    const first = await provision(client)
+    const instanceId = first.body.instance_id as string
+    await redeem({ handoff_code: first.body.handoff_code as string })
+    expect(await liveEmitCredentials(instanceId)).toBe(1)
+
+    const second = await provision(client, instanceId)
+    const code = second.body.handoff_code as string
+
+    // Manufacture the row migration 0100 now prevents but that a device
+    // enrolled BEFORE it could still be holding. The trigger is disabled for
+    // exactly one statement, which is the only honest way to reach the state
+    // the read-side guard exists for.
+    await t.client.unsafe(
+      `ALTER TABLE instance_attestation DISABLE TRIGGER instance_attestation_tool_nonblank`,
+    )
+    try {
+      await t.client`UPDATE instance_attestation SET tool = 'vim' WHERE instance_id = ${instanceId}::uuid`
+    } finally {
+      await t.client.unsafe(
+        `ALTER TABLE instance_attestation ENABLE TRIGGER instance_attestation_tool_nonblank`,
+      )
+    }
+
+    await expect(redeem({ handoff_code: code })).rejects.toMatchObject({ statusCode: 409 })
+
+    // Refusing must be safe, not destructive: the guard runs INSIDE the
+    // transaction, so the one-time code is not spent and the credential the
+    // device is currently emitting with is untouched. (Recovery is a fresh
+    // device, but a broken row must not also cost the caller a working one.)
+    expect(await redeemableHandoffs(instanceId)).toBe(1)
+    expect(await liveEmitCredentials(instanceId)).toBe(1)
+  })
+
+  it('the same redeem succeeds when the tool IS serveable (anti-vacuity control)', async () => {
+    // Without this, the test above would also pass if redeem 409'd on every
+    // second redeem for unrelated reasons.
+    const client = await connectClient()
+    const first = await provision(client)
+    const instanceId = first.body.instance_id as string
+    await redeem({ handoff_code: first.body.handoff_code as string })
+    const second = await provision(client, instanceId)
+    await expect(redeem({ handoff_code: second.body.handoff_code as string })).resolves.toBeTruthy()
+    expect(await redeemableHandoffs(instanceId)).toBe(0)
   })
 })

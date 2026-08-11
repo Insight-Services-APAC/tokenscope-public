@@ -17,6 +17,14 @@
  *   1. claude-opus-4-8 → model-specific Opus lines ($5 / $25 / $0.50 / $6.25),
  *      NOT the Sonnet wildcard.
  *   2. an UNKNOWN model id → still falls back to the wildcard (Sonnet) lines.
+ *
+ * AFTER docs/design/provider-cost-precedence.md, 0061 is no longer what makes a
+ * total correct — the provider's figure is — but model-line selection is still
+ * what makes the per-token-type SLICE of that figure right. The first two cases
+ * therefore emit no provider cost (rung 2, byte-identical to before); a third
+ * case pins that the same model lines proportion a provider-costed span. This is
+ * also why 0061 stops being a recurring migration chore: a brand-new model is
+ * priced correctly on day one whether or not anyone writes its lines.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
@@ -129,5 +137,55 @@ describe('model-specific rate lines (mig 0061)', () => {
     expect(row.model).toBe('claude-future-model-9')
     expect(row.cost_usd).toBe('3.000000') // wildcard Sonnet fallback, not an Opus rate
     expect(row.rate_card_id).toBe(GLOBAL_CARD)
+  })
+
+  it('a provider-costed Opus span is SLICED by the Opus lines — total exact, ratios from 0061', async () => {
+    // Opus list ratio for 1M of each type: 5 : 25 : 0.5 : 6.25 = 36.75 total.
+    // The provider says the request cost $3.675, so the shares are exactly
+    // one tenth of the list numbers. Chosen to divide cleanly so the assertion
+    // reads as arithmetic rather than as "whatever the code produced"; the
+    // residue path is exercised in joiner-provider-cost.test.ts.
+    const res = await runReadJoiner(
+      t.db,
+      reader(
+        INST_OPUS,
+        (
+          [
+            ['input', 1_000_000],
+            ['output', 1_000_000],
+            ['cache-read', 1_000_000],
+            ['cache-write', 1_000_000],
+          ] as const
+        ).map(([tokenType, tokens]) => ({
+          tokens,
+          tokenType,
+          model: 'claude-opus-4-8',
+          tsEvent: '2026-05-10T10:05:00Z',
+          sourceRunId: 'req_opus_provider',
+          lawCostUsd: 3.675,
+        })),
+      ),
+      { sessionIds: [INST_OPUS] },
+    )
+    expect(res.attributionRowsWritten).toBe(4)
+    expect(res.costingRungs).toEqual({ provider: 1, rateCard: 0, carrier: 0, skipped: 0 })
+
+    const rows = await t.client<{ token_type: string; cost_usd: string; rate_card_id: string | null }[]>`
+      SELECT token_type, cost_usd::text AS cost_usd, rate_card_id::text AS rate_card_id
+      FROM attribution_record
+      WHERE instance_id = ${INST_OPUS}::uuid AND source_run_id = 'req_opus_provider'
+      ORDER BY token_type`
+    expect(rows.map((r) => [r.token_type, r.cost_usd])).toEqual([
+      ['cache-read', '0.050000'],
+      ['cache-write', '0.625000'],
+      ['input', '0.500000'],
+      ['output', '2.500000'],
+    ])
+    // Provider priced it, so no card is pinned even though a card sliced it.
+    for (const r of rows) expect(r.rate_card_id).toBeNull()
+    const [total] = await t.client<{ total: string }[]>`
+      SELECT SUM(cost_usd)::text AS total FROM attribution_record
+      WHERE instance_id = ${INST_OPUS}::uuid AND source_run_id = 'req_opus_provider'`
+    expect(total!.total).toBe('3.675000')
   })
 })

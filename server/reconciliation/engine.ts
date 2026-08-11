@@ -13,6 +13,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
 import type * as schema from '../../drizzle/schema'
 import type { ReconciledLine, ReconcileResult, ReconcileCategory } from './types'
+import { createGovernanceKeyCache, resolveGovernanceKeyForLine } from './governance-keys'
 
 type Db = PostgresJsDatabase<typeof schema>
 
@@ -195,6 +196,7 @@ export async function runReconcileEngine(
   // Per-run caches keyed by teammateId.
   const dimsCache = new Map<string, TeammateDims | null>()
   const historyCache = new Map<string, boolean>() // key: `${teammateId}:${tool}`
+  const govKeyCache = createGovernanceKeyCache()
 
   // Reject malformed adapter lines rather than writing NaN into a NOT NULL
   // numeric column (PG numeric accepts 'NaN') or letting an empty/whitespace
@@ -324,12 +326,22 @@ export async function runReconcileEngine(
     const deltaParam = cls.deltaUsd.toFixed(6)
     const rawJson = JSON.stringify(line.raw ?? null)
 
+    // Governance key (mig 0103, design §4.0): resolved generically (branches
+    // internally on line.provider so THIS function stays provider-agnostic).
+    const govKey = await resolveGovernanceKeyForLine(db, govKeyCache, {
+      provider: line.provider,
+      enterpriseRef: line.enterpriseRef,
+      licenseOrg: line.licenseOrg,
+    })
+    const govKeyStatus = govKey.providerOrgId || govKey.providerEnterpriseId ? 'resolved' : 'unresolved'
+
     await db.execute(sql`
       INSERT INTO reconciliation_record (
         provider, enterprise_ref, license_org, period_date, category, scope,
         teammate_id, region_id, org_unit_id, cost_owning_unit_id,
         actual_qty, actual_unit_type, actual_usd, otel_attributed_usd, delta_usd,
-        spend_class, indicative_reason, disposition, lag_state, raw, status, run_id
+        spend_class, indicative_reason, disposition, lag_state, raw, status, run_id,
+        provider_org_id, provider_enterprise_id, governance_key_status
       ) VALUES (
         ${line.provider}, ${line.enterpriseRef}, ${line.licenseOrg}, ${line.periodDate}::date,
         ${line.category}, ${scope},
@@ -337,7 +349,8 @@ export async function runReconcileEngine(
         ${actualQtyParam}::numeric, ${line.unit.unitType}, ${actualUsdParam}::numeric,
         ${otelAttributedUsd}::numeric, ${deltaParam}::numeric,
         ${line.spendClass}, ${line.indicativeReason ?? null}, ${cls.disposition}, ${cls.lagState},
-        ${rawJson}::jsonb, 'proposed', ${runId}
+        ${rawJson}::jsonb, 'proposed', ${runId},
+        ${govKey.providerOrgId}::uuid, ${govKey.providerEnterpriseId}::uuid, ${govKeyStatus}
       )
       ON CONFLICT (
         provider, enterprise_ref, period_date, category, scope,
@@ -348,6 +361,9 @@ export async function runReconcileEngine(
         region_id = EXCLUDED.region_id,
         org_unit_id = EXCLUDED.org_unit_id,
         cost_owning_unit_id = EXCLUDED.cost_owning_unit_id,
+        provider_org_id = EXCLUDED.provider_org_id,
+        provider_enterprise_id = EXCLUDED.provider_enterprise_id,
+        governance_key_status = EXCLUDED.governance_key_status,
         actual_qty = EXCLUDED.actual_qty,
         actual_unit_type = EXCLUDED.actual_unit_type,
         actual_usd = EXCLUDED.actual_usd,

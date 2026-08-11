@@ -395,3 +395,91 @@ describe('no-credential', () => {
     }
   })
 })
+
+describe('coverage stage (Workstream D) — a cheap, persisted-only read attached to every Verify outcome', () => {
+  it('never observed at all — the stage reads unavailable, never a false "0 of 0"', async () => {
+    stub.samlIdentities = [{ login: 'alice' }, { login: 'bob' }]
+    stub.userDailyCredits = [{ login: 'alice' }, { login: 'bob' }]
+    const h = await call(ev({ session: admin(), enterpriseId: appEntId }))
+    expect(h.coverage).toMatchObject({ available: false, denominator: null, stale: false, observedAt: null })
+  })
+
+  it('a persisted, non-stale observation surfaces through the SAME Verify call that also succeeds on the rest of the ladder', async () => {
+    const { persistEnterpriseCoverage } = await import('../../../server/reconciliation/coverage-store')
+    const { summariseEnterpriseCoverage } = await import('../../../server/reconciliation/coverage')
+    const orgs = [
+      { org: 'connected-org', state: 'connected' as const, providerOrgId: null },
+      { org: 'suspended-org', state: 'suspended' as const, providerOrgId: null },
+    ]
+    await persistEnterpriseCoverage(t.db, {
+      enterpriseId: appEntId,
+      externalId: 'app-health-ent',
+      census: { available: true, capped: false, reason: null, orgCount: 2 },
+      orgs,
+      summary: summariseEnterpriseCoverage(orgs.map((o) => o.state), { censusAvailable: true, censusCapped: false, censusSize: 2 }),
+      probesCapped: false,
+    })
+
+    stub.samlIdentities = [{ login: 'alice' }, { login: 'bob' }]
+    stub.userDailyCredits = [{ login: 'alice' }, { login: 'bob' }]
+    const h = await call(ev({ session: admin(), enterpriseId: appEntId }))
+    expect(h.verdict).toBe('healthy') // the REST of the ladder is unaffected
+    expect(h.coverage).toMatchObject({ available: true, capped: false, denominator: 2, connected: 1, nonConnected: 1, stale: false })
+  })
+
+  it('an EXPIRED observation reads as unavailable/unknown through the Verify route too — never still-complete', async () => {
+    const { persistEnterpriseCoverage } = await import('../../../server/reconciliation/coverage-store')
+    const { summariseEnterpriseCoverage } = await import('../../../server/reconciliation/coverage')
+    const orgs = [{ org: 'connected-org', state: 'connected' as const, providerOrgId: null }]
+    const oldNow = new Date(Date.now() - 60 * 60 * 1000) // an hour ago
+    await persistEnterpriseCoverage(
+      t.db,
+      {
+        enterpriseId: patEntId,
+        externalId: 'pat-health-ent',
+        census: { available: true, capped: false, reason: null, orgCount: 1 },
+        orgs,
+        summary: summariseEnterpriseCoverage(orgs.map((o) => o.state), { censusAvailable: true, censusCapped: false, censusSize: 1 }),
+        probesCapped: false,
+      },
+      { now: oldNow, ttlMs: 1000 }, // expired 59+ minutes ago
+    )
+    stub.seats = [{ assignee: { login: 'alice' } }]
+    const h = await call(ev({ session: admin(), enterpriseId: patEntId }))
+    expect(h.coverage.available).toBe(false)
+    expect(h.coverage.denominator).toBeNull()
+    expect(h.coverage.stale).toBe(true)
+  })
+
+  it('coverage is attached even when the REST of the ladder failed (no-credential) — independent signals', async () => {
+    // A DEDICATED enterprise (not the shared appEntId) so this test's assertions are
+    // never coupled to what earlier tests in this file persisted for appEntId.
+    const [freshEnt] = await t.db
+      .insert(schema.providerEnterprise)
+      .values({
+        provider: 'github',
+        externalId: 'coverage-nocred-ent',
+        displayName: 'Coverage NoCred Ent',
+        reconciliationMode: 'reconciled',
+        credentialSecretName: 'coveragenocred',
+        githubAppId: '7654321',
+      })
+      .returning()
+    const { persistEnterpriseCoverage } = await import('../../../server/reconciliation/coverage-store')
+    const { summariseEnterpriseCoverage } = await import('../../../server/reconciliation/coverage')
+    const orgs = [{ org: 'still-connected-org', state: 'connected' as const, providerOrgId: null }]
+    await persistEnterpriseCoverage(t.db, {
+      enterpriseId: freshEnt!.id,
+      externalId: 'coverage-nocred-ent',
+      census: { available: true, capped: false, reason: null, orgCount: 1 },
+      orgs,
+      summary: summariseEnterpriseCoverage(orgs.map((o) => o.state), { censusAvailable: true, censusCapped: false, censusSize: 1 }),
+      probesCapped: false,
+    })
+    // NUXT_GITHUB_APP_KEY_COVERAGENOCRED is deliberately never set — no-credential.
+    const h = await call(ev({ session: admin(), enterpriseId: freshEnt!.id }))
+    expect(h.verdict).toBe('no-credential')
+    // The REST of the ladder failed, but coverage is an INDEPENDENT read — still surfaced.
+    expect(h.coverage).toMatchObject({ available: true, denominator: 1, connected: 1 })
+  })
+})

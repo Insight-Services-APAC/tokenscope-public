@@ -1,6 +1,6 @@
 ---
 description: Turn the TokenScope status line (emission health + session id) on or off
-allowed-tools: Bash(node:*)
+allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/statusline-toggle.mjs":*)
 ---
 
 TokenScope installs a status line ON by default showing, every refresh, a

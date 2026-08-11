@@ -106,6 +106,56 @@ urlencode() {
   printf '%s' "$_ue_out"
 }
 
+# ── endpoint pre-flight (S1 fix 3 — POSIX sh port of endpoint-guard.mjs) ──────
+# Reject a non-https / leading-dash / empty endpoint BEFORE it ever reaches
+# curl — the same validation plugin-runtime.mjs's assertSafeEndpoint applies
+# JS-side, ported here because this script runs under `sh`, never Node.
+# Loopback (127.0.0.1/localhost/::1, any port) is exempted from the https
+# requirement — a locally-running dev server (TOKENSCOPE_API_BASE=
+# http://localhost:3450) legitimately returns its OWN loopback address as
+# both the bearer and OAuth token endpoint. On failure: write_sentinel + exit
+# 1, the SAME loud-failure pattern every other guard in this script uses —
+# never a silent skip. Args: $1 = endpoint value, $2 = label (for the message).
+assert_safe_endpoint() {
+  _ep="$1"
+  _label="$2"
+  case "$_ep" in
+    '')
+      echo "TokenScope: emission auth FAILED (${_label} is empty) — telemetry is being DROPPED." >&2
+      write_sentinel 0 "${_label} is empty"
+      exit 1
+      ;;
+    -*)
+      echo "TokenScope: emission auth FAILED (${_label} must not start with '-') — telemetry is being DROPPED." >&2
+      write_sentinel 0 "${_label} starts with '-'"
+      exit 1
+      ;;
+  esac
+  case "$_ep" in
+    https://*) return 0 ;;
+    http://127.0.0.1|http://127.0.0.1:*|http://127.0.0.1/*) return 0 ;;
+    http://localhost|http://localhost:*|http://localhost/*) return 0 ;;
+    http://\[::1\]|http://\[::1\]:*|http://\[::1\]/*) return 0 ;;
+    *)
+      echo "TokenScope: emission auth FAILED (${_label} must be https for an off-box host) — telemetry is being DROPPED." >&2
+      write_sentinel 0 "${_label} must be https off-box"
+      exit 1
+      ;;
+  esac
+}
+
+# The `--proto` value matching whichever scheme just validated, so curl is
+# restricted to EXACTLY that protocol (defence against a scheme/URL parser
+# differential between this script's `case` matching and curl's own parser —
+# `--proto '=https'` for the common off-box case; `'=http'` for a validated
+# loopback dev endpoint). Args: $1 = the already-validated endpoint value.
+proto_for() {
+  case "$1" in
+    https://*) printf '=https' ;;
+    *) printf '=http' ;;
+  esac
+}
+
 # ── OAuth refresh_token grant ─────────────────────────────────────────────────
 # Run the refresh grant; on success set AUTH_TOKEN + persist the access cache. On
 # failure write the sentinel + exit 1 (a failed refresh means the durable
@@ -119,10 +169,11 @@ oauth_refresh() {
   _tok_form="grant_type=refresh_token&client_id=$(urlencode "${TOKENSCOPE_OAUTH_CLIENT_ID}")&refresh_token=$(urlencode "${TOKENSCOPE_OAUTH_REFRESH_TOKEN}")"
   _tok_response="$(
     printf '%s' "$_tok_form" | curl -s --connect-timeout 5 --max-time 10 -w '\n%{http_code}' \
+      --proto "$(proto_for "$TOKENSCOPE_OAUTH_TOKEN_ENDPOINT")" \
       -X POST \
       -H 'Content-Type: application/x-www-form-urlencoded' \
       --data-binary @- \
-      "${TOKENSCOPE_OAUTH_TOKEN_ENDPOINT}" 2>/dev/null
+      --url "${TOKENSCOPE_OAUTH_TOKEN_ENDPOINT}" 2>/dev/null
   )" || _tok_response=""
 
   _tok_body=""
@@ -165,6 +216,111 @@ oauth_refresh() {
   AUTH_TOKEN="$_new_access"
 }
 
+# ── Client version reporting (diagnostic) ─────────────────────────────────────
+# Every version-specific incident this project has had ended in "go ask the human
+# what version they are on": the 2.1.191 chunked-OTLP regression, the durable
+# revert-key wedge, the forwarder self-heal, and most recently a device eight days
+# behind on attribution where "does that user need to update?" was unanswerable
+# from data. So the mint states what is actually running. This is the RIGHT place
+# for it: /bearer is already called every ~29 minutes by a live device, the values
+# describe the code that is doing the calling, and it costs two headers.
+#
+# The server treats these as UNTRUSTED diagnostic hints — never an authorisation
+# or costing input — and stores a missing value as NULL ("not reported"), which is
+# itself the signal that a device is on a build older than this one. So a value we
+# cannot determine is OMITTED, never guessed or defaulted.
+
+# Version of the TokenScope plugin this helper belongs to, read from the manifest
+# sitting beside it. Anchored on $0 (the helper is invoked by absolute path,
+# pinned into settings.json) so it reports the version of the code that ACTUALLY
+# ran, not whatever is nominally installed — the two diverge exactly when a stale
+# pinned path is the bug you are hunting.
+#
+# TWO LAYOUTS, because this script is VENDORED INTO BOTH PLUGINS (the parity gate
+# scripts/check-copilot-plugin-sync.mjs keeps the copies identical, so one file
+# must be correct in both trees):
+#   plugin/scripts/…          → ../.claude-plugin/plugin.json   (Claude plugin)
+#   copilot-plugin/scripts/…  → ../plugin.json                  (Copilot plugin)
+# Probed in that order, first hit wins. Getting this wrong is invisible rather
+# than loud: a manifest we cannot find yields NULL, which is indistinguishable
+# from a device that has not upgraded — so the whole Copilot fleet would look
+# stale forever and nobody would see an error.
+detect_plugin_version() {
+  _pv_dir="$(dirname "$0" 2>/dev/null || echo .)"
+  for _pv_file in "${_pv_dir}/../.claude-plugin/plugin.json" "${_pv_dir}/../plugin.json"; do
+    if [ -f "$_pv_file" ]; then
+      _pv_body="$(cat "$_pv_file" 2>/dev/null || echo '')"
+      PLUGIN_VERSION="$(json_str "$_pv_body" version)"
+      [ -n "$PLUGIN_VERSION" ] && return 0
+    fi
+  done
+  return 0
+}
+
+# Version of the Claude Code CLI that launched this session. Same two signals and
+# same precedence as otlp-shim-policy.mjs::detectCliVersion.
+#
+# HONESTY NOTE — what is and is not verified here. Those signals are proven in the
+# HOOK environment (the shim policy reads them there to decide whether to run the
+# forwarder, and that decision has been correct in production). What is NOT
+# verified is whether Claude Code exports them into the environment of the
+# otelHeadersHelper subprocess it spawns for the ~29-minute refresh; that
+# inheritance has not been captured, and this project's standing rule is not to
+# infer emission behaviour. It is designed to be safe either way: if neither
+# variable is present the header is simply OMITTED, the server stores NULL, and
+# the plugin version — read from disk, not from the environment — still lands. So
+# the worst case is a partially-reported device, never a wrong version and never a
+# failed mint. The SessionStart hook's own invocation of this helper passes its
+# process env through, so that path reports the CLI version regardless.
+detect_cli_version() {
+  # .../versions/2.1.212/... — backslashes are NORMALISED to forward slashes
+  # first, so the pattern needs only one separator. The obvious `versions[/\]`
+  # bracket form does work in the sed implementations tested here, but whether a
+  # backslash inside a bracket expression is literal or an escape is exactly the
+  # kind of thing that varies between GNU sed, BSD sed and busybox — and this
+  # script runs on developer machines, not on a runner we control. `tr` removes
+  # the question instead of betting on it. A non-matching value prints nothing, so
+  # no `case` guard is needed — one code path, not two.
+  CLI_VERSION="$(printf '%s' "${CLAUDE_CODE_EXECPATH:-}" | tr '\\' '/' | sed -n 's|.*versions/\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*|\1|p')"
+  if [ -z "$CLI_VERSION" ]; then
+    # e.g. AI_AGENT=claude-code_2-1-211_agent
+    CLI_VERSION="$(printf '%s' "${AI_AGENT:-}" | sed -n 's|.*claude-code_\([0-9][0-9]*\)-\([0-9][0-9]*\)-\([0-9][0-9]*\).*|\1.\2.\3|p')"
+  fi
+}
+
+# Drop anything that is not plausibly a version string. The value is interpolated
+# into a curl argument and then into an HTTP header, so a stray space, quote, or
+# newline is a correctness problem here and a rendering problem in the operator's
+# console. The server sanitises independently (defence in depth) — this side
+# guarantees we never SEND junk, that side guarantees we never STORE junk.
+safe_version() {
+  printf '%s' "$1" | tr -d '\000-\037' | sed -n 's|^\([A-Za-z0-9][A-Za-z0-9._+-]\{0,39\}\)$|\1|p'
+}
+
+PLUGIN_VERSION=""
+CLI_VERSION=""
+detect_plugin_version
+detect_cli_version
+PLUGIN_VERSION="$(safe_version "$PLUGIN_VERSION")"
+CLI_VERSION="$(safe_version "$CLI_VERSION")"
+
+# Build the curl header arguments once (present_bearer runs twice on the self-heal
+# path). Uses curl's `-H Name:value` form, which word-splits into exactly TWO
+# tokens per header (`-H` and `Name:value`) — that split is the intent, and the
+# colon form keeps the value welded to its name. safe_version has already
+# constrained both values to [A-Za-z0-9._+-], so neither token can carry further
+# whitespace or a glob character, and the deliberate UNQUOTED expansion of
+# $VERSION_HEADER_ARGS below therefore cannot split or glob into anything
+# unintended. An undetermined value contributes no argument at all — the server
+# then records NULL, which is the honest reading.
+VERSION_HEADER_ARGS=""
+if [ -n "$PLUGIN_VERSION" ]; then
+  VERSION_HEADER_ARGS="-H X-TokenScope-Plugin-Version:${PLUGIN_VERSION}"
+fi
+if [ -n "$CLI_VERSION" ]; then
+  VERSION_HEADER_ARGS="${VERSION_HEADER_ARGS} -H X-TokenScope-Client-Version:${CLI_VERSION}"
+fi
+
 # ── Present the chosen credential to /bearer ──────────────────────────────────
 # GET /bearer with AUTH_TOKEN; set HTTP_STATUS + BODY (no exit). We do NOT use
 # `curl -f` (which discards the body and status); instead ask curl to append the
@@ -174,9 +330,13 @@ present_bearer() {
   HTTP_STATUS=000
   BODY=""
   _resp="$(
+    # shellcheck disable=SC2086 -- word-splitting $VERSION_HEADER_ARGS is intended;
+    # its tokens are charset-constrained by safe_version above.
     curl -s --connect-timeout 5 --max-time 10 -w '\n%{http_code}' \
+      --proto "$(proto_for "$TOKENSCOPE_BEARER_ENDPOINT")" \
       -H "Authorization: Bearer ${AUTH_TOKEN}" \
-      "${TOKENSCOPE_BEARER_ENDPOINT}" 2>/dev/null
+      $VERSION_HEADER_ARGS \
+      --url "${TOKENSCOPE_BEARER_ENDPOINT}" 2>/dev/null
   )" || _resp=""
   if [ -n "$_resp" ]; then
     HTTP_STATUS="$(printf '%s' "$_resp" | tail -n1)"
@@ -189,6 +349,27 @@ if [ -z "${TOKENSCOPE_BEARER_ENDPOINT:-}" ]; then
   write_sentinel 0 "TOKENSCOPE_BEARER_ENDPOINT not set"
   exit 1
 fi
+assert_safe_endpoint "$TOKENSCOPE_BEARER_ENDPOINT" "TOKENSCOPE_BEARER_ENDPOINT"
+
+# ── OAuth refresh token: env, else the device credential store fallback ──────
+# Claude's repo-local tag no longer carries TOKENSCOPE_OAUTH_REFRESH_TOKEN (S1
+# fix 4 — a hostile repo must not be able to exfiltrate the durable refresh
+# credential merely by sitting in the working tree: `tag-repo.mjs` now strips
+# it from the repo-local env copy it writes). When the env omits it, fall back
+# to the device's OWN 0700 global state dir store (${STATE_DIR}/config.json →
+# .oauth_refresh_token), which claude-redeem.mjs now writes on THIS lane and
+# copilot-redeem.mjs already writes+reads on the Copilot lane
+# (copilot-plugin/scripts/status.mjs) — ONE shared store, keyed by the SAME
+# field name, so a tagged repo's session still finds the refresh token (from
+# the device store, never from the repo) and removing it from the repo tag
+# cannot brick emission.
+if [ -z "${TOKENSCOPE_OAUTH_REFRESH_TOKEN:-}" ] && [ -f "${STATE_DIR}/config.json" ]; then
+  _cfg="$(cat "${STATE_DIR}/config.json" 2>/dev/null || echo '')"
+  _cfg_refresh="$(json_str "$_cfg" oauth_refresh_token)"
+  if [ -n "$_cfg_refresh" ]; then
+    TOKENSCOPE_OAUTH_REFRESH_TOKEN="$_cfg_refresh"
+  fi
+fi
 
 # ── Require OAuth auth ─────────────────────────────────────────────────────────
 # OAuth is the ONLY emission credential. If it is not fully configured, fail loud
@@ -196,10 +377,11 @@ fi
 if [ -z "${TOKENSCOPE_OAUTH_REFRESH_TOKEN:-}" ] \
   || [ -z "${TOKENSCOPE_OAUTH_TOKEN_ENDPOINT:-}" ] \
   || [ -z "${TOKENSCOPE_OAUTH_CLIENT_ID:-}" ]; then
-  echo "TokenScope: emission auth NOT CONFIGURED — no OAuth credential (TOKENSCOPE_OAUTH_REFRESH_TOKEN/_TOKEN_ENDPOINT/_CLIENT_ID); run the tokenscope-setup MCP prompt. Telemetry will not emit." >&2
+  echo "TokenScope: emission auth NOT CONFIGURED — no OAuth credential (TOKENSCOPE_OAUTH_REFRESH_TOKEN/_TOKEN_ENDPOINT/_CLIENT_ID, and none found in ${STATE_DIR}/config.json); run the tokenscope-setup MCP prompt. Telemetry will not emit." >&2
   write_sentinel 0 "no OAuth credential configured"
   exit 1
 fi
+assert_safe_endpoint "$TOKENSCOPE_OAUTH_TOKEN_ENDPOINT" "TOKENSCOPE_OAUTH_TOKEN_ENDPOINT"
 
 # AUTH_TOKEN is the credential presented to /bearer. USED_CACHE records whether we
 # presented a CACHED OAuth token (vs a freshly-refreshed one) — only a cached

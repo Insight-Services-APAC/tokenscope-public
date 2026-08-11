@@ -23,6 +23,7 @@
  * builders, and the UI lane renderers alike.
  */
 import type { ProviderSurfaceAdapter } from './lanes'
+import { COPILOT_AGENT_TOOL } from './github-surface'
 
 export const CLAUDE_CODE_TOOL = 'claude-code'
 
@@ -85,6 +86,29 @@ export type NonCodeClaudeTool = (typeof NON_CODE_CLAUDE_TOOLS)[number]
  * this set so no other source's rows are ever touched.
  */
 export const CLAUDE_FAMILY_TOOLS: readonly string[] = [CLAUDE_CODE_TOOL, ...NON_CODE_CLAUDE_TOOLS]
+
+/*
+ * INGEST_ONLY_USAGE_TOOLS (Workstream A, migration 0101) — the provider-neutral
+ * generalisation of what was `GITHUB_INGEST_ONLY_USAGE_TOOLS`
+ * (shared/usage/github-surface.ts, now superseded and removed): every tool
+ * whose usage truth is genuine §A provider usage but which can NEVER become a
+ * taggable `unaccounted_usage` worklist item, because no session/OTel
+ * emission exists for it to tag.
+ *
+ * `reconcileUnaccountedUsage` (server/usage/unaccounted-reconciliation.ts)
+ * excludes exactly this set from the needs-tagging reconciliation — the
+ * non-Code Claude surfaces (#142, no sessions, no OTel — restored to
+ * `v_teammate_usage_daily` by migration 0101's A1) and `copilot-agent` (D4,
+ * OTel-invisible coding-agent lane, migration 0086). `v_complete_usage`'s
+ * third, non-taggable union arm (migration 0101, A3) reads exactly this set
+ * FROM `v_teammate_usage_daily`, so ingest-only usage is §A-visible
+ * (showback/velocity) while staying permanently absent from the worklist.
+ *
+ * `copilot-cli` is deliberately NOT a member: it remains ordinarily taggable
+ * (an enrolled container's un-reconciled gap is genuine developer-taggable
+ * usage), just as it always has been.
+ */
+export const INGEST_ONLY_USAGE_TOOLS: readonly string[] = [COPILOT_AGENT_TOOL, ...NON_CODE_CLAUDE_TOOLS]
 
 /** True when `tool` is a non-Code Claude surface lane (chargeback-only, untaggable). */
 export function isNonCodeClaudeTool(tool: string | null | undefined): tool is NonCodeClaudeTool {

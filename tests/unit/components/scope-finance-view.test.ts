@@ -268,7 +268,12 @@ describe('ScopeFinanceView — the drill four exclusive states', () => {
     const w = mount(ScopeFinanceView, { props: { ...baseProps, report: makeReport(), drill, isDrill: true, pending: false } })
     expect(w.find('[data-testid="finance-copilot-pool-card"]').exists()).toBe(true)
     expect(w.find('[data-testid="finance-copilot-pooled-lines"]').exists()).toBe(false)
-    expect(w.find('[data-testid="finance-copilot-pending-note"]').text().toLowerCase()).toContain('pending correct writer')
+    // "pooled — pending correct writer" named an internal work item; the state a
+    // finance reader needs is that the figure is held back and the rest is an
+    // estimate.
+    expect(w.find('[data-testid="finance-copilot-pending-note"]').text().toLowerCase()).toContain(
+      'held back until validated',
+    )
     expect(w.find('[data-testid="finance-overage-drivers"]').exists()).toBe(false)
     expect(w.find('[data-testid="finance-copilot-pending-chip"]').exists()).toBe(true)
   })
@@ -448,5 +453,104 @@ describe('ScopeFinanceView — drill dominant-lane badge (lane-visuals V3, r1-F7
     const others = badge.find('[data-testid="finance-drill-lane-others"]')
     expect(others.exists()).toBe(true)
     expect(others.attributes('title')).toContain('Claude Chat')
+  })
+})
+
+/*
+ * ── THE BLANK FINANCE PAGE ────────────────────────────────────────────────────
+ *
+ * The four states above were only ever asserted MUTUALLY EXCLUSIVE. They were never
+ * asserted EXHAUSTIVE, and they were not: `report === null` with `pending === false`
+ * and no error matched none of them, so the body rendered nothing at all. That is
+ * exactly the state Nuxt reports on the SERVER pass for the container's
+ * `useFetch(..., { lazy: true, server: false })` — the fetch is deliberately skipped
+ * during SSR, so nothing is in flight and no data has arrived — which is why the
+ * page shipped its header, period control and "defaults to the last complete month"
+ * line above an empty space, and then mismatched on hydration.
+ *
+ * "Exactly one of four" is only a guarantee if the four cover every input.
+ */
+describe('ScopeFinanceView — the four states are EXHAUSTIVE (never a blank body)', () => {
+  it('INDEX: renders the skeleton when there is no report, nothing in flight and no error', () => {
+    const w = mount(ScopeFinanceView, {
+      props: { ...baseProps, report: null, drill: null, isDrill: false, pending: false },
+    })
+    expect(indexSeen(w)).toEqual({ skeleton: true, error: false, empty: false, data: false })
+    // And the body is not empty — the defect was visual before it was logical.
+    expect(w.find('[data-testid="scope-finance"]').element.children.length).toBeGreaterThan(0)
+  })
+
+  it('DRILL: renders the skeleton when there is no drill, nothing in flight and no error', () => {
+    const w = mount(ScopeFinanceView, {
+      props: { ...baseProps, report: makeReport(), drill: null, isDrill: true, pending: false, drillPending: false },
+    })
+    expect(drillSeen(w)).toEqual({ skeleton: true, error: false, empty: false, data: false })
+    expect(w.find('[data-testid="scope-finance"]').element.children.length).toBeGreaterThan(0)
+  })
+
+  it('INDEX: every (report × pending × error) combination renders exactly one state', () => {
+    for (const report of [null, makeReport()]) {
+      for (const pending of [true, false]) {
+        for (const error of [undefined, new Error('boom')]) {
+          const w = mount(ScopeFinanceView, {
+            props: { ...baseProps, report, drill: null, isDrill: false, pending, error },
+          })
+          const lit = Object.entries(indexSeen(w)).filter(([, on]) => on).map(([k]) => k)
+          expect(lit, `report=${report ? 'set' : 'null'} pending=${pending} error=${Boolean(error)}`).toHaveLength(1)
+        }
+      }
+    }
+  })
+
+  it('DRILL: every (drill × drillPending × drillError) combination renders exactly one state', () => {
+    for (const drill of [null, makeDrill()]) {
+      for (const drillPending of [true, false]) {
+        for (const drillError of [undefined, new Error('404')]) {
+          const w = mount(ScopeFinanceView, {
+            props: { ...baseProps, report: makeReport(), drill, isDrill: true, pending: false, drillPending, drillError },
+          })
+          const lit = Object.entries(drillSeen(w)).filter(([, on]) => on).map(([k]) => k)
+          expect(lit, `drill=${drill ? 'set' : 'null'} pending=${drillPending} error=${Boolean(drillError)}`).toHaveLength(1)
+        }
+      }
+    }
+  })
+})
+
+/*
+ * The "Bill vs chargeback" band is in the owner-signed prototype unconditionally,
+ * and it lists GitHub Copilot explicitly as "Pooled net — pending cutover" at $0.00.
+ * Filtering zero rows out and then gating the card on `max > 0` deleted the whole
+ * band from a period whose only Copilot state was "pending" — the reader lost a
+ * section of the report with nothing put in its place.
+ */
+describe('FinanceBillCompare — a pending provider is shown, not dropped', () => {
+  const pendingOnly = () =>
+    makeReport({
+      billCheck: {
+        chargebackUsd: 0, billUsd: 0, deltaUsd: 0, matched: true, unsettled: false,
+        copilotChargebackUsd: 0, copilotLanes: [], anthropicLanes: [], providers: [],
+      },
+      copilot: { mode: 'pool-utilisation', pending: true, unclassifiedWarning: false },
+    })
+
+  it('keeps the band, with the pending provider at $0.00, when Copilot chargeback is held back', () => {
+    const w = mount(ScopeFinanceView, {
+      props: { ...baseProps, report: pendingOnly(), drill: null, isDrill: false, pending: false },
+    })
+    const card = w.find('[data-testid="finance-bill-compare"]')
+    expect(card.exists()).toBe(true)
+    const row = w.find('[data-testid="finance-compare-row"][data-provider="copilot"]')
+    expect(row.exists()).toBe(true)
+    expect(row.text()).toContain('pending cutover')
+  })
+
+  it('makes NO reconciliation claim on a row with no money on either bar', () => {
+    const w = mount(ScopeFinanceView, {
+      props: { ...baseProps, report: pendingOnly(), drill: null, isDrill: false, pending: false },
+    })
+    // "matched" over $0.00 vs $0.00 is true, vacuous, and reads as a settled month.
+    const row = w.find('[data-testid="finance-compare-row"][data-provider="copilot"]')
+    expect(row.text()).not.toContain('matched')
   })
 })

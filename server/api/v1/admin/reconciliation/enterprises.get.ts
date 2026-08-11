@@ -29,6 +29,7 @@ interface Row extends Record<string, unknown> {
   notes: string | null
   flat_seat_price_usd: string | null
   included_allowance_usd: string | null
+  overage_allocation_policy: string
   org_count: string
 }
 
@@ -48,6 +49,7 @@ export default defineEventHandler(async (event) => {
            pe.notes,
            pe.flat_seat_price_usd::text AS flat_seat_price_usd,
            pe.included_allowance_usd::text AS included_allowance_usd,
+           pe.overage_allocation_policy,
            (SELECT COUNT(*) FROM provider_org po WHERE po.provider_enterprise_id = pe.id)::text
              AS org_count
     FROM provider_enterprise pe
@@ -70,9 +72,13 @@ export default defineEventHandler(async (event) => {
       githubAppId: r.github_app_id,
       credentialKind: appMode ? ('github-app' as const) : ('github-pat' as const),
       notes: r.notes,
-      // ADR-0010 D1/D2 (Copilot only; null on Anthropic = pure metered).
+      // ADR-0010 D1/D2 (Copilot only; null on Anthropic = pure metered). FORECAST/SHOWBACK
+      // reference only — see docs/wiki/Reporting.md §5; the effective-dated rate-plan history
+      // (ADR-0011 D9) is the authoritative period-aware source, via GET .../copilot-rate-plans.
       flatSeatPriceUsd: r.flat_seat_price_usd != null ? Number(r.flat_seat_price_usd) : null,
       includedAllowanceUsd: r.included_allowance_usd != null ? Number(r.included_allowance_usd) : null,
+      // ADR-0011 D10 — configurable per-enterprise pooled-overage allocation policy.
+      overageAllocationPolicy: r.overage_allocation_policy,
       orgCount: Number(r.org_count),
       // Presence ONLY — the key value never crosses this boundary. App mode checks the
       // App private key env (NUXT_GITHUB_APP_KEY_<NAME>); PAT mode the PAT env.

@@ -74,6 +74,28 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* ───── The hero KPI row — ONE grid rule, no breakpoint (F2/D8) ─────
+ *
+ * Four tiles across at EVERY width. The row AUTO-FITS; it does not break.
+ *
+ * The three hero rows (ScopeHero, MeHeroTiles, /projects/{code}) each carried
+ * their own Tailwind breakpoint ladder — `md:grid-cols-2 xl:grid-cols-4`. `xl`
+ * is 1280px, so on any window narrower than that (a laptop, a split screen, the
+ * owner's actual browser) the approved four-up silently became a two-up, while
+ * the parity capture at 1600px sat above every breakpoint and could not tell the
+ * fix from the bug. `repeat(auto-fit, minmax(168px, 1fr))` with a 12px gap seats
+ * four from 708px of content and needs no breakpoint at all — the prototype's
+ * own rule (`D:70` / `R:78`).
+ *
+ * It lives HERE, once, rather than as three copies of a utility string: three
+ * copies is how the three rows drifted in the first place.
+ */
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 12px;
+}
+
 /* In @layer base so Tailwind utility classes (e.g. text-white on a NuxtLink
  * styled as a button) WIN over this default link colour. Unlayered, this rule
  * beat the utilities and rendered button-links as purple-on-purple. */

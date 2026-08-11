@@ -7,8 +7,23 @@
  * exhaust the matrix of (caller, target, count, newRole) without booting
  * Nitro or a testcontainer.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { evaluateRoleChange, evaluateRevokeSessions } from '../../../server/auth/admin-guards'
+import { injectTestSession } from '../../helpers/auth'
+import type { Session } from '../../../server/utils/auth'
+
+// The network probe itself (real DNS/TCP) is exercised elsewhere — mocked
+// here so this stays a fast, DB-free RBAC-boundary check, matching the rest
+// of this file's philosophy.
+vi.mock('../../../server/azure/network-check', () => ({
+  runNetworkCheck: vi.fn().mockResolvedValue({
+    generatedNote: 'x',
+    vnetHint: 'x',
+    summary: { total: 0, ok: 0, zoneNotLinked: 0, unreachable: 0, dnsFail: 0 },
+    records: [],
+    itReport: 'x',
+  }),
+}))
 
 const CALLER_ADMIN = { role: 'admin' as const, teammateId: 'admin-1' }
 const CALLER_FINOPS = { role: 'global-finops' as const, teammateId: 'finops-1' }
@@ -171,5 +186,45 @@ describe('evaluateRevokeSessions — pure verdicts (Wave VII)', () => {
   it('global-finops revoking themselves → allowed (mirror of admin self-revoke)', () => {
     const v = evaluateRevokeSessions(CALLER_FINOPS, TARGET_R('finops-1', 'region-a'))
     expect(v).toEqual({ allowed: true })
+  })
+})
+
+// ── GET /api/v1/admin/diagnostics/network — tier matrix ────────────────────
+//
+// This route used to accept admin/global-finops; it now matches
+// otel-logs.get.ts's platform-admin-only tier (it exposes the same class of
+// infrastructure-topology detail: private IPs, internal host:port pairs).
+// injectTestSession is DB-free (it pre-populates tryAuth's per-event cache
+// directly — see tests/helpers/auth.ts), so this exercises the REAL
+// requireRole gate without a testcontainer.
+function fakeEvent(session: Session) {
+  const event = { context: {} } as Parameters<typeof injectTestSession>[0]
+  injectTestSession(event, session)
+  return event
+}
+
+const REGION_ID = '00000000-0000-0000-0000-0000000000aa'
+const platformAdminSession = (): Session =>
+  ({ teammateId: 'pa-1', email: 'pa@x.test', displayName: 'PA', role: 'platform-admin', regionId: REGION_ID, orgPath: 'x' }) as Session
+const adminSession = (): Session =>
+  ({ teammateId: 'ad-1', email: 'ad@x.test', displayName: 'Admin', role: 'admin', regionId: REGION_ID, orgPath: 'x' }) as Session
+const globalFinopsSession = (): Session =>
+  ({ teammateId: 'gf-1', email: 'gf@x.test', displayName: 'GF', role: 'global-finops', regionId: REGION_ID, orgPath: 'x' }) as Session
+
+describe('GET /api/v1/admin/diagnostics/network — tier matrix', () => {
+  it('a region-scoped admin is REJECTED (403) — network topology is platform-admin only now', async () => {
+    const handler = (await import('../../../server/api/v1/admin/diagnostics/network.get')).default
+    await expect(handler(fakeEvent(adminSession()) as never)).rejects.toMatchObject({ statusCode: 403 })
+  })
+
+  it('global-finops is ALSO rejected (403) — this tier is narrower than the rest of diagnostics', async () => {
+    const handler = (await import('../../../server/api/v1/admin/diagnostics/network.get')).default
+    await expect(handler(fakeEvent(globalFinopsSession()) as never)).rejects.toMatchObject({ statusCode: 403 })
+  })
+
+  it('platform-admin is allowed (200-shaped response)', async () => {
+    const handler = (await import('../../../server/api/v1/admin/diagnostics/network.get')).default
+    const res = (await handler(fakeEvent(platformAdminSession()) as never)) as { records: unknown[] }
+    expect(res.records).toEqual([])
   })
 })

@@ -5,17 +5,20 @@
  * ONE page, scope-tabbed via UiTabs (`?scope=` URL-synced). `useReportState()`
  * is the sole owner of scope/month/region/ou ⇄ URL; the shell bootstraps from
  * `GET /reports/meta` (granted scopes + best-default) and renders the active
- * scope component. Wave 2 wires the `regional` scope; the other GRANTED tabs
- * render a "coming soon" panel (they land wave-by-wave). Client gating is UX
- * only — every endpoint re-enforces its own gate.
+ * scope component. Client gating is UX only — every endpoint re-enforces its own gate.
+ *
+ * THREE TABS: Region · Cost centre · Finance. Across-Regions was a fourth and is
+ * now the "All regions" first option of the Region scope's region selector
+ * (04-prototype-delta.md §6) — the whole-company answer is a WIDTH of Region, not a
+ * scope beside it.
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import type { ReportScope } from '#shared/reports/types'
+import { BU_LABEL_PLURAL } from '#shared/reports/vocabulary'
 
 interface ReportMetaResp {
   scopes: ReportScope[]
   defaultScope: ReportScope | null
-  defaultRegionId: string | null
   monthFloors: { usage: string | null; bill: string | null; reconciliation: string | null; overall: string }
   copilotMode: 'pool-utilisation' | 'chargeback'
   // Report-visibility policy (#19). Optional: present once meta.get.ts threads
@@ -34,28 +37,29 @@ const VISIBILITY_MODE_LABEL: Record<string, string> = {
 }
 
 const SCOPE_LABEL: Record<ReportScope, string> = {
-  across: 'Across regions',
-  regional: 'Regional',
-  'cost-centre': 'Cost centres',
+  region: 'Region',
+  'cost-centre': BU_LABEL_PLURAL,
   finance: 'Finance',
 }
 
 const { data: meta, error: metaError } = await useFetch<ReportMetaResp>('/api/v1/reports/meta', {
   key: 'reports-meta',
+  retry: false,
 })
 
 const granted = computed<ReportScope[]>(() => meta.value?.scopes ?? [])
 const hasScopes = computed<boolean>(() => granted.value.length > 0)
-const bestScope = computed<ReportScope>(() => meta.value?.defaultScope ?? granted.value[0] ?? 'regional')
+const bestScope = computed<ReportScope>(() => meta.value?.defaultScope ?? granted.value[0] ?? 'region')
 
 // useReportState owns the URL query. Only `scope` is shell-defaulted (best-granted)
 // so a bare /reporting lands on a sensible, granted view. `region` is deliberately
-// NOT defaulted here: it is a per-scope key, not a global one. Regional home-defaults
-// its region server-side (resolveRegionalScope) and reflects the effective region back
+// NOT defaulted here: it is a per-scope key, not a global one. Regional defaults its
+// region server-side (resolveRegionalScope) and reflects the effective region back
 // through the report; the global scopes (Finance/Across) mean whole-company and MUST
 // default to region=null. A shell-wide home-region default was silently materialised
 // into the URL by patch() and then inherited by Finance, narrowing its per-CoU table to
 // the home region while the Σ=bill headline stayed whole-company (they stopped footing).
+// `/reports/meta` no longer even offers a region default, for the same reason.
 const rs = useReportState({
   scope: bestScope.value,
 })
@@ -75,7 +79,27 @@ function clampScope() {
     ungrantedNotice.value = null
   }
 }
-onMounted(clampScope)
+/*
+ * CANONICALISE a retired `?scope=`, once, on mount. `parseReportQuery` already
+ * resolved `across`/`regional` to `region` (+ `region=all` for `across`), so the
+ * page renders correctly either way — but until the URL itself is rewritten the
+ * address bar still reads the retired value, and the link the user copies and
+ * re-shares is the stale one. Writing the mapped state back is what actually
+ * retires the value; without it the compatibility window never closes.
+ *
+ * Ordered BEFORE clampScope in the same hook: the mapped scope is what the grant
+ * check must run against.
+ */
+function canonicaliseLegacyScope() {
+  if (!rs.isLegacyScope?.value) return
+  // `rs.scope` / `rs.region` are ALREADY the mapped values (parseReportQuery did the
+  // mapping); writing them back is what replaces the retired value in the URL.
+  rs.patch({ scope: rs.scope.value, region: rs.region.value })
+}
+onMounted(() => {
+  canonicaliseLegacyScope()
+  clampScope()
+})
 watch(() => rs.scope.value, clampScope)
 
 const activeScope = computed<ReportScope>(() =>
@@ -110,7 +134,7 @@ const tabModel = computed<string>({
     <UiPageHead
       eyebrow="Reporting"
       title="Reporting"
-      sub="Usage and spend across the org — one place, scoped to what you can see."
+      sub="Across the org — scoped to what you can see."
     />
 
     <div
@@ -139,10 +163,9 @@ const tabModel = computed<string>({
           {{ ungrantedNotice }}
         </div>
 
-        <!-- Scopes wired: Regional (Wave 2), Across-Regions (Wave 4), Cost-Centre
-             (Wave 3), Finance (Wave 5). All four scopes now live in the reporting area. -->
-        <ReportingScopeAcrossRegions v-if="activeScope === 'across'" />
-        <ReportingScopeRegional v-else-if="activeScope === 'regional'" />
+        <!-- Three scopes. Region owns BOTH widths behind its own region selector
+             ("All regions" or one), so no view here is reachable from two tabs. -->
+        <ReportingScopeRegion v-if="activeScope === 'region'" />
         <ReportingScopeCostCentre v-else-if="activeScope === 'cost-centre'" />
         <ReportingScopeFinance v-else-if="activeScope === 'finance'" />
       </template>

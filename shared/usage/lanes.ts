@@ -55,6 +55,17 @@ export interface LaneRegistry<L extends string = string> {
   readonly labels: Readonly<Record<L, string>>
   /** Emit `tool` → owning lane id. Tools without an entry are no provider's. */
   readonly toolToLane: Readonly<Record<string, L>>
+  /**
+   * Lane id → the PROVIDER whose adapter declared it ('anthropic' | 'github').
+   *
+   * The composition already computes this to enforce lane-id uniqueness; it is
+   * returned rather than discarded because "which provider's clock governs this
+   * lane" is a real question (the teammate drill's staleness refusal asks it —
+   * developer pages D36), and the alternative is every caller hand-coding
+   * "copilot* means GitHub, everything else means Anthropic" — the drift the
+   * registry exists to prevent.
+   */
+  readonly laneProvider: Readonly<Record<L, string>>
   /** Every tool with a dedicated lane, in lane order — feeds SQL `NOT IN` catch-alls. */
   readonly lanedTools: readonly string[]
 }
@@ -106,6 +117,7 @@ export function buildLaneRegistry<const A extends readonly ProviderSurfaceAdapte
     laneIds,
     labels: labels as Record<L, string>,
     toolToLane,
+    laneProvider: laneProvider as Record<L, string>,
     lanedTools: Object.keys(toolToLane),
   }
 }

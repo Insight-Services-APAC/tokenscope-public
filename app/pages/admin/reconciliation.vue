@@ -337,6 +337,8 @@ interface EnterpriseRow {
   credentialSecretName: string | null
   flatSeatPriceUsd: number | null
   includedAllowanceUsd: number | null
+  // ADR-0011 D10 — configurable per-enterprise pooled-overage allocation policy.
+  overageAllocationPolicy: string
   // GitHub App credential opt-in (mig 0078). Non-null = App mode intended; the API
   // derives credentialKind + checks the App private key for keyPresent.
   githubAppId: string | null
@@ -358,6 +360,114 @@ const { data: entData, refresh: refreshEnterprises, pending: entPending } = awai
   default: () => ({ enterprises: [], total: 0 }),
   immediate: isAdmin.value,
 })
+
+// ---- GitHub org coverage (Workstream D) — persisted-only, no live network call ----
+// One GET powers BOTH the cross-enterprise banner and the per-enterprise/per-org
+// columns below. denominator null = no honest "N of M" claim; never render "0 of 0".
+interface CoverageOrgObservation {
+  org: string
+  state: 'mislinked' | 'coverage-unknown' | 'stale' | 'not-installed' | 'suspended' | 'not-onboarded' | 'connected'
+  providerOrgId: string | null
+  observedAt: string
+  stale: boolean
+}
+interface EnterpriseCoverage {
+  enterpriseId: string
+  census: {
+    available: boolean
+    capped: boolean
+    reason: string | null
+    orgCount: number | null
+    observedAt: string | null
+    stale: boolean
+  }
+  orgs: CoverageOrgObservation[]
+}
+const { data: coverageData, refresh: refreshCoverage } = await useFetch<{ coverage: EnterpriseCoverage[] }>(
+  () => '/api/v1/admin/reconciliation/github/coverage',
+  { default: () => ({ coverage: [] }), immediate: isAdmin.value },
+)
+const coverageByEnterprise = computed(() => new Map(coverageData.value?.coverage.map((c) => [c.enterpriseId, c]) ?? []))
+/** This org's coverage observation, found by external_org_id across every enterprise's
+ *  coverage set (an org's own row doesn't say which enterprise "found" it). */
+function orgCoverage(o: OrgRow): CoverageOrgObservation | null {
+  for (const c of coverageData.value?.coverage ?? []) {
+    const hit = c.orgs.find((x) => x.org === o.externalOrgId.toLowerCase())
+    if (hit) return hit
+  }
+  return null
+}
+const COVERAGE_STATE_LABEL: Record<CoverageOrgObservation['state'], string> = {
+  mislinked: 'Mislinked',
+  'coverage-unknown': 'Coverage unknown',
+  stale: 'Stale',
+  'not-installed': 'Not installed',
+  suspended: 'Suspended',
+  'not-onboarded': 'Not onboarded',
+  connected: 'Connected',
+}
+const COVERAGE_STATE_BADGE: Record<CoverageOrgObservation['state'], BadgeKind> = {
+  mislinked: 'rag-red',
+  'coverage-unknown': 'neutral',
+  stale: 'rag-red',
+  'not-installed': 'rag-amber',
+  suspended: 'rag-amber',
+  'not-onboarded': 'rag-amber',
+  connected: 'rag-green',
+}
+/** A one-line, key-safe remediation hint per non-connected state (requirement 4: every
+ *  non-connected state has a clear remediation path via EXISTING flows — never a new
+ *  mutation route). Points at the Edit / Discover / Verify actions already on this page. */
+const COVERAGE_REMEDIATION_HINT: Record<CoverageOrgObservation['state'], string> = {
+  mislinked: 'This org is linked to a DIFFERENT enterprise below — open Edit on its Orgs row and fix the Enterprise field.',
+  'coverage-unknown': 'Cannot classify — grant the App "Enterprise organization installations: read", or Recheck once GitHub is reachable again.',
+  stale: 'GitHub no longer lists this org as an enterprise member — remove it via Delete on its Orgs row.',
+  'not-installed': 'Install the reconciliation App on this org in GitHub, or run "Discover Copilot orgs" if it already has seats.',
+  suspended: 'Unsuspend the App installation on this org in GitHub enterprise settings, then Recheck.',
+  'not-onboarded': 'Open Edit on its Orgs row (or "+ Add org" if it has none yet) and set its Cost-owning unit.',
+  connected: '',
+}
+// Cross-enterprise banner summary — computed client-side from the SAME payload so it
+// can never disagree with the per-enterprise rows. A denominator-less enterprise
+// contributes ONLY to the unknown count, never a false "0 of 0".
+const coverageBanner = computed(() => {
+  const list = coverageData.value?.coverage ?? []
+  let nonConnected = 0
+  let unknownEnterprises = 0
+  const stateCounts: Partial<Record<CoverageOrgObservation['state'], number>> = {}
+  for (const c of list) {
+    if (!c.census.available || c.census.stale) unknownEnterprises += 1
+    for (const o of c.orgs) {
+      if (o.state !== 'connected') {
+        nonConnected += 1
+        stateCounts[o.state] = (stateCounts[o.state] ?? 0) + 1
+      }
+    }
+  }
+  return { nonConnected, unknownEnterprises, stateCounts, hasAnyGithubEnterprise: list.length > 0 }
+})
+const recheckingCoverage = ref<Set<string>>(new Set())
+async function recheckCoverage(e: EnterpriseRow) {
+  const next = new Set(recheckingCoverage.value)
+  next.add(e.id)
+  recheckingCoverage.value = next
+  try {
+    await $fetch('/api/v1/admin/reconciliation/github/coverage-recheck', {
+      method: 'POST',
+      body: { enterpriseId: e.id },
+    })
+    await refreshCoverage()
+    flashToast('ok', `Coverage rechecked for ${e.displayName}.`)
+  } catch (err) {
+    flashToast('err', apiErrorDetail(err, 'Recheck failed — could not recompute coverage.'))
+    consola.warn('github coverage recheck failed', err)
+  } finally {
+    const done = new Set(recheckingCoverage.value)
+    done.delete(e.id)
+    recheckingCoverage.value = done
+  }
+}
+
 // Regions for the GitHub org→region home picker (ADR-0010 D4).
 const { data: regionsData } = await useFetch<{ regions: { id: string; code: string; displayName: string }[] }>(
   () => '/api/v1/admin/regions',
@@ -376,6 +486,16 @@ const { data: anthHealth } = await useFetch<{ endpointConfigured: boolean }>(
   () => '/api/v1/admin/reconciliation/anthropic/health',
   { default: () => ({ endpointConfigured: false }), immediate: isAdmin.value },
 )
+
+// Workstream B: whether the governance cutover is activated (ADR-0011 D11) —
+// global-finops-only endpoint, so gated the same way as canRunWorkers below
+// (a region admin simply sees the pre-activation org-level billing field,
+// which is harmless — they are not the audience for the cutover anyway).
+const { data: cutoverData } = await useFetch<{ status: string }>(() => '/api/v1/admin/governance-cutover', {
+  default: () => ({ status: 'not_started' }),
+  immediate: session.value?.role === 'global-finops' || session.value?.role === 'platform-admin',
+})
+const governanceActivated = computed(() => cutoverData.value?.status === 'activated')
 
 const colorBadge: Record<'green' | 'amber' | 'red', BadgeKind> = {
   green: 'rag-green',
@@ -413,6 +533,7 @@ const enterpriseOptions = computed<EnterpriseOption[]>(() =>
 function refreshProviders() {
   refreshOrgs()
   refreshEnterprises()
+  refreshCoverage()
 }
 
 // ---- toast (mirrors grants.vue / rate-cards.vue) ----
@@ -442,6 +563,7 @@ function openEditEnterprise(e: EnterpriseRow) {
     credentialSecretName: e.credentialSecretName,
     flatSeatPriceUsd: e.flatSeatPriceUsd,
     includedAllowanceUsd: e.includedAllowanceUsd,
+    overageAllocationPolicy: e.overageAllocationPolicy,
     githubAppId: e.githubAppId,
   }
   entDialogOpen.value = true
@@ -574,6 +696,19 @@ type GithubVerdict =
   | 'healthy' | 'no-teammate-match' | 'metrics-empty' | 'upstream-transient' | 'probe-error'
   | 'no-license-orgs' | 'auth-failed' | 'egress-blocked' | 'not-installed' | 'key-malformed' | 'no-credential'
 interface GithubStage { ok: boolean; reason?: string; count?: number; rosterMatched?: number; recordCount?: number; matchedRecords?: number; skipped?: boolean; hint?: string }
+// Coverage stage (Workstream D) — a cheap, persisted-only read attached to every
+// Verify outcome. denominator null = no honest "N of M" claim can be made (never
+// render "0 of 0"); nonConnected is the run-warning/banner trigger count.
+interface CoverageStage {
+  available: boolean
+  capped: boolean
+  reason: string | null
+  denominator: number | null
+  connected: number
+  nonConnected: number
+  stale: boolean
+  observedAt: string | null
+}
 interface GithubHealth {
   enterpriseId: string
   externalId: string
@@ -583,6 +718,7 @@ interface GithubHealth {
   stages: { credential: GithubStage; appAuth?: GithubStage; licenses: GithubStage; metrics: GithubStage }
   verdict: GithubVerdict
   color: 'green' | 'amber' | 'red'
+  coverage: CoverageStage
 }
 const verifying = ref<Set<string>>(new Set())
 const verifyResult = ref<GithubHealth | null>(null)
@@ -663,7 +799,7 @@ useModalA11y({
 // (POST /map writes the enterprise lane) so the reconciler then attributes their spend. The list
 // is LIVE (an unmapped login is skipped before reconciliation_record is written, so it's not
 // persisted) — hence a per-enterprise on-demand button, like Verify.
-interface UnresolvedLogin { login: string; licenseOrg: string | null; credits: number | null; lastSeenDay: string | null }
+interface UnresolvedLogin { login: string; licenseOrg: string | null; credits: number | null; lastSeenDay: string | null; profileName: string | null; profileEmail: string | null }
 interface UnresolvedResult {
   enterpriseId: string
   externalId: string
@@ -677,11 +813,21 @@ const unresolvedEntName = ref<string>('')
 const unresolvedEntId = ref<string>('')
 // Per-login map state: the search box, results, and the busy login.
 interface TeammateHit { id: string; email: string; displayName: string | null; regionCode: string | null; orgUnitCode: string | null }
+/* A directory (Entra) candidate who is NOT yet a teammate. Kept in a SEPARATE list from
+ * TeammateHit, never merged, because assigning one PROVISIONS a person — a different act
+ * from binding to someone who already exists, and the operator has to be able to see which
+ * one they are about to do. */
+interface DirectoryHit { oid: string; email: string; displayName: string | null; department: string | null; jobTitle: string | null }
 const mapSearchFor = ref<string | null>(null) // which login's picker is open
 const mapQuery = ref('')
 const mapResults = ref<TeammateHit[]>([])
+const mapDirectory = ref<DirectoryHit[]>([])
+const mapDirectoryError = ref<string | null>(null)
 const mapSearching = ref(false)
-const mapBusyLogin = ref<string | null>(null)
+/* A SET, not a scalar: two maps can be in flight at once, and a scalar let the first to finish
+ * clear the second's busy flag, re-enabling a button whose request had not returned. */
+const mapBusyLogins = ref<Set<string>>(new Set())
+const isMapBusy = (login: string) => mapBusyLogins.value.has(login)
 
 async function loadUnresolved(e: EnterpriseRow) {
   const next = new Set(loadingUnresolved.value)
@@ -705,44 +851,120 @@ async function loadUnresolved(e: EnterpriseRow) {
   }
 }
 function resetMapPicker() {
+  cancelPendingSearch()
   mapSearchFor.value = null
   mapQuery.value = ''
   mapResults.value = []
+  mapDirectory.value = []
+  mapDirectoryError.value = null
   mapSearching.value = false
 }
 function openMapPicker(login: string) {
   if (mapSearchFor.value === login) { resetMapPicker(); return }
+  // Full invalidation, not just a timer clear: switching pickers with a request in flight must
+  // not inherit the previous login's spinner (which would leave the new picker disabled until
+  // an unrelated Graph call returns) or its results.
+  cancelPendingSearch()
   mapSearchFor.value = login
-  mapQuery.value = ''
   mapResults.value = []
+  mapDirectory.value = []
+  mapDirectoryError.value = null
+  /*
+   * Pre-seed from the github profile email and search immediately. This is the whole point of
+   * carrying the hint: without it the admin leaves for github.com to find out who the login
+   * belongs to, comes back, and types what they read. Pre-filling is safe precisely because the
+   * search is a READ — the self-asserted email chooses what to LOOK UP, never what to bind, and
+   * the admin still picks from the results.
+   */
+  // Email FIRST but name as the fallback: a GitHub profile commonly carries a name with no
+  // public email, and seeding '' there would leave the admin retyping the very name we are
+  // already showing them, which is the legwork this hint exists to remove.
+  const hint = unresolvedResult.value?.logins.find((l) => l.login === login)
+  const seed = hint?.profileEmail || hint?.profileName || ''
+  mapQuery.value = seed
+  if (seed) void searchTeammates()
 }
+/* Monotonic search token. Searches are fired on input and on picker-open, so responses can land
+ * out of order or after the admin has moved to a DIFFERENT login. Applying a stale response
+ * would repopulate the picker with candidates for the login they just left, and the next click
+ * would bind the CURRENT login to that stale person. Only the newest search may write. */
+let mapSearchSeq = 0
+let mapSearchTimer: ReturnType<typeof setTimeout> | null = null
+
+/* The ONE place in-flight search state is invalidated. Every transition that makes an
+ * outstanding response irrelevant (typing, switching login, closing, unmounting) goes through
+ * here, so there is no transition that drops the spinner but keeps the token, or vice versa. */
+function cancelPendingSearch() {
+  if (mapSearchTimer) { clearTimeout(mapSearchTimer); mapSearchTimer = null }
+  mapSearchSeq++
+  mapSearching.value = false
+}
+
+/* Debounced entry point for keystrokes. The picker now searches Entra as well as the local
+ * table, so a per-keystroke call is a live Graph request per character. */
+function onMapQueryInput() {
+  // Invalidate FIRST. Clearing the lists alone left a window: a response from the previous
+  // query could land during the debounce delay, repopulate the candidates the admin had just
+  // typed over, and be clicked. The token has to move on the keystroke, not on the fetch.
+  cancelPendingSearch()
+  mapResults.value = []
+  mapDirectory.value = []
+  mapDirectoryError.value = null
+  if (!mapQuery.value.trim()) return
+  mapSearchTimer = setTimeout(() => { mapSearchTimer = null; void searchTeammates() }, 250)
+}
+
+onBeforeUnmount(cancelPendingSearch)
+
 async function searchTeammates() {
   const q = mapQuery.value.trim()
-  if (!q) { mapResults.value = []; return }
+  const seq = ++mapSearchSeq
+  const forLogin = mapSearchFor.value
+  if (!q) { mapResults.value = []; mapDirectory.value = []; mapDirectoryError.value = null; return }
   mapSearching.value = true
   try {
-    const r = await $fetch<{ teammates: TeammateHit[] }>(
+    const r = await $fetch<{ teammates: TeammateHit[]; directory?: DirectoryHit[]; directoryError?: string | null }>(
       '/api/v1/admin/reconciliation/github/teammate-search',
       { params: { q, limit: 10 } },
     )
+    if (seq !== mapSearchSeq || mapSearchFor.value !== forLogin) return
     mapResults.value = r.teammates ?? []
+    mapDirectory.value = r.directory ?? []
+    mapDirectoryError.value = r.directoryError ?? null
   } catch (err) {
+    if (seq !== mapSearchSeq || mapSearchFor.value !== forLogin) return
     flashToast('err', apiErrorDetail(err, 'Teammate search failed.'))
   } finally {
-    mapSearching.value = false
+    if (seq === mapSearchSeq) mapSearching.value = false
   }
 }
 async function mapLogin(login: UnresolvedLogin, teammate: TeammateHit) {
+  await postMap(login, { teammateId: teammate.id }, teammate.displayName ?? teammate.email)
+}
+/* Assigning a DIRECTORY hit resolves the person server-side, then binds, in ONE call — so the
+ * resolve can never be left without its bind by a half-finished click sequence. The server may
+ * provision a new teammate, adopt a `bill:` placeholder, or reuse an existing row; the response
+ * says which, and the caller must not assume "new person" from this path. */
+async function mapLoginToDirectory(login: UnresolvedLogin, hit: DirectoryHit) {
+  // The OID, never the email: the server re-resolves it against Entra, so what gets written is
+  // directory-attested rather than whatever this page happened to be displaying.
+  await postMap(login, { directoryOid: hit.oid }, hit.displayName ?? hit.email)
+}
+async function postMap(
+  login: UnresolvedLogin,
+  target: { teammateId: string } | { directoryOid: string },
+  label: string,
+) {
   if (!unresolvedResult.value) return
-  mapBusyLogin.value = login.login
+  mapBusyLogins.value = new Set(mapBusyLogins.value).add(login.login)
   try {
     await $fetch('/api/v1/admin/reconciliation/github/map', {
       method: 'POST',
       body: {
         enterpriseId: unresolvedResult.value.enterpriseId,
         login: login.login,
-        teammateId: teammate.id,
         licenseOrg: login.licenseOrg ?? undefined,
+        ...target,
       },
     })
     // Drop the now-resolved login from the live list (no refetch needed — it maps 1:1).
@@ -751,12 +973,14 @@ async function mapLogin(login: UnresolvedLogin, teammate: TeammateHit) {
       logins: unresolvedResult.value.logins.filter((l) => l.login !== login.login),
     }
     resetMapPicker()
-    flashToast('ok', `Mapped ${login.login} → ${teammate.displayName ?? teammate.email}.`)
+    flashToast('ok', `Mapped ${login.login} → ${label}.`)
   } catch (err) {
     flashToast('err', apiErrorDetail(err, 'Mapping failed.'))
     consola.warn('map login failed', err)
   } finally {
-    mapBusyLogin.value = null
+    const done = new Set(mapBusyLogins.value)
+    done.delete(login.login)
+    mapBusyLogins.value = done
   }
 }
 function closeUnresolved() {
@@ -1121,6 +1345,37 @@ function onBackfillSaved() {
         </span>
       </p>
 
+      <!-- ---------- COVERAGE BANNER (Workstream D) ---------- -->
+      <!-- Persisted-only (no live network call on page load) — an org whose coverage was
+           never observed contributes to neither count, so a fresh/never-swept enterprise
+           never renders "0 of 0 — complete" (R1-M5). -->
+      <div
+        v-if="coverageBanner.hasAnyGithubEnterprise && (coverageBanner.nonConnected > 0 || coverageBanner.unknownEnterprises > 0)"
+        class="mb-4 rounded-md border px-4 py-3 text-sm"
+        :class="coverageBanner.nonConnected > 0 ? 'border-brand-hunger bg-brand-hunger/5' : 'border-carbon-6 bg-carbon-8'"
+        data-testid="admin-recon-coverage-banner"
+      >
+        <div class="font-bold text-carbon">
+          <span v-if="coverageBanner.nonConnected > 0" data-testid="admin-recon-coverage-banner-nonconnected">
+            {{ coverageBanner.nonConnected }} GitHub org{{ coverageBanner.nonConnected === 1 ? '' : 's' }} need{{ coverageBanner.nonConnected === 1 ? 's' : '' }} attention
+          </span>
+          <span v-else>GitHub org coverage</span>
+          <span v-if="coverageBanner.unknownEnterprises > 0" class="font-normal text-carbon-2">
+            — {{ coverageBanner.unknownEnterprises }} enterprise{{ coverageBanner.unknownEnterprises === 1 ? '' : 's' }} with unknown/stale coverage (no completeness claim possible until rechecked)
+          </span>
+        </div>
+        <div v-if="Object.keys(coverageBanner.stateCounts).length" class="mt-1.5 flex flex-wrap gap-1.5">
+          <UiBadge
+            v-for="(count, state) in coverageBanner.stateCounts"
+            :key="state"
+            :kind="COVERAGE_STATE_BADGE[state as CoverageOrgObservation['state']]"
+          >
+            {{ count }} {{ COVERAGE_STATE_LABEL[state as CoverageOrgObservation['state']] }}
+          </UiBadge>
+        </div>
+        <p class="mt-1.5 text-xs text-carbon-3">See the Coverage column below for per-enterprise detail and a Recheck action; each org row's remediation uses the existing Edit / Discover / Delete actions.</p>
+      </div>
+
       <!-- ---------- ENTERPRISES ---------- -->
       <div class="flex items-baseline justify-between mb-2">
         <h2 class="text-sm font-bold text-carbon">Enterprises</h2>
@@ -1139,6 +1394,7 @@ function onBackfillSaved() {
                 <th class="py-2 pr-3 font-bold">Mode</th>
                 <th class="py-2 pr-3 font-bold">Key</th>
                 <th class="py-2 pr-3 font-bold">Orgs</th>
+                <th class="py-2 pr-3 font-bold">Coverage</th>
                 <th class="py-2 pr-3 font-bold text-right">Actions</th>
               </tr>
             </thead>
@@ -1168,6 +1424,32 @@ function onBackfillSaved() {
                   <UiBadge :kind="e.keyPresent ? 'rag-green' : 'rag-red'">{{ e.keyPresent ? '✓' : '✗' }}</UiBadge>
                 </td>
                 <td class="py-2 pr-3 font-mono text-xs">{{ e.orgCount }}</td>
+                <td class="py-2 pr-3" :data-testid="`admin-recon-ent-coverage-${e.id}`">
+                  <span v-if="e.provider !== 'github'" class="text-carbon-3 italic text-xs" title="Coverage detection is GitHub-only (org installations are a GitHub App concept).">n/a</span>
+                  <template v-else>
+                    <div class="flex items-center gap-1.5">
+                      <UiBadge
+                        v-if="coverageByEnterprise.get(e.id)?.census.available && !coverageByEnterprise.get(e.id)?.census.stale"
+                        :kind="(coverageByEnterprise.get(e.id)!.orgs.some((o) => o.state !== 'connected')) ? 'rag-amber' : 'rag-green'"
+                      >
+                        {{ coverageByEnterprise.get(e.id)!.orgs.filter((o) => o.state === 'connected').length }} of {{ coverageByEnterprise.get(e.id)!.census.orgCount }} connected
+                      </UiBadge>
+                      <UiBadge v-else kind="neutral" title="No denominator can be claimed — census never obtained, capped, or expired since the last check.">
+                        coverage unknown
+                      </UiBadge>
+                      <UiButton
+                        kind="ghost"
+                        size="sm"
+                        :disabled="recheckingCoverage.has(e.id)"
+                        :data-testid="`admin-recon-ent-coverage-recheck-${e.id}`"
+                        title="Run a live capability probe + per-org installation check now, and persist the result."
+                        @click="recheckCoverage(e)"
+                      >
+                        {{ recheckingCoverage.has(e.id) ? '…' : 'Recheck' }}
+                      </UiButton>
+                    </div>
+                  </template>
+                </td>
                 <td class="py-2 pr-3 text-right whitespace-nowrap">
                   <UiButton
                     kind="ghost"
@@ -1272,6 +1554,7 @@ function onBackfillSaved() {
                 <th class="py-2 pr-3 font-bold">Mode</th>
                 <th class="py-2 pr-3 font-bold">Key</th>
                 <th class="py-2 pr-3 font-bold">Health</th>
+                <th class="py-2 pr-3 font-bold">Coverage</th>
                 <th class="py-2 pr-3 font-bold text-right">Actions</th>
               </tr>
             </thead>
@@ -1324,6 +1607,18 @@ function onBackfillSaved() {
                   </UiBadge>
                   <span v-else-if="o.provider === 'github'" class="text-carbon-3 italic text-xs" title="GitHub reconciles via the enterprise PAT — health is at the enterprise, not per-org. The Key column shows the PAT is wired.">via enterprise</span>
                   <span v-else class="text-carbon-3 italic text-xs">—</span>
+                </td>
+                <td class="py-2 pr-3" :data-testid="`admin-recon-org-coverage-${o.id}`">
+                  <span v-if="o.provider !== 'github'" class="text-carbon-3 italic text-xs" title="Coverage detection is GitHub-only.">n/a</span>
+                  <template v-else-if="orgCoverage(o)">
+                    <UiBadge :kind="COVERAGE_STATE_BADGE[orgCoverage(o)!.state]" :title="COVERAGE_REMEDIATION_HINT[orgCoverage(o)!.state]">
+                      {{ COVERAGE_STATE_LABEL[orgCoverage(o)!.state] }}
+                    </UiBadge>
+                    <p v-if="orgCoverage(o)!.state !== 'connected'" class="text-[11px] text-carbon-3 mt-0.5 max-w-[220px]">
+                      {{ COVERAGE_REMEDIATION_HINT[orgCoverage(o)!.state] }}
+                    </p>
+                  </template>
+                  <span v-else class="text-carbon-3 italic text-xs" title="Not yet observed by a coverage sweep/recheck.">not yet observed</span>
                 </td>
                 <td class="py-2 pr-3 text-right whitespace-nowrap">
                   <UiButton
@@ -1419,6 +1714,7 @@ function onBackfillSaved() {
       :target="orgEditTarget"
       :enterprises="enterpriseOptions"
       :regions="regionsData.regions"
+      :governance-activated="governanceActivated"
       @close="orgDialogOpen = false"
       @saved="onOrgSaved"
     />
@@ -1523,6 +1819,25 @@ function onBackfillSaved() {
               <span v-else class="text-brand-hunger">— {{ stageReason(verifyResult.stages.metrics.reason) }}</span>
             </div>
           </li>
+          <!-- coverage (Workstream D) — a cheap, persisted-only read; NOT re-probed by
+               Verify itself (see the field doc in github-health.ts). Recheck below runs
+               the live probe on demand. -->
+          <li class="flex items-start gap-2" data-testid="admin-recon-verify-coverage">
+            <UiBadge :kind="verifyResult.coverage.available && !verifyResult.coverage.stale ? (verifyResult.coverage.nonConnected > 0 ? 'rag-amber' : 'rag-green') : 'neutral'">
+              {{ verifyResult.coverage.available && !verifyResult.coverage.stale ? (verifyResult.coverage.nonConnected > 0 ? '!' : '✓') : '?' }}
+            </UiBadge>
+            <div class="flex-1">
+              <span class="font-bold text-carbon">org coverage</span>
+              <span v-if="verifyResult.coverage.available && !verifyResult.coverage.stale" class="text-carbon-2">
+                — {{ verifyResult.coverage.denominator != null ? `${verifyResult.coverage.connected} of ${verifyResult.coverage.denominator} orgs connected` : `${verifyResult.coverage.connected} connected (no denominator — census capped)` }}
+                <span v-if="verifyResult.coverage.nonConnected > 0" class="text-brand-hunger font-bold">→ {{ verifyResult.coverage.nonConnected }} NEED ATTENTION</span>
+              </span>
+              <span v-else class="text-carbon-2">
+                — coverage unknown{{ verifyResult.coverage.observedAt ? ` (last observed ${verifyResult.coverage.observedAt}, now stale)` : ' (never observed)' }}
+              </span>
+              <p class="text-[11px] text-carbon-3 mt-0.5">See the Coverage column on the Orgs/Enterprises tables below, or Recheck this enterprise from its row.</p>
+            </div>
+          </li>
         </ul>
 
         <div class="flex justify-end mt-5">
@@ -1574,6 +1889,14 @@ function onBackfillSaved() {
             <div class="flex items-center gap-3">
               <div class="min-w-0 flex-1">
                 <div class="text-sm font-mono text-carbon truncate">{{ l.login }}</div>
+                <!-- Self-asserted github profile text. Labelled as such because it looks
+                     authoritative and is not: it informs the admin's choice, it never makes
+                     one. See getUserProfile in github-client.ts. -->
+                <div v-if="l.profileName || l.profileEmail" class="text-[11px] text-carbon-2 truncate">
+                  <span v-if="l.profileName">{{ l.profileName }}</span>
+                  <span v-if="l.profileEmail"><span v-if="l.profileName"> · </span>{{ l.profileEmail }}</span>
+                  <span class="text-carbon-3 italic"> · from github profile, unverified</span>
+                </div>
                 <div class="text-[11px] text-carbon-3 truncate">
                   <span v-if="l.licenseOrg">org {{ l.licenseOrg }}</span>
                   <span v-if="l.credits != null"><span v-if="l.licenseOrg"> · </span>{{ l.credits }} credits<span v-if="l.lastSeenDay"> ({{ l.lastSeenDay }})</span></span>
@@ -1583,7 +1906,7 @@ function onBackfillSaved() {
               <UiButton
                 kind="primary"
                 size="sm"
-                :disabled="mapBusyLogin === l.login"
+                :disabled="isMapBusy(l.login)"
                 :data-testid="`admin-recon-unresolved-map-${l.login}`"
                 @click="openMapPicker(l.login)"
               >
@@ -1599,7 +1922,7 @@ function onBackfillSaved() {
                 placeholder="Search teammates by name or email…"
                 class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
                 :data-testid="`admin-recon-unresolved-search-${l.login}`"
-                @input="searchTeammates"
+                @input="onMapQueryInput"
               >
               <ul v-if="mapResults.length" class="mt-2 border border-calm-2 rounded-md divide-y divide-calm-2">
                 <li v-for="tm in mapResults" :key="tm.id" class="flex items-center gap-3 px-3 py-2">
@@ -1612,7 +1935,7 @@ function onBackfillSaved() {
                   <UiButton
                     kind="primary"
                     size="sm"
-                    :disabled="mapBusyLogin === l.login"
+                    :disabled="isMapBusy(l.login) || mapSearching"
                     :data-testid="`admin-recon-unresolved-assign-${l.login}-${tm.id}`"
                     @click="mapLogin(l, tm)"
                   >
@@ -1620,7 +1943,51 @@ function onBackfillSaved() {
                   </UiButton>
                 </li>
               </ul>
-              <p v-else-if="mapQuery.trim() && !mapSearching" class="text-[12px] text-carbon-3 mt-2">No matching teammates.</p>
+              <!-- Shown ALONGSIDE any teammate matches, not only when there are none: the
+                   teammate search is a substring match, so one unrelated hit would otherwise
+                   hide the directory result the admin is actually looking for. Anyone already
+                   returned above is filtered out server-side, but that is a de-duplication
+                   courtesy over one page of results, not a guarantee, which is why the label
+                   says what the action DOES rather than asserting the person is not already a
+                   teammate. -->
+              <p v-if="mapDirectory.length" class="text-[12px] text-carbon-3 mt-2">
+                Found in the directory (adding one assigns the login to them):
+              </p>
+              <ul v-if="mapDirectory.length" class="mt-1 border border-calm-2 rounded-md divide-y divide-calm-2">
+                <li v-for="d in mapDirectory" :key="d.oid" class="flex items-center gap-3 px-3 py-2">
+                  <div class="min-w-0 flex-1">
+                    <div class="text-sm text-carbon truncate">{{ d.displayName ?? d.email }}</div>
+                    <div class="text-[11px] text-carbon-3 truncate">
+                      {{ d.email }}<span v-if="d.jobTitle"> · {{ d.jobTitle }}</span><span v-if="d.department"> · {{ d.department }}</span>
+                    </div>
+                  </div>
+                  <UiButton
+                    kind="secondary"
+                    size="sm"
+                    :disabled="isMapBusy(l.login) || mapSearching"
+                    :data-testid="`admin-recon-unresolved-provision-${l.login}-${d.oid}`"
+                    @click="mapLoginToDirectory(l, d)"
+                  >
+                    Add + assign
+                  </UiButton>
+                </li>
+              </ul>
+              <!-- Shown on ANY directory failure, even when teammates matched: a silent
+                   omission would read as "this person is not in the directory", which is the one
+                   outcome that misleads. -->
+              <p
+                v-if="mapDirectoryError"
+                class="text-[12px] text-brand-hunger mt-2"
+              >
+                The directory could not be searched, so directory matches are not shown here —
+                this does not mean the person is absent from it. Retry, or pick an existing teammate.
+              </p>
+              <p
+                v-else-if="!mapResults.length && !mapDirectory.length && mapQuery.trim() && !mapSearching"
+                class="text-[12px] text-carbon-3 mt-2"
+              >
+                No matching teammates or directory users.
+              </p>
             </div>
           </li>
         </ul>

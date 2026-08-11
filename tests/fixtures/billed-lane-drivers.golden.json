@@ -1,0 +1,374 @@
+{
+  "across:model:WIN": {
+    "rows": [
+      {
+        "key": "claude-opus-5",
+        "label": "claude-opus-5",
+        "usd": 671.75,
+        "sharePct": 0.8634318766066839,
+        "spendClass": "billed"
+      },
+      {
+        "key": "claude-sonnet-5",
+        "label": "claude-sonnet-5",
+        "usd": 88.5,
+        "sharePct": 0.11375321336760925,
+        "spendClass": "billed"
+      },
+      {
+        "key": "__billed_no_model",
+        "label": "No model on the provider record",
+        "usd": 17.75,
+        "sharePct": 0.02281491002570694,
+        "spendClass": "billed"
+      }
+    ],
+    "headlineUsd": 778,
+    "lane": "billed",
+    "billedLane": {
+      "availability": "present",
+      "billedUsd": 778,
+      "consumptionUsd": 913.4,
+      "arms": [
+        {
+          "id": "anthropic:billed",
+          "provider": "anthropic",
+          "measure": "billed",
+          "source": "provider_usage_fact",
+          "availability": "present",
+          "totalUsd": 778,
+          "rows": [
+            {
+              "key": "claude-opus-5",
+              "label": "claude-opus-5",
+              "usd": 671.75,
+              "sharePct": 0.8634318766066839,
+              "spendClass": "billed"
+            },
+            {
+              "key": "claude-sonnet-5",
+              "label": "claude-sonnet-5",
+              "usd": 88.5,
+              "sharePct": 0.11375321336760925,
+              "spendClass": "billed"
+            },
+            {
+              "key": "__billed_no_model",
+              "label": "No model on the provider record",
+              "usd": 17.75,
+              "sharePct": 0.02281491002570694,
+              "spendClass": "billed"
+            }
+          ]
+        },
+        {
+          "id": "github:consumption",
+          "provider": "github",
+          "measure": "consumption",
+          "source": "provider_usage_fact",
+          "availability": "present",
+          "totalUsd": 913.4,
+          "rows": [
+            {
+              "key": "__billed_no_model",
+              "label": "No model on the provider record",
+              "usd": 913.4,
+              "sharePct": 1,
+              "spendClass": "pooled-usage"
+            }
+          ]
+        }
+      ]
+    },
+    "chargebackCoverage": {
+      "providers": [
+        "anthropic"
+      ],
+      "gaps": [
+        {
+          "provider": "github",
+          "reason": "Copilot bills pooled per cost centre, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
+        }
+      ]
+    }
+  },
+  "regional:model:WIN": {
+    "rows": [
+      {
+        "key": "claude-opus-5",
+        "label": "claude-opus-5",
+        "usd": 411.25,
+        "sharePct": 0.7946859903381642,
+        "spendClass": "billed"
+      },
+      {
+        "key": "claude-sonnet-5",
+        "label": "claude-sonnet-5",
+        "usd": 88.5,
+        "sharePct": 0.17101449275362318,
+        "spendClass": "billed"
+      },
+      {
+        "key": "__billed_no_model",
+        "label": "No model on the provider record",
+        "usd": 17.75,
+        "sharePct": 0.03429951690821256,
+        "spendClass": "billed"
+      }
+    ],
+    "headlineUsd": 517.5,
+    "lane": "billed",
+    "billedLane": {
+      "availability": "present",
+      "billedUsd": 517.5,
+      "consumptionUsd": 913.4,
+      "arms": [
+        {
+          "id": "anthropic:billed",
+          "provider": "anthropic",
+          "measure": "billed",
+          "source": "provider_usage_fact",
+          "availability": "present",
+          "totalUsd": 517.5,
+          "rows": [
+            {
+              "key": "claude-opus-5",
+              "label": "claude-opus-5",
+              "usd": 411.25,
+              "sharePct": 0.7946859903381642,
+              "spendClass": "billed"
+            },
+            {
+              "key": "claude-sonnet-5",
+              "label": "claude-sonnet-5",
+              "usd": 88.5,
+              "sharePct": 0.17101449275362318,
+              "spendClass": "billed"
+            },
+            {
+              "key": "__billed_no_model",
+              "label": "No model on the provider record",
+              "usd": 17.75,
+              "sharePct": 0.03429951690821256,
+              "spendClass": "billed"
+            }
+          ]
+        },
+        {
+          "id": "github:consumption",
+          "provider": "github",
+          "measure": "consumption",
+          "source": "provider_usage_fact",
+          "availability": "present",
+          "totalUsd": 913.4,
+          "rows": [
+            {
+              "key": "__billed_no_model",
+              "label": "No model on the provider record",
+              "usd": 913.4,
+              "sharePct": 1,
+              "spendClass": "pooled-usage"
+            }
+          ]
+        }
+      ]
+    },
+    "chargebackCoverage": {
+      "providers": [
+        "anthropic"
+      ],
+      "gaps": [
+        {
+          "provider": "github",
+          "reason": "Copilot bills pooled per cost centre, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
+        }
+      ]
+    }
+  },
+  "across:model:MONTH_WIN:pool": {
+    "rows": [
+      {
+        "key": "claude-opus-5",
+        "label": "claude-opus-5",
+        "usd": 671.75,
+        "sharePct": 0.8634318766066839,
+        "spendClass": "billed"
+      },
+      {
+        "key": "claude-sonnet-5",
+        "label": "claude-sonnet-5",
+        "usd": 88.5,
+        "sharePct": 0.11375321336760925,
+        "spendClass": "billed"
+      },
+      {
+        "key": "__billed_no_model",
+        "label": "No model on the provider record",
+        "usd": 17.75,
+        "sharePct": 0.02281491002570694,
+        "spendClass": "billed"
+      }
+    ],
+    "headlineUsd": 778,
+    "lane": "billed",
+    "billedLane": {
+      "availability": "present",
+      "billedUsd": 778,
+      "consumptionUsd": 913.4,
+      "arms": [
+        {
+          "id": "anthropic:billed",
+          "provider": "anthropic",
+          "measure": "billed",
+          "source": "provider_usage_fact",
+          "availability": "present",
+          "totalUsd": 778,
+          "rows": [
+            {
+              "key": "claude-opus-5",
+              "label": "claude-opus-5",
+              "usd": 671.75,
+              "sharePct": 0.8634318766066839,
+              "spendClass": "billed"
+            },
+            {
+              "key": "claude-sonnet-5",
+              "label": "claude-sonnet-5",
+              "usd": 88.5,
+              "sharePct": 0.11375321336760925,
+              "spendClass": "billed"
+            },
+            {
+              "key": "__billed_no_model",
+              "label": "No model on the provider record",
+              "usd": 17.75,
+              "sharePct": 0.02281491002570694,
+              "spendClass": "billed"
+            }
+          ]
+        },
+        {
+          "id": "github:consumption",
+          "provider": "github",
+          "measure": "consumption",
+          "source": "provider_usage_fact",
+          "availability": "present",
+          "totalUsd": 913.4,
+          "rows": [
+            {
+              "key": "__billed_no_model",
+              "label": "No model on the provider record",
+              "usd": 913.4,
+              "sharePct": 1,
+              "spendClass": "pooled-usage"
+            }
+          ]
+        }
+      ]
+    },
+    "chargebackCoverage": {
+      "providers": [
+        "anthropic"
+      ],
+      "gaps": [
+        {
+          "provider": "github",
+          "reason": "Copilot bills pooled per cost centre, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
+        }
+      ]
+    }
+  },
+  "regional:model:MONTH_WIN:pool": {
+    "rows": [
+      {
+        "key": "claude-opus-5",
+        "label": "claude-opus-5",
+        "usd": 411.25,
+        "sharePct": 0.7946859903381642,
+        "spendClass": "billed"
+      },
+      {
+        "key": "claude-sonnet-5",
+        "label": "claude-sonnet-5",
+        "usd": 88.5,
+        "sharePct": 0.17101449275362318,
+        "spendClass": "billed"
+      },
+      {
+        "key": "__billed_no_model",
+        "label": "No model on the provider record",
+        "usd": 17.75,
+        "sharePct": 0.03429951690821256,
+        "spendClass": "billed"
+      }
+    ],
+    "headlineUsd": 517.5,
+    "lane": "billed",
+    "billedLane": {
+      "availability": "present",
+      "billedUsd": 517.5,
+      "consumptionUsd": 913.4,
+      "arms": [
+        {
+          "id": "anthropic:billed",
+          "provider": "anthropic",
+          "measure": "billed",
+          "source": "provider_usage_fact",
+          "availability": "present",
+          "totalUsd": 517.5,
+          "rows": [
+            {
+              "key": "claude-opus-5",
+              "label": "claude-opus-5",
+              "usd": 411.25,
+              "sharePct": 0.7946859903381642,
+              "spendClass": "billed"
+            },
+            {
+              "key": "claude-sonnet-5",
+              "label": "claude-sonnet-5",
+              "usd": 88.5,
+              "sharePct": 0.17101449275362318,
+              "spendClass": "billed"
+            },
+            {
+              "key": "__billed_no_model",
+              "label": "No model on the provider record",
+              "usd": 17.75,
+              "sharePct": 0.03429951690821256,
+              "spendClass": "billed"
+            }
+          ]
+        },
+        {
+          "id": "github:consumption",
+          "provider": "github",
+          "measure": "consumption",
+          "source": "provider_usage_fact",
+          "availability": "present",
+          "totalUsd": 913.4,
+          "rows": [
+            {
+              "key": "__billed_no_model",
+              "label": "No model on the provider record",
+              "usd": 913.4,
+              "sharePct": 1,
+              "spendClass": "pooled-usage"
+            }
+          ]
+        }
+      ]
+    },
+    "chargebackCoverage": {
+      "providers": [
+        "anthropic"
+      ],
+      "gaps": [
+        {
+          "provider": "github",
+          "reason": "Copilot bills pooled per cost centre, so it has no per-model charge — this figure is Anthropic's alone. Break down by Practice, Region or Surface to see the Copilot charge."
+        }
+      ]
+    }
+  }
+}

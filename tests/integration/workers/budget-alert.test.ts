@@ -110,6 +110,29 @@ async function recordSpend(
   })
 }
 
+/**
+ * Copilot §A usage: lands in unaccounted_usage (the API-OTel gap), NOT in
+ * attribution_record — native Copilot OTLP is default-off. This is the lane the
+ * worker was blind to before it read v_complete_usage.
+ */
+async function recordCopilotUsage(
+  projectId: string,
+  costUsd: string,
+  day: string,
+  teammateId: string = priyaId,
+): Promise<void> {
+  await t.db.insert(schema.unaccountedUsage).values({
+    teammateId,
+    regionId,
+    orgUnitId: buId,
+    projectId,
+    day,
+    tool: 'copilot-cli',
+    costUsd,
+    tokens: 0n,
+  })
+}
+
 beforeAll(async () => {
   t = await startTestDb()
 
@@ -219,10 +242,109 @@ describe('runBudgetAlert', () => {
     expect(sample.body.usedUsd).toBe(150)
     expect(sample.body.capUsd).toBe(100)
     expect(sample.body.overBy).toBe(50)
-    // otelPct = 1.0 today (see budget-alert.ts header — all attribution_record
-    // rows are OTel-attributed). anthroPct = 0.
+    // Provenance: this project's $150 is ALL arm 1 (attribution_record), so the
+    // split really is 1/0 — but that is a property of THIS fixture, not a
+    // constant. The two cases below move it.
     expect(sample.body.otelPct).toBe(1)
     expect(sample.body.anthroPct).toBe(0)
+  })
+
+  /*
+   * ── THE "HOW WE KNOW" SPLIT ───────────────────────────────────────────────
+   * `otelPct`/`anthroPct` are rendered to a PM in DrawerBodyOverBudget as the
+   * provenance of the figure that paged them. They used to be hard-coded 1.0/0.0
+   * and the suite pinned exactly those constants — so every assertion on them
+   * passed no matter what the worker computed, including the hard-coded version.
+   * The two cases below are the ones that can tell the difference: an alert whose
+   * spend is entirely reconciled, and one that is genuinely mixed.
+   */
+  it('PROVENANCE: an arm-2-only overage reports anthroPct = 1, otelPct = 0', async () => {
+    const projectId = await createProject('BA-PROV-RECON')
+    await createBaselineAllocation(projectId, '40.00')
+    // No attribution_record at all: every dollar arrives through reconciliation.
+    // The day is unique per (teammate, tool) across this file — unaccounted_usage
+    // is one row per person-day-tool.
+    await recordCopilotUsage(projectId, '90.00', '2026-05-06')
+
+    await runBudgetAlert(t.db, { now: NOW })
+    const [row] = await t.client<{ body: { usedUsd: number; otelPct: number; anthroPct: number } }[]>`
+      SELECT body::jsonb AS body FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid LIMIT 1`
+    expect(row!.body.usedUsd).toBeCloseTo(90, 6)
+    expect(row!.body.otelPct).toBeCloseTo(0, 6)
+    expect(row!.body.anthroPct).toBeCloseTo(1, 6)
+  })
+
+  it('PROVENANCE: a MIXED overage reports the real ratio, and both legs sum to 1', async () => {
+    const projectId = await createProject('BA-PROV-MIXED')
+    await createBaselineAllocation(projectId, '50.00')
+    // $30 emitted + $70 reconciled = $100 against a $50 cap. Deliberately not a
+    // half-and-half split: 0.5/0.5 is the one ratio a swapped pair would survive.
+    await recordSpend(projectId, '30.00', new Date('2026-05-09T10:00:00Z'))
+    await recordCopilotUsage(projectId, '70.00', '2026-05-07')
+
+    await runBudgetAlert(t.db, { now: NOW })
+    const [row] = await t.client<{ body: { usedUsd: number; overBy: number; otelPct: number; anthroPct: number } }[]>`
+      SELECT body::jsonb AS body FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid LIMIT 1`
+    expect(row!.body.usedUsd).toBeCloseTo(100, 6)
+    expect(row!.body.overBy).toBeCloseTo(50, 6)
+    expect(row!.body.otelPct).toBeCloseTo(0.3, 6)
+    expect(row!.body.anthroPct).toBeCloseTo(0.7, 6)
+    // The two legs are the WHOLE of the figure — arm 3 can never be in a project
+    // total, so a third share would mean the headline had grown a lane.
+    expect(row!.body.otelPct + row!.body.anthroPct).toBeCloseTo(1, 6)
+  })
+
+  it('PROVENANCE: provisional spend is excluded from the total AND from both shares', async () => {
+    /*
+     * The named `excludeProvisional` option and the provenance split are two
+     * features of one figure, and they have to agree: if provisional spend were
+     * dropped from `usedUsd` but left in `otelUsd`, the shares would exceed 1 and
+     * the drawer would tell a PM that 133% of their overage was telemetry.
+     */
+    const projectId = await createProject('BA-PROV-EXCLUDED')
+    await createBaselineAllocation(projectId, '40.00')
+    await recordSpend(projectId, '60.00', new Date('2026-05-09T10:00:00Z'), priyaId)
+    await recordSpend(projectId, '25.00', new Date('2026-05-10T10:00:00Z'), lenaId, 'provisional')
+
+    await runBudgetAlert(t.db, { now: NOW })
+    const [row] = await t.client<{ body: { usedUsd: number; otelPct: number; anthroPct: number } }[]>`
+      SELECT body::jsonb AS body FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid LIMIT 1`
+    // $60 confirmed only — the $25 provisional is NOT in the figure that paged.
+    expect(row!.body.usedUsd).toBeCloseTo(60, 6)
+    expect(row!.body.otelPct).toBeCloseTo(1, 6)
+    expect(row!.body.anthroPct).toBeCloseTo(0, 6)
+    expect(row!.body.otelPct + row!.body.anthroPct).toBeCloseTo(1, 6)
+  })
+
+  it('MONTH TO DATE: spend dated LATER THIS MONTH does not page a PM today', async () => {
+    /*
+     * The alert's window ends at NOW, not at the month end. It used to be the
+     * whole calendar month, so a row dated 2026-05-20 counted towards an alert
+     * computed on 2026-05-15 — paging a PM for an overage that has not happened,
+     * against a figure the project page (same window, same bug) agreed with.
+     */
+    const projectId = await createProject('BA-FUTURE')
+    await createBaselineAllocation(projectId, '50.00')
+    await recordSpend(projectId, '30.00', new Date('2026-05-10T10:00:00Z'))
+    // Five days after `NOW`, still inside May.
+    await recordSpend(projectId, '80.00', new Date('2026-05-20T10:00:00Z'))
+
+    await runBudgetAlert(t.db, { now: NOW })
+    const [row] = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    expect(Number(row!.c)).toBe(0)
+
+    // Run the same worker with a clock PAST that row and it fires — proving the
+    // row is real and the silence above was the window, not a missing fixture.
+    await runBudgetAlert(t.db, { now: new Date('2026-05-25T12:00:00Z') })
+    const [after] = await t.client<{ body: { usedUsd: number } }[]>`
+      SELECT body::jsonb AS body FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid LIMIT 1`
+    expect(after!.body.usedUsd).toBeCloseTo(110, 6)
   })
 
   it('routes to budget-RESPONSIBLE parties (PM + CC owner) even with $0 contribution', async () => {
@@ -371,11 +493,143 @@ describe('runBudgetAlert', () => {
     expect(Number(rows[0]!.c)).toBeGreaterThanOrEqual(1)
   })
 
+  it('COPILOT: a project over cap purely on unaccounted (Copilot) usage FIRES', async () => {
+    // The headline bug this fix closes. Copilot per-user spend never reaches
+    // attribution_record, so the old worker read $0 for a Copilot-only project
+    // and stayed silent while the dev's own usage page showed it over budget.
+    const projectId = await createProject('BA-COPILOT')
+    await createBaselineAllocation(projectId, '50.00')
+    await recordCopilotUsage(projectId, '80.00', '2026-05-10')
+
+    const res = await runBudgetAlert(t.db, { now: NOW })
+    expect(res.alertsDispatched).toBeGreaterThanOrEqual(1)
+    const rows = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    expect(Number(rows[0]!.c)).toBeGreaterThanOrEqual(1)
+  })
+
+  it('COPILOT: claude + copilot spend SUM against one cap (neither lane alone trips it)', async () => {
+    // Tool-completeness, not just "copilot works": $30 claude + $30 copilot vs a
+    // $50 cap must fire, though each lane alone is under.
+    const projectId = await createProject('BA-MIXED')
+    await createBaselineAllocation(projectId, '50.00')
+    await recordSpend(projectId, '30.00', new Date('2026-05-09T10:00:00Z'))
+    await recordCopilotUsage(projectId, '30.00', '2026-05-11')
+
+    const res = await runBudgetAlert(t.db, { now: NOW })
+    expect(res.alertsDispatched).toBeGreaterThanOrEqual(1)
+    const rows = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    expect(Number(rows[0]!.c)).toBeGreaterThanOrEqual(1)
+  })
+
+  it('MID-MONTH TOP-UP counts toward the cap (allocation overlap, not month-start containment)', async () => {
+    // The @> -> && fix. A top-up effective from mid-month does not CONTAIN
+    // month-start, so the old point-containment cap missed it entirely and the
+    // worker paged "over budget" against a cap the PM had already raised.
+    const projectId = await createProject('BA-TOPUP')
+    await createBaselineAllocation(projectId, '50.00')
+    await t.db.insert(schema.allocation).values({
+      scopeType: 'project',
+      scopeId: projectId,
+      budgetUsd: '100.00',
+      effective: '[2026-05-14T00:00:00+00,2026-06-01T00:00:00+00)',
+      allocationKind: 'top-up',
+      auditEventId: await newAuditId(),
+    })
+    await recordSpend(projectId, '90.00', new Date('2026-05-10T10:00:00Z'))
+
+    // 90 used vs 50 baseline + 100 top-up = 150 cap -> NOT over budget.
+    const res = await runBudgetAlert(t.db, { now: NOW })
+    const rows = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    expect(Number(rows[0]!.c)).toBe(0)
+    expect(res).toBeDefined()
+  })
+
+  it('DISMISS STICKS: a dismissed alert is not re-paged on the next tick', async () => {
+    // The guard used to count only OPEN ack_states, so dismissing an item stopped
+    // it suppressing the next run — a still-over project re-paged its PM, CoU
+    // owner and every contributor on EVERY tick for the rest of the month.
+    const projectId = await createProject('BA-DISMISS')
+    await createBaselineAllocation(projectId, '50.00')
+    await recordSpend(projectId, '80.00', new Date('2026-05-10T10:00:00Z'))
+
+    await runBudgetAlert(t.db, { now: NOW })
+    const after1 = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    const initial = Number(after1[0]!.c)
+    expect(initial).toBeGreaterThanOrEqual(1)
+
+    // The recipient dismisses it; the project is still over budget.
+    await t.client.unsafe(`
+      UPDATE inbox_item SET ack_state = 'dismissed'
+       WHERE category = 'over-budget' AND related_entity_id = '${projectId}'`)
+
+    await runBudgetAlert(t.db, { now: NOW })
+    const after2 = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    expect(Number(after2[0]!.c)).toBe(initial) // no new items
+  })
+
+  it('SUCCESSIVE BASELINES do not double the cap (only the one in force at month-start counts)', async () => {
+    // Baselines are non-overlapping but successive ones are allowed (change the
+    // budget mid-month). Summing every baseline that merely OVERLAPS the month
+    // would read a $50 budget as $100 and silently suppress a real page.
+    const projectId = await createProject('BA-SUCCESSIVE')
+    await t.db.insert(schema.allocation).values({
+      scopeType: 'project',
+      scopeId: projectId,
+      budgetUsd: '50.00',
+      effective: '[2026-05-01T00:00:00+00,2026-05-15T00:00:00+00)',
+      allocationKind: 'baseline',
+      auditEventId: await newAuditId(),
+    })
+    await t.db.insert(schema.allocation).values({
+      scopeType: 'project',
+      scopeId: projectId,
+      budgetUsd: '50.00',
+      effective: '[2026-05-15T00:00:00+00,2026-06-01T00:00:00+00)',
+      allocationKind: 'baseline',
+      auditEventId: await newAuditId(),
+    })
+    await recordSpend(projectId, '80.00', new Date('2026-05-10T10:00:00Z'))
+
+    // Cap is the month-start baseline ($50), not $50+$50 — so $80 IS over.
+    await runBudgetAlert(t.db, { now: NOW })
+    const rows = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    expect(Number(rows[0]!.c)).toBeGreaterThanOrEqual(1)
+  })
+
+  it('AUDIENCE: the Copilot contributor who blew the budget is notified', async () => {
+    // Slice 2 made the TRIGGER Copilot-complete; if the recipient lane still read
+    // raw attribution_record, the one person who caused the overage would be the
+    // only one not told. Trigger and audience must use the same lane.
+    const projectId = await createProject('BA-AUDIENCE')
+    await createBaselineAllocation(projectId, '50.00')
+    await recordCopilotUsage(projectId, '90.00', '2026-05-12', priyaId)
+
+    await runBudgetAlert(t.db, { now: NOW })
+    const rows = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'over-budget'
+         AND related_entity_id = ${projectId}::uuid
+         AND recipient_teammate_id = ${priyaId}::uuid`
+    expect(Number(rows[0]!.c)).toBeGreaterThanOrEqual(1)
+  })
+
   it('excludes burst-kind allocations from the cap', async () => {
     // Setup: baseline = $100, burst = $500 in same month. usedUsd = $150.
     // Burst-included cap would be $600 → no alert. Correct (burst-excluded)
     // cap is $100 → alert fires for $50 over. This is the same rule the
-    // homepage uses (usage.get.ts), so this test guards the parity contract.
+    // homepage uses (home.get.ts), so this test guards the parity contract.
     const projectId = await createProject('BA-BURST')
     await createBaselineAllocation(projectId, '100.00')
     await t.db.insert(schema.allocation).values({
@@ -397,6 +651,37 @@ describe('runBudgetAlert', () => {
     `
     expect(rows.length).toBeGreaterThanOrEqual(1)
     expect(rows[0]!.body.capUsd).toBe(100)
+  })
+
+  it('EXCLUDES ingest-only spend (non-Code Claude surfaces / copilot-agent) from every project budget — it can never carry a project_id (mig 0101, A3 design decision, §3.1 R1-M2)', async () => {
+    /*
+     * v_complete_usage's third (ingest-only) union arm hardcodes
+     * `project_id = NULL` unconditionally — there is no code path by which
+     * this money can ever be tagged to a project, however large. This mirrors
+     * the velocity-watch test proving the OPPOSITE decision for the SAME arm
+     * (untaggable provider-only spend is velocity-eligible but never
+     * budget-eligible): both are independent tests of one owner decision.
+     */
+    const projectId = await createProject('BA-INGESTONLY')
+    await createBaselineAllocation(projectId, '50.00')
+    // A huge non-Code Claude spend for the same teammate/month — reaches §A via
+    // arm 3 (v_complete_usage), but completeProjectSpend filters
+    // `project_id IS NOT NULL`, so this can never attribute to ANY project.
+    await t.db.insert(schema.actualSpend).values({
+      teammateId: priyaId,
+      date: '2026-05-12',
+      tool: 'claude-ai',
+      inputTokens: 0n,
+      outputTokens: 0n,
+      costUsd: '999.00',
+      source: 'anthropic-analytics-api',
+    })
+
+    await runBudgetAlert(t.db, { now: NOW })
+    const rows = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    expect(Number(rows[0]!.c)).toBe(0)
   })
 })
 

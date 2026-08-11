@@ -85,6 +85,9 @@ param entraIdRedirectUri string = ''
 @description('Optional pinned PUBLIC origin (scheme://host) when an upstream WAF/proxy fronts the app under a fixed hostname (the IT dev zone). Empty = derive from Front Door / the request Host. See server/utils/public-url.ts.')
 param appPublicOrigin string = ''
 
+@description('Break-glass EXTRA hostnames the MCP transport answers to, comma-separated. The app already derives its public origin and its Container Apps app/revision FQDNs; this covers a topology that derivation does not model (custom backend domain, private DNS alias, traffic-label FQDN) WITHOUT a code change and release. Empty is the normal state. See server/utils/public-url.ts platformSelfHosts().')
+param mcpAllowedHosts string = ''
+
 // ── Persona-impersonation gate (Wave-V) ──────────────────────────────
 // SAFETY FLOOR: defaulted to `false`. The triple-gate in
 // server/api/v1/auth/dev-login.post.ts refuses unless one of:
@@ -523,6 +526,7 @@ module containerApp 'modules/container-app.bicep' = {
     entraClientId: entraIdClientId
     entraRedirectUri: entraIdRedirectUri
     appPublicOrigin: appPublicOrigin
+    mcpAllowedHosts: mcpAllowedHosts
     allowPersonaOverride: allowPersonaOverride
     bootstrapAdminEmail: bootstrapAdminEmail
     containerAppsSubnetId: enablePrivateNetworking ? networking!.outputs.containerAppsSubnetId : ''

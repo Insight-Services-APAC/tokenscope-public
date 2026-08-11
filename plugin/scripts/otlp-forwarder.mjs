@@ -12,12 +12,31 @@
  * add Content-Length → real Azure DCE → pipe the response back.
  *
  * SINGLETON = THE PORT BIND. A second spawn EADDRINUSEs on listen and exits 0
- * (harmless). Still no byte-offset, catch-up, or retry — this is a stateless
- * header-add, not the copilot daemon. It DOES expose GET /healthz ({ok,pid,dir})
- * and write a pidfile, purely so the SessionStart hook can tell a working forwarder
- * from a bound-but-broken one (a prior run under a leaked HOME resolving a different
- * stateDir) and replace the latter — the port bind alone can't. The listening
- * server keeps the process alive; it dies with the container.
+ * (logged, not silent — see the `server.on('error', ...)` handler below).
+ * Still no byte-offset, catch-up, or retry — this is a stateless header-add,
+ * not the copilot daemon. It DOES expose GET /healthz ({ok,dirMatches,ready})
+ * and write a pidfile, purely so the SessionStart hook can tell a working
+ * forwarder from a bound-but-broken one (a prior run under a leaked HOME
+ * resolving a different stateDir) and replace the latter — the port bind
+ * alone can't. The listening server keeps the process alive; it dies with
+ * the container.
+ *
+ * /healthz reports NEITHER a raw pid NOR the absolute state-dir path (S1 fix
+ * 6): it is an UNAUTHENTICATED local HTTP endpoint, so its response is
+ * untrusted input — a `pid` field would let anything able to bind or answer
+ * on the port choose what the SessionStart hook's self-heal kills, and the
+ * absolute dir is a needless filesystem-layout leak. `dirMatches` is a
+ * boolean computed HERE against a caller-supplied `?dir=` query param; every
+ * kill decision on the hook side goes through the PIDFILE instead (this
+ * process's own `otlp-forwarder.pid`, inside the 0700 state dir it wrote —
+ * filesystem-trusted, not network-trusted).
+ *
+ * Routing is restricted to exactly `GET /healthz` and `POST /v1/logs` — every
+ * other method/path 404s — and any request carrying an `Origin` header is
+ * refused outright: this relay has no CORS boundary of its own, and `Origin`
+ * only appears on a browser-initiated request (e.g. a page a developer was
+ * lured into opening), which should never be able to reach a loopback relay
+ * that forwards the emit bearer at all.
  *
  * Two accepted, documented gaps: (1) on the FIRST session after a fresh re-point,
  * Claude Code's exporter may fire its first export before this detached spawn
@@ -31,6 +50,7 @@ import https from 'node:https'
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stateDir } from './plugin-runtime.mjs'
+import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 
 const PORT = Number(process.env.TOKENSCOPE_OTLP_PROXY_PORT) || 14318
 const DIR = stateDir()
@@ -53,26 +73,90 @@ function log(msg) {
   }
 }
 
-/** Read the real DCE logs endpoint FRESH per request (from the re-point stash). */
-function readDceEndpoint() {
-  const { dceLogsEndpoint } = JSON.parse(readFileSync(FORWARD_CONFIG, 'utf8'))
-  if (!dceLogsEndpoint) throw new Error('otlp-forward.json missing dceLogsEndpoint')
-  // Defence-in-depth: this process relays the emit bearer to whatever URL the stash
-  // holds. Refuse to ship it in PLAINTEXT off-box — require https for any non-loopback
-  // destination (the real DCE is remote https; loopback stays on-box and is what
-  // tests / local collectors use, so http there is harmless).
-  const parsed = new URL(dceLogsEndpoint)
-  const loopback = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '::1'
-  if (parsed.protocol !== 'https:' && !loopback) {
-    throw new Error(`otlp-forward.json endpoint must be https for a non-loopback host, got ${parsed.protocol}//${parsed.hostname}`)
+/** A candidate DCE value normalized to a trimmed, URL-parseable string, or null.
+ * Selection-time check only — the security guards (https off-box, self-loop)
+ * apply AFTER selection, to whichever source won. */
+function usableCandidate(v) {
+  if (typeof v !== 'string' || !v.trim()) return null
+  try {
+    new URL(v.trim())
+  } catch {
+    return null
   }
+  return v.trim()
+}
+
+/** Read the real DCE logs endpoint FRESH per request: the re-point stash first,
+ * else the durable env copy (TOKENSCOPE_DCE_LOGS_ENDPOINT — handed to this
+ * process in its spawn env). A stash that is missing, unreadable, OR
+ * malformed-but-truthy (whitespace, non-URL garbage) falls through to the env
+ * copy — a corrupt stash must not defeat the durability design by shadowing a
+ * valid durable value. Keeps the relay serving instead of 502ing every export
+ * until a re-provision. */
+function readDceEndpoint() {
+  let stashed = null
+  try {
+    stashed = usableCandidate(JSON.parse(readFileSync(FORWARD_CONFIG, 'utf8')).dceLogsEndpoint)
+  } catch {
+    /* stash lost/unreadable — fall through to the durable env copy */
+  }
+  const envCopy = usableCandidate(process.env.TOKENSCOPE_DCE_LOGS_ENDPOINT)
+  const dceLogsEndpoint = stashed ?? envCopy
+  if (!dceLogsEndpoint) {
+    throw new Error(
+      'no usable DCE endpoint: otlp-forward.json missing/unreadable/malformed and no valid TOKENSCOPE_DCE_LOGS_ENDPOINT',
+    )
+  }
+  const source = stashed ? 'otlp-forward.json' : 'TOKENSCOPE_DCE_LOGS_ENDPOINT'
+  // Defence-in-depth: this process relays the emit bearer to whatever URL won the
+  // selection. Refuse to ship it in PLAINTEXT off-box — require https for any
+  // non-loopback destination (the real DCE is remote https; loopback stays on-box
+  // and is what tests / local collectors use, so http there is harmless). The
+  // shared validator (S1 fix 3, endpoint-guard.mjs — promoted from this exact
+  // check) is the host allowlist layered ON TOP of the pre-existing self-loop
+  // guard below, which stays: assertSafeEndpoint has no notion of "this
+  // forwarder's own listen port".
+  let parsed
+  try {
+    parsed = assertSafeEndpoint(dceLogsEndpoint, { allowLoopback: true })
+  } catch (err) {
+    // `dceLogsEndpoint` is SERVER-supplied (redeem bundle / stash), so the
+    // rejected value must not reach this message — err.message embeds it.
+    throw unsafeEndpointError(`${source} endpoint`, err)
+  }
+  // URL#hostname for an IPv6 literal INCLUDES the brackets ('[::1]', not
+  // '::1') — match both forms.
+  const loopback =
+    parsed.hostname === '127.0.0.1' ||
+    parsed.hostname === 'localhost' ||
+    parsed.hostname === '::1' ||
+    parsed.hostname === '[::1]'
+  // Never relay to OUR OWN listen address — a self-referential endpoint would loop
+  // every export back into this handler forever.
+  const port = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80))
+  if (loopback && port === PORT)
+    throw new Error(
+      `refusing self-referential DCE endpoint from ${source} (points at this forwarder)`,
+    )
   return dceLogsEndpoint
 }
 
 const server = http.createServer((req, res) => {
-  // Health probe (the hook's self-heal signal). Cheap + synchronous; reports the
-  // stateDir THIS process resolved so the hook can spot a stale/wrong-HOME instance.
-  if (req.method === 'GET' && req.url === '/healthz') {
+  // Reject any request carrying an Origin header (S1 fix 6). A loopback HTTP
+  // server has no CORS boundary of its own; Origin only appears on a
+  // browser-initiated request, which must never be able to reach a relay
+  // that forwards the emit bearer.
+  if (req.headers.origin) {
+    res.writeHead(403).end()
+    return
+  }
+
+  // Health probe (the hook's self-heal signal). Cheap + synchronous.
+  // `dirMatches` (S1 fix 6) is a BOOLEAN computed against a caller-supplied
+  // `?dir=` — never the raw absolute path, and never a `pid` (see the module
+  // header for why: /healthz is unauthenticated, so its response is
+  // untrusted input the hook must not use to pick a SIGTERM target).
+  if (req.method === 'GET' && (req.url === '/healthz' || req.url?.startsWith('/healthz?'))) {
     // `ready` = can this forwarder actually resolve its DCE endpoint RIGHT NOW.
     // Liveness (answering /healthz) is not readiness: a forwarder can be bound
     // and answering while its stash is missing/unreadable, in which case it
@@ -86,10 +170,26 @@ const server = http.createServer((req, res) => {
         return false
       }
     })()
+    let expectedDir = null
+    try {
+      expectedDir = new URL(req.url, 'http://internal').searchParams.get('dir')
+    } catch {
+      /* malformed query — dirMatches stays null (unknown), never a false match */
+    }
+    const dirMatches = expectedDir ? expectedDir === DIR : null
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, pid: process.pid, dir: DIR, ready }))
+    res.end(JSON.stringify({ ok: true, dirMatches, ready }))
     return
   }
+
+  // Everything else is exactly ONE route: POST /v1/logs. Restricting routing
+  // (S1 fix 6) closes an overly-permissive relay that used to forward ANY
+  // method/path (e.g. a stray GET) straight upstream with the bearer attached.
+  if (!(req.method === 'POST' && req.url === '/v1/logs')) {
+    res.writeHead(404).end()
+    return
+  }
+
   const chunks = []
   req.on('data', (c) => chunks.push(c))
   req.on('end', () => {
@@ -107,13 +207,22 @@ const server = http.createServer((req, res) => {
     const headers = { 'content-length': body.length }
     if (req.headers.authorization) headers.authorization = req.headers.authorization
     if (req.headers['content-type']) headers['content-type'] = req.headers['content-type']
-    if (req.headers['content-encoding']) headers['content-encoding'] = req.headers['content-encoding']
+    if (req.headers['content-encoding'])
+      headers['content-encoding'] = req.headers['content-encoding']
 
     const mod = url.protocol === 'https:' ? https : http
     const up = mod.request(
-      { method: 'POST', hostname: url.hostname, port: url.port || undefined, path: url.pathname + url.search, headers },
+      {
+        method: 'POST',
+        hostname: url.hostname,
+        port: url.port || undefined,
+        path: url.pathname + url.search,
+        headers,
+      },
       (upRes) => {
-        res.writeHead(upRes.statusCode || 502, { 'content-type': upRes.headers['content-type'] || 'text/plain' })
+        res.writeHead(upRes.statusCode || 502, {
+          'content-type': upRes.headers['content-type'] || 'text/plain',
+        })
         upRes.pipe(res)
       },
     )
@@ -132,8 +241,15 @@ const server = http.createServer((req, res) => {
 })
 
 server.on('error', (e) => {
-  // Singleton via the port bind: a second forwarder just exits 0 (harmless).
-  if (e.code === 'EADDRINUSE') process.exit(0)
+  // Singleton via the port bind: a second forwarder just exits 0 — but LOUD
+  // now (S1 fix 6), not silent, so a respawn that lost the race is at least
+  // attributable instead of vanishing with no trace.
+  if (e.code === 'EADDRINUSE') {
+    log(
+      `EADDRINUSE on 127.0.0.1:${PORT} — another forwarder already holds the port; exiting (respawn lost the race, or the SessionStart self-heal did not evict the prior owner first)`,
+    )
+    process.exit(0)
+  }
   log(`server error: ${String(e)}`)
   process.exit(1)
 })

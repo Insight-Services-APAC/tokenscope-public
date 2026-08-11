@@ -79,6 +79,11 @@ const DIAL_META: Record<string, { label: string; explanation: string }> = {
     label: 'Reconciliation lag buffer (hours)',
     explanation: 'Reconciliation walk-back lag buffer (hours)',
   },
+  'placement.default_unit_warn_threshold': {
+    label: 'Catch-all unit warning (people)',
+    explanation:
+      'How many people may sit in a region’s (default) unit without reporting to its owner before the region page warns. It is a span of control, so it differs by organisation.',
+  },
 }
 
 // Scope selection. 'platform' or a region id — org-wide only; a region admin

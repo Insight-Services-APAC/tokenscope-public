@@ -185,7 +185,7 @@ function compactUsd(v: number): string {
       class="mb-2 text-[11px] text-carbon-2"
       data-testid="chargeback-trend-peak-day"
     >
-      Peak day: <b>{{ shortDay(peakDay.day) }}</b> · {{ fmtUsd(peakDay.totalUsd) }} — true linear scale, nothing clipped.
+      Peak day: <b>{{ shortDay(peakDay.day) }}</b> · {{ fmtUsd(peakDay.totalUsd) }}
     </p>
 
     <ChartWeeklyLanes
@@ -215,27 +215,22 @@ function compactUsd(v: number): string {
       class="text-xs text-carbon-3 italic py-8 text-center"
       data-testid="chargeback-trend-lane-empty"
     >
-      No Anthropic per-teammate chargeback by surface this period — the period's chargeback is
-      Copilot's pooled lane (monthly; see the provider split and the cost-centre ranking).
+      No Anthropic per-teammate chargeback this period — the period's chargeback is Copilot's
+      pooled lane.
     </p>
     <ChartTrend v-else :series="totalSeries" :value-format="compactUsd" :height="300" />
 
-    <p
-      v-if="showWeekly && weekly?.inProgressWeek"
-      class="mt-2 text-[11px] text-carbon-3 italic"
-      data-testid="chargeback-trend-partial-note"
-    >
-      The current week is in progress — rendered lighter and excluded from the ranking and the delta.
-    </p>
+    <!-- NO "rendered lighter and excluded…" NOTE: it described its own encoding
+         rather than naming a series. See SurfaceHeroCard for the full argument. -->
     <p
       v-if="showDaily && built?.forecastFrom"
       class="mt-2 text-[11px] text-carbon-3 italic"
       data-testid="chargeback-trend-projected-note"
     >
-      Dashed line = run-rate projection of the accrued total to month-end — provisional, not a settled figure.
+      dashed = run-rate projection to month-end
     </p>
     <p class="mt-2 text-[11px] text-carbon-3 leading-snug" data-testid="chargeback-trend-caveat">
-      Anthropic per-teammate chargeback · Copilot is pooled per cost-centre (monthly, see the cost-centre ranking).
+      Anthropic per-teammate chargeback · Copilot is pooled per cost-centre.
     </p>
   </UiCard>
 </template>

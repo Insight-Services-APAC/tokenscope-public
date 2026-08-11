@@ -29,8 +29,9 @@ import {
   NON_CODE_CLAUDE_TOOLS,
   CLAUDE_FAMILY_TOOLS,
   CLAUDE_TOOL_LABELS,
+  INGEST_ONLY_USAGE_TOOLS,
 } from '../../../shared/usage/surface'
-import { GITHUB_USAGE_TOOLS } from '../../../shared/usage/github-surface'
+import { GITHUB_USAGE_TOOLS, COPILOT_AGENT_TOOL } from '../../../shared/usage/github-surface'
 
 /* The documented product enum (platform.claude.com/docs/en/api/admin/analytics,
  * verified 2026-07-14) and the lane each maps to. */
@@ -201,5 +202,91 @@ describe('migration 0086 pin (the TS↔SQL drift guard, deployed view)', () => {
     expect(raw).toMatch(
       /CASE WHEN r\.category = 'copilot_coding_agent' THEN 'copilot-agent' ELSE 'copilot-cli' END/,
     )
+  })
+})
+
+/*
+ * Migration 0101 (Workstream A) supersedes 0086's v_teammate_usage_daily
+ * definition (A1: reverts 0084's non-Code exclusion) and 0089's v_complete_usage
+ * definition (A3: the ingest-only completeness arm). Four independent TS↔SQL
+ * drift guards, one per exclusion/inclusion clause — a SQL view cannot import
+ * TS, so each pin is load-bearing on its own.
+ */
+describe('migration 0101 pin (the TS↔SQL drift guard, deployed views)', () => {
+  const MIGRATION = join(
+    dirname(fileURLToPath(import.meta.url)),
+    '..',
+    '..',
+    '..',
+    'drizzle',
+    'migrations',
+    '0101_usage_completeness_ingest_only_arm.sql',
+  )
+  const raw = readFileSync(MIGRATION, 'utf8')
+  const stripped = raw.replace(/--[^\n]*/g, '')
+
+  it("A1: v_teammate_usage_daily's actual_spend branch (a.tool NOT IN) == [...GITHUB_USAGE_TOOLS] EXACTLY — the seven non-Code tools are GONE from this exclusion", () => {
+    const clause = stripped.match(/a\.tool\s+NOT\s+IN\s*\(([^)]*)\)/)
+    expect(clause, '0101 must carry an `a.tool NOT IN (...)` exclusion on the actual_spend branch').not.toBeNull()
+    const literals = [...clause![1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
+    expect(literals).toEqual([...GITHUB_USAGE_TOOLS])
+    // Explicitly NOT the 0084/0086 shape any more (drift the other direction).
+    expect(literals).not.toEqual([...GITHUB_USAGE_TOOLS, ...NON_CODE_CLAUDE_TOOLS])
+  })
+
+  it('A3: v_complete_usage arm 1 (attribution_record, ar.tool NOT IN) == INGEST_ONLY_USAGE_TOOLS EXACTLY', () => {
+    const clause = stripped.match(/ar\.tool\s+NOT\s+IN\s*\(([^)]*)\)/)
+    expect(clause, '0101 must carry an `ar.tool NOT IN (...)` exclusion on the attribution_record arm').not.toBeNull()
+    const literals = [...clause![1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
+    expect(literals).toEqual([...INGEST_ONLY_USAGE_TOOLS])
+  })
+
+  it('A3: v_complete_usage arm 2 (unaccounted_usage, uu.tool NOT IN) == INGEST_ONLY_USAGE_TOOLS EXACTLY', () => {
+    const clause = stripped.match(/uu\.tool\s+NOT\s+IN\s*\(([^)]*)\)/)
+    expect(clause, '0101 must carry a `uu.tool NOT IN (...)` exclusion on the unaccounted_usage arm').not.toBeNull()
+    const literals = [...clause![1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
+    expect(literals).toEqual([...INGEST_ONLY_USAGE_TOOLS])
+  })
+
+  it('A3: v_complete_usage arm 3 (v_teammate_usage_daily, vtd.tool IN) == INGEST_ONLY_USAGE_TOOLS EXACTLY — the ONLY arm that INCLUDES this set', () => {
+    const clause = stripped.match(/vtd\.tool\s+IN\s*\(([^)]*)\)/)
+    expect(clause, '0101 must carry a `vtd.tool IN (...)` inclusion on the third arm').not.toBeNull()
+    const literals = [...clause![1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
+    expect(literals).toEqual([...INGEST_ONLY_USAGE_TOOLS])
+  })
+
+  it('INGEST_ONLY_USAGE_TOOLS itself == [COPILOT_AGENT_TOOL, ...NON_CODE_CLAUDE_TOOLS] — the provider-neutral generalisation A2 introduces', () => {
+    expect(INGEST_ONLY_USAGE_TOOLS).toEqual([COPILOT_AGENT_TOOL, ...NON_CODE_CLAUDE_TOOLS])
+    // copilot-cli is deliberately NOT a member — it stays ordinarily taggable.
+    expect(INGEST_ONLY_USAGE_TOOLS).not.toContain('copilot-cli')
+  })
+
+  it('the three v_complete_usage arms are structurally disjoint BY THIS FILE: arm 1/2 exclude, arm 3 includes, the SAME literal list', () => {
+    const literalsOf = (m: RegExpMatchArray) => [...m[1]!.matchAll(/'([^']+)'/g)].map((x) => x[1]!)
+    const arm1 = literalsOf(stripped.match(/ar\.tool\s+NOT\s+IN\s*\(([^)]*)\)/)!)
+    const arm2 = literalsOf(stripped.match(/uu\.tool\s+NOT\s+IN\s*\(([^)]*)\)/)!)
+    const arm3 = literalsOf(stripped.match(/vtd\.tool\s+IN\s*\(([^)]*)\)/)!)
+    expect(arm1).toEqual(arm2)
+    expect(arm1).toEqual(arm3)
+  })
+
+  it('carries the new usage_provenance column with the three canonical literal values', () => {
+    expect(raw).toContain("'otel-emitted'::text AS usage_provenance")
+    expect(raw).toContain("'api-reconciled'::text AS usage_provenance")
+    expect(raw).toContain("'provider-usage'::text AS usage_provenance")
+  })
+
+  it('backs up ingest-only unaccounted_usage rows before deleting them (§8.4 rollback evidence)', () => {
+    expect(raw).toContain('CREATE TABLE unaccounted_usage_0101_ingest_only_backup AS')
+    expect(raw).toMatch(/CREATE TABLE unaccounted_usage_0101_ingest_only_backup AS\s*\nSELECT \* FROM unaccounted_usage/)
+    expect(raw).toContain('DELETE FROM unaccounted_usage')
+  })
+
+  it('adds the historical-homing dimension snapshot columns to actual_spend, nullable, with a legacy-current-placement backfill', () => {
+    expect(raw).toContain('ADD COLUMN region_id uuid REFERENCES region(id)')
+    expect(raw).toContain('ADD COLUMN org_unit_id uuid REFERENCES org_unit(id)')
+    expect(raw).toContain('ADD COLUMN cost_owning_unit_id uuid REFERENCES org_unit(id)')
+    expect(raw).toContain('ADD COLUMN dimension_source text')
+    expect(raw).toContain("dimension_source = 'legacy-current-placement'")
   })
 })

@@ -17,15 +17,29 @@
  * All three are correct-BY-DESIGN and different-by-design — see the assertions below.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import {
   seedKnownOutcomeCompany,
+  seedCostCentreProjectSumBack,
   KO_NOW,
   KO_MAY_WINDOW,
   KO_MAY_PARTIAL_WINDOW,
+  KO_MAR_WINDOW,
+  KO_MAR_ARM1_ACTIVITY,
+  KO_MAR_ARM2_ACTIVITY,
+  KO_MAR_MEMBER_UNTAGGED_USD,
+  type CostCentreSumBackIds,
   type KnownOutcomeIds,
 } from '../helpers/known-outcome-fixture'
+import {
+  completeCostCentreProjectResidual,
+  completeOneProjectSpend,
+  completeProjectSpend,
+  completeProjectSpendByActivity,
+  completeProjectSpendRanked,
+} from '../../../server/usage/complete-spend'
 import {
   fetchAcrossKpis,
   fetchAcrossRegionCards,
@@ -49,12 +63,23 @@ import {
   fetchFinanceProjectOverlay,
 } from '../../../server/reporting/finance'
 import { getMyUsage } from '../../../server/utils/me-queries'
+import { resolveServerClock } from '../../../shared/reports/clock'
+
+/*
+ * A PINNED clock. `fetchDailyMetrics` / `fetchChargebackTrend` no longer read
+ * `CURRENT_DATE` (F1/D2) — the axis frontier is `clock.settledThrough`, passed
+ * in. Fixed well past every window below, so the frontier is the window's own
+ * end and these assertions are about the CLAMP, not about the calendar.
+ */
+const CLOCK = resolveServerClock(new Date('2026-12-31T12:00:00Z'))
+
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
 
 let t: TestDb
 let tx: Tx
 let ids: KnownOutcomeIds
+let marIds: CostCentreSumBackIds
 let ccs: CostCentreRef[]
 
 const WIN = KO_MAY_WINDOW
@@ -64,6 +89,9 @@ beforeAll(async () => {
   t = await startTestDb()
   process.env.DATABASE_URL = t.url
   ids = await seedKnownOutcomeCompany(t)
+  // The March estate for the cost-centre→project node pair. Outside May, so every
+  // figure below is unchanged.
+  marIds = await seedCostCentreProjectSumBack(t, ids)
   tx = t.db as unknown as Tx
 
   // Build the CostCentreRef list the card/drill fns take (bypassing the RLS-scoped
@@ -141,7 +169,7 @@ describe('§A usage — v_complete_usage totals (attribution ∪ unaccounted gap
     ).toBeCloseTo(915, 6)
   })
 
-  it('§A model drivers sum back to 915 (claude-sonnet 850 + NULL/unattributed 65)', async () => {
+  it('§A model drivers sum back to 915 (claude-sonnet 850 + NULL-model residual 65)', async () => {
     const { rows, headlineUsd } = await fetchAcrossDrivers(tx, WIN, 'model')
     expect(headlineUsd).toBeCloseTo(915, 6)
     const sonnet = rows.find((r) => r.label === 'claude-sonnet-4-6')!
@@ -199,6 +227,283 @@ describe('cost-centre burn — §A, homed by the tagged project cost_owning_unit
     const aliceRow = rows.find((r) => r.label === 'alice@ko.test')!
     expect(aliceRow.usd).toBeCloseTo(100, 6) // her scholarship spend only; deliveryx homes elsewhere
     expect(rows.reduce((a, r) => a + r.usd, 0)).toBeCloseTo(100, 6)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COST-CENTRE → PROJECT sum-back, ONE lane (consistency contract §6.3)
+//
+// The third node pair. Every project figure here comes from `completeProjectSpend`
+// — THE definition the project header, the /projects cards, the budget editor,
+// the manager rollup and the budget alert all call — and the cost-centre figure
+// comes from the production `fetchCostCentreCards`. Same lane, same window, same
+// options on both sides: if any ONE of those five sites is reverted to
+// `attribution_aggregate` or `attribution_record`, its number stops matching the
+// figure asserted here and the identity below stops closing.
+//
+// March estate; see seedCostCentreProjectSumBack for the derivation of every
+// figure. Deliberately NOT a both-sides-zero identity — three projects at 165 /
+// 80 / 91 and four residual terms at 33 / 18 / 27 / 45, all distinct — plus $12
+// of untagged RECONCILED spend that sits outside the identity entirely and is
+// reported on the teammate axis instead of vanishing.
+//
+// NOTE what this file does NOT prove: that the five surfaces quoting these
+// figures still call `completeProjectSpend`. It calls the helper directly, so
+// reverting any call site leaves it green. That contract is pinned statically in
+// tests/unit/server/project-spend-one-lane.test.ts, and the two are a pair.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('cost-centre → project sum-back on the §A lane', () => {
+  const MAR = KO_MAR_WINDOW
+  // The CC burn (fetchCostCentreCards) does NOT filter provisional identity, so
+  // the project side must not either — an identity asserted across two different
+  // questions is not an identity.
+  const OPTS = { excludeProvisional: false }
+
+  it('project spend is one lane: deliveryx 165 (120 OTel + 45 reconciled), atlas 80, scholarship 91', async () => {
+    const spend = await completeProjectSpend(tx, MAR, {
+      projectIds: [marIds.projAtlas, ids.projDeliveryx, ids.projScholarship],
+      ...OPTS,
+    })
+    const deliveryx = spend.get(ids.projDeliveryx)!
+    expect(deliveryx.costUsd).toBeCloseTo(165, 6)
+    // The arm split is the whole point: $45 of this project's March spend exists
+    // ONLY on the completeness lane. The old aggregate-backed headline was 120.
+    expect(deliveryx.otelUsd).toBeCloseTo(120, 6)
+    expect(deliveryx.reconciledUsd).toBeCloseTo(45, 6)
+    expect(spend.get(marIds.projAtlas)!.costUsd).toBeCloseTo(80, 6)
+    // Scholarship is led by apac.cto but carries $27 that homes to apac.delivery
+    // (the post-re-home shape) — the project total is blind to CoU, by design.
+    expect(spend.get(ids.projScholarship)!.costUsd).toBeCloseTo(91, 6)
+  })
+
+  it('APAC Delivery: Σ projects + ingestOnly + untagged + foreignProject − offCentre = burn (278)', async () => {
+    const { cards } = await fetchCostCentreCards(tx, ccs, MAR, null, { copilotChargeback: false })
+    const burn = cards.find((c) => c.id === ids.uApacDelivery)!.burnUsd
+    expect(burn).toBeCloseTo(278, 6)
+
+    // Σ over the projects THIS cost centre leads, from the one function.
+    const spend = await completeProjectSpend(tx, MAR, {
+      projectIds: [ids.projDeliveryx, marIds.projAtlas],
+      ...OPTS,
+    })
+    const sumProjects = [...spend.values()].reduce((a, s) => a + s.costUsd, 0)
+    expect(sumProjects).toBeCloseTo(245, 6)
+
+    const residual = await completeCostCentreProjectResidual(tx, ids.uApacDelivery, MAR, OPTS)
+    // The residual carries the BURN it reconciles to, and it must be the same
+    // number the production cost-centre card reports. A reconciliation whose
+    // target comes from somewhere else is two questions, not one identity.
+    expect(residual.burnUsd).toBeCloseTo(burn, 6)
+    // Each term is separately pinned — a swap between any two would otherwise
+    // leave the identity closing while both labels lied.
+    expect(residual.ingestOnlyUsd).toBeCloseTo(33, 6) // arm 3, untaggable by construction
+    expect(residual.untaggedUsd).toBeCloseTo(18, 6) // homed here, no project claim
+    expect(residual.foreignProjectUsd).toBeCloseTo(27, 6) // homed here, another CC's project
+    expect(residual.offCentreUsd).toBeCloseTo(45, 6) // this CC's project, not homed here
+
+    expect(
+      sumProjects +
+        residual.ingestOnlyUsd +
+        residual.untaggedUsd +
+        residual.foreignProjectUsd -
+        residual.offCentreUsd,
+    ).toBeCloseTo(residual.burnUsd, 6)
+  })
+
+  it('UNTAGGED RECONCILED money lands in a named term, and the identity still closes', async () => {
+    /*
+     * The hole this closes: an arm-2 row with no project claim carries no
+     * cost_owning_unit_id either (every writer sets the CoU only alongside a
+     * project), so bob's $12 of unclaimed reconciled spend was in the §A estate,
+     * in no project total, in no cost-centre burn and in none of the four
+     * residual terms. Money the whole reporting surface could not account for.
+     *
+     * It is caught on the only dimension it has — WHO spent it — and reported
+     * OUTSIDE the burn identity, because a teammate-home figure added to a
+     * project-home identity is two axes in one number.
+     */
+    const residual = await completeCostCentreProjectResidual(tx, ids.uApacDelivery, MAR, OPTS)
+    expect(residual.memberUntaggedUsd).toBeCloseTo(KO_MAR_MEMBER_UNTAGGED_USD, 6)
+
+    // It is REALLY on the lane and REALLY in nobody's burn — asserted against
+    // the raw view so the term cannot be passing off a constant.
+    const [row] = await t.client<{ total: string }[]>`
+      SELECT COALESCE(SUM(cost_usd), 0)::text AS total FROM v_complete_usage
+      WHERE usage_provenance = 'api-reconciled' AND project_id IS NULL
+        AND cost_owning_unit_id IS NULL AND teammate_id = ${ids.bob}::uuid
+        AND ts_event >= ${MAR.startIso}::timestamptz AND ts_event < ${MAR.endIso}::timestamptz`
+    expect(Number(row!.total)).toBeCloseTo(KO_MAR_MEMBER_UNTAGGED_USD, 6)
+
+    // And it moved NOTHING: the burn, the four terms and the project totals are
+    // exactly what they were before the term existed. That is what makes this a
+    // new disclosure rather than a re-homing of money.
+    expect(residual.burnUsd).toBeCloseTo(278, 6)
+    expect(residual.untaggedUsd).toBeCloseTo(18, 6) // disjoint: that one needs a CoU
+    const spend = await completeProjectSpend(tx, MAR, {
+      projectIds: [ids.projDeliveryx, marIds.projAtlas],
+      ...OPTS,
+    })
+    expect([...spend.values()].reduce((a, s) => a + s.costUsd, 0)).toBeCloseTo(245, 6)
+  })
+
+  it('CTO APAC: the mirror case — Σ projects 91 − offCentre 27 = burn (64)', async () => {
+    const { cards } = await fetchCostCentreCards(tx, ccs, MAR, null, { copilotChargeback: false })
+    const burn = cards.find((c) => c.id === ids.uApacCto)!.burnUsd
+    expect(burn).toBeCloseTo(64, 6)
+
+    const spend = await completeProjectSpend(tx, MAR, { projectIds: [ids.projScholarship], ...OPTS })
+    const sumProjects = [...spend.values()].reduce((a, s) => a + s.costUsd, 0)
+    expect(sumProjects).toBeCloseTo(91, 6)
+
+    const residual = await completeCostCentreProjectResidual(tx, ids.uApacCto, MAR, OPTS)
+    expect(residual.burnUsd).toBeCloseTo(burn, 6)
+    expect(residual.offCentreUsd).toBeCloseTo(27, 6)
+    expect(residual.ingestOnlyUsd).toBeCloseTo(0, 6)
+    expect(residual.untaggedUsd).toBeCloseTo(0, 6)
+    expect(residual.foreignProjectUsd).toBeCloseTo(0, 6)
+    // bob's unclaimed $12 homes to apac.DELIVERY — it must not leak here.
+    expect(residual.memberUntaggedUsd).toBeCloseTo(0, 6)
+
+    expect(
+      sumProjects +
+        residual.ingestOnlyUsd +
+        residual.untaggedUsd +
+        residual.foreignProjectUsd -
+        residual.offCentreUsd,
+    ).toBeCloseTo(residual.burnUsd, 6)
+  })
+
+  it('the residual is NOT a rounding term: dropping any one of it breaks the identity', async () => {
+    // Guards against the identity being asserted with all-zero residual terms,
+    // which is the failure mode that makes a sum-back test worthless. Every term
+    // is individually large enough to break the equation on its own.
+    const residual = await completeCostCentreProjectResidual(tx, ids.uApacDelivery, MAR, OPTS)
+    for (const [label, usd] of Object.entries(residual)) {
+      expect(Math.abs(usd as number), `${label} must be materially non-zero`).toBeGreaterThan(1)
+    }
+  })
+
+  it('the `untagged` TERM is schema-legal but UNREACHABLE in production — and stays anyway', async () => {
+    /*
+     * Said plainly rather than left for the next reader to discover: NO writer
+     * produces the row this term counts. `attribution_record.cost_owning_unit_id`
+     * is set only alongside a project (tag-session.ts, azure-monitor-reader.ts)
+     * and arm 2 has no CoU column at all, so "homed at a cost centre AND carrying
+     * no project claim" cannot arise. The $18 row below is planted by hand.
+     *
+     * It is kept, not deleted, for one reason: `untagged` and `ingestOnly` differ
+     * by a single `usage_provenance` clause, so without a row in this shape a
+     * term that swallowed the other returns the same total and the mutation
+     * survives. That is a statement about MUTATION COVERAGE, not about the
+     * product — the money a cost-centre owner actually has unclaimed is
+     * `memberUntaggedUsd`, which IS reachable and is asserted above.
+     */
+    const [planted] = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM attribution_record
+      WHERE claude_session_id = 'ko-mar-untagged-bob'`
+    expect(Number(planted!.n)).toBe(1) // hand-planted, never written by the app
+    const residual = await completeCostCentreProjectResidual(tx, ids.uApacDelivery, MAR, OPTS)
+    expect(residual.untaggedUsd).toBeCloseTo(18, 6)
+    expect(residual.ingestOnlyUsd).toBeCloseTo(33, 6) // the term it must not swallow
+  })
+
+  it('RANKING and LIMIT happen in the DATABASE, not after the round trip', async () => {
+    /*
+     * The manager rollup renders the top 100 projects of an org subtree. It used
+     * to SELECT every scoped project, ship the ids back, scan the lane for all
+     * of them and then `.sort().slice(0, 100)` in JS — the work of the whole
+     * subtree to render one page of it.
+     *
+     * `completeProjectSpendRanked` takes the scope PREDICATE and returns only
+     * the page. Because the truncation happens before the rows leave Postgres,
+     * a wrong ORDER BY cannot be repaired by the caller: the rows the caller
+     * never received are the proof.
+     */
+    const apacScope = sql`p.region_id = ${ids.regionApac}::uuid`
+    // March: deliveryx 165 > scholarship 91 > atlas 80. Three APAC projects,
+    // three distinct figures, so every position in the ranking is falsifiable.
+    const top2 = await completeProjectSpendRanked(tx, MAR, {
+      projectScope: apacScope,
+      limit: 2,
+      ...OPTS,
+    })
+    expect(top2.map((r) => r.code)).toEqual(['PROJ-DELIVERYX', 'PROJ-SCHOLARSHIP'])
+    expect(top2[0]!.costUsd).toBeCloseTo(165, 6)
+    expect(top2[0]!.otelUsd).toBeCloseTo(120, 6)
+    expect(top2[0]!.reconciledUsd).toBeCloseTo(45, 6)
+    expect(top2[1]!.costUsd).toBeCloseTo(91, 6)
+    // The limit is a LIMIT: atlas is not in the payload at all, so no amount of
+    // client-side sorting could recover it.
+    expect(top2).toHaveLength(2)
+
+    const all = await completeProjectSpendRanked(tx, MAR, {
+      projectScope: apacScope,
+      limit: 50,
+      ...OPTS,
+    })
+    expect(all.map((r) => r.code)).toEqual([
+      'PROJ-DELIVERYX',
+      'PROJ-SCHOLARSHIP',
+      'PROJ-ATLAS',
+    ])
+  })
+
+  it('a funded project with NO spend still appears, at 0, sorted last', async () => {
+    // An inner join to the lane would silently delete it — and a manager's
+    // project table exists precisely to show budget against spend, including the
+    // budget nothing has been spent against yet. Atlas has no MAY spend.
+    const may = await completeProjectSpendRanked(tx, WIN, {
+      projectScope: sql`p.region_id = ${ids.regionApac}::uuid`,
+      limit: 50,
+      ...OPTS,
+    })
+    const atlas = may.find((r) => r.code === 'PROJ-ATLAS')
+    expect(atlas, 'a zero-spend project must not vanish from the ranking').toBeDefined()
+    expect(atlas!.costUsd).toBeCloseTo(0, 6)
+    expect(may[may.length - 1]!.code).toBe('PROJ-ATLAS')
+  })
+
+  it('ACTIVITY reaches the project mix from BOTH taggable arms (mig 0113)', async () => {
+    /*
+     * The per-activity grain must foot to the same headline as everything else
+     * on the project page, which means it has to carry arm 2. The reconciled
+     * $45 is tagged `reconciled-catchup` — a label on NO attribution_record row
+     * anywhere in this fixture, so it can only appear here through
+     * `unaccounted_usage.activity` on the §A lane.
+     */
+    const mix = await completeProjectSpendByActivity(tx, ids.projDeliveryx, MAR, OPTS)
+    const byActivity = new Map(mix.map((m) => [m.activity, m.costUsd]))
+
+    expect(byActivity.get(KO_MAR_ARM1_ACTIVITY)).toBeCloseTo(120, 6) // arm 1
+    expect(byActivity.get(KO_MAR_ARM2_ACTIVITY)).toBeCloseTo(45, 6) // arm 2 — the point
+    // No NULL bucket: every dollar of this project's March spend is tagged, so a
+    // mix blind to arm 2 puts the $45 under `null` — asserted as a NUMBER so the
+    // failure reads as money in the wrong bucket, not as a missing key.
+    expect(byActivity.get(null) ?? 0).toBeCloseTo(0, 6)
+    expect(byActivity.has(null)).toBe(false)
+
+    // And the mix FOOTS to the headline — the reason the grain moved onto this
+    // lane in the first place.
+    const headline = await completeOneProjectSpend(tx, ids.projDeliveryx, MAR, OPTS)
+    expect(headline.costUsd).toBeCloseTo(165, 6)
+    expect(mix.reduce((a, m) => a + m.costUsd, 0)).toBeCloseTo(headline.costUsd, 6)
+  })
+
+  it('arm 3 can never enter a project figure, on any project, at any grain', async () => {
+    // The $33 of claude-cowork is in the cost centre's burn but must be absent
+    // from EVERY project row — that is what "project_id NULL by construction"
+    // means, and it is why it needs its own labelled bucket on the page.
+    const spend = await completeProjectSpend(tx, MAR, OPTS)
+    const anyIngestOnly = [...spend.values()].some((s) => s.costUsd + 1e-9 < s.otelUsd + s.reconciledUsd)
+    expect(anyIngestOnly).toBe(false)
+    // Every project's total is exactly arms 1+2 — no third arm anywhere.
+    for (const [projectId, s] of spend) {
+      expect(s.otelUsd + s.reconciledUsd, `project ${projectId}`).toBeCloseTo(s.costUsd, 6)
+    }
+    const [row] = await t.client<{ total: string }[]>`
+      SELECT COALESCE(SUM(cost_usd), 0)::text AS total FROM v_complete_usage
+      WHERE usage_provenance = 'provider-usage' AND project_id IS NOT NULL`
+    expect(Number(row!.total)).toBeCloseTo(0, 6)
   })
 })
 
@@ -330,7 +635,7 @@ describe('§B chargeback — per-cost-centre, teammate-homed (Anthropic) + poole
   })
 
   it('§B daily trend has a nonzero day per spend day (05-05..05-08) summing to 900', async () => {
-    const trend = await fetchAcrossChargebackTrend(tx, WIN)
+    const trend = await fetchAcrossChargebackTrend(tx, WIN, CLOCK)
     const nonzero = trend.filter((p) => p.chargeUsd > 0)
     const byDay = new Map(nonzero.map((p) => [p.day, p.chargeUsd]))
     expect(byDay.get('2026-05-05')).toBeCloseTo(350, 6) // alice
@@ -380,7 +685,7 @@ describe('§B chargeback — a non-month-aligned custom range windows by DAY, no
   })
 
   it('Σ chargeDaily == 500 (bob 05-06 = 300, carol 05-07 = 200); alice/dave days excluded', async () => {
-    const trend = await fetchAcrossChargebackTrend(tx, RANGE)
+    const trend = await fetchAcrossChargebackTrend(tx, RANGE, CLOCK)
     const byDay = new Map(trend.map((p) => [p.day, p.chargeUsd]))
     expect(byDay.get('2026-05-06')).toBeCloseTo(300, 6)
     expect(byDay.get('2026-05-07')).toBeCloseTo(200, 6)

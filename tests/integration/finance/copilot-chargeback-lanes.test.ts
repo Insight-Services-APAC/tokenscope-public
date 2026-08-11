@@ -16,6 +16,10 @@
  *       regional and cost-centres outputs.
  *   (4) copilot-unclassified is VISIBLE everywhere but NEVER in a chargeableUsd —
  *       even in chargeback mode (design D2, r1-F10).
+ *   (5) Workstream C (ADR-0011 D10, migration 0107): the persisted overage allocation
+ *       REPLACES the org-homed copilot-usage figure for an (enterprise, month) once
+ *       computed — never both (no double charge), same total either way; license and
+ *       unclassified are untouched.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { randomUUID } from 'node:crypto'
@@ -326,5 +330,70 @@ describe('(3) per-§B-site NON-ZERO Copilot charge post-split (r1-F4)', () => {
     )
     expect(copilotChargebackPartialMonth).toBe(false)
     expect(cards[0]!.chargeUsd).toBeCloseTo(350, 6) // 50 anthropic + 300 chargeable copilot
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe('(5) Workstream C — persisted allocation replaces the org-homed copilot-usage lane, never both (no double charge)', () => {
+  const ENT2 = 'lane-ent-alloc'
+  const MONTH2 = '2026-07-01'
+  let ent2Id = ''
+  let ccB = ''
+
+  beforeAll(async () => {
+    const [ou] = await t.client<{ id: string }[]>`
+      INSERT INTO org_unit (region_id, path, code, display_name, unit_type, is_cost_owning_unit)
+      VALUES (${regionId}::uuid, 'clb', 'clb', 'Lane BU B', 'bu', TRUE) RETURNING id::text AS id`
+    ccB = ou!.id
+    const [ent] = await t.client<{ id: string }[]>`
+      INSERT INTO provider_enterprise (provider, external_id, display_name)
+      VALUES ('github', ${ENT2}, 'Lane Ent Alloc') RETURNING id::text AS id`
+    ent2Id = ent!.id
+    const [po] = await t.client<{ id: string }[]>`
+      INSERT INTO provider_org (provider, external_org_id, display_name, provider_enterprise_id, cost_owning_unit_id)
+      VALUES ('github', 'lane-org-alloc', 'Lane Org Alloc', ${ent2Id}::uuid, ${ccA}::uuid) RETURNING id::text AS id`
+    // The bill homes this org's overage to ccA — the org-homed baseline every OTHER
+    // test in this file exercises.
+    await t.client`
+      INSERT INTO copilot_pool_bill
+        (month, provider_enterprise_id, provider_org_id, cost_owning_unit_id, seats,
+         license_net_usd, overage_net_usd, unclassified_net_usd, included_allowance_usd, usage_gross_usd)
+      VALUES (${MONTH2}::date, ${ent2Id}::uuid, ${po!.id}::uuid, ${ccA}::uuid, 5, 200, 100, 0, 400, 350)`
+  })
+
+  async function copilotUsageByCou(): Promise<Record<string, number>> {
+    const rows = await t.client<{ cou: string | null; usd: string }[]>`
+      SELECT cost_owning_unit_id::text AS cou, charge_usd::text AS usd FROM v_finance_copilot_pool_chargeback
+      WHERE period_month = ${MONTH2}::date AND tool = 'copilot-usage'`
+    const out: Record<string, number> = {}
+    for (const r of rows) out[r.cou ?? '__null'] = Number(r.usd)
+    return out
+  }
+
+  it('before any allocation: copilot-usage is the org-homed figure at ccA', async () => {
+    const byCou = await copilotUsageByCou()
+    expect(byCou[ccA]).toBe(100)
+    expect(Object.values(byCou).reduce((a, b) => a + b, 0)).toBe(100)
+  })
+
+  it('once an allocation exists (redirecting the SAME overage to ccB), the org-homed figure at ccA disappears — not both', async () => {
+    await t.client`
+      INSERT INTO copilot_overage_allocation
+        (provider_enterprise_id, month, cost_owning_unit_id, policy, weight, allocated_usd, overage_net_usd)
+      VALUES (${ent2Id}::uuid, ${MONTH2}::date, ${ccB}::uuid, 'consumption-share', 1, 100, 100)`
+
+    const byCou = await copilotUsageByCou()
+    // The org-homed ccA figure is GONE (superseded), not summed alongside the allocation.
+    expect(byCou[ccA] ?? 0).toBe(0)
+    expect(byCou[ccB]).toBe(100)
+    // SAME TOTAL either way — allocation redistributes, never creates or drops money.
+    expect(Object.values(byCou).reduce((a, b) => a + b, 0)).toBe(100)
+  })
+
+  it('license (200) is untouched by the allocation — still org-homed at ccA', async () => {
+    const [row] = await t.client<{ usd: string }[]>`
+      SELECT charge_usd::text AS usd FROM v_finance_copilot_pool_chargeback
+      WHERE period_month = ${MONTH2}::date AND tool = 'copilot-license' AND cost_owning_unit_id = ${ccA}::uuid`
+    expect(Number(row!.usd)).toBe(200)
   })
 })

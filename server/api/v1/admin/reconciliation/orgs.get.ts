@@ -18,6 +18,13 @@
  * RBAC: requireRole(admin, global-finops). provider_org is a config table (no RLS
  * policy) → getDb() like regions.get.ts / the anthropic reader.
  *
+ * Region-scope: a region `admin` sees mapped orgs in their OWN region PLUS
+ * every unmapped (region_id IS NULL) org — narrowing unmapped rows would hide
+ * exactly the onboarding surface an admin is there to map. `global-finops` /
+ * `platform-admin` see every row. Matches diagnostics/index.get.ts's
+ * `session.role === 'admin'` shape; RLS is inert at runtime (owner
+ * connection, no FORCE) so this in-query clamp is the live gate.
+ *
  * SAFETY: the probe (computeOrgHealth) never throws and never leaks the key.
  */
 import { defineEventHandler } from 'h3'
@@ -27,6 +34,7 @@ import { getDb } from '../../../../db'
 import { resolveOrgApiKey } from '../../../../workers/analytics-poller'
 import { readSecret } from '../../../../reconciliation/credentials'
 import { computeOrgHealth, apiKindLabel, type AnthropicOrgRow } from '../../../../anthropic/org-health'
+import { isGovernanceActivated } from '../../../../governance/verdict'
 import type { AnthropicApiKind } from '../../../../reconciliation/adapters/registry'
 
 interface Row extends Record<string, unknown> {
@@ -56,8 +64,22 @@ function narrowApiKind(value: string | null): AnthropicApiKind {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin', 'global-finops')
   const db = getDb()
+  // ADR-0011 D11 (Required outcome 4): once governance is activated,
+  // provider_org.billing is meaningless for GitHub (the enterprise is
+  // authoritative) — hidden from the API response rather than echoing a stale
+  // value an operator could mistake for live. The key/shape is PRESERVED
+  // (billing: null), not removed — backward-compatible response shape.
+  const governanceActivated = await isGovernanceActivated(db)
+
+  // Region clamp (sole gate — provider_org has no RLS policy, and RLS is
+  // inert at runtime regardless). admin -> own region OR unmapped;
+  // global-finops / platform-admin -> every row.
+  const regionClause =
+    session.role === 'admin'
+      ? sql`WHERE po.region_id IS NULL OR po.region_id = ${session.regionId}::uuid`
+      : sql``
 
   const rows = await db.execute<Row>(sql`
     SELECT po.id::text AS id,
@@ -81,6 +103,7 @@ export default defineEventHandler(async (event) => {
     LEFT JOIN provider_enterprise pe ON pe.id = po.provider_enterprise_id
     LEFT JOIN region rg ON rg.id = po.region_id
     LEFT JOIN org_unit cou ON cou.id = po.cost_owning_unit_id
+    ${regionClause}
     ORDER BY po.provider, po.display_name
   `)
 
@@ -147,7 +170,7 @@ export default defineEventHandler(async (event) => {
         // name as the thing that drives keyPresent.
         credentialSecretName: null,
         reconciliationMode: r.reconciliation_mode,
-        billing: r.billing,
+        billing: governanceActivated ? null : r.billing,
         notes: r.notes,
         providerEnterpriseId: r.provider_enterprise_id,
         enterprise,

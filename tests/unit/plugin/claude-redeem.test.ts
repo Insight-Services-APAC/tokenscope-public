@@ -33,7 +33,7 @@ import { spawn } from 'node:child_process'
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — mjs import resolved by Vitest
-const { buildClaudeDeviceEnv, assertClaudeRedeemResponse, writeClaudeSettings, parseArgs } = await import(
+const { buildClaudeDeviceEnv, assertClaudeRedeemResponse, writeClaudeSettings, writeSharedCredentialStore, parseArgs } = await import(
   '../../../plugin/scripts/claude-redeem.mjs'
 )
 
@@ -71,11 +71,20 @@ const FAKE_OAUTH = {
 }
 
 let dir: string
+const savedStateDir = process.env.TOKENSCOPE_STATE_DIR
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'ts-claude-redeem-'))
+  // S1 fix 4: writeClaudeSettings now ALSO mirrors the refresh token into the
+  // shared device credential store (stateDir()/config.json). Pin it into this
+  // test's own temp dir — without this every run here would write a stray
+  // (test-only, non-secret) config.json into the REAL ~/.tokenscope on
+  // whatever machine runs the suite.
+  process.env.TOKENSCOPE_STATE_DIR = join(dir, 'state')
 })
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
+  if (savedStateDir === undefined) delete process.env.TOKENSCOPE_STATE_DIR
+  else process.env.TOKENSCOPE_STATE_DIR = savedStateDir
 })
 
 describe('buildClaudeDeviceEnv', () => {
@@ -154,6 +163,46 @@ describe('assertClaudeRedeemResponse', () => {
   it('rejects a response missing an OAuth credential field', () => {
     const bad = { ...FAKE_REDEEM_RESPONSE, oauth_token_endpoint: '' }
     expect(() => assertClaudeRedeemResponse(bad)).toThrow(/oauth_token_endpoint/)
+  })
+
+  // S1 fix 3 — validate BEFORE persisting a server-supplied bundle: a
+  // compromised/MITM'd redeem response must not be able to plant a plaintext
+  // endpoint that every subsequent bearer mint would then send the durable
+  // credential to.
+  it('rejects a bundle whose otel_headers_helper_url downgrades to plaintext http (off-box)', () => {
+    const bad = {
+      ...FAKE_REDEEM_RESPONSE,
+      telemetry: { claude: { ...FAKE_REDEEM_RESPONSE.telemetry.claude, otel_headers_helper_url: 'http://attacker.example.com/bearer' } },
+    }
+    expect(() => assertClaudeRedeemResponse(bad)).toThrow(/otel_headers_helper_url/)
+  })
+
+  it('rejects a bundle whose OTLP logs endpoint downgrades to plaintext http (off-box)', () => {
+    const bad = {
+      ...FAKE_REDEEM_RESPONSE,
+      telemetry: { claude: { ...FAKE_REDEEM_RESPONSE.telemetry.claude, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'http://attacker.example.com/v1/logs' } },
+    }
+    expect(() => assertClaudeRedeemResponse(bad)).toThrow(/OTEL_EXPORTER_OTLP_LOGS_ENDPOINT/)
+  })
+
+  it('rejects a response whose oauth_token_endpoint downgrades to plaintext http (off-box)', () => {
+    const bad = { ...FAKE_REDEEM_RESPONSE, oauth_token_endpoint: 'http://attacker.example.com/oauth/token' }
+    expect(() => assertClaudeRedeemResponse(bad)).toThrow(/oauth_token_endpoint/)
+  })
+
+  it('accepts a loopback bearer/logs endpoint (a locally-running dev server)', () => {
+    const local = {
+      ...FAKE_REDEEM_RESPONSE,
+      telemetry: {
+        claude: {
+          ...FAKE_REDEEM_RESPONSE.telemetry.claude,
+          otel_headers_helper_url: 'http://localhost:3450/api/v1/instances/abc/bearer',
+          OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'http://127.0.0.1:3450/v1/logs',
+        },
+      },
+      oauth_token_endpoint: 'http://localhost:3450/api/v1/oauth/token',
+    }
+    expect(() => assertClaudeRedeemResponse(local)).not.toThrow()
   })
 })
 
@@ -317,6 +366,59 @@ describe('writeClaudeSettings', () => {
     const path = join(dir, 'settings.json')
     writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
     expect(statSync(path).mode & 0o777).toBe(0o600)
+  })
+
+  // ── S1 fix 4: the shared device credential store ─────────────────────────
+  // tag-repo.mjs now strips TOKENSCOPE_OAUTH_REFRESH_TOKEN from every repo
+  // tag it writes; otel-headers-helper.sh falls back to
+  // ${STATE_DIR}/config.json → .oauth_refresh_token. writeClaudeSettings must
+  // populate that store on every successful redeem, or the fallback has
+  // nothing to fall back TO and a tagged repo's emission bricks.
+  it('mirrors the refresh token into the shared state-dir credential store on redeem', () => {
+    const path = join(dir, 'settings.json')
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
+    const cfg = JSON.parse(readFileSync(join(process.env.TOKENSCOPE_STATE_DIR!, 'config.json'), 'utf8'))
+    expect(cfg.oauth_refresh_token).toBe('rt_super_secret')
+  })
+
+  it('the state-dir store is 0700/0600 (credential-bearing)', () => {
+    if (platform() === 'win32') return
+    const path = join(dir, 'settings.json')
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
+    const stateDirPath = process.env.TOKENSCOPE_STATE_DIR!
+    expect(statSync(stateDirPath).mode & 0o777).toBe(0o700)
+    expect(statSync(join(stateDirPath, 'config.json')).mode & 0o777).toBe(0o600)
+  })
+
+  it('rotates the stored refresh token on a re-run and preserves unrelated existing config.json fields', () => {
+    const path = join(dir, 'settings.json')
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
+    // An operator / the Copilot lane may have set an unrelated field already.
+    const cfgPath = join(process.env.TOKENSCOPE_STATE_DIR!, 'config.json')
+    const between = JSON.parse(readFileSync(cfgPath, 'utf8'))
+    between.instance_id = 'shared-with-copilot-lane'
+    writeFileSync(cfgPath, JSON.stringify(between))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, { ...FAKE_OAUTH, refresh_token: 'rt_rotated' }))
+    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
+    expect(cfg.oauth_refresh_token).toBe('rt_rotated')
+    expect(cfg.instance_id).toBe('shared-with-copilot-lane') // unrelated field survived
+  })
+
+  it('a state-dir write failure does not fail the whole redeem (settings.json still lands)', () => {
+    // Point the state dir at a path that cannot be created (a FILE sits where
+    // the dir needs to go) — writeSharedCredentialStore must swallow this.
+    const blocker = join(dir, 'blocked-state')
+    writeFileSync(blocker, 'not a directory')
+    process.env.TOKENSCOPE_STATE_DIR = blocker
+    const path = join(dir, 'settings.json')
+    expect(() => writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))).not.toThrow()
+    expect(JSON.parse(readFileSync(path, 'utf8')).env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBe('rt_super_secret')
+  })
+
+  it('writeSharedCredentialStore is a no-op when there is no refresh token to store', () => {
+    const stateDirPath = join(dir, 'no-token-state')
+    writeSharedCredentialStore(undefined, stateDirPath)
+    expect(existsSync(stateDirPath)).toBe(false)
   })
 })
 

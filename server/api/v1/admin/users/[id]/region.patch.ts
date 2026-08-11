@@ -11,6 +11,13 @@
  * Re-scoping a teammate changes what they can see, so we bump `revoked_at`
  * (their existing cookie 401s on its next request and they re-login into the
  * new scope) — same auto-revoke contract as the role-change PATCH.
+ *
+ * S3: when `org_unit_id` is omitted, the target lands on the target region's
+ * `__UNPLACED__` holding node (server/auth/placement-home.ts), NOT "the
+ * lexicographically-first unit" — that was the region ROOT (ltree sorts a
+ * region's root before its children), whose subtree is the whole region, so an
+ * admin re-homing someone without picking a unit silently handed them the
+ * whole target region's scope.
  */
 import { createError, defineEventHandler, getRouterParam } from 'h3'
 import { readValidated } from '../../../../../utils/validated-body'
@@ -20,6 +27,7 @@ import { requireRole } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
+import { unplacedOrgUnitIdForRegion } from '../../../../../auth/placement-home'
 
 const Body = z.object({
   region_id: z.string().uuid(),
@@ -49,8 +57,8 @@ export default defineEventHandler(async (event) => {
     if ([...regionRows].length === 0) throw createError({ statusCode: 422, statusMessage: 'Unknown region' })
 
     // Resolve the home org_unit in the target region: the explicit one (must
-    // belong to that region) or the lexicographically-first unit (the same
-    // default JIT teammate-creation uses).
+    // belong to that region) or the region's __UNPLACED__ holding node — a real,
+    // least-privilege placement rather than a guess at a real BU (S3).
     let orgUnitId = body.org_unit_id
     if (orgUnitId) {
       const ouRows = await tx.execute<{ id: string }>(sql`
@@ -58,12 +66,7 @@ export default defineEventHandler(async (event) => {
       `)
       if ([...ouRows].length === 0) throw createError({ statusCode: 422, statusMessage: 'org_unit not in target region' })
     } else {
-      const ouRows = await tx.execute<{ id: string }>(sql`
-        SELECT id::text AS id FROM org_unit WHERE region_id = ${body.region_id}::uuid ORDER BY path LIMIT 1
-      `)
-      const ou = [...ouRows][0]
-      if (!ou) throw createError({ statusCode: 422, statusMessage: 'Target region has no org_unit' })
-      orgUnitId = ou.id
+      orgUnitId = await unplacedOrgUnitIdForRegion(tx, body.region_id)
     }
 
     await recordAuditEvent(tx, {

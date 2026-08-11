@@ -24,7 +24,7 @@
  */
 import 'dotenv/config'
 import { drizzle } from 'drizzle-orm/postgres-js'
-import postgres from 'postgres'
+import { createDbClient } from '../drizzle/connect'
 import * as schema from '../drizzle/schema'
 import { getWorker, listWorkerNames, WORKERS, type WorkerRunContext } from '../server/workers/registry'
 import { workerOptsSchema } from '../server/workers/run-worker-opts'
@@ -75,7 +75,7 @@ async function main() {
     console.error('DATABASE_URL not set')
     process.exit(2)
   }
-  const client = postgres(url)
+  const client = createDbClient(url)
   const db = drizzle(client, { schema })
   const startedAt = Date.now()
   try {

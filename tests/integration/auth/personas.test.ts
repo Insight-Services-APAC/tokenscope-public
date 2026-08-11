@@ -29,7 +29,7 @@ describe('demo personas', () => {
     expect(getPersona('developer')?.landing).toBe('/')
     // Reporting cutover: the former Team/Finance/CC landing pages collapsed into
     // the /reporting scopes, so the persona landings point at those scopes now.
-    expect(getPersona('manager')?.landing).toBe('/reporting?scope=regional')
+    expect(getPersona('manager')?.landing).toBe('/reporting?scope=region')
     expect(getPersona('admin')?.landing).toBe('/admin')
     expect(getPersona('finance')?.landing).toBe('/reporting?scope=finance')
     expect(getPersona('cc-owner')?.landing).toBe('/reporting?scope=cost-centre')

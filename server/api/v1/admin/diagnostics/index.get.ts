@@ -19,6 +19,13 @@ import { sql } from 'drizzle-orm'
 import { requireRole } from '../../../../auth/rbac'
 import { withRequestRls } from '../../../../db/request-rls'
 import { getTelemetryReader, type ReaderHealth } from '../../../../azure/reader'
+import {
+  classifyDispatchDuration,
+  dispatchBudgetReason as dispatchBudgetReasonFor,
+  DISPATCH_TIMEOUT_MS,
+  type DispatchBudgetState,
+} from '#shared/workers/dispatch-budget'
+import { classifyProbeError } from '../../../../utils/redact-probe-error'
 // Canonical probe module — also run at boot by the entrypoint pre-flight.
 // Lives in scripts/ (raw in the runtime image); nitro bundles it here at build.
 import { probeServices, type ServiceProbe } from '../../../../../scripts/preflight'
@@ -48,6 +55,7 @@ export default defineEventHandler(async (event) => {
   const pgStart = Date.now()
   let pgReachable = false
   let pgError: string | null = null
+  let pgErrorCorrelationId: string | null = null
   let activeMigration: string | null = null
   try {
     await withRequestRls(event, async (tx) => {
@@ -76,7 +84,9 @@ export default defineEventHandler(async (event) => {
       }
     })
   } catch (err) {
-    pgError = err instanceof Error ? err.message : String(err)
+    const classified = classifyProbeError(err, 'diagnostics:postgres')
+    pgError = classified.reason
+    pgErrorCorrelationId = classified.correlationId
   }
   const pgLatencyMs = Date.now() - pgStart
 
@@ -161,27 +171,56 @@ export default defineEventHandler(async (event) => {
     // Non-fatal — leave as unknown.
   }
 
-  // ── Cost drift (rate-card vs Claude's own cost_usd, mig 0045) ──────
-  // v_cost_drift compares our SUM(rate-card cost) against MAX(law cost) per
-  // span for spans that captured metadata.law_cost_usd (post-0045 emission
-  // only). A creeping mean drift = the rate card is stale — caught here
-  // before reconciliation books the gap. 7-day window keeps the scan cheap
-  // and recent-biased.
+  // ── Cost drift (our rate-card estimate vs the provider, migs 0045/0091) ──
+  // v_cost_drift compares our rate-card ESTIMATE against the PROVIDER's own
+  // figure, per span, across both cost vintages: pre-cutover rows where
+  // cost_usd is the estimate, and provider-priced rows where cost_usd is the
+  // provider's number and the estimate rides in metadata.rate_card_cost_usd
+  // (mig 0091 owns that branching; this endpoint just reads the columns).
+  // A creeping mean drift = the rate card is stale — caught here before
+  // reconciliation books the gap. 7-day window keeps the scan cheap and
+  // recent-biased, and prunes to one or two monthly partitions.
+  //
+  // NOTE the drift card and the costing-rung card below answer DIFFERENT
+  // questions and must not be conflated: drift asks "how wrong is the rate
+  // card", rungs ask "did we have to USE it". A fleet can be entirely
+  // provider-priced (rungs green) while drift is 50% — that is the healthy
+  // state, and it is exactly the number the rate card is still needed for
+  // (slicing a span total across token types).
   let costDrift: {
     spansCompared: number
     meanAbsDriftPct: number | null
-    worstSpan: { spanKey: string; model: string; rateCardCostUsd: string; lawCostUsd: string; driftUsd: string } | null
-  } = { spansCompared: 0, meanAbsDriftPct: null, worstSpan: null }
+    /** Per-vintage split of spansCompared — 'mixed' spans count as provider. */
+    providerPricedSpans: number
+    rateCardPricedSpans: number
+    worstSpan: {
+      spanKey: string
+      model: string
+      rateCardCostUsd: string
+      lawCostUsd: string
+      driftUsd: string
+      pricedBy: string
+    } | null
+  } = {
+    spansCompared: 0,
+    meanAbsDriftPct: null,
+    providerPricedSpans: 0,
+    rateCardPricedSpans: 0,
+    worstSpan: null,
+  }
   try {
     const rows = await withRequestRls(event, async (tx) =>
       tx.execute<{
         spans: string
+        provider_spans: string
+        rate_card_spans: string
         mean_abs_pct: string | null
         span_key: string | null
         model: string | null
         rate_card_cost_usd: string | null
         law_cost_usd: string | null
         drift_usd: string | null
+        priced_by: string | null
       }>(sql`
         WITH windowed AS (
           SELECT * FROM v_cost_drift
@@ -192,11 +231,14 @@ export default defineEventHandler(async (event) => {
         )
         SELECT
           (SELECT COUNT(*) FROM windowed)::text AS spans,
+          (SELECT COUNT(*) FROM windowed WHERE priced_by <> 'rate-card')::text AS provider_spans,
+          (SELECT COUNT(*) FROM windowed WHERE priced_by = 'rate-card')::text AS rate_card_spans,
           (SELECT AVG(ABS(drift_usd) / law_cost_usd) * 100 FROM windowed)::text AS mean_abs_pct,
           w.span_key, w.model,
           w.rate_card_cost_usd::text AS rate_card_cost_usd,
           w.law_cost_usd::text AS law_cost_usd,
-          w.drift_usd::text AS drift_usd
+          w.drift_usd::text AS drift_usd,
+          w.priced_by
         FROM (SELECT 1) one
         LEFT JOIN worst w ON TRUE
       `),
@@ -207,6 +249,8 @@ export default defineEventHandler(async (event) => {
       spansCompared: spans,
       meanAbsDriftPct:
         r?.mean_abs_pct != null ? Number(Number(r.mean_abs_pct).toFixed(2)) : null,
+      providerPricedSpans: Number(r?.provider_spans ?? 0),
+      rateCardPricedSpans: Number(r?.rate_card_spans ?? 0),
       worstSpan:
         spans > 0 && r?.span_key != null
           ? {
@@ -215,11 +259,163 @@ export default defineEventHandler(async (event) => {
               rateCardCostUsd: r.rate_card_cost_usd ?? '0',
               lawCostUsd: r.law_cost_usd ?? '0',
               driftUsd: r.drift_usd ?? '0',
+              pricedBy: r.priced_by ?? 'unknown',
             }
           : null,
     }
   } catch {
     // Non-fatal — pre-0045 DBs have no view/rows; leave the zero shape.
+  }
+
+  // ── Costing rungs (which rung priced real spend) ───────────────────
+  // docs/design/provider-cost-precedence.md §"Making it visible": the ladder is
+  //   1. the provider's reported cost   2. the rate card   3. skip the span
+  // and "a healthy fleet is ENTIRELY provider. Any other rung costing a real
+  // span is unexpected enough to ALERT on, not merely to count."
+  //
+  // Sourced from attribution_record.cost_basis, NOT from the joiner's per-run
+  // costingRungs counters: those are transient (they live for the length of one
+  // worker run and are gone), while cost_basis is the persisted, queryable truth
+  // and survives a restart, a redeploy and a missed alert. A rung that fired
+  // three days ago is still visible here; the counter is not.
+  //
+  // Grain is the SPAN, not the row: one api_request explodes into up to four
+  // token-type rows, and counting rows would make a cache-heavy span look four
+  // times as alarming as a plain one. Same span key the drift view groups on.
+  //
+  // Scoped to tool='claude-code'. Copilot is untouched by the provider-cost
+  // change — it is priced from AI credits and never used a rate card (design
+  // §"Where cost comes from") — so including it would park a permanent
+  // non-provider bucket on the card and train operators to ignore red.
+  //
+  // Region admins see their own region (same explicit filter the pipeline block
+  // uses: the RLS policy treats 'admin' as org-wide, so scoping is the app's job).
+  const regionAnd =
+    session.role === 'admin' ? sql`AND region_id = ${session.regionId}::uuid` : sql``
+  const COSTING_WINDOW_DAYS = 7
+  let costingRungs: {
+    windowDays: number
+    spans: number
+    provider: number
+    rateCard: number
+    other: number
+    /**
+     * provider + rateCard — the spans the LADDER actually priced, and the
+     * denominator of rateCardPct. See the comment where it is computed.
+     */
+    ladderSpans: number
+    rateCardPct: number | null
+    fallbackModels: { model: string; spans: number }[]
+  } = {
+    windowDays: COSTING_WINDOW_DAYS,
+    spans: 0,
+    provider: 0,
+    rateCard: 0,
+    other: 0,
+    ladderSpans: 0,
+    rateCardPct: null,
+    fallbackModels: [],
+  }
+  try {
+    const rows = await withRequestRls(event, async (tx) =>
+      tx.execute<{
+        spans: string
+        provider_spans: string
+        rate_card_spans: string
+        other_spans: string
+        fallback_models: { model: string; spans: number }[] | null
+      }>(sql`
+        WITH span AS (
+          SELECT
+            MAX(model) AS model,
+            -- A span is provider-priced if ANY of its rows says so; the rows of
+            -- one api_request are priced together, and a half-and-half span
+            -- (written across the cutover) is a provider span with stragglers,
+            -- not a fallback.
+            --
+            -- DELIBERATELY NARROWER THAN v_cost_drift's predicate, which also
+            -- treats a NULL rate_card_id as provider-priced (mig 0091). The two
+            -- want opposite failure directions. The view's risk is a
+            -- TAUTOLOGICAL ZERO — reading a provider figure as an estimate and
+            -- reporting no drift — so it detects broadly. This counter's risk is
+            -- a FALSE GREEN: claiming the provider priced a span it did not,
+            -- which would silence the alert the design exists to raise. So it
+            -- believes only the explicit marker. The cost of the narrower test
+            -- is that a backfilled provider-priced span (cost_basis carries
+            -- 'telemetry-only' for that provenance, not the rung) lands in the
+            -- "other" bucket rather than "provider" — an undercount that can
+            -- only make the card noisier, never quieter.
+            bool_or(cost_basis = 'provider-reported') AS any_provider,
+            -- 'estimated' is the rate-card rung. Anything else that is not
+            -- provider-reported ('telemetry-only' backfill provenance) is
+            -- neither rung and lands in the "other" bucket rather than being
+            -- silently folded into the alerting one.
+            bool_or(cost_basis = 'estimated') AS any_estimated
+          FROM attribution_record
+          WHERE tool = 'claude-code'
+            AND ts_event >= now() - make_interval(days => ${COSTING_WINDOW_DAYS}::int)
+            ${regionAnd}
+          GROUP BY instance_id, COALESCE(claude_session_id, ''), ts_event, COALESCE(source_run_id, '')
+        ),
+        totals AS (
+          SELECT
+            COUNT(*)::text AS spans,
+            COUNT(*) FILTER (WHERE any_provider)::text AS provider_spans,
+            COUNT(*) FILTER (WHERE NOT any_provider AND any_estimated)::text AS rate_card_spans,
+            COUNT(*) FILTER (WHERE NOT any_provider AND NOT any_estimated)::text AS other_spans
+          FROM span
+        ),
+        fallback AS (
+          SELECT model, COUNT(*)::int AS spans
+          FROM span
+          WHERE NOT any_provider AND any_estimated
+          GROUP BY model
+          ORDER BY COUNT(*) DESC, model
+          LIMIT 5
+        )
+        SELECT
+          t.spans, t.provider_spans, t.rate_card_spans, t.other_spans,
+          COALESCE(
+            (SELECT json_agg(json_build_object('model', f.model, 'spans', f.spans)) FROM fallback f),
+            '[]'::json
+          ) AS fallback_models
+        FROM totals t
+      `),
+    )
+    const r = [...rows][0]
+    const spans = Number(r?.spans ?? 0)
+    const rateCard = Number(r?.rate_card_spans ?? 0)
+    const provider = Number(r?.provider_spans ?? 0)
+    /*
+     * DENOMINATOR = provider + rateCard, NOT every span in the window.
+     *
+     * The question this figure answers is "of the spans the precedence ladder
+     * priced, what share did our own rate card have to price?" — so only the two
+     * ladder buckets belong underneath it. The `other` bucket is neither rung:
+     * it is backfill provenance (cost_basis 'telemetry-only'), and a backfill
+     * campaign is exactly the kind of thing an operator kicks off during an
+     * incident. Counting it in the denominator would let heavy backfill traffic
+     * mechanically shrink this percentage while the number of real fallbacks was
+     * unchanged or rising — softening the alert precisely when it is most needed.
+     * `spans`, `provider`, `rateCard` and `other` are all still reported, so the
+     * broader share is one subtraction away for anyone who wants it.
+     */
+    const ladderSpans = provider + rateCard
+    costingRungs = {
+      windowDays: COSTING_WINDOW_DAYS,
+      spans,
+      provider,
+      rateCard,
+      other: Number(r?.other_spans ?? 0),
+      ladderSpans,
+      rateCardPct: ladderSpans > 0 ? Number(((rateCard / ladderSpans) * 100).toFixed(2)) : null,
+      fallbackModels: (r?.fallback_models ?? []).map((m) => ({
+        model: m.model,
+        spans: Number(m.spans),
+      })),
+    }
+  } catch {
+    // Non-fatal — leave the zero shape (an env with no attribution rows yet).
   }
 
   // ── Worker execution health (outcome of each dispatch) ────────────
@@ -255,6 +451,17 @@ export default defineEventHandler(async (event) => {
     startedAgeMinutes: number | null
     consecutiveFailures: number
     rag: 'ok' | 'failing' | 'stale' | 'unknown'
+    /**
+     * How the last run's duration sits against the dispatch budget. The ledger
+     * and the platform disagree about a worker that OVERRUNS: the work finished
+     * and wrote `success` here, while the cron trigger gave up waiting and the
+     * platform recorded a FAILED execution and retried. Without this, that
+     * worker reads `ok` on this card and red in Azure, and only someone holding
+     * both views can tell. Null when the duration is unknown.
+     */
+    dispatchBudget: DispatchBudgetState | null
+    /** Plain-language reason when dispatchBudget is 'near' or 'over'. */
+    dispatchBudgetReason: string | null
   }[] = []
   // A 'running' row older than this is treated as wedged/killed (failing) — the
   // run never transitioned. Well past the 240s replica timeout so a genuinely
@@ -326,16 +533,26 @@ export default defineEventHandler(async (event) => {
             ? 'failing'
             : 'ok'
       } else rag = 'unknown'
+      // Non-finite collapses to null, not NaN. Two reasons: the SSR payload is
+      // serialised with devalue, which preserves NaN faithfully all the way to a
+      // rendered "NaNms" (plain JSON would have turned it into null); and leaving it
+      // would let durationMs claim a value while dispatchBudget below says null —
+      // two fields on the same row disagreeing about whether the duration is known.
+      const rawDuration = r.duration_ms == null ? null : Number(r.duration_ms)
+      const durationMs = rawDuration != null && Number.isFinite(rawDuration) ? rawDuration : null
+      const dispatchBudget = classifyDispatchDuration(durationMs)
       return {
         worker: r.worker_name,
         status: r.status,
         finishedAt: r.finished_at,
         startedAt: r.started_at ?? null,
-        durationMs: r.duration_ms == null ? null : Number(r.duration_ms),
+        durationMs,
         ageMinutes: ageMin(r.finished_at ?? r.started_at),
         startedAgeMinutes,
         consecutiveFailures,
         rag,
+        dispatchBudget,
+        dispatchBudgetReason: dispatchBudgetReasonFor(dispatchBudget, durationMs),
       }
     })
   } catch {
@@ -353,7 +570,9 @@ export default defineEventHandler(async (event) => {
   // (LAW can't be meaningfully TCP-probed — its public frontend would mislead).
   // Both are bounded + non-throwing so a wedged dependency can't 500 or stall
   // this admin page beyond the probe timeout.
-  type TelemetryReadResult = ReaderHealth | { ok: false; kind: 'unknown'; latencyMs: null; error: string }
+  type TelemetryReadResult =
+    | ReaderHealth
+    | { ok: false; kind: 'unknown'; latencyMs: null; error: string; correlationId: string }
   // Short timeouts (5s, incl. critical) for this INTERACTIVE page — the 30s
   // critical default is for boot (aligned with the migrate client), not a
   // human-facing request that must not hang on a wedged endpoint.
@@ -364,7 +583,8 @@ export default defineEventHandler(async (event) => {
       try {
         return await getTelemetryReader().healthCheck()
       } catch (err) {
-        return { ok: false, kind: 'unknown', latencyMs: null, error: err instanceof Error ? err.message : String(err) }
+        const { reason, correlationId } = classifyProbeError(err, 'diagnostics:telemetry-read')
+        return { ok: false, kind: 'unknown', latencyMs: null, error: reason, correlationId }
       }
     })(),
   ])
@@ -374,7 +594,7 @@ export default defineEventHandler(async (event) => {
       reachable: pgReachable,
       latencyMs: pgLatencyMs,
       activeMigration,
-      ...(pgError ? { error: pgError } : {}),
+      ...(pgError ? { error: pgError, errorCorrelationId: pgErrorCorrelationId } : {}),
     },
     redis,
     queues,
@@ -382,7 +602,12 @@ export default defineEventHandler(async (event) => {
     telemetryRead,
     pipeline,
     costDrift,
+    costingRungs,
     workers,
+    // The budget each worker's duration is judged against, so the card can name
+    // the threshold instead of hard-coding a number that would drift from the
+    // bicep the moment either changed.
+    dispatchBudgetMs: DISPATCH_TIMEOUT_MS,
     lastSync,
     nodeEnv: process.env.NODE_ENV ?? 'development',
     containerInfo: {

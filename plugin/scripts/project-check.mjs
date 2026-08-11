@@ -26,6 +26,8 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { resolveRepoProjectCode, computeCodeHash } from './tag-repo.mjs'
+import { stateDir as resolveStateDir } from './plugin-runtime.mjs'
+import { assertSafeEndpoint } from './endpoint-guard.mjs'
 
 const TIMEOUT_MS = 4000
 
@@ -42,8 +44,15 @@ function readJson(p) {
  * never throws. status ∈ 'ok' | 'not-billable' | 'unverifiable' | 'no-tag'.
  * @param {{ env?: Record<string,string>, cwd?: string, stateDir?: string, timeoutMs?: number }} opts
  */
-export async function checkRepoProjectBillable({ env = {}, cwd = process.cwd(), stateDir, timeoutMs = TIMEOUT_MS } = {}) {
-  const dir = stateDir || env.TOKENSCOPE_STATE_DIR || process.env.TOKENSCOPE_STATE_DIR || join(homedir(), '.tokenscope')
+export async function checkRepoProjectBillable({
+  env = {},
+  cwd = process.cwd(),
+  stateDir,
+  timeoutMs = TIMEOUT_MS,
+} = {}) {
+  // S1 fix 2: route through the shared stateDir() resolver — see landed-check.mjs's
+  // identical note; one deletion (safeProcessEnv / repoTagEnv) then covers this too.
+  const dir = stateDir || resolveStateDir(env)
   const attrs = env.OTEL_RESOURCE_ATTRIBUTES || process.env.OTEL_RESOURCE_ATTRIBUTES || ''
   const instanceId = attrs.match(/tokenscope\.instance_id=([^,]+)/)?.[1]
   // The hash THIS session is actually emitting (frozen at process start), if tagged.
@@ -71,13 +80,22 @@ export async function checkRepoProjectBillable({ env = {}, cwd = process.cwd(), 
   const hashToCheck = emittingHash || committedHash
   const scope = emittingHash ? 'emitting' : 'committed'
 
-  const bearerEndpoint = env.TOKENSCOPE_BEARER_ENDPOINT || process.env.TOKENSCOPE_BEARER_ENDPOINT || ''
+  const bearerEndpoint =
+    env.TOKENSCOPE_BEARER_ENDPOINT || process.env.TOKENSCOPE_BEARER_ENDPOINT || ''
   if (!bearerEndpoint || !instanceId) return { status: 'unverifiable', reason: 'not-configured' }
 
   // .../instances/{id}/bearer  →  .../instances/{id}/project-resolve?code_hash=…
   const base = bearerEndpoint.replace(/\/bearer(\?.*)?$/, '/project-resolve')
   if (base === bearerEndpoint) return { status: 'unverifiable', reason: 'bad-endpoint' }
   const url = `${base}?code_hash=${encodeURIComponent(hashToCheck)}`
+  // S1 fix 3: validate before the fetch (defence-in-depth backstop). Loopback
+  // allowed: local-dev TOKENSCOPE_API_BASE (:3450) legitimately returns a
+  // loopback bearer endpoint.
+  try {
+    assertSafeEndpoint(url, { allowLoopback: true })
+  } catch {
+    return { status: 'unverifiable', reason: 'bad-endpoint' }
+  }
 
   const access = readJson(join(dir, 'oauth-access.json'))
   const token = access?.access_token || access?.accessToken || access?.token
@@ -129,5 +147,7 @@ export async function checkRepoProjectBillable({ env = {}, cwd = process.cwd(), 
 // CLI: classify using the global settings.json env (best-effort, prints the result).
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const settings = readJson(join(homedir(), '.claude', 'settings.json'))
-  checkRepoProjectBillable({ env: settings?.env || {} }).then((r) => process.stdout.write(`${JSON.stringify(r)}\n`))
+  checkRepoProjectBillable({ env: settings?.env || {} }).then((r) =>
+    process.stdout.write(`${JSON.stringify(r)}\n`),
+  )
 }

@@ -8,6 +8,7 @@ export const INBOX_CATEGORIES = [
   'over-attribution',
   'structural-conflict',
   'connector-health',
+  'personal-subscription-prompt',
 ] as const
 
 export const INBOX_SEVERITIES = ['info', 'attention', 'urgent'] as const

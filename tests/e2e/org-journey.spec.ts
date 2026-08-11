@@ -18,7 +18,7 @@ const baseUrl = process.env.BASE_URL || 'http://localhost:3450'
 const LANDING: Record<string, string> = {
   'cc-owner': '/cost-centres',
   developer: '/',
-  manager: '/rollups',
+  manager: '/reporting?scope=region',
   admin: '/admin',
 }
 
@@ -74,6 +74,7 @@ test.describe('Region admin — owner assignment (J4)', () => {
     await page.goto(`${baseUrl}/admin/regions`)
     await page.click('[data-testid="region-manage-demo"]')
     await page.waitForURL(/\/admin\/regions\/.+/)
+    await page.waitForLoadState('networkidle')
 
     await expect(page.locator('[data-testid="cc-owners-delta"]')).toContainText('Owen Cole')
     await expect(page.locator('[data-testid="cc-owners-foxtrot"]')).toContainText('No owner')
@@ -91,11 +92,11 @@ test.describe('Region admin — owner assignment (J4)', () => {
 
     await page.click('[data-testid="cc-owners-open-foxtrot"]')
     await expect(page.locator('[data-testid="cou-owners-modal"]')).toBeVisible()
-    await page.fill('[data-testid="cou-owners-search"]', 'aarti')
+    await page.fill('[data-testid="cou-owners-search"]', 'sasha')
     const assignBtn = page.locator('[data-testid^="cou-owners-assign-"]').first()
     await assignBtn.waitFor()
     await assignBtn.click()
-    await expect(page.locator('[data-testid="cou-owners-list"]')).toContainText('Aarti Shah')
+    await expect(page.locator('[data-testid="cou-owners-list"]')).toContainText('Sasha Kumar')
 
     // Revoke to restore seed state for the rest of the suite.
     await page.locator('[data-testid^="cou-owners-revoke-"]').first().click()

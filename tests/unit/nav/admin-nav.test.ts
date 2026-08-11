@@ -2,6 +2,8 @@
  * admin-nav — the shared admin IA. Tests the pure matchers/access logic the
  * sidebar + breadcrumb derivation depend on (no Vue/Nuxt runtime).
  */
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import {
   ADMIN_NAV,
@@ -10,6 +12,46 @@ import {
   groupForItem,
   roleMeetsAccess,
 } from '../../../shared/nav/admin-nav'
+
+/** Every .vue file under `dir`, recursively, as absolute paths. */
+function readdirSyncRecursive(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const full = resolve(dir, e.name)
+    if (e.isDirectory()) return readdirSyncRecursive(full)
+    return e.name.endsWith('.vue') ? [full] : []
+  })
+}
+
+describe('every admin page opts into the admin route middleware', () => {
+  // `middleware: 'admin'` is what enforces the navigation boundary. The API is a
+  // second gate, but without this a non-admin reaches the page and renders its
+  // empty states as if they were the truth. All 23 admin pages carried it and the
+  // 24th did not -- a convention with no guard is a convention that drifts.
+  const adminPages = readdirSyncRecursive(resolve(__dirname, '../../../app/pages/admin'))
+
+  it('finds admin pages to check', () => {
+    expect(adminPages.length).toBeGreaterThan(10)
+  })
+
+  it.each(adminPages)('%s declares middleware: admin', (file) => {
+    expect(readFileSync(file, 'utf8')).toMatch(/middleware:\s*'admin'/)
+  })
+})
+
+describe('every nav item points at a page that exists', () => {
+  // The nav is hand-maintained and the router resolves at runtime, so a typo or a
+  // link added ahead of its page ships a dead entry that only a human clicking it
+  // would find. Same silent-gap shape as a worker registered without a cron.
+  const pagesRoot = resolve(__dirname, '../../../app/pages')
+
+  it.each(allAdminNavItems().map((i) => [i.label, i.to] as const))('%s -> %s', (_label, to) => {
+    const path = String(to).split('?')[0]!.replace(/^\/+|\/+$/g, '')
+    // Nuxt resolves `/admin/foo` to either `admin/foo.vue` or `admin/foo/index.vue`.
+    const candidates = [`${path}.vue`, `${path}/index.vue`]
+    const found = candidates.some((c) => existsSync(resolve(pagesRoot, c)))
+    expect(found, `no page file for ${to} (looked for ${candidates.join(', ')})`).toBe(true)
+  })
+})
 
 describe('matchAdminNavItem — longest-prefix active item', () => {
   it('maps the hub root to Overview', () => {

@@ -25,29 +25,24 @@ import { LogAnalyticsReader, serializeQueryError } from '../../../../azure/reade
 const QuerySchema = z.object({
   hours: z.coerce.number().int().min(1).max(168).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
-  // Optional query-endpoint override to TEST the Private Link path live, e.g.
-  // ?endpoint=https://api.monitor.azure.com (the LA query endpoint over AMPLS).
-  // Restricted to https monitor.azure.<tld> hosts so this can't be pointed at an
-  // arbitrary server.
-  endpoint: z
-    .string()
-    .url()
-    .refine((u) => {
-      try {
-        const { protocol, hostname } = new URL(u)
-        return protocol === 'https:' && /(^|\.)monitor\.azure\.[a-z]{2,}$/.test(hostname)
-      } catch {
-        return false
-      }
-    }, 'endpoint must be an https monitor.azure.<tld> host')
-    .optional(),
+  // NO caller-supplied query-endpoint override. There used to be one here
+  // ("test the Private Link path live"), allowlisted by a hostname regex
+  // (`/(^|\.)monitor\.azure\.[a-z]{2,}$/`) — but that regex classifies a
+  // STRING, and a wildcard TLD is not a network boundary: it let a caller
+  // steer this Managed-Identity-authenticated outbound query at any host
+  // matching the pattern. reader.ts's own comment records that the override
+  // was added on wrong guidance and that the SDK default already reaches the
+  // private AMPLS path — it "MUST be left empty on dev/sandbox". The fix is
+  // to remove the parameter, not to tighten the regex: the reader's
+  // env-sourced `queryEndpoint` option stays for real overrides that need a
+  // deploy to change.
 })
 
 export default defineEventHandler(async (event) => {
   // Platform-admin only — raw error/result packets are exposed here.
   await requireRole(event, 'platform-admin')
 
-  const { hours, limit, endpoint } = await getValidated(event, QuerySchema)
+  const { hours, limit } = await getValidated(event, QuerySchema)
 
   const workspaceId = process.env.NUXT_LOG_ANALYTICS_WORKSPACE_ID
   const miClientId = process.env.NUXT_AZURE_MI_CLIENT_ID
@@ -74,14 +69,17 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  // ?endpoint= override (test-only) takes precedence over the env-configured one.
-  const queryEndpoint = endpoint ?? process.env.NUXT_AZURE_MONITOR_QUERY_ENDPOINT
+  const queryEndpoint = process.env.NUXT_AZURE_MONITOR_QUERY_ENDPOINT
   const reader = new LogAnalyticsReader(workspaceId, { miClientId, queryEndpoint })
 
   // Never swallow: even an unexpected throw is returned raw (200 with the error
   // packet) so the operator always gets something pasteable.
   try {
-    const result = await reader.diagnosticOtelLogs({ hours, limit })
+    // `workspaceId` deliberately stripped from the spread: the UI's
+    // `config.workspaceIdSet` boolean already answers "is a workspace
+    // configured" without echoing the GUID itself.
+    const { workspaceId: _workspaceId, ...result } = await reader.diagnosticOtelLogs({ hours, limit })
+    void _workspaceId
     return { config, ...result }
   } catch (err) {
     return { config, fatalError: serializeQueryError(err) }

@@ -474,35 +474,36 @@ describe('GET /api/v1/admin/settings — build.commitSha (Wave VII)', () => {
 
   beforeEach(() => {
     delete process.env.GIT_COMMIT_SHA
-    delete process.env.CONTAINER_APP_REVISION
   })
 
   it('GIT_COMMIT_SHA set to a real SHA → surfaces it', async () => {
     process.env.GIT_COMMIT_SHA = 'abc1234deadbeef'
-    process.env.CONTAINER_APP_REVISION = 'ca-tokenscope--abcdef'
     const handler = await loadHandler()
     const ev = makeEvent({
       path: `/api/v1/admin/settings`,
       initialSession: adminASession(),
     })
     const result = (await handler(ev as never)) as {
-      build: { commitSha: string | null; imageTag: string | null }
+      build: { commitSha: string | null }
     }
     expect(result.build.commitSha).toBe('abc1234deadbeef')
-    expect(result.build.imageTag).toBe('ca-tokenscope--abcdef')
+    // S8 (7390960) dropped `build.imageTag` (CONTAINER_APP_REVISION) from the
+    // payload entirely — commitSha already answers "what is deployed", so
+    // the revision name was redundant infrastructure detail. No imageTag
+    // assertion belongs here any more.
+    expect(result.build).not.toHaveProperty('imageTag')
   })
 
-  it('GIT_COMMIT_SHA absent → commitSha=null + imageTag=null (UI shows "unknown")', async () => {
+  it('GIT_COMMIT_SHA absent → commitSha=null (UI shows "unknown")', async () => {
     const handler = await loadHandler()
     const ev = makeEvent({
       path: `/api/v1/admin/settings`,
       initialSession: adminASession(),
     })
     const result = (await handler(ev as never)) as {
-      build: { commitSha: string | null; imageTag: string | null }
+      build: { commitSha: string | null }
     }
     expect(result.build.commitSha).toBeNull()
-    expect(result.build.imageTag).toBeNull()
   })
 
   it('GIT_COMMIT_SHA = "unknown" (Dockerfile ARG default with no override) → normalised to null', async () => {

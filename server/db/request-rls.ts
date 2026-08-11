@@ -11,17 +11,18 @@
  */
 import type { H3Event } from 'h3'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
+import type * as schema from '../../drizzle/schema'
 import { getDb } from './index'
 import { requireAuth } from '../utils/auth'
 import { withRlsContext } from './rls'
 
 export async function withRequestRls<T>(
   event: H3Event,
-  fn: (tx: PostgresJsDatabase<Record<string, unknown>>) => Promise<T>,
+  fn: (tx: PostgresJsDatabase<typeof schema>) => Promise<T>,
 ): Promise<T> {
   const session = await requireAuth(event)
   return withRlsContext(
-    getDb() as unknown as PostgresJsDatabase<Record<string, unknown>>,
+    getDb(),
     {
       userRegionId: session.regionId,
       userOrgPath: session.orgPath,

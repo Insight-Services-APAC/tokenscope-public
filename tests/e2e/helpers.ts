@@ -13,7 +13,7 @@ export type Persona = 'developer' | 'manager' | 'admin' | 'finance'
 // still target the old pages — flagged for a follow-up rewrite against /reporting).
 const LANDING_BY_PERSONA: Record<Persona, string> = {
   developer: '/',
-  manager: '/reporting?scope=regional',
+  manager: '/reporting?scope=region',
   admin: '/admin',
   finance: '/reporting?scope=finance',
 }

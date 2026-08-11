@@ -88,12 +88,47 @@ describe('over-emission (§A integrity)', () => {
     expect(res.flagged).toBe(0)
   })
 
-  it('does NOT flag a teammate with OTel but NO API bill (org not reconciled — absence ≠ forgery)', async () => {
+  it('does NOT flag a teammate with OTel but NO API bill (org not reconciled — absence ≠ forgery); (A) the SEPARATE no-bill lane DOES pick it up above its floor', async () => {
     // No actual_spend at all for this day (the Anthropic org isn't reconciled), only OTel.
-    // api=0 must NOT read as "uncorroborated $X" — caught in sandbox validation.
+    // api=0 must NOT read as "uncorroborated $X" in the high-confidence lane — caught in
+    // sandbox validation. But (A): a fully-unreconciled org with a LARGE OTel total was
+    // previously invisible to BOTH lanes — $300 clears OVER_EMISSION_NO_BILL_FLOOR_USD
+    // ($250), so the separate, lower-confidence lane flags it while the existing flag
+    // stays untouched (never merged).
     await otelSession('sess-noapi', '300.00')
     const res = await detectOverEmission(t.db, WINDOW)
     expect(res.flagged).toBe(0)
+    expect(res.totalOverUsd).toBe(0)
+    expect(res.noBillFlagged).toBe(1)
+    expect(res.totalNoBillUsd).toBeCloseTo(300, 2)
+    // NOT written to over_emission — over_emission has no `reason` column to
+    // distinguish this weaker-evidence lane (adding one is a migration outside
+    // this story's ownership; see the PERSISTENCE GAP note in
+    // over-emission-detection.ts). The gap is measured + returned, not silently
+    // dropped, but nothing lands in the table for it yet.
+    const rows = await t.client<{ id: string }[]>`SELECT id FROM over_emission WHERE teammate_id = ${teammateId}::uuid`
+    expect(rows).toHaveLength(0)
+  })
+
+  it('(A) below the no-bill floor: the lower-confidence lane stays silent too (an unreconciled org must not read every small OTel total as a suspected forger)', async () => {
+    await otelSession('sess-noapi-small', '100.00') // < OVER_EMISSION_NO_BILL_FLOOR_USD (250)
+    const res = await detectOverEmission(t.db, WINDOW)
+    expect(res.flagged).toBe(0)
+    expect(res.noBillFlagged).toBe(0)
+    expect(res.totalNoBillUsd).toBe(0)
+  })
+
+  it('(A) a still-settling recent day is exempt from the no-bill lane too (same settled-bill guard)', async () => {
+    const recent = new Date(`${WINDOW.endDate}T00:00:00Z`)
+    recent.setUTCDate(recent.getUTCDate() - 1)
+    const recentDay = recent.toISOString().slice(0, 10)
+    await t.db.insert(schema.attributionRecord).values({
+      instanceId, claudeSessionId: 'recent-noapi', teammateId, regionId, orgUnitId, tool: 'claude-code',
+      model: 'opus', tokenType: 'output', tokens: 1000n, costUsd: '500.00', fidelityTier: 'tier-2',
+      costBasis: 'estimated', tsEvent: new Date(`${recentDay}T12:00:00Z`), sourceRunId: randomUUID(),
+    })
+    const res = await detectOverEmission(t.db, WINDOW)
+    expect(res.noBillFlagged).toBe(0)
   })
 
   it('does NOT flag a still-settling recent day even with a huge over (bill lag)', async () => {
@@ -148,7 +183,11 @@ describe('over-emission (§A integrity)', () => {
     expect(cleared!.state).toBe('quarantined')
     expect(Number(cleared!.over)).toBe(0)
     // The forged session no longer shows in the dev's needs-tagging.
-    const usage = await getMyUsage(t.db, teammateId, new Date(`${DAY}T12:00:00.000Z`))
+    // AFTER the seeded event, not at the same instant. The month-to-date
+    // window is half-open `[month start, now)` by house convention
+    // (server/utils/period.ts) so an event at exactly `now` belongs to the
+    // next read; reading at the event's own timestamp asserted against that.
+    const usage = await getMyUsage(t.db, teammateId, new Date(`${DAY}T12:00:01.000Z`))
     // sess-small ($50, untagged) still needs tagging; sess-big is excluded.
     expect(Number(usage.unallocated.untagged_cost_usd)).toBeCloseTo(50, 2)
   })
@@ -177,7 +216,11 @@ describe('over-emission (§A integrity)', () => {
     const [flag] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM over_emission WHERE teammate_id = ${teammateId}::uuid`
     const r = (await resolveHandler(ev({ id: flag!.id, body: { action: 'accept' } }) as never)) as { state: string }
     expect(r.state).toBe('accepted')
-    const usage = await getMyUsage(t.db, teammateId, new Date(`${DAY}T12:00:00.000Z`))
+    // AFTER the seeded event, not at the same instant. The month-to-date
+    // window is half-open `[month start, now)` by house convention
+    // (server/utils/period.ts) so an event at exactly `now` belongs to the
+    // next read; reading at the event's own timestamp asserted against that.
+    const usage = await getMyUsage(t.db, teammateId, new Date(`${DAY}T12:00:01.000Z`))
     expect(Number(usage.unallocated.untagged_cost_usd)).toBeCloseTo(500, 2) // both sessions still counted
   })
 })

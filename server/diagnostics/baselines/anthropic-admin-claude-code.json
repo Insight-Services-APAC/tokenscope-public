@@ -1,0 +1,31 @@
+{
+  "endpoint": "anthropic-admin-claude-code",
+  "provenance": "schema-derived",
+  "capturedAt": null,
+  "note": "Transcribed from the Zod schemas in server/anthropic/client.ts (UsageReport / UsageRecord / Actor / ModelBreakdown). This records what TokenScope ASSUMES, not what has been observed. `data[].model_breakdown[].model` carries presentRate 1 because ModelBreakdown declares it REQUIRED — a presence move on that path means the Admin report stopped sending the model. ModelBreakdown is the one non-passthrough object in this tree, so any field it receives beyond these is silently dropped at parse time and will show up as added here.",
+  "paths": [
+    { "path": "data", "types": ["array"], "presentRate": 1 },
+    { "path": "data[]", "types": ["object"], "presentRate": 1 },
+    { "path": "data[].actor", "types": ["object"], "presentRate": 1 },
+    { "path": "data[].actor.api_key_name", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].actor.email_address", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].actor.type", "types": ["string"], "presentRate": 1 },
+    { "path": "data[].customer_type", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].date", "types": ["string"], "presentRate": 1 },
+    { "path": "data[].model_breakdown", "types": ["array"], "presentRate": null, "defaulted": true },
+    { "path": "data[].model_breakdown[]", "types": ["object"], "presentRate": 1 },
+    { "path": "data[].model_breakdown[].estimated_cost", "types": ["object"], "presentRate": null },
+    { "path": "data[].model_breakdown[].estimated_cost.amount", "types": ["number"], "presentRate": 1 },
+    { "path": "data[].model_breakdown[].estimated_cost.currency", "types": ["string"], "presentRate": null },
+    { "path": "data[].model_breakdown[].model", "types": ["string"], "presentRate": 1 },
+    { "path": "data[].model_breakdown[].tokens", "types": ["object"], "presentRate": 1 },
+    { "path": "data[].model_breakdown[].tokens.cache_creation", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "data[].model_breakdown[].tokens.cache_read", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "data[].model_breakdown[].tokens.input", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "data[].model_breakdown[].tokens.output", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "data[].organization_id", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].terminal_type", "types": ["string", "null"], "presentRate": null },
+    { "path": "has_more", "types": ["boolean"], "presentRate": 1 },
+    { "path": "next_page", "types": ["string", "null"], "presentRate": null }
+  ]
+}

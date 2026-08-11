@@ -122,23 +122,53 @@ describe('resolveEnrollmentSecret', () => {
   })
 })
 
+/*
+ * The Copilot enrol door's destination.
+ *
+ * This resolver used to rank TOKENSCOPE_API_BASE FIRST — above even an explicit
+ * argument — which is the precedence plugin/scripts/api-base.mjs identifies as
+ * the vulnerability, in the one place that POSTs the bundled enrollment secret
+ * and persists the endpoints that come back. It was a second, private copy
+ * outside sync-copilot-plugin.mjs's FILES list, so the drift check could not see
+ * it. `discovered` is passed explicitly throughout so these never read the real
+ * home directory.
+ */
 describe('resolveApiBase', () => {
   it('falls back to the baked default and strips a trailing slash', () => {
-    const saved = process.env.TOKENSCOPE_API_BASE
-    delete process.env.TOKENSCOPE_API_BASE
-    try {
-      expect(resolveApiBase('https://ts.example.com/')).toBe('https://ts.example.com')
-      expect(resolveApiBase(null)).toBe('https://tokenscope.example.com')
-    } finally {
-      if (saved === undefined) delete process.env.TOKENSCOPE_API_BASE
-      else process.env.TOKENSCOPE_API_BASE = saved
-    }
+    expect(resolveApiBase('https://ts.example.com/', { discovered: null })).toBe(
+      'https://ts.example.com',
+    )
+    expect(resolveApiBase(null, { discovered: null })).toBe('https://tokenscope.example.com')
   })
-  it('honours the TOKENSCOPE_API_BASE env override', () => {
+
+  it('prefers a registered MCP origin over the baked default', () => {
+    // The operator who registered their own server enrols against their own
+    // server. This is what replaced the env var as the middle source.
+    expect(resolveApiBase(null, { discovered: 'https://ts-own.example.com' })).toBe(
+      'https://ts-own.example.com',
+    )
+  })
+
+  it('lets an explicitly passed base outrank discovery', () => {
+    expect(
+      resolveApiBase('https://typed.example.com', { discovered: 'https://ts-own.example.com' }),
+    ).toBe('https://typed.example.com')
+  })
+
+  it('does NOT let TOKENSCOPE_API_BASE choose where the enrollment secret is POSTed', () => {
+    // The pin. A repository can supply this variable, and repo-supplied env is
+    // indistinguishable from shell-exported env, so it is not a source for a
+    // path that ships an org-wide secret and stores whatever comes back.
     const saved = process.env.TOKENSCOPE_API_BASE
-    process.env.TOKENSCOPE_API_BASE = 'http://localhost:3450/'
+    process.env.TOKENSCOPE_API_BASE = 'https://attacker.example.com'
     try {
-      expect(resolveApiBase('https://ignored')).toBe('http://localhost:3450')
+      expect(resolveApiBase(null, { discovered: null })).toBe('https://tokenscope.example.com')
+      expect(resolveApiBase(null, { discovered: 'https://ts-own.example.com' })).toBe(
+        'https://ts-own.example.com',
+      )
+      expect(resolveApiBase('https://typed.example.com', { discovered: null })).not.toContain(
+        'attacker',
+      )
     } finally {
       if (saved === undefined) delete process.env.TOKENSCOPE_API_BASE
       else process.env.TOKENSCOPE_API_BASE = saved
@@ -259,6 +289,48 @@ describe('buildCopilotConfig — response → config.json mapping', () => {
     expect(() => buildCopilotConfig(bad)).toThrow()
   })
 
+  // S2 — closes the Copilot leg of client-plugins:mitm:0003: buildCopilotConfig
+  // now validates the resolved endpoint bundle via assertSafeRedeemBundle (reused
+  // from copilot-redeem.mjs, not re-implemented) BEFORE returning a config the
+  // caller persists to ~/.tokenscope/config.json.
+  it('throws when the bearer endpoint downgrades to plaintext http (off-box)', () => {
+    const bad = {
+      ...FAKE_ENROLL_RESPONSE,
+      bearer_endpoint: 'http://attacker.example.com/api/v1/instances/abc/bearer',
+      telemetry: {
+        copilot: {
+          ...FAKE_ENROLL_RESPONSE.telemetry.copilot,
+          TOKENSCOPE_BEARER_ENDPOINT: 'http://attacker.example.com/api/v1/instances/abc/bearer',
+        },
+      },
+    }
+    expect(() => buildCopilotConfig(bad)).toThrow(/TOKENSCOPE_BEARER_ENDPOINT/)
+  })
+
+  it('throws when the logs endpoint downgrades to plaintext http (off-box)', () => {
+    const bad = {
+      ...FAKE_ENROLL_RESPONSE,
+      telemetry: {
+        copilot: { ...FAKE_ENROLL_RESPONSE.telemetry.copilot, TOKENSCOPE_LOGS_ENDPOINT: 'http://attacker.example.com/v1/logs' },
+      },
+    }
+    expect(() => buildCopilotConfig(bad)).toThrow(/TOKENSCOPE_LOGS_ENDPOINT/)
+  })
+
+  it('throws when the oauth token endpoint downgrades to plaintext http (off-box)', () => {
+    const bad = {
+      ...FAKE_ENROLL_RESPONSE,
+      oauth_token_endpoint: 'http://attacker.example.com/api/v1/oauth/token',
+      telemetry: {
+        copilot: {
+          ...FAKE_ENROLL_RESPONSE.telemetry.copilot,
+          TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'http://attacker.example.com/api/v1/oauth/token',
+        },
+      },
+    }
+    expect(() => buildCopilotConfig(bad)).toThrow(/TOKENSCOPE_OAUTH_TOKEN_ENDPOINT/)
+  })
+
   it('throws when the response carries a CLAUDE bundle instead of a copilot bundle (wrong tool)', () => {
     // Belt-and-braces: if the server ever returned telemetry.claude for a copilot
     // enroll, there is no telemetry.copilot to map → unattributable → throw, not a
@@ -336,6 +408,28 @@ describe('enrollIfNeeded — decision logic', () => {
     expect(writeConfig).not.toHaveBeenCalled()
   })
 
+  // S2 — closes the Copilot leg of client-plugins:mitm:0003: the enroll URL is
+  // validated via assertSafeEndpoint BEFORE the POST is issued (replacing a naive
+  // startsWith('http') guard that accepted http:// as readily as https://). An
+  // off-box http:// api base must never reach the network — no request at all.
+  it('no-op (no POST, no write) when the resolved api base is off-box plaintext http', async () => {
+    const post = vi.fn()
+    const writeConfig = vi.fn()
+    const r = await enrollIfNeeded({ ...baseOpts(), apiBase: 'http://attacker.example.com', post, writeConfig })
+    expect(r).toEqual({ enrolled: false, reason: 'no-base' })
+    expect(post).not.toHaveBeenCalled()
+    expect(writeConfig).not.toHaveBeenCalled()
+  })
+
+  it('still enrols against a loopback api base (local dev server)', async () => {
+    const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
+    const writeConfig = vi.fn()
+    const r = await enrollIfNeeded({ ...baseOpts(), apiBase: 'http://localhost:3450', post, writeConfig })
+    expect(r.enrolled).toBe(true)
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(post.mock.calls[0][0]).toBe('http://localhost:3450/api/v1/setup/enroll')
+  })
+
   it('success: POSTs the gated body and writes the forwarder config', async () => {
     const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
     const writeConfig = vi.fn()
@@ -390,6 +484,41 @@ describe('enrollIfNeeded — decision logic', () => {
     expect(r.enrolled).toBe(true)
     expect(armRc).toHaveBeenCalledTimes(1)
     expect(armRc).toHaveBeenCalledWith('/tmp/fake-home')
+  })
+
+  it('Workstream D §10.1 — a successful enrol runs the managed-telemetry check and echoes the classification', async () => {
+    const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
+    const writeConfig = vi.fn()
+    const checkManagedTelemetry = vi.fn().mockResolvedValue({ classification: 'benign', source: 'file-based', checkedPaths: [], serverManagedNote: '' })
+    const r = await enrollIfNeeded({ ...baseOpts(), post, writeConfig, checkManagedTelemetry })
+    expect(r.enrolled).toBe(true)
+    expect(r.managedTelemetry).toBe('benign')
+    expect(checkManagedTelemetry).toHaveBeenCalledTimes(1)
+  })
+
+  it('Workstream D §10.1 — a HOSTILE managed telemetry setting is logged loudly but NEVER fails the enrol', async () => {
+    const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
+    const writeConfig = vi.fn()
+    const checkManagedTelemetry = vi.fn().mockResolvedValue({ classification: 'hostile', source: 'native-mdm', checkedPaths: [], serverManagedNote: '' })
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const r = await enrollIfNeeded({ ...baseOpts(), post, writeConfig, checkManagedTelemetry })
+      expect(r.enrolled).toBe(true) // never blocked by a hostile finding
+      expect(r.managedTelemetry).toBe('hostile')
+      expect(errSpy).toHaveBeenCalled()
+      expect(String(errSpy.mock.calls.flat())).toMatch(/HOSTILE/)
+    } finally {
+      errSpy.mockRestore()
+    }
+  })
+
+  it('Workstream D §10.1 — a throwing managed-telemetry check degrades to "unknown", never fails the enrol', async () => {
+    const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
+    const writeConfig = vi.fn()
+    const checkManagedTelemetry = vi.fn().mockRejectedValue(new Error('boom'))
+    const r = await enrollIfNeeded({ ...baseOpts(), post, writeConfig, checkManagedTelemetry })
+    expect(r.enrolled).toBe(true)
+    expect(r.managedTelemetry).toBe('unknown')
   })
 
   it('stays silent and writes NOTHING when the POST fails', async () => {

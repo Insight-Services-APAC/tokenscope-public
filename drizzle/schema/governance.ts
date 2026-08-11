@@ -125,6 +125,12 @@ export const providerEnterprise = pgTable(
     // itself is a non-secret integer; only the private key is a secret (KV/env). See
     // docs/design/github-pat-to-github-app-transition.md.
     githubAppId: text('github_app_id'),
+    // ADR-0011 D10 (mig 0106): how a PAID pooled overage is DISTRIBUTED across
+    // cost-owning units. 'consumption-share' | 'excess-share' | 'excess-equal' |
+    // 'seat-share' (CHECK in 0106 — Drizzle def omits it, same precedent as
+    // billing/reconciliationMode above). Never derives a charge — see
+    // server/governance/copilot-overage-allocation.ts.
+    overageAllocationPolicy: text('overage_allocation_policy').notNull().default('consumption-share'),
     notes: text('notes'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

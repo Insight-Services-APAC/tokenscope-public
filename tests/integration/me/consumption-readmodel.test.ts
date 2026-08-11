@@ -12,19 +12,21 @@ import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import * as schema from '../../../drizzle/schema'
 import { runAggregateRollup } from '../../../server/workers/aggregate-rollup'
 import {
+  fetchAdvisorySpend,
   fetchDailySeries,
-  fetchMtdSpend,
   fetchProjectAllocation,
   fetchProjectVelocity,
   fetchWindowTotals,
   requireProjectMembership,
 } from '../../../server/usage/consumption'
 import { exhaustionDate } from '../../../server/usage/projections'
+import { fetchUntaggedPressure } from '../../../server/usage/project-detail'
 import {
-  fetchMemberContribution,
-  fetchProjectActivityMix,
-  fetchUntaggedPressure,
-} from '../../../server/usage/project-detail'
+  completeOneProjectSpend,
+  completeProjectSpendByActivity,
+  completeProjectSpendByMember,
+} from '../../../server/usage/complete-spend'
+import { monthToDateWindow } from '../../../server/utils/period'
 import { fetchCatalog, fetchRateLines } from '../../../server/usage/insights'
 
 let t: TestDb
@@ -117,7 +119,14 @@ beforeAll(async () => {
   // the MTD / rolling windows, failing activity-mix / untagged-pressure / member-
   // contribution. No assertion needs a 2-day spread, so both seeds sit on today.
   const d = new Date()
-  const anchorMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12)
+  const monthStartMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)
+  // Anchored a couple of MINUTES IN THE PAST, clamped up to month-start.
+  // Month-to-date is half-open `[month start, now)`, so noon-today (the previous
+  // anchor) is FUTURE-DATED on any run before 12:00 UTC and drops straight out of
+  // every month figure; and a plain `now - Nh` falls into the PREVIOUS month near
+  // a boundary, which is the failure the noon anchor was introduced to fix. The
+  // clamp satisfies both at once. No assertion needs a multi-day spread.
+  const anchorMs = Math.max(monthStartMs, Date.now() - 60_000)
   const insert = (over: Record<string, unknown>) =>
     t.db.insert(schema.attributionRecord).values({
       instanceId: INSTANCE,
@@ -136,7 +145,7 @@ beforeAll(async () => {
       rateCardVersion: rc!.version,
       fidelityTier: 'tier-1',
       costBasis: 'estimated',
-      tsEvent: new Date(anchorMs - 3_600_000),
+      tsEvent: new Date(Math.max(monthStartMs, anchorMs - 60_000)),
       sourceRunId: String(over.run),
       querySource: 'main',
       ...over,
@@ -157,6 +166,14 @@ beforeAll(async () => {
 afterAll(async () => {
   await stopTestDb(t)
 }, 30_000)
+
+/*
+ * The one MTD window every project figure uses: half-open `[month start, NOW)`.
+ * Evaluated PER CALL, never hoisted into a constant — the window's upper bound
+ * is the current instant, and a module-load snapshot would exclude every row
+ * this suite writes after it (testcontainers startup alone is minutes).
+ */
+const mtd = () => monthToDateWindow()
 
 describe('consumption read-model (aggregate-backed)', () => {
   it('daily series re-adds to the teammate ledger total', async () => {
@@ -185,13 +202,15 @@ describe('consumption read-model (aggregate-backed)', () => {
   })
 
   it('project MTD spend + allocation + exhaustion wire together', async () => {
-    const mtd = await fetchMtdSpend(t.db, 'project', projectId)
+    const window = mtd()
+    const mtdUsd = (await completeOneProjectSpend(t.db, projectId, window)).costUsd
     const [ledger] = await t.client<{ cost: string }[]>`
       SELECT SUM(cost_usd)::text AS cost FROM attribution_record
       WHERE project_id = ${projectId}::uuid
-        AND ts_event >= date_trunc('month', now() AT TIME ZONE 'UTC')
+        AND ts_event >= ${window.startIso}::timestamptz
+        AND ts_event <  ${window.endIso}::timestamptz
     `
-    expect(mtd).toBeCloseTo(Number(ledger!.cost), 6)
+    expect(mtdUsd).toBeCloseTo(Number(ledger!.cost), 6)
     const allocation = await fetchProjectAllocation(t.db, projectId)
     expect(allocation).toBe(300)
     // exhaustionDate is a pure projection over a caller-supplied clock; pin it to
@@ -203,8 +222,81 @@ describe('consumption read-model (aggregate-backed)', () => {
     const asOf = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 5))
     // ~$1.35 MTD against $300 burns out far past month-end → null (the cap that
     // stops meaningless next-quarter projections); a realistic burn projects.
-    expect(exhaustionDate(mtd, allocation, asOf)).toBeNull()
+    expect(exhaustionDate(mtdUsd, allocation, asOf)).toBeNull()
     expect(exhaustionDate(150, allocation, asOf)).not.toBeNull()
+  })
+
+  /*
+   * THE GUARD THAT USED TO BE VACUOUS.
+   *
+   * This assertion was `fetchMtdSpend(aggregate) == Σ ledger`, taken with
+   * `runAggregateRollup` called immediately before and nothing written after —
+   * the ONE condition under which it is guaranteed true. It certified nothing,
+   * and the divergence it was supposed to catch is precisely what shipped: a
+   * cron-refreshed headline above a live table.
+   *
+   * The failing half, added here: write to the ledger AFTER the rollup, then
+   * check the two sources. The project headline must move (it is on the live
+   * §A lane) and the aggregate must NOT (nobody has re-rolled it). If some
+   * future change points the headline back at the aggregate, the first
+   * assertion drops to the stale figure and this fails.
+   */
+  it('after a post-rollup ledger write the project figure is LIVE and the aggregate is stale', async () => {
+    const before = (await completeOneProjectSpend(t.db, projectId, mtd())).costUsd
+    const [aggBefore] = await t.client<{ total: string }[]>`
+      SELECT COALESCE(SUM(total_cost_usd), 0)::text AS total FROM attribution_aggregate
+      WHERE scope_type = 'project' AND scope_id = ${projectId}::uuid AND period_kind = 'day'
+        AND period_start >= date_trunc('month', now() AT TIME ZONE 'UTC')`
+
+    const [rc] = await t.db
+      .select({ id: schema.rateCard.id, version: schema.rateCard.version })
+      .from(schema.rateCard)
+      .limit(1)
+    const d = new Date()
+    await t.db.insert(schema.attributionRecord).values({
+      instanceId: INSTANCE,
+      claudeSessionId: 'conv-cn-post-rollup',
+      teammateId: devId,
+      projectId,
+      regionId,
+      orgUnitId,
+      costOwningUnitId: orgUnitId,
+      tool: 'claude-code',
+      model: 'claude-fable-5',
+      tokenType: 'input',
+      tokens: 40_000n,
+      costUsd: '0.250000',
+      rateCardId: rc!.id,
+      rateCardVersion: rc!.version,
+      fidelityTier: 'tier-1',
+      costBasis: 'estimated',
+      // A minute in the past: month-to-date is half-open and ends at NOW.
+      tsEvent: new Date(Math.max(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1), Date.now() - 60_000)),
+      sourceRunId: 'post-rollup',
+      querySource: 'main',
+    } as never)
+
+    // The headline saw it immediately — no rollup tick required.
+    const after = (await completeOneProjectSpend(t.db, projectId, mtd())).costUsd
+    expect(after).toBeCloseTo(before + 0.25, 6)
+
+    // And the aggregate did NOT: the two sources really do diverge between
+    // ticks, which is why the page must not quote one above the other in
+    // silence. (This is the half the old assertion could never reach.)
+    const [aggAfter] = await t.client<{ total: string }[]>`
+      SELECT COALESCE(SUM(total_cost_usd), 0)::text AS total FROM attribution_aggregate
+      WHERE scope_type = 'project' AND scope_id = ${projectId}::uuid AND period_kind = 'day'
+        AND period_start >= date_trunc('month', now() AT TIME ZONE 'UTC')`
+    expect(Number(aggAfter!.total)).toBeCloseTo(Number(aggBefore!.total), 6)
+    expect(after).toBeGreaterThan(Number(aggAfter!.total))
+
+    // The per-member grain moved with it — one lane, one window, so the table
+    // under the headline cannot lag behind it.
+    const members = await completeProjectSpendByMember(t.db, projectId, mtd())
+    expect(members.reduce((a, m) => a + m.costUsd, 0)).toBeCloseTo(after, 6)
+
+    // Restore the fixture for any later test in this file.
+    await t.client`DELETE FROM attribution_record WHERE source_run_id = 'post-rollup'`
   })
 
   it('velocity: current week vs trailing mean (no flag without history)', async () => {
@@ -268,20 +360,19 @@ describe('consumption read-model (aggregate-backed)', () => {
   })
 
   it('member contribution: per-member MTD with cost-per-active-day, cost desc', async () => {
-    const members = await fetchMemberContribution(t.db, projectId)
+    const members = await completeProjectSpendByMember(t.db, projectId, mtd())
     expect(members.length).toBe(2)
     // dev's project rows: a1 .30 + a2 .15 + a3 .15 + a6 .005 = .605 > mate .60
-    // (sorted on the RAW sums; cost_usd strings are 2dp money)
+    // (sorted on the RAW sums)
     expect(members[0]!.email).toBe('cn.dev@example.com')
-    expect(Number(members[0]!.cost_usd)).toBeCloseTo(0.6, 2)
-    expect(Number(members[1]!.cost_usd)).toBeCloseTo(0.6, 2)
+    expect(members[0]!.costUsd).toBeCloseTo(0.605, 6)
+    expect(members[1]!.costUsd).toBeCloseTo(0.6, 6)
     expect(members[0]!.tokens).toBe(165_000) // 100k+10k+50k+5k
-    expect(members[0]!.active_days).toBeGreaterThanOrEqual(1)
-    expect(Number(members[0]!.cost_per_active_day)).toBeGreaterThan(0)
+    expect(members[0]!.activeDays).toBeGreaterThanOrEqual(1)
   })
 
   it('activity mix: tagged slices + NULL lane, cost desc', async () => {
-    const mix = await fetchProjectActivityMix(t.db, projectId)
+    const mix = await completeProjectSpendByActivity(t.db, projectId, mtd())
     const labels = mix.map((m) => m.activity)
     expect(labels).toContain('feature-dev')
     expect(labels).toContain('research')
@@ -289,9 +380,59 @@ describe('consumption read-model (aggregate-backed)', () => {
   })
 
   it('untagged pressure: members’ unallocated MTD spend, counts only', async () => {
-    const up = await fetchUntaggedPressure(t.db, projectId)
+    const up = await fetchUntaggedPressure(t.db, projectId, mtd())
     expect(up.conversations).toBe(1)
     expect(Number(up.cost_usd)).toBeCloseTo(0.09, 6)
+  })
+
+  it('untagged pressure STOPS AT NOW — a row dated later is not "pressure" yet', async () => {
+    /*
+     * The query used to be bounded from below only (`ts_event >=
+     * date_trunc('month', now())`), so a row dated later today, later this
+     * month, or in any later month counted towards a figure a PM reads as
+     * "conversations to chase this week". A lower bound is not a window.
+     */
+    const [rc] = await t.db
+      .select({ id: schema.rateCard.id, version: schema.rateCard.version })
+      .from(schema.rateCard)
+      .limit(1)
+    await t.db.insert(schema.attributionRecord).values({
+      instanceId: INSTANCE,
+      claudeSessionId: 'conv-cn-future-untagged',
+      teammateId: devId,
+      projectId: null,
+      regionId,
+      orgUnitId,
+      costOwningUnitId: null,
+      tool: 'claude-code',
+      model: 'claude-fable-5',
+      tokenType: 'input',
+      tokens: 10_000n,
+      costUsd: '4.000000',
+      rateCardId: rc!.id,
+      rateCardVersion: rc!.version,
+      fidelityTier: 'tier-1',
+      costBasis: 'estimated',
+      // A DAY into the future. Inside this month on all but one day of it, and
+      // in the NEXT month on that day — both of which the old open-ended bound
+      // counted, and neither of which the half-open window does.
+      tsEvent: new Date(Date.now() + 86_400_000),
+      sourceRunId: 'future-untagged',
+      querySource: 'main',
+    } as never)
+
+    const up = await fetchUntaggedPressure(t.db, projectId, mtd())
+    // Unchanged: still the ONE genuinely-past untagged conversation.
+    expect(up.conversations).toBe(1)
+    expect(Number(up.cost_usd)).toBeCloseTo(0.09, 6)
+
+    // The row IS there — the silence above is the window, not a missing fixture.
+    const laterWindow = { startIso: mtd().startIso, endIso: new Date(Date.now() + 172_800_000).toISOString() }
+    const ahead = await fetchUntaggedPressure(t.db, projectId, laterWindow)
+    expect(ahead.conversations).toBe(2)
+    expect(Number(ahead.cost_usd)).toBeCloseTo(4.09, 6)
+
+    await t.client`DELETE FROM attribution_record WHERE source_run_id = 'future-untagged'`
   })
 
   it('insight fetch helpers: catalog seeded, rate lines active', async () => {
@@ -313,5 +454,80 @@ describe('consumption read-model (aggregate-backed)', () => {
       SELECT COUNT(*)::text AS n FROM insight_ack WHERE teammate_id = ${devId}::uuid
     `
     expect(Number(rows[0]!.n)).toBe(1)
+  })
+})
+
+/*
+ * fetchAdvisorySpend — the absence/zero distinction (external review, F1).
+ *
+ * THE DEFECT THIS PINS. The read used to be
+ * `COALESCE(SUM(advisory_cost_usd), 0)` with a `?? 0` behind it, so a scope
+ * whose rollup has NOT been materialised for the window came back as the number
+ * 0 — indistinguishable from a scope the rollup HAS covered and measured at
+ * zero advisory. The aggregate is the ONE cron-fed lane on the project page, so
+ * "un-materialised" is a live state rather than a hypothetical, and collapsing
+ * it publishes a measurement nobody made. NULL IS NOT 0. Restore either the
+ * COALESCE or the `?? 0` and the first assertion goes red.
+ */
+describe('fetchAdvisorySpend — a missing aggregate is not a measured zero', () => {
+  // A window far from every other fixture's rows, so "empty" is a property of
+  // the window rather than of test ordering.
+  const WINDOW = { startIso: '2031-03-01T00:00:00.000Z', endIso: '2031-03-31T00:00:00.000Z' }
+
+  const cell = (day: string, costUsd: string, advisoryUsd: string) =>
+    t.db.insert(schema.attributionAggregate).values({
+      scopeType: 'project',
+      scopeId: projectId,
+      periodStart: new Date(`${day}T00:00:00Z`),
+      periodEnd: new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000),
+      periodKind: 'day',
+      model: 'claude-fable-5',
+      tokenType: 'output',
+      totalTokens: 100n,
+      totalCostUsd: costUsd,
+      advisoryCostUsd: advisoryUsd,
+      recordCount: 1,
+    })
+
+  it('returns null when the aggregate holds no row for the scope+window', async () => {
+    expect(await fetchAdvisorySpend(t.db, 'project', projectId, WINDOW)).toBeNull()
+  })
+
+  it('returns 0 — a NUMBER — when rows exist and they measured zero advisory', async () => {
+    // Same call, same bounds as the assertion above; a different answer, because
+    // a different fact. That contrast is the whole distinction being restored.
+    await cell('2031-03-10', '4.000000', '0')
+    expect((await fetchAdvisorySpend(t.db, 'project', projectId, WINDOW))?.usd).toBe(0)
+
+    // …and a genuine tier-2 cell still sums — the absence handling ate nothing.
+    await cell('2031-03-11', '7.500000', '2.250000')
+    expect((await fetchAdvisorySpend(t.db, 'project', projectId, WINDOW))?.usd).toBeCloseTo(2.25, 6)
+
+    await t.client`DELETE FROM attribution_aggregate
+                   WHERE scope_id = ${projectId}::uuid AND period_start >= '2031-01-01'`
+    expect(await fetchAdvisorySpend(t.db, 'project', projectId, WINDOW)).toBeNull()
+  })
+
+  /*
+   * PARTIAL MATERIALISATION IS A THIRD ANSWER (external review r2). The absence
+   * fix above only caught TOTAL absence: a window the rollup had covered for
+   * some of its days still returned a confident sum with nothing to say it was
+   * short. The figure now travels with the DAYS the aggregate actually holds, so
+   * a caller can test them against the days it knows carry spend.
+   *
+   * RED ON REVERT: drop `materialisedDays` (return the bare number again) and
+   * this goes red — there is then no way to tell these two windows apart.
+   */
+  it('reports WHICH days the rollup holds, not just the sum', async () => {
+    await cell('2031-03-04', '1.000000', '0.500000')
+    await cell('2031-03-06', '1.000000', '0.500000')
+    const got = await fetchAdvisorySpend(t.db, 'project', projectId, WINDOW)
+    expect(got!.usd).toBeCloseTo(1, 6)
+    // Two of the window's thirty days — the sum is over those two, and says so.
+    expect([...got!.materialisedDays].sort()).toEqual(['2031-03-04', '2031-03-06'])
+    expect(got!.materialisedDays.has('2031-03-05')).toBe(false)
+
+    await t.client`DELETE FROM attribution_aggregate
+                   WHERE scope_id = ${projectId}::uuid AND period_start >= '2031-01-01'`
   })
 })

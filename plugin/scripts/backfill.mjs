@@ -1,5 +1,5 @@
 #!/usr/bin/env node
- 
+
 /*
  * /tokenscope:backfill — transcript-replay catch-up for a short emission hiccup
  * (ADR-0005 decision 4, slice 3).
@@ -56,6 +56,8 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { encodeExportLogsServiceRequest } from './otlp-logs.mjs'
+import { safeProcessEnv } from './plugin-runtime.mjs'
+import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 
 // Re-export so existing callers (tests, file-forwarder) can import from here.
 export { encodeExportLogsServiceRequest } from './otlp-logs.mjs'
@@ -83,22 +85,40 @@ export function parseArgs(argv) {
     const a = argv[i]
     const next = () => argv[++i]
     switch (a) {
-      case '--since': out.since = next(); break
-      case '--until': out.until = next(); break
-      case '--max-records': out.maxRecords = Number(next()); break
-      case '--max-window-hours': out.maxWindowHours = Number(next()); break
-      case '--projects-dir': out.projectsDir = next(); break
+      case '--since':
+        out.since = next()
+        break
+      case '--until':
+        out.until = next()
+        break
+      case '--max-records':
+        out.maxRecords = Number(next())
+        break
+      case '--max-window-hours':
+        out.maxWindowHours = Number(next())
+        break
+      case '--projects-dir':
+        out.projectsDir = next()
+        break
       // Opt-in to sweeping EVERY project/CW transcript on the host. Default is
       // THIS project only (derived from cwd) — a multi-CW host has many other
       // containers' transcripts under ~/.claude/projects, and sweeping them all
       // mis-attributes their sessions to this instance (untagged). Loud warning.
-      case '--all-projects': out.allProjects = true; break
-      case '--dry-run': out.dryRun = true; break
-      case '--json': out.json = true; break
+      case '--all-projects':
+        out.allProjects = true
+        break
+      case '--dry-run':
+        out.dryRun = true
+        break
+      case '--json':
+        out.json = true
+        break
       // Debug escape hatch: POST OTLP/JSON instead of protobuf. The Azure DCR
       // rejects JSON with HTTP 415 — this exists only to repro that 415 / probe a
       // collector that accepts JSON. Default (no flag) is protobuf.
-      case '--json-emit': out.jsonEmit = true; break
+      case '--json-emit':
+        out.jsonEmit = true
+        break
       default:
         // tolerate stray tokens (Claude may pass an empty $ARGUMENTS)
         if (a && a.startsWith('--')) throw new Error(`unknown flag: ${a}`)
@@ -129,7 +149,11 @@ export function resolveBound(value, fallback, now) {
  */
 export function resolveWindow(opts, now = new Date()) {
   const until = resolveBound(opts.until, now, now)
-  let since = resolveBound(opts.since, new Date(now.getTime() - DEFAULT_SINCE_HOURS * 60 * 60 * 1000), now)
+  let since = resolveBound(
+    opts.since,
+    new Date(now.getTime() - DEFAULT_SINCE_HOURS * 60 * 60 * 1000),
+    now,
+  )
   if (since.getTime() > until.getTime()) {
     throw new Error('--since is after --until')
   }
@@ -185,7 +209,12 @@ export function recordFromTranscriptLine(line) {
     claudeSessionId: typeof obj.sessionId === 'string' ? obj.sessionId : null,
     // cost is advisory; newer transcripts omit it. Carried when present.
     costUsd: typeof obj.costUSD === 'number' ? obj.costUSD : null,
-    tokens: { input_tokens: input, output_tokens: output, cache_read_tokens: cacheRead, cache_creation_tokens: cacheCreation },
+    tokens: {
+      input_tokens: input,
+      output_tokens: output,
+      cache_read_tokens: cacheRead,
+      cache_creation_tokens: cacheCreation,
+    },
   }
 }
 
@@ -215,7 +244,9 @@ export function listTranscriptFiles(projectsDir) {
       try {
         names = readdirSync(full)
       } catch (err) {
-        process.stderr.write(`[tokenscope] skipping unreadable transcript dir ${full}: ${err?.code ?? err}\n`)
+        process.stderr.write(
+          `[tokenscope] skipping unreadable transcript dir ${full}: ${err?.code ?? err}\n`,
+        )
         continue
       }
       for (const f of names) {
@@ -286,7 +317,10 @@ export function parseResourceAttrs(raw) {
 }
 
 function kvList(attrs) {
-  return Object.entries(attrs).map(([key, value]) => ({ key, value: { stringValue: String(value) } }))
+  return Object.entries(attrs).map(([key, value]) => ({
+    key,
+    value: { stringValue: String(value) },
+  }))
 }
 
 /**
@@ -310,7 +344,8 @@ export function buildOtlpLogsPayload(records, resourceAttrs) {
       { key: 'cache_creation_tokens', value: { intValue: String(r.tokens.cache_creation_tokens) } },
     ]
     if (r.requestId) attributes.push({ key: 'request_id', value: { stringValue: r.requestId } })
-    if (r.claudeSessionId) attributes.push({ key: 'session.id', value: { stringValue: r.claudeSessionId } })
+    if (r.claudeSessionId)
+      attributes.push({ key: 'session.id', value: { stringValue: r.claudeSessionId } })
     if (r.costUsd != null) attributes.push({ key: 'cost_usd', value: { doubleValue: r.costUsd } })
     return {
       timeUnixNano: nanos,
@@ -341,18 +376,29 @@ export function buildOtlpLogsPayload(records, resourceAttrs) {
  * invoking it. The helper prints `{"Authorization":"Bearer <token>"}` to stdout
  * on success (exit 0) and fails loud on a non-200 /bearer (revoked instance →
  * E2 401 → helper exits non-zero → we throw). The token is NEVER logged.
+ *
+ * S1 fix 2: `env` is passed EXPLICITLY (the caller's safeProcessEnv()) rather
+ * than letting execFileSync inherit raw `process.env` — a repo-tagged
+ * session's process.env may carry a repo-supplied TOKENSCOPE_BEARER_ENDPOINT
+ * / _STATE_DIR / _API_BASE, and the safe env is what closes that.
  */
-function mintBearer(pluginRoot) {
+function mintBearer(pluginRoot, env) {
   const helper = join(pluginRoot, 'scripts', 'otel-headers-helper.sh')
   if (!existsSync(helper)) {
     throw new Error(`otel-headers-helper.sh not found at ${helper} (is CLAUDE_PLUGIN_ROOT set?)`)
   }
   let stdout
   try {
-    stdout = execFileSync('sh', [helper], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] })
+    stdout = execFileSync('sh', [helper], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'inherit'],
+      env,
+    })
   } catch {
     // The helper already printed a loud, sanitised reason to stderr.
-    throw new Error('emission auth failed — /bearer did not return a token (instance may be revoked/expired). Run /tokenscope:status.')
+    throw new Error(
+      'emission auth failed — /bearer did not return a token (instance may be revoked/expired). Run /tokenscope:status.',
+    )
   }
   let parsed
   try {
@@ -361,7 +407,8 @@ function mintBearer(pluginRoot) {
     throw new Error('headers helper returned an unparseable bearer payload')
   }
   const auth = parsed && parsed.Authorization
-  if (typeof auth !== 'string' || !auth) throw new Error('headers helper returned no Authorization header')
+  if (typeof auth !== 'string' || !auth)
+    throw new Error('headers helper returned no Authorization header')
   return auth
 }
 
@@ -392,7 +439,7 @@ async function run(opts, env, now = new Date()) {
     projectsDir = projectsRoot
     scope = 'ALL-PROJECTS'
     process.stderr.write(
-      'WARNING: --all-projects backfills EVERY project/CW transcript on this host under THIS instance. On a multi-CW host that mis-attributes other containers\' sessions (untagged). Prefer the default (this project only) or --projects-dir.\n',
+      "WARNING: --all-projects backfills EVERY project/CW transcript on this host under THIS instance. On a multi-CW host that mis-attributes other containers' sessions (untagged). Prefer the default (this project only) or --projects-dir.\n",
     )
   } else {
     const cwd = opts.cwd || process.cwd()
@@ -439,13 +486,27 @@ async function run(opts, env, now = new Date()) {
   // Real emit requires the ingest endpoint + the live bearer (auth gate).
   const endpoint = (env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ?? '').trim()
   if (!endpoint) {
-    throw new Error('OTEL_EXPORTER_OTLP_LOGS_ENDPOINT not set — provision emit via the tokenscope-setup MCP prompt and bind the repo via the project MCP prompt first.')
+    throw new Error(
+      'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT not set — provision emit via the tokenscope-setup MCP prompt and bind the repo via the project MCP prompt first.',
+    )
+  }
+  // S1 fix 3: validate BEFORE the first POST. Loopback is allowed — the
+  // CC #72671 local Content-Length forwarder legitimately pins this endpoint
+  // to http://127.0.0.1:<port>/v1/logs while active.
+  try {
+    assertSafeEndpoint(endpoint, { allowLoopback: true })
+  } catch (err) {
+    // Redact: this throw is caught by the top-level handler below, which prints
+    // `err.message` into the JSON summary on stdout. The endpoint comes from
+    // OTEL_EXPORTER_OTLP_ENDPOINT, so it is not necessarily a value the reader
+    // supplied. Reason code only.
+    throw unsafeEndpointError('OTLP endpoint', err)
   }
   if (!instanceId) {
     throw new Error('tokenscope.instance_id missing from OTEL_RESOURCE_ATTRIBUTES — not enrolled.')
   }
   const pluginRoot = env.CLAUDE_PLUGIN_ROOT || join(dirname(fileURLToPath(import.meta.url)), '..')
-  const authorization = mintBearer(pluginRoot) // throws (loud) if the instance is revoked/expired
+  const authorization = mintBearer(pluginRoot, env) // throws (loud) if the instance is revoked/expired
 
   // Default transport: OTLP/protobuf (application/x-protobuf). The Azure DCR
   // rejects OTLP/JSON with HTTP 415 (verified live) — protobuf is the only
@@ -502,7 +563,8 @@ if (isMain) {
   ;(async () => {
     try {
       const opts = parseArgs(process.argv.slice(2))
-      const summary = await run(opts, process.env)
+      // S1 fix 2: the safe env, not raw process.env — see mintBearer's doc.
+      const summary = await run(opts, safeProcessEnv())
       if (opts.json) {
         console.log(JSON.stringify(summary))
       } else {
@@ -510,7 +572,9 @@ if (isMain) {
       }
       process.exit(summary.ok ? 0 : 1)
     } catch (err) {
-      console.log(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }))
+      console.log(
+        JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }),
+      )
       process.exit(1)
     }
   })()

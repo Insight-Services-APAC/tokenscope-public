@@ -149,9 +149,9 @@ const GUIDES: Record<ConnectClient, Guide> = {
     name: 'Copilot CLI',
     accent: '#3e332d',
     lead: [
-      'Install the TokenScope plugin once per machine. It registers a TokenScope MCP server plus a usage forwarder; the first time you run the ',
+      'Three steps: install the plugin, run the ',
       { code: 'tokenscope-setup' },
-      ' skill, Copilot walks you through a browser OAuth sign-in and provisions this device to emit usage — no token to copy.',
+      ' skill (one browser OAuth sign-in that authenticates and provisions this device to emit — no token to copy), then verify. It registers a TokenScope MCP server plus a usage forwarder.',
     ],
     steps: [
       {
@@ -202,6 +202,28 @@ const GUIDES: Record<ConnectClient, Guide> = {
             ' it ',
             { strong: 'on the Copilot host' },
             ' so the CLI receives the authorization code.',
+          ],
+        ],
+      },
+      {
+        title: '3. Verify it is working',
+        badge: 'In Copilot',
+        intro: [
+          'In your fresh ',
+          { code: 'copilot' },
+          ' session, run the ',
+          { strong: 'tokenscope-status' },
+          ' skill (type ',
+          { code: '/' },
+          ' to list TokenScope\u2019s skills). It should report ',
+          { strong: 'green' },
+          ' \u2014 emitting, landing on the server, and attributing to a project. Ingestion takes ~4\u20135 min, so allow a few minutes after your first session before it confirms.',
+        ],
+        notes: [
+          [
+            'Copilot CLI has no always-on status line (unlike Claude Code\u2019s ',
+            { code: '/tokenscope:status' },
+            '), so run this probe on demand whenever you want to confirm the loop \u2014 or if sessions seem to have stopped attributing.',
           ],
         ],
       },

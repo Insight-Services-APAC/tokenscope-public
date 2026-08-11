@@ -25,8 +25,8 @@ let stateDir = ''
 let savedExecPath: string | undefined
 let savedAiAgent: string | undefined
 
-function writeSettings(endpoint: string | null) {
-  const env: Record<string, string> = { CLAUDE_CODE_ENABLE_TELEMETRY: '1', TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'super-secret' }
+function writeSettings(endpoint: string | null, extraEnv: Record<string, string> = {}) {
+  const env: Record<string, string> = { CLAUDE_CODE_ENABLE_TELEMETRY: '1', TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'super-secret', ...extraEnv }
   if (endpoint) env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = endpoint
   writeFileSync(settingsPath, JSON.stringify({ permissions: { allow: ['Bash'] }, env }, null, 2) + '\n')
 }
@@ -167,5 +167,56 @@ describe('selfHealGlobalOtlpEndpoint', () => {
     await selfHealGlobalOtlpEndpoint({ settingsPath, forwarderProbe: { ok: true, dir: '/some/other/leaked/dir' } })
     const out = JSON.parse(readFileSync(settingsPath, 'utf8'))
     expect(out.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(DCE) // reverted — do not trust a stale relay
+  })
+
+  // ── Durable revert key (the 2026-07-24 cold-start wedge, hook level) ─────────
+
+  it('THE COLD-START WEDGE: pinned global + durable copy + NO stash + forwarder gone → reverts to the DCE', async () => {
+    // The incident replay end-to-end: persistent settings survived a container
+    // rebuild pinned to the proxy; the ephemeral stash did not. With the durable
+    // copy in the SAME file, the session heals itself — no manual re-provision.
+    writeSettings(PROXY, { TOKENSCOPE_DCE_LOGS_ENDPOINT: DCE })
+    await selfHealGlobalOtlpEndpoint({ settingsPath, forwarderProbe: 'refused' })
+    const out = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(out.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(DCE) // recovered
+    expect(out.env.TOKENSCOPE_DCE_LOGS_ENDPOINT).toBeUndefined() // copy retired with the pin
+    expect(out.env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBe('super-secret') // credential survives
+    expect(out.permissions).toEqual({ allow: ['Bash'] }) // top-level keys survive
+  })
+
+  it('BACKFILLS the durable copy for a legacy pin on a broken CLI (endpoint unchanged, env still written)', async () => {
+    // A pin made before 0.1.26 has only the stash. While that stash is still
+    // alive, the reconcile copies it into settings — closing the durability gap
+    // BEFORE the ephemeral state dir is next wiped. This exercises the whole-env
+    // change detection: the ENDPOINT does not change, only the new env key.
+    process.env.CLAUDE_CODE_EXECPATH = BROKEN_EXECPATH
+    writeSettings(PROXY)
+    writeFileSync(join(stateDir, 'otlp-forward.json'), JSON.stringify({ dceLogsEndpoint: DCE }))
+    await selfHealGlobalOtlpEndpoint({ settingsPath })
+    const out = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(out.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(PROXY) // still pinned — shim needed
+    expect(out.env.TOKENSCOPE_DCE_LOGS_ENDPOINT).toBe(DCE) // durability gained
+  })
+
+  it('AUTO pin on a broken CLI records the durable copy alongside the stash', async () => {
+    process.env.CLAUDE_CODE_EXECPATH = BROKEN_EXECPATH
+    writeSettings(DCE)
+    await selfHealGlobalOtlpEndpoint({ settingsPath })
+    const out = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(out.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(PROXY)
+    expect(out.env.TOKENSCOPE_DCE_LOGS_ENDPOINT).toBe(DCE)
+    expect(JSON.parse(readFileSync(join(stateDir, 'otlp-forward.json'), 'utf8')).dceLogsEndpoint).toBe(DCE)
+  })
+
+  it('RE-MATERIALIZES a wiped stash from the durable copy on a broken CLI (no settings churn)', async () => {
+    // Pinned + durable copy present + stash gone + shim active: the forwarder needs
+    // its stash file back. The settings file itself has nothing to change, so it
+    // must stay byte-identical (no churn) while the stash reappears on disk.
+    process.env.CLAUDE_CODE_EXECPATH = BROKEN_EXECPATH
+    writeSettings(PROXY, { TOKENSCOPE_DCE_LOGS_ENDPOINT: DCE })
+    const rawBefore = readFileSync(settingsPath, 'utf8')
+    await selfHealGlobalOtlpEndpoint({ settingsPath })
+    expect(readFileSync(settingsPath, 'utf8')).toBe(rawBefore) // untouched
+    expect(JSON.parse(readFileSync(join(stateDir, 'otlp-forward.json'), 'utf8')).dceLogsEndpoint).toBe(DCE)
   })
 })

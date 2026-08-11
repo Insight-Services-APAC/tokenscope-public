@@ -31,7 +31,13 @@ import { defineEventHandler, getValidatedQuery } from 'h3'
 import { sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { requireReportScope } from '../../../../auth/report-scope'
+import { requireAuth } from '../../../../utils/auth'
 import { withRequestRls } from '../../../../db/request-rls'
+import {
+  withReportCache,
+  identityKey,
+  normalizedQuery,
+} from '../../../../reporting/report-cache'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
   fetchFinanceBillCheck,
@@ -41,6 +47,7 @@ import {
   HOMING_NOTE,
 } from '../../../../reporting/finance'
 import { providerStatesForWindow } from '../../../../reports/settling'
+import { reportCoverageMeta } from '../../../../reports/coverage-meta'
 import { copilotChargebackEnabled, copilotFinanceMode } from '../../../../reports/copilot-mode'
 import { MONTH_REGEX, monthKeyUtc } from '../../../../utils/period'
 import { COPILOT_UNCLASSIFIED_LANE } from '../../../../../shared/usage/github-surface'
@@ -70,12 +77,19 @@ export default defineEventHandler(async (event) => {
   const copilotChargeback = copilotChargebackEnabled()
   const region = query.region ?? null
 
-  return await withRequestRls(event, async (tx) => {
-    // Finance pack is whole-company: requires the finance grant (reportGrants.finance
-    // === true). Standard = global-finops / platform-admin only; a region admin gets
-    // it ONLY under a loosened mode (region-admins-see-all / all-admins-see-all), which
-    // may also admit a cost-centre owner. Denies are audited (report-scope-denied).
-    await requireReportScope(event, tx, 'finance')
+  // Authz tx first, compute tx only for a cache-miss leader (plan D5/r1-M2).
+  //
+  // Finance pack is whole-company: requires the finance grant (reportGrants.finance
+  // === true). Standard = global-finops / platform-admin only; a region admin gets
+  // it ONLY under a loosened mode (region-admins-see-all / all-admins-see-all), which
+  // may also admit a cost-centre owner. Denies are audited (report-scope-denied).
+  await withRequestRls(event, (tx) => requireReportScope(event, tx, 'finance'))
+  const session = await requireAuth(event)
+
+  return await withReportCache(
+    event,
+    ['finance', normalizedQuery(query), identityKey(session)],
+    () => withRequestRls(event, async (tx) => {
     const billCheck = await fetchFinanceBillCheck(tx, win)
     const cous = await fetchFinanceCous(tx, win, { copilotChargeback, region })
     const exemptGap = await fetchFinanceExemptGap(tx, win, { region })
@@ -94,6 +108,7 @@ export default defineEventHandler(async (event) => {
       monthFloor: metaMonth,
       asOfDate: asOf?.as_of ?? null,
       providerStates: providerStatesForWindow(win, now),
+      coverage: await reportCoverageMeta(tx),
       scope: 'finance',
       // Finance homes bill rows to the CURRENT org structure (D-Homing interim).
       pointInTimeDims: false,
@@ -121,5 +136,6 @@ export default defineEventHandler(async (event) => {
       region,
       homingNote: HOMING_NOTE,
     }
-  })
+    }),
+  )
 })

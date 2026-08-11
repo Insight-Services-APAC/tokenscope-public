@@ -1,31 +1,37 @@
 // @vitest-environment node
 /*
- * visuals-iter2 §I3 — /api/v1/me/consumption hero + provider-truth MTD, against
- * real Postgres via the REAL handler (AGENTS.md §"Never mock Drizzle").
+ * /api/v1/me/usage provider-truth MTD + provider-feed freshness, against real
+ * Postgres via the REAL handler (AGENTS.md §"Never mock Drizzle").
  *
- * Conservation contract under test (design §Conservation, r1-F8):
- *   - per-lane MTD == its OWN source, one test per basis:
- *       claude (telemetry)      == Σ attribution_aggregate MTD
- *       copilot lanes (telemetry) == Σ reconciliation_record per-category MTD
- *                                    (live-row lifecycle: superseded excluded)
- *       billed lanes            == Σ actual_spend per non-Code surface MTD
- *   - NO cross-basis scalar exists anywhere in the payload;
+ * WHAT THIS FILE USED TO ALSO COVER. It was the §I3 basis-group `hero` leg's
+ * conservation suite — per-lane MTD against each basis's own source, "no
+ * cross-basis scalar exists in the payload", and hero-weekly Σ == daily Σ. The
+ * card that leg fed ("What kind of AI work drove this") is RETIRED (owner
+ * ruling 2026-08-05) and `getMyConsumptionHero` went with it, so those
+ * assertions have no subject left. The rule they enforced — never sum or scale
+ * across bases — is not lost: with the two-basis surface gone there is nothing
+ * on /usage that could sum them, and the one-scalar-per-basis pin lives on the
+ * page (tests/unit/pages/consumption-one-scalar.test.ts, the D1 describe and
+ * the retirement describe). The FILENAME is kept because the remaining
+ * subject — provider truth — is the figure server/utils/me-queries.ts's
+ * `getMyProviderTruthMtd` doc comment points here for.
+ *
+ * Conservation contract still under test:
  *   - provider_truth.mtd_usd == Σ actual_spend (non-copilot tools) + Σ copilot
  *     reconciliation usage — and a copilot-cli row smuggled into actual_spend
  *     never double-counts (the mig-0086 exclusion);
- *   - grain conservation: hero claude weekly Σ == the daily series Σ (same
- *     window, same source);
- *   - requester-scoped: another teammate's rows never leak; RBAC: 401 unauth.
+ *   - requester-scoped: another teammate's rows never leak; RBAC: 401 unauth;
+ *   - provider-feed freshness is the STALEST sub-feed (LEAST, iter2 r1).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import { sql } from 'drizzle-orm'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import * as schema from '../../../drizzle/schema'
 import { injectTestSession } from '../../helpers/auth'
 import type { Session } from '../../../server/utils/auth'
 import { runAggregateRollup } from '../../../server/workers/aggregate-rollup'
-import consumptionHandler from '../../../server/api/v1/me/consumption.get'
-import type { HeroBasisGroup } from '../../../server/utils/me-queries'
+import consumptionHandler from '../../../server/api/v1/me/usage.get'
 
 let t: TestDb
 let regionId = ''
@@ -91,16 +97,37 @@ const todayIso = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.
   .toISOString()
   .slice(0, 10)
 
+/*
+ * ACCUMULATES on (teammate, date, tool, source) rather than inserting blind.
+ *
+ * The fixture seeds some rows on a second day of the month and clamps that day
+ * to today when the month has not had two days yet. On the 1st that clamp turns
+ * two rows into one key and the seed died on the unique index — the suite
+ * failed wholesale, once a month, for a reason that had nothing to do with the
+ * behaviour under test. The seeded expectations below are SUMS per surface, so
+ * folding the two rows together on the 1st leaves every one of them intact.
+ */
 async function spend(teammateId: string, tool: string, costUsd: string, onDay = todayIso) {
-  await t.db.insert(schema.actualSpend).values({
-    teammateId,
-    date: onDay,
-    tool,
-    inputTokens: 100n,
-    outputTokens: 100n,
-    costUsd,
-    source: 'anthropic-analytics-api',
-  })
+  await t.db
+    .insert(schema.actualSpend)
+    .values({
+      teammateId,
+      date: onDay,
+      tool,
+      inputTokens: 100n,
+      outputTokens: 100n,
+      costUsd,
+      source: 'anthropic-analytics-api',
+    })
+    .onConflictDoUpdate({
+      target: [
+        schema.actualSpend.teammateId,
+        schema.actualSpend.date,
+        schema.actualSpend.tool,
+        schema.actualSpend.source,
+      ],
+      set: { costUsd: sql`${schema.actualSpend.costUsd} + EXCLUDED.cost_usd` },
+    })
 }
 
 async function recon(
@@ -109,11 +136,20 @@ async function recon(
   actualUsd: string,
   status: 'proposed' | 'applied' | 'superseded',
   onDay = todayIso,
+  /*
+   * Part of the LIFECYCLE key (mig 0101:179 — provider, enterprise_ref,
+   * period_date, category, scope, teammate_id). Exposed so a row can be given
+   * its own logical key without needing its own DAY, which the 1st of a month
+   * cannot supply: there is exactly one day that is both in the current month
+   * and not in the future. The migration names this exact case ("a teammate can
+   * hold seats in >1 enterprise").
+   */
+  enterpriseRef = 'ent-hero',
 ) {
   await t.db.insert(schema.reconciliationRecord).values({
     teammateId,
     provider: 'github',
-    enterpriseRef: 'ent-hero',
+    enterpriseRef,
     periodDate: onDay,
     category,
     scope: 'teammate',
@@ -208,7 +244,16 @@ beforeAll(async () => {
   const yesterdayIso = new Date(Date.parse(todayIso) - 86_400_000).toISOString().slice(0, 10)
   // Yesterday may fall in the previous month on the 1st — month-clamp it.
   const inMonthDay = yesterdayIso.slice(0, 7) === todayIso.slice(0, 7) ? yesterdayIso : todayIso
-  await recon(priyaId, 'copilot_interactive', '2.50', 'proposed', inMonthDay)
+  /*
+   * A live PROPOSED row alongside the live APPLIED one, so PROVIDER_TRUTH can
+   * only hold if both count. It carries its own enterprise_ref rather than
+   * relying on a second day: on the 1st the month-clamp collapses inMonthDay
+   * onto today, which put this row on the SAME logical key as the applied one,
+   * and mig 0101's DISTINCT ON correctly kept only the applied row. The fixture
+   * then asserted 7.50 against a view that could only ever return 5.00 —
+   * a red suite once a month for a reason unrelated to the behaviour tested.
+   */
+  await recon(priyaId, 'copilot_interactive', '2.50', 'proposed', inMonthDay, 'ent-hero-2')
   await recon(priyaId, 'copilot_coding_agent', '4.00', 'applied')
 
   // §B provider bill: non-Code surfaces + the claude-code bill line, plus a
@@ -255,57 +300,7 @@ async function fetchPage(): Promise<Resp> {
   return await consumptionHandler(ev(sess(priyaId)))
 }
 
-const groupOf = (resp: Resp, id: string): HeroBasisGroup => {
-  const g = resp.hero.groups.find((x: HeroBasisGroup) => x.id === id)
-  expect(g).toBeDefined()
-  return g!
-}
-const laneMtd = (g: HeroBasisGroup, lane: string) =>
-  Number(g.lanes.find((l) => l.lane === lane)?.mtd_usd ?? NaN)
-
-describe('/me/consumption hero — per-lane MTD == its own source (per basis)', () => {
-  it('telemetry basis: claude lane MTD == Σ attribution_aggregate MTD (never the bill)', async () => {
-    const resp = await fetchPage()
-    const tel = groupOf(resp, 'telemetry')
-    expect(laneMtd(tel, 'claude')).toBeCloseTo(CLAUDE_ATTRIBUTED, 6)
-    // Distinct from the provider's claude-code bill line ($3.10) — the lane is
-    // attributed telemetry, not §B.
-    expect(laneMtd(tel, 'claude')).not.toBeCloseTo(CLAUDE_CODE_BILL, 6)
-  })
-
-  it('telemetry basis: copilot lanes MTD == reconciliation usage truth (lifecycle-aware)', async () => {
-    const resp = await fetchPage()
-    const tel = groupOf(resp, 'telemetry')
-    expect(laneMtd(tel, 'copilot')).toBeCloseTo(COPILOT_INTERACTIVE, 6) // superseded 99 excluded
-    expect(laneMtd(tel, 'copilot-agent')).toBeCloseTo(COPILOT_AGENT, 6)
-  })
-
-  it('billed basis: each non-Code surface MTD == Σ actual_spend; §A tools never appear', async () => {
-    const resp = await fetchPage()
-    const billed = groupOf(resp, 'billed')
-    expect(laneMtd(billed, 'claude-ai')).toBeCloseTo(CLAUDE_AI, 6)
-    expect(laneMtd(billed, 'claude-cowork')).toBeCloseTo(CLAUDE_COWORK, 6)
-    const lanes = billed.lanes.map((l) => l.lane)
-    expect(lanes).not.toContain('claude-code')
-    expect(lanes).not.toContain('copilot-cli')
-    expect(lanes).not.toContain('copilot')
-    expect(lanes).not.toContain('claude-slack') // zero surface elided
-  })
-
-  it('NO cross-basis scalar exists in the hero payload (r1-F1)', async () => {
-    const resp = await fetchPage()
-    // The hero carries groups + lanes + the as_of anchor only — no total field
-    // at any level. as_of is the SERVER's UTC today (the client's partial-week
-    // anchor — the page never calls `new Date()`, iter2 r1).
-    expect(Object.keys(resp.hero).sort()).toEqual(['as_of', 'groups', 'window_days'])
-    expect(resp.hero.as_of).toMatch(/^\d{4}-\d{2}-\d{2}$/)
-    for (const g of resp.hero.groups) {
-      expect(Object.keys(g).sort()).toEqual(['basis', 'id', 'label', 'lanes'])
-    }
-  })
-})
-
-describe('/me/consumption — provider-truth MTD (the one honest number)', () => {
+describe('/me/usage — provider-truth MTD (the one honest number)', () => {
   it('equals Σ actual_spend (non-copilot) + Σ copilot reconciliation usage', async () => {
     const resp = await fetchPage()
     expect(Number(resp.provider_truth.mtd_usd)).toBeCloseTo(PROVIDER_TRUTH, 2)
@@ -319,33 +314,64 @@ describe('/me/consumption — provider-truth MTD (the one honest number)', () =>
     expect(Number(resp.provider_truth.mtd_usd)).toBeCloseTo(PROVIDER_TRUTH, 2)
   })
 
+  it('is the BILL, never the attributed telemetry beside it (ADR 0012 D1/D2)', async () => {
+    /*
+     * RE-HOMED from the retired hero's first test, which pinned the same
+     * contrast from the §A side ("claude lane MTD == Σ attribution_aggregate,
+     * never the bill"). The fixture seeds $3.00 of attributed Claude Code
+     * against a $3.10 actual_spend bill line precisely so the two cannot be
+     * confused for one another, and the ADR's whole point is that they are
+     * different quantities that must never be substituted.
+     */
+    const resp = await fetchPage()
+    const attributedSum = resp.series.reduce((a: number, d: { cost_usd: string }) => a + Number(d.cost_usd), 0)
+    expect(attributedSum).toBeCloseTo(CLAUDE_ATTRIBUTED, 6)
+    expect(Number(resp.provider_truth.mtd_usd)).not.toBeCloseTo(attributedSum, 2)
+    expect(Number(resp.provider_truth.mtd_usd)).toBeCloseTo(PROVIDER_TRUTH, 2)
+  })
+
   it('run-rate is computed on the provider-truth MTD', async () => {
     const resp = await fetchPage()
     const rr = resp.provider_truth.run_rate
     const expected = (PROVIDER_TRUTH * rr.days_in_month) / rr.days_elapsed
     expect(Number(rr.projected_month_end_usd)).toBeCloseTo(expected, 1)
   })
-})
 
-describe('/me/consumption hero — grain conservation (weekly Σ == daily Σ)', () => {
-  it('hero claude weekly Σ == the daily series Σ (same window, same source)', async () => {
+  it('A4 (mig 0101): equals Σ v_teammate_usage_daily ALONE — the non-Code operand this figure used to ADD SEPARATELY is gone, because A1 restored those tools to the view itself', async () => {
+    /*
+     * R1-H7 / A4: getMyProviderTruthMtd used to compute
+     * Σ v_teammate_usage_daily (which EXCLUDED non-Code tools pre-0101) + Σ
+     * actual_spend(non-Code tools) as two separate operands. Migration 0101
+     * (A1) restores the non-Code tools to v_teammate_usage_daily itself, which
+     * would make that second operand a DUPLICATE if the code had not also
+     * removed it (A4). This test proves the fix directly, independent of the
+     * other "mixed conservation" tests above (which only prove the TOTAL is
+     * right — this proves WHERE it now comes from): summing
+     * v_teammate_usage_daily alone, with NO second operand added, must equal
+     * the page's own figure exactly. If A4 had been skipped, the page would
+     * read PROVIDER_TRUTH + (CLAUDE_AI + CLAUDE_COWORK) — roughly double the
+     * non-Code contribution — while this independent SQL total would not.
+     */
     const resp = await fetchPage()
-    const tel = groupOf(resp, 'telemetry')
-    const weeklySum = tel.lanes
-      .find((l) => l.lane === 'claude')!
-      .weekly.reduce((a, w) => a + Number(w.usd), 0)
-    const dailySum = resp.series.reduce((a: number, d: { cost_usd: string }) => a + Number(d.cost_usd), 0)
-    expect(weeklySum).toBeCloseTo(dailySum, 6)
+    const monthStart = todayIso.slice(0, 7) + '-01'
+    const [row] = await t.client<{ usd: string }[]>`
+      SELECT COALESCE(SUM(usage_usd), 0)::text AS usd FROM v_teammate_usage_daily
+      WHERE teammate_id = ${priyaId}::uuid AND day >= ${monthStart}::date`
+    const viewTotal = Number(row!.usd)
+    expect(viewTotal).toBeCloseTo(PROVIDER_TRUTH, 6)
+    expect(Number(resp.provider_truth.mtd_usd)).toBeCloseTo(viewTotal, 2)
   })
 })
 
-describe('/me/consumption — scoping, freshness, RBAC', () => {
-  it("another teammate's spend never leaks into the requester's hero or MTD", async () => {
+describe('/me/usage — scoping, freshness, RBAC', () => {
+  it("another teammate's spend never leaks into the requester's MTD", async () => {
+    /*
+     * Ani's $100 claude-ai and $50 copilot are absent. This used to also read
+     * the retired hero's per-lane MTDs; PROVIDER_TRUTH is the sum of every
+     * seeded surface, so a leak of either row moves it and the assertion keeps
+     * its teeth without the hero.
+     */
     const resp = await fetchPage()
-    const billed = groupOf(resp, 'billed')
-    // Ani's $100 claude-ai and $50 copilot are absent everywhere.
-    expect(laneMtd(billed, 'claude-ai')).toBeCloseTo(CLAUDE_AI, 6)
-    expect(laneMtd(groupOf(resp, 'telemetry'), 'copilot')).toBeCloseTo(COPILOT_INTERACTIVE, 6)
     expect(Number(resp.provider_truth.mtd_usd)).toBeCloseTo(PROVIDER_TRUTH, 2)
   })
 
@@ -364,9 +390,17 @@ describe('/me/consumption — scoping, freshness, RBAC', () => {
   it('rejects an unauthenticated request (401)', async () => {
     await expect(consumptionHandler(ev())).rejects.toMatchObject({ statusCode: 401 })
   })
+
+  it('carries NO `hero` leg — the basis-group card and its query are retired', async () => {
+    // Mutation proof for the server half: restore the leg and this fails.
+    // `hero_tiles` (the W2 band) is a different key and stays.
+    const resp = await fetchPage()
+    expect('hero' in resp).toBe(false)
+    expect(resp.hero_tiles).toBeDefined()
+  })
 })
 
-describe('/me/consumption — provider-feed freshness = STALEST sub-feed (LEAST, iter2 r1)', () => {
+describe('/me/usage — provider-feed freshness = STALEST sub-feed (LEAST, iter2 r1)', () => {
   const fetchAs = async (id: string) => await consumptionHandler(ev(sess(id)))
 
   it('a fresh GitHub pull never hides a 3-day-old Anthropic pull; page worst-of reflects it', async () => {

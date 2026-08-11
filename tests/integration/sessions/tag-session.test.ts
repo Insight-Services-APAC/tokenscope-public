@@ -122,3 +122,95 @@ describe('tagSessionTx — activity-only tag preserves the successor project (CO
     expect(result.activity).toBe('research')
   })
 })
+
+/*
+ * server-api-app:idor:0005 — the ended-state predicate ran BEFORE the
+ * membership check, so a non-member probing a project id they don't belong
+ * to could learn "this id exists and is ended" (409, WITH the project's code
+ * in the detail) before ever being told "you're not a member" (403). The fix
+ * reorders membership first: an unknown id, a real ACTIVE project the caller
+ * isn't a member of, and a real ENDED project the caller isn't a member of
+ * must now be indistinguishable — same status, same body, no code leaked.
+ *
+ * These assertions FAIL against the pre-fix code (the ended project used to
+ * short-circuit to a 409 carrying its code before membership was checked) —
+ * confirmed by running this file against a git stash of the ordering fix.
+ */
+describe('tagSessionTx — membership checked BEFORE ended-state (server-api-app:idor:0005)', () => {
+  const NON_MEMBER = '77777777-7777-7777-7777-777777777777'
+  const OWNED_CONV = 'conv-idor5-owned-0001'
+  const PROJ_ACTIVE_NOTMINE = '88888888-cccc-cccc-cccc-cccccccccccc'
+  const PROJ_ENDED_NOTMINE = '99999999-dddd-dddd-dddd-dddddddddddd'
+  const UNKNOWN_PROJECT = '00000000-0000-4000-8000-00000000cafe'
+  const SECRET_ACTIVE_CODE = 'SECRET-ACTIVE-NOTMINE'
+  const SECRET_ENDED_CODE = 'SECRET-ENDED-NOTMINE'
+
+  beforeAll(async () => {
+    await t.client.unsafe(`
+      INSERT INTO teammate (id, entra_oid, email, region_id, org_unit_id)
+        VALUES ('${NON_MEMBER}', 'oid-idor5', 'idor5-nonmember@i.com',
+                '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222');
+      -- Two REAL projects the caller is NOT assigned to: one active, one ended.
+      INSERT INTO project (id, code, code_hash, display_name, type, region_id, cost_owning_unit_id, end_date)
+        VALUES ('${PROJ_ACTIVE_NOTMINE}', '${SECRET_ACTIVE_CODE}', 'h-secret-active-notmine', 'Secret Active', 'billable',
+                '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', NULL),
+               ('${PROJ_ENDED_NOTMINE}', '${SECRET_ENDED_CODE}', 'h-secret-ended-notmine', 'Secret Ended', 'billable',
+                '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
+                '2026-05-01 00:00:00+00');
+      -- An owned (unallocated) session for NON_MEMBER, so tagSessionTx's own
+      -- ownership gate (attribution_record rows for the caller) passes and we
+      -- reach the project gate under test.
+      INSERT INTO attribution_record
+        (instance_id, claude_session_id, teammate_id, project_id, region_id, org_unit_id,
+         cost_owning_unit_id, tool, model, token_type, tokens, cost_usd,
+         fidelity_tier, cost_basis, ts_event)
+      VALUES
+        ('${INST}', '${OWNED_CONV}', '${NON_MEMBER}', NULL,
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
+         NULL, 'claude-code', 'claude-sonnet-4-7', 'input', 500, 0.005000,
+         'tier-1', 'estimated', '2026-05-05 10:00:00+00');
+    `)
+  })
+
+  type TagError = { statusCode?: number; statusMessage?: string; data?: unknown }
+
+  async function attemptTag(projectId: string): Promise<TagError> {
+    try {
+      await t.db.transaction((tx) =>
+        tagSessionTx(
+          tx as unknown as TagTx,
+          NON_MEMBER,
+          OWNED_CONV,
+          { setProject: true, projectVal: projectId, setActivity: false, activityVal: null },
+          { actorSystem: 'test' },
+        ),
+      )
+      throw new Error('expected tagSessionTx to reject the non-member tag')
+    } catch (err) {
+      return err as TagError
+    }
+  }
+
+  it('an unknown id, a real ACTIVE non-member project, and a real ENDED non-member project all produce the SAME 403 — no code disclosed', async () => {
+    const unknown = await attemptTag(UNKNOWN_PROJECT)
+    const active = await attemptTag(PROJ_ACTIVE_NOTMINE)
+    const ended = await attemptTag(PROJ_ENDED_NOTMINE)
+
+    for (const err of [unknown, active, ended]) {
+      expect(err.statusCode).toBe(403)
+      expect(err.statusMessage).toBe('Forbidden')
+    }
+    // Identical body across all three — no existence/ended-state oracle.
+    expect(active.data).toEqual(unknown.data)
+    expect(ended.data).toEqual(unknown.data)
+
+    // The 409 "Budget has ended" branch — and the code it would have named —
+    // must never be reached by a non-member.
+    for (const err of [unknown, active, ended]) {
+      expect(err.statusCode).not.toBe(409)
+      const serialized = JSON.stringify(err)
+      expect(serialized).not.toContain(SECRET_ACTIVE_CODE)
+      expect(serialized).not.toContain(SECRET_ENDED_CODE)
+    }
+  })
+})

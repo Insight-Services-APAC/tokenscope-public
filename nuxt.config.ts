@@ -1,4 +1,6 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
+import pkg from './package.json' with { type: 'json' }
+
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
 
@@ -71,6 +73,11 @@ export default defineNuxtConfig({
     sessionSecret: process.env.NUXT_SESSION_SECRET || '',
     azureMonitorEndpoint: process.env.NUXT_AZURE_MONITOR_ENDPOINT || '',
     public: {
+      // The artefact's own version, read from package.json at BUILD time —
+      // which is the only time it can be known, and the only place it is
+      // maintained. Surfaced through /api/v1/meta/build so no view ever
+      // hand-types a version string (see shared/build-info.ts).
+      appVersion: pkg.version,
       authDevMode: process.env.NUXT_OIDC_AUTH_DEV_MODE === 'true',
       // Client mirror of NUXT_DEPLOY_ENV, consumed by useDemoFeatures() to hide
       // persona/demo UI off demo-capable envs. Empty placeholder — runtime-overlaid

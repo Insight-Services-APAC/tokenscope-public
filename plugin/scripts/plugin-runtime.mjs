@@ -19,12 +19,25 @@
  * probe, the wrong one for a re-emitter.
  */
 import { readFileSync, existsSync } from 'node:fs'
-import { homedir, userInfo } from 'node:os'
+import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import https from 'node:https'
 import http from 'node:http'
+import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
+// Re-exported so existing importers keep one name, and so mcp-origin.mjs can
+// reach it without importing this module (copilot-plugin does not vendor it).
+import { realHome } from './real-home.mjs'
+export { realHome }
+
+// Re-exported so every existing importer of plugin-runtime.mjs has ONE name to
+// reach for (S1 fix 3) — the implementation lives in endpoint-guard.mjs, which
+// stays dependency-free so it can also be vendored standalone into the Copilot
+// distribution. plugin-runtime.mjs itself is NOT vendored (it imports Node
+// builtins beyond what endpoint-guard needs and carries Claude-lane settings
+// resolution the Copilot lane has no use for).
+export { assertSafeEndpoint } from './endpoint-guard.mjs'
 
 /**
  * POST a JSON body and resolve the parsed JSON response (dependency-free; shared
@@ -34,10 +47,28 @@ import http from 'node:http'
  *
  * Times out by default (30s): an unresponsive endpoint must fail loud rather than
  * hang the enrolment forever while the 5-min handoff code expires.
+ *
+ * The URL is validated via assertSafeEndpoint (S1 fix 3) — this used to pick
+ * `http` for ANY non-https URL with no complaint (the "plain-http fallback"),
+ * which would silently downgrade a poisoned endpoint instead of refusing it.
+ * `allowLoopback` defaults true: every caller of this helper is a plugin
+ * script resolving its OWN target (via api-base.mjs, which validates itself),
+ * and the documented local-dev override (`http://localhost:3450`) must keep
+ * working end-to-end through this shared POST path.
  */
-export function httpsPostJson(urlStr, body, { timeoutMs = 30_000 } = {}) {
+export function httpsPostJson(urlStr, body, { timeoutMs = 30_000, allowLoopback = true } = {}) {
   return new Promise((resolve, reject) => {
-    const url = new URL(urlStr)
+    let url
+    try {
+      url = assertSafeEndpoint(urlStr, { allowLoopback })
+    } catch (err) {
+      // Redact at the throw site: assertSafeEndpoint's message embeds the
+      // REJECTED endpoint, and this promise's rejection is printed by callers'
+      // generic handlers that interpolate err.message. Rejecting the raw guard
+      // error is the CodeQL js/clear-text-logging class.
+      reject(unsafeEndpointError('Endpoint', err))
+      return
+    }
     const bodyBuf = Buffer.from(JSON.stringify(body), 'utf8')
     const mod = url.protocol === 'https:' ? https : http
     const req = mod.request(
@@ -92,49 +123,30 @@ export function resolveHelperPath() {
 }
 
 /**
- * The account's REAL home, HOME-leak-proof. `os.homedir()` trusts the `HOME`
- * env var first, so a container/`cw` event that leaks `HOME=/tmp/ts-home-*`
- * into a spawned process makes it resolve a phantom home — the exact recurring
- * silent-drop bug (the forwarder resolved its DCE stash under the leaked home,
- * found nothing, and 502'd every export). `os.userInfo().homedir` reads the
- * passwd entry (getpwuid), which the `HOME` env cannot move, so every plugin
- * component agrees on one real `~/.tokenscope` regardless of env leaks. Falls
- * back to `homedir()` only if the passwd lookup itself throws (extremely rare).
- */
-function realHome() {
-  try {
-    const h = userInfo().homedir
-    if (h) return h
-  } catch {
-    /* fall through to the last-resort branch below */
-  }
-  // Last resort (passwd unavailable — e.g. a minimal container with no
-  // /etc/passwd entry for the uid). This branch DOES follow HOME, so it can
-  // reinstate the leak — but only in the rare no-passwd case AND only when no
-  // TOKENSCOPE_STATE_DIR pin is set (the override is consulted before realHome).
-  // Make the degradation LOUD (stderr, best-effort) so a silent drop in that
-  // corner is at least attributable instead of invisible.
-  try {
-    process.stderr.write('[tokenscope] WARN: os.userInfo() unavailable; state dir falls back to HOME (leak-susceptible). Set TOKENSCOPE_STATE_DIR to pin it.\n')
-  } catch {
-    /* best effort */
-  }
-  return homedir()
-}
-
-/**
  * The TokenScope state dir (TOKENSCOPE_STATE_DIR or ~/.tokenscope), anchored on
  * the passwd home so it is stable across a leaked `HOME`. This dir is
  * plugin-owned (forwarder stash/log/pid, landed state) — it is NOT `~/.claude`,
  * which stays on `homedir()` to match Claude Code's own settings resolution.
+ *
+ * The `env` parameter is accepted but deliberately UNUSED (kept only for
+ * call-site compatibility — readEmitSentinel and others still pass one; JS
+ * ignores an extra argument). See the S1 note inside the function body.
  */
-export function stateDir(env = process.env) {
-  // The override is a PROCESS-level concern (a deployment pin / test sandbox),
-  // never carried in a per-settings OTEL env block. Honour it from the passed
-  // env first, then the process env, so EVERY call site resolves the same dir
-  // even when handed a settings block that lacks the key — then anchor on the
-  // passwd home (HOME-leak-proof).
-  const override = (env.TOKENSCOPE_STATE_DIR ?? '').trim() || (process.env.TOKENSCOPE_STATE_DIR ?? '').trim()
+// eslint-disable-next-line no-unused-vars, @typescript-eslint/no-unused-vars
+export function stateDir(env) {
+  // S1 fix 2 (hardened): the override is a PROCESS-level concern (a
+  // deployment pin / test sandbox) — NEVER carried in a per-settings OTEL env
+  // block, because nothing anywhere legitimately writes TOKENSCOPE_STATE_DIR
+  // to settings.json (global or repo). Reading it from a PASSED `env` object
+  // used to trust exactly that non-existent legitimate source — the same
+  // shape as the vulnerability repoTagEnv/safeProcessEnv close elsewhere: a
+  // settings-derived object is attacker-reachable in a way `process.env`
+  // (this process's own, real OS environment) is not. So this reads
+  // `process.env` ONLY, ignoring a passed `env.TOKENSCOPE_STATE_DIR` entirely
+  // — the parameter still exists so call sites don't need to change, it
+  // simply no longer influences the state dir. Anchored on the passwd home
+  // (HOME-leak-proof).
+  const override = (process.env.TOKENSCOPE_STATE_DIR ?? '').trim()
   return override || join(realHome(), '.tokenscope')
 }
 
@@ -151,6 +163,106 @@ export function readSettingsEnv(path) {
 /** The GLOBAL ~/.claude/settings.json `env` block. */
 export function globalSettingsEnv() {
   return readSettingsEnv(join(homedir(), '.claude', 'settings.json'))
+}
+
+/**
+ * S1 fix (1) — the POSITIVE ALLOWLIST for a repo-local settings merge. Takes
+ * `OTEL_RESOURCE_ATTRIBUTES` from the repo-local env and NOTHING else; every
+ * other key comes from `globalEnv`. This replaces the `{...global, ...repo}`
+ * shape that used to sit at five call sites in session-start.mjs: an
+ * additive spread lets a repo committed into any cloned repository override
+ * ANY single key — most dangerously the endpoint the credential is POSTed
+ * to, while the credential itself still comes from the trusted global file.
+ *
+ * A DENY-list would miss `TOKENSCOPE_STATE_DIR`, which is credential-bearing:
+ * `otel-headers-helper.sh` writes the freshly-minted emit ACCESS TOKEN into
+ * it, so a repo-steered state dir drops a live token inside the attacker's
+ * working tree with NO network call at all — an exfil path an endpoint
+ * validator can never catch. An allowlist closes it structurally: nothing a
+ * repo sets other than the resource attrs can ever reach the merged env.
+ *
+ * @param {Record<string,string>} globalEnv
+ * @param {Record<string,string>} repoEnv
+ * @returns {Record<string,string>}
+ */
+export function repoTagEnv(globalEnv, repoEnv) {
+  const out = { ...(globalEnv && typeof globalEnv === 'object' ? globalEnv : {}) }
+  const attrs =
+    repoEnv && typeof repoEnv === 'object' ? repoEnv.OTEL_RESOURCE_ATTRIBUTES : undefined
+  if (typeof attrs === 'string') out.OTEL_RESOURCE_ATTRIBUTES = attrs
+  return out
+}
+
+/**
+ * S1 fix (2) — the safe env for scripts that read LIVE `process.env` directly
+ * (status.mjs, backfill.mjs). Claude Code itself has already applied a
+ * TAGGED repo's `settings.local.json` onto `process.env` by REPLACEMENT
+ * before spawning this process (ADR-0006 §2), so `process.env` may be
+ * entirely repo-controlled by the time these scripts run — `repoTagEnv`
+ * above cannot help here, because there is no separate "repo env" object to
+ * allowlist against; Claude has already merged the two.
+ *
+ * STRIP FIRST, THEN LAYER THE GLOBAL ON TOP. The earlier shape here was
+ * `{...env, ...globalSettingsEnv()}` — the global wins for every key it
+ * actually CONTAINS, which is only the enrolled-device case. On a device with
+ * no `~/.claude/settings.json`, or one enrolled before a key existed, there is
+ * nothing to "win" and the repo-supplied value survives the spread untouched.
+ * That is precisely the un-enrolled or partially-enrolled developer — the
+ * person most likely to be opening an unfamiliar repository — so the weakest
+ * device got the weakest protection.
+ *
+ * CI proved it: with no global settings file, the hostile-repo fixture's
+ * `TOKENSCOPE_BEARER_ENDPOINT` reached the assertion intact, while the same
+ * test passed on an enrolled workstation. A control whose strength depends on
+ * unrelated local state is not a control.
+ *
+ * Deleting first makes absence FAIL-SAFE instead of fail-open: a key the
+ * global does not supply is simply absent, and every consumer already falls
+ * back to its compiled default (`api-base.mjs`'s `DEFAULT_API_BASE`, the
+ * helper's `$HOME/.tokenscope`). A repo can no longer contribute any of these
+ * values whether or not the device is enrolled.
+ *
+ * `TOKENSCOPE_STATE_DIR` and `TOKENSCOPE_API_BASE` stay deleted UNCONDITIONALLY
+ * — not restored from the global either — because `stateDir()` reads
+ * `process.env` directly by design and the API base has a compiled default; a
+ * genuine process-level override still reaches them by the documented path.
+ *
+ * @param {Record<string,string>} [env]
+ * @returns {Record<string,string>}
+ */
+/**
+ * Keys a repo-local `settings.local.json` must never contribute: each one
+ * either steers a credential-presenting network call or names where a minted
+ * credential is written. Restored from the GLOBAL file when it has them.
+ */
+export const REPO_UNTRUSTED_ENV_KEYS = Object.freeze([
+  'TOKENSCOPE_BEARER_ENDPOINT',
+  'TOKENSCOPE_OAUTH_TOKEN_ENDPOINT',
+  'TOKENSCOPE_OAUTH_CLIENT_ID',
+  'TOKENSCOPE_OAUTH_REFRESH_TOKEN',
+  'TOKENSCOPE_READ_CLIENT_ID',
+  'TOKENSCOPE_READ_REFRESH_TOKEN',
+  'TOKENSCOPE_SESSION_TOKEN',
+  'TOKENSCOPE_DCE_LOGS_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
+])
+
+/** Deleted outright and never restored — see safeProcessEnv's doc. */
+const REPO_UNTRUSTED_ENV_KEYS_NO_RESTORE = Object.freeze([
+  'TOKENSCOPE_STATE_DIR',
+  'TOKENSCOPE_API_BASE',
+])
+
+export function safeProcessEnv(env = process.env) {
+  const out = { ...env }
+  for (const k of REPO_UNTRUSTED_ENV_KEYS) delete out[k]
+  for (const k of REPO_UNTRUSTED_ENV_KEYS_NO_RESTORE) delete out[k]
+  // The device's OWN global config may legitimately supply the restorable keys.
+  const global = globalSettingsEnv()
+  for (const k of REPO_UNTRUSTED_ENV_KEYS) {
+    if (typeof global[k] === 'string') out[k] = global[k]
+  }
+  return out
 }
 
 /** Read the helper's emit-failure sentinel for `env`'s state dir (or null). */

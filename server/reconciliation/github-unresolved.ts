@@ -18,6 +18,7 @@
  * The client + roster reader are INJECTABLE so the whole path unit-tests with mocks (no network,
  * no live GitHub). RBAC/audit live in the route + the map endpoint; this is a pure reader.
  */
+import { consola } from 'consola'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { resolveEnterpriseCredential } from './credentials'
 import type { CredentialKind } from './credentials'
@@ -43,6 +44,15 @@ export interface UnresolvedCopilotLogin {
   credits: number | null
   /** The UTC day the App-mode credits figure is for (App mode only). */
   lastSeenDay: string | null
+  /* SELF-ASSERTED github profile text (GET /users/{login}), for the map picker's benefit only.
+   * NOT an identity source and never a basis for a bind: profile fields are user-editable, so
+   * trusting them would be the claim-jacking vector the SAML-only resolver exists to avoid.
+   * They spare an admin the trip to github.com to find out who a login belongs to. Null when
+   * the profile is private, the field is unset, or the lookup failed - all common, all
+   * non-fatal, and indistinguishable to the consumer by design (no field-level error surface
+   * on a decoration). */
+  profileName: string | null
+  profileEmail: string | null
 }
 
 export interface UnresolvedCopilotResult {
@@ -65,6 +75,8 @@ export interface UnresolvedProbeClient {
   >
   // App mode — per-user daily AI-credit consumption for the whole enterprise on one day.
   getUserDailyCredits?: (day: string) => Promise<Array<{ login: string; credits: number }>>
+  // Public profile decoration (optional — a client without it simply yields null hints).
+  getUserProfile?: (login: string) => Promise<{ name: string | null; email: string | null } | null>
 }
 
 export type UnresolvedClientFactory = (args: {
@@ -92,6 +104,15 @@ export class UnresolvedProbeError extends Error {
     this.name = 'UnresolvedProbeError'
   }
 }
+
+/* Max live profile lookups per probe (see the decoration pass). Bounds the page load on a
+ * badly-unmapped enterprise; rows past it render without hints. */
+const PROFILE_HINT_LIMIT = 25
+/* In-flight profile lookups. Small: the enterprise credential is shared with the reconciler and
+ * the profile API is rate-limited, so latency is bought a few calls at a time, not all at once. */
+const PROFILE_HINT_CONCURRENCY = 5
+/* Whole-pass budget for hint decoration. Past it the list returns with whatever it has. */
+const PROFILE_HINT_DEADLINE_MS = 4_000
 
 export interface ListUnresolvedOpts {
   now?: Date
@@ -160,7 +181,7 @@ export async function listUnresolvedCopilotLogins(
         if (!login) continue
         const key = login.toLowerCase()
         if (roster.has(key) || byLogin.has(key)) continue
-        byLogin.set(key, { login, licenseOrg: null, credits: Number.isFinite(credits) ? credits : 0, lastSeenDay: probeDay })
+        byLogin.set(key, { login, licenseOrg: null, credits: Number.isFinite(credits) ? credits : 0, lastSeenDay: probeDay, profileName: null, profileEmail: null })
       }
     } else {
       const seats = await client.listSeats!()
@@ -169,7 +190,7 @@ export async function listUnresolvedCopilotLogins(
         if (!login) continue
         const key = login.toLowerCase()
         if (roster.has(key) || byLogin.has(key)) continue
-        byLogin.set(key, { login, licenseOrg: seat.organization?.login ?? null, credits: null, lastSeenDay: null })
+        byLogin.set(key, { login, licenseOrg: seat.organization?.login ?? null, credits: null, lastSeenDay: null, profileName: null, profileEmail: null })
       }
     }
   } catch (err) {
@@ -179,5 +200,77 @@ export async function listUnresolvedCopilotLogins(
   }
 
   const logins = [...byLogin.values()].sort((a, b) => a.login.localeCompare(b.login))
+
+  /*
+   * 4. DECORATE with the public profile (name + public email). Strictly best-effort: this is a
+   * display hint for the human doing the mapping, so a failure must degrade to a null hint and
+   * NEVER convert a good list into a probe error. That is why this sits after the sort, outside
+   * the try that guards the roster fetch, and swallows per-login failures individually.
+   *
+   * CAPPED because it is the only part of this probe that costs one live call PER ROW rather
+   * than one per enterprise. The cap bounds a page load on a badly-unmapped enterprise; beyond
+   * it the remaining rows simply render without hints, which is the pre-existing experience.
+   *
+   * The cap bounds the CALL COUNT; a serial loop would still make page latency the SUM of 25
+   * round trips against a slow provider, so the lookups run with bounded concurrency. Bounded
+   * rather than unbounded because these are authenticated calls against a rate-limited API and
+   * the enterprise credential is shared with the reconciler.
+   *
+   * A whole-pass DEADLINE on top of both, because neither bounds TIME: a profile API that hangs
+   * rather than fails would hold a list that is already complete and correct. When it expires
+   * the rows decorated so far keep their hints and the rest render without, which is the same
+   * degradation as exceeding the cap. "Best-effort" has to mean the list never waits on it.
+   */
+  if (client.getUserProfile && logins.length > 0) {
+    const fetchProfile = client.getUserProfile.bind(client)
+    const queue = logins.slice(0, PROFILE_HINT_LIMIT)
+    let next = 0
+    let deadlineExpired = false
+    const worker = async () => {
+      for (;;) {
+        // Checked per iteration, not just raced against: without this the workers keep
+        // dequeuing and calling the provider after the response has been sent, which turns a
+        // response-latency bound into no bound on provider load at all.
+        if (deadlineExpired) return
+        const i = next++
+        const row = queue[i]
+        if (!row) return
+        try {
+          const profile = await fetchProfile(row.login)
+          if (!profile) continue
+          row.profileName = profile.name
+          row.profileEmail = profile.email
+        } catch {
+          // A decoration failure is not a probe failure. Nothing is logged per row: on a wholly
+          // unreachable profile API this would be one warn per unresolved login, which buries
+          // the real signal without telling an operator anything the null hint doesn't show.
+        }
+      }
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(() => { deadlineExpired = true; resolve() }, PROFILE_HINT_DEADLINE_MS)
+      // Do not hold the event loop open on a short-lived process (a worker run, a test).
+      timer.unref?.()
+    })
+    try {
+      await Promise.race([
+        Promise.all(Array.from({ length: Math.min(PROFILE_HINT_CONCURRENCY, queue.length) }, worker)),
+        deadline,
+      ])
+    } finally {
+      // Always cleared, including on the fast path: an uncleared timer fires long after the
+      // response has gone out, and on a busy server that is one stray timer per request.
+      if (timer) clearTimeout(timer)
+    }
+    if (deadlineExpired) {
+      // One warn for the PASS (not per row): an operator needs to know hints were truncated by
+      // a slow provider, and one line says it without burying the log.
+      consola.warn('[github-unresolved] profile hint pass hit its deadline; some rows render without hints', {
+        enterprise: ent.externalId,
+      })
+    }
+  }
+
   return { enterpriseId: ent.enterpriseId, externalId: ent.externalId, credentialKind, probeDay, logins }
 }

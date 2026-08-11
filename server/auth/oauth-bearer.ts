@@ -20,8 +20,11 @@
 import { createError, getHeader, setHeader, type H3Event } from 'h3'
 import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
+import { consola } from 'consola'
 import { hashSessionToken } from './hmac'
 import { getDb } from '../db'
+
+const legacyBindingLogger = consola.withTag('oauth-bearer')
 
 export interface BearerTeammate {
   teammateId: string
@@ -30,6 +33,10 @@ export interface BearerTeammate {
   role: string
   regionId: string
   scope: string
+  /** The instance this credential is bound to (mig 0031); null for read/tag/legacy grants. */
+  instanceId: string | null
+  /** The oauth_client that minted this credential (oauth_token.client_id, NOT NULL at rest). */
+  clientId: string | null
 }
 
 type Db = PostgresJsDatabase<Record<string, unknown>>
@@ -67,7 +74,18 @@ interface TokenJoinRow extends Record<string, unknown> {
   teammate_revoked_at: string | Date | null
   is_current: boolean
   prev_in_grace: boolean | null
+  instance_id: string | null
+  client_id: string | null
 }
+
+/**
+ * How many times this process has let a NULL-bound (pre-mig-0031 legacy, or
+ * genuinely un-instance-bound) emit credential through an instance-scoped
+ * route's binding check. Not attacker-reachable (see the check below) — this
+ * exists purely so an operator can watch the legacy population shrink to zero
+ * and know when the permissive branch is safe to delete.
+ */
+let legacyUnboundBearerHits = 0
 
 function toMs(v: string | Date | null | undefined): number | null {
   if (!v) return null
@@ -130,6 +148,16 @@ export async function requireOAuthBearer(
   event: H3Event,
   scope?: string,
   dbOverride?: Db,
+  /**
+   * When supplied, the credential MUST be bound (oauth_token.instance_id) to
+   * THIS instance — the per-DEVICE check the four /instances/{instanceId}/*
+   * consumers pass their path param as. A NULL-bound row (pre-mig-0031
+   * legacy grant, or a read/tag credential that is never instance-bound by
+   * construction) stays PERMISSIVE — see the check below for why that's safe.
+   * Omit for callers with no single-instance target (e.g. the MCP endpoint,
+   * which is read-scoped and instance-agnostic by design).
+   */
+  requiredInstanceId?: string,
 ): Promise<BearerTeammate> {
   const header = getHeader(event, 'authorization') ?? ''
   const match = /^Bearer\s+(.+)$/i.exec(header.trim())
@@ -157,6 +185,8 @@ export async function requireOAuthBearer(
            t.revoked_at              AS token_revoked_at,
            t.access_issued_at        AS access_issued_at,
            tm.revoked_at             AS teammate_revoked_at,
+           t.instance_id::text       AS instance_id,
+           t.client_id::text         AS client_id,
            (t.access_token_hash = ${accessHash}) AS is_current,
            -- Grace-window validity is judged DB-side (mig 0044 writes
            -- prev_valid_until with now()); comparing app-side Date.now()
@@ -211,6 +241,48 @@ export async function requireOAuthBearer(
     bearerError(event, 'insufficient_scope', `Token is missing the required scope: ${scope}`)
   }
 
+  // Per-DEVICE binding. oauth_token.instance_id is written at mint (mig 0031)
+  // but was never selected here — every instance-scoped consumer therefore
+  // degraded a per-DEVICE check into a per-TEAMMATE one: any of a teammate's
+  // OWN emit credentials could drive ANY of that teammate's OTHER instances'
+  // /bearer, /health, /end, /project-resolve. This is what ADR-0008 §2's
+  // anti-spoof claim ("a cross-instance spoofer cannot mint a bearer for a
+  // victim's instance") depends on — this check is what makes it true.
+  //
+  // A NULL row.instance_id MUST stay permissive — rejecting it would 401
+  // every pre-mig-0031 legacy device's /bearer in one deploy, a silent
+  // fleet-wide emission stop (the 2026-06-06 outage class; see bearer.get.ts
+  // §"Must not break"). This permissive branch is NOT attacker-reachable: the
+  // sole `INSERT INTO oauth_token` (oauth.ts:334) never sets instance_id; the
+  // binding only happens via the UPDATE at emit-provision.ts:394-397, reached
+  // only from setup/redeem.post.ts and setup/enroll.post.ts; and
+  // INTERACTIVE_GRANTABLE_SCOPES (oauth.ts:44) is
+  // ['tokenscope.read','tokenscope.tag'] — the interactive/consent flow can
+  // never mint an emit token to begin with, so there is no route by which an
+  // attacker can cause a NULL-bound row to exist and then exploit it.
+  if (requiredInstanceId && row.instance_id !== null && row.instance_id !== requiredInstanceId) {
+    bearerError(event, 'invalid_token', 'Bearer token is not bound to this instance')
+  }
+  if (requiredInstanceId && row.instance_id === null) {
+    legacyUnboundBearerHits += 1
+    // Two more reasons a NULL binding can persist — worth carrying in the
+    // same line so an operator watching this doesn't have to go dig:
+    //  (1) oauth_token.instance_id is ON DELETE SET NULL (mig 0031:47) —
+    //      deleting an instance_attestation silently de-binds a LIVE emit
+    //      credential back into this permissive branch;
+    //  (2) the rotate-on-reissue revoke (emit-provision.ts:386-391) filters
+    //      WHERE instance_id = X, so a NULL-bound credential is never
+    //      rotated out by a later re-provision of the SAME device.
+    legacyBindingLogger.warn(
+      'legacy NULL-bound emit credential accepted on an instance-scoped route (permissive branch — not attacker-reachable; see requireOAuthBearer)',
+      {
+        teammateId: row.teammate_id,
+        requestedInstanceId: requiredInstanceId,
+        totalHitsThisProcess: legacyUnboundBearerHits,
+      },
+    )
+  }
+
   return {
     teammateId: row.teammate_id,
     email: row.email,
@@ -218,5 +290,7 @@ export async function requireOAuthBearer(
     role: row.role,
     regionId: row.region_id,
     scope: row.scope,
+    instanceId: row.instance_id,
+    clientId: row.client_id,
   }
 }

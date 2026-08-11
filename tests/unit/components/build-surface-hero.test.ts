@@ -1,9 +1,10 @@
 // @vitest-environment node
 /*
  * build-surface-hero — the usage-view composition hero + its PINNED donut
- * (lane-visuals iter-2 I1). Pins the Conservation section's hero items:
+ * (requirement 1 — canonical §A USAGE basis). Pins the Conservation section's
+ * hero items:
  *   - hero Σ (rendered weekly lane $, incl. the tooltip-flagged partial week)
- *     == Σ(input showback cells), cent-exact;
+ *     == Σ(input usage cells), cent-exact;
  *   - donut Σ == hero Σ for the SAME window (one shared window object, r2-2)
  *     — same cells, same fold membership, so the two can never disagree;
  *   - the remainder wears the DISCLOSURE label "Other surfaces (composition
@@ -14,12 +15,11 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildSurfaceHero,
-  heroLegendLanes,
   heroHasData,
   HERO_REMAINDER_LABEL,
 } from '../../../app/components/reporting/build-surface-hero'
 import { FOLDED_LANE_ID } from '../../../app/components/reporting/charts/fold-lanes'
-import type { ShowbackWeeklyLaneCell } from '../../../shared/reports/types'
+import type { UsageSurfaceWeeklyCell } from '../../../shared/reports/types'
 
 const cents = (n: number) => Math.round(n * 100)
 
@@ -31,8 +31,8 @@ const COMPLETE = [
   '2026-06-08', '2026-06-15', '2026-06-22', '2026-06-29',
 ]
 
-function makeCells(): ShowbackWeeklyLaneCell[] {
-  const cells: ShowbackWeeklyLaneCell[] = []
+function makeCells(): UsageSurfaceWeeklyCell[] {
+  const cells: UsageSurfaceWeeklyCell[] = []
   for (const w of COMPLETE) {
     cells.push({ weekStart: w, lane: 'claude', usd: 200.07 })
     cells.push({ weekStart: w, lane: 'claude-ai', usd: 90.01 })
@@ -87,16 +87,17 @@ describe('buildSurfaceHero — I1 conservation', () => {
     expect(donutRemainder.label).toBe(HERO_REMAINDER_LABEL)
   })
 
-  it('legend = the hero’s rendered lanes; empty input has no data and no legend', () => {
+  it('empty input has no data and no slices', () => {
+    /*
+     * `heroLegendLanes` was asserted here too, until the page-level usage legend
+     * it fed was replaced by SurfaceHeroCard's own totals bar (built from
+     * `donut.slices`, asserted below and in the card's own test). The helper went
+     * with the legend; what is left is the property the card actually reads.
+     */
     const hero = buildSurfaceHero(makeCells(), { from: FROM, to: TO, today: TODAY })
-    expect(heroLegendLanes(hero)).toEqual(
-      hero.series.map((s) => ({ lane: s.key, label: s.name })),
-    )
     expect(heroHasData(hero)).toBe(true)
     const empty = buildSurfaceHero([], { from: FROM, to: TO, today: TODAY })
     expect(heroHasData(empty)).toBe(false)
-    expect(heroLegendLanes(empty)).toEqual([])
-    expect(heroLegendLanes(null)).toEqual([])
     expect(empty.donut.slices).toEqual([])
     expect(empty.donut.totalUsd).toBe(0)
   })

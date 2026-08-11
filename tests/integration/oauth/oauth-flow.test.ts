@@ -28,10 +28,11 @@ import { hashSessionToken } from '../../../server/auth/hmac'
 import registerHandler from '../../../server/api/v1/oauth/register.post'
 import authorizeHandler from '../../../server/api/v1/oauth/authorize.get'
 import authorizePostHandler from '../../../server/api/v1/oauth/authorize.post'
-import { refreshAccessToken } from '../../../server/auth/oauth'
+import { refreshAccessToken, MAX_OAUTH_CLIENTS, SOURCE_REGISTRATION_LIMIT } from '../../../server/auth/oauth'
 import { issueEmitCredential } from '../../../server/auth/emit-credential'
 import tokenHandler from '../../../server/api/v1/oauth/token.post'
 import revokeHandler from '../../../server/api/v1/oauth/revoke.post'
+import { OAUTH_SCOPE_LABELS } from '../../../shared/oauth-scopes'
 
 let t: TestDb
 let regionId: string
@@ -721,5 +722,228 @@ describe('refresh: teammate revocation (ADR-0005 E2)', () => {
         t.db as never,
       ),
     ).rejects.toMatchObject({ statusCode: 401 })
+  })
+})
+
+// ── S6: consent-page info fetch (server-verified client identity + scopes) ────
+// The GET handler's Accept: application/json branch is what app/pages/oauth/
+// authorize.vue calls to render the consent screen — never route.query.
+describe('authorize GET — consent info fetch (Accept: application/json)', () => {
+  it('returns the server-verified client_name — a query-supplied client_name has no effect', async () => {
+    const client = await registerClient() // registers "Test MCP"
+    const { challenge } = makePkce()
+    const e = ev({
+      method: 'GET',
+      query: {
+        response_type: 'code',
+        client_id: client.client_id,
+        redirect_uri: REDIRECT_URI,
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        // Not a real query field on this endpoint — proves the response can't
+        // be steered by anything the caller puts in the URL.
+        client_name: 'Definitely Not Test MCP',
+        scope: 'tokenscope.read',
+        state: randomBytes(16).toString('hex'),
+      },
+      headers: { accept: 'application/json' },
+      session: userSession(),
+    })
+    const res = await call<{ client_name: string; redirect_host: string; granted_scopes: string[] }>(
+      authorizeHandler,
+      e,
+    )
+    expect(statusOf(e)).toBe(200)
+    expect(res.client_name).toBe('Test MCP')
+    expect(res.redirect_host).toBe(new URL(REDIRECT_URI).host)
+  })
+
+  it('no scope requested → granted_scopes matches what authorize.post actually grants', async () => {
+    const client = await registerClient()
+    const { verifier, challenge } = makePkce()
+
+    const infoE = ev({
+      method: 'GET',
+      query: {
+        response_type: 'code',
+        client_id: client.client_id,
+        redirect_uri: REDIRECT_URI,
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        state: randomBytes(16).toString('hex'),
+        // scope omitted entirely.
+      },
+      headers: { accept: 'application/json' },
+      session: userSession(),
+    })
+    const info = await call<{ granted_scopes: string[] }>(authorizeHandler, infoE)
+    expect(info.granted_scopes).toEqual(['tokenscope.read'])
+
+    // Drive the SAME no-scope request through the real approve → token
+    // exchange and confirm the ACTUAL grant matches what was rendered.
+    const state = randomBytes(16).toString('hex')
+    const postE = ev({
+      method: 'POST',
+      body: {
+        response_type: 'code',
+        client_id: client.client_id,
+        redirect_uri: REDIRECT_URI,
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        state,
+        action: 'approve',
+        // scope omitted — same as the GET above.
+      },
+      session: userSession(),
+    })
+    await call(authorizePostHandler, postE)
+    expect(statusOf(postE)).toBe(302)
+    const loc = (postE as { node: { res: { _headers: Record<string, string> } } }).node.res._headers['location']
+    const code = new URL(loc).searchParams.get('code')!
+
+    const tok = await call<{ scope: string }>(
+      tokenHandler,
+      ev({
+        body: {
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: REDIRECT_URI,
+          code_verifier: verifier,
+          client_id: client.client_id,
+          client_secret: client.client_secret,
+        },
+      }),
+    )
+    expect(tok.scope).toBe('tokenscope.read')
+  })
+
+  it('an unknown scope in the request is not rendered', async () => {
+    const client = await registerClient()
+    const { challenge } = makePkce()
+    const e = ev({
+      method: 'GET',
+      query: {
+        response_type: 'code',
+        client_id: client.client_id,
+        redirect_uri: REDIRECT_URI,
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        scope: 'tokenscope.read sudo-admin',
+        state: randomBytes(16).toString('hex'),
+      },
+      headers: { accept: 'application/json' },
+      session: userSession(),
+    })
+    const res = await call<{ granted_scopes: string[] }>(authorizeHandler, e)
+    expect(res.granted_scopes).toEqual(['tokenscope.read'])
+    expect(res.granted_scopes).not.toContain('sudo-admin')
+  })
+})
+
+// ── S6: registration bounds (client_name / redirect_uris) ─────────────────────
+describe('registration bounds (S6)', () => {
+  it('over-long client_name (129 chars) → 400', async () => {
+    const e = ev({ body: { client_name: 'x'.repeat(129), redirect_uris: [REDIRECT_URI] } })
+    const res = await call<{ error: string }>(registerHandler, e)
+    expect(res.error).toBe('invalid_client_metadata')
+    expect(statusOf(e)).toBe(400)
+  })
+
+  it('9 redirect_uris → 400 (cap is 8)', async () => {
+    const uris = Array.from({ length: 9 }, (_, i) => `http://127.0.0.1:${40000 + i}/cb`)
+    const e = ev({ body: { client_name: 'Many URIs', redirect_uris: uris } })
+    const res = await call<{ error: string }>(registerHandler, e)
+    expect(res.error).toBe('invalid_client_metadata')
+    expect(statusOf(e)).toBe(400)
+  })
+
+  it('a client_name containing a control character (\\n) is rejected', async () => {
+    const e = ev({ body: { client_name: 'Evil\nName', redirect_uris: [REDIRECT_URI] } })
+    const res = await call<{ error: string }>(registerHandler, e)
+    expect(res.error).toBe('invalid_client_metadata')
+    expect(statusOf(e)).toBe(400)
+  })
+
+  it('a client_name containing a bidi override (U+202E) is rejected', async () => {
+    const e = ev({ body: { client_name: 'Evil‮Name', redirect_uris: [REDIRECT_URI] } })
+    const res = await call<{ error: string }>(registerHandler, e)
+    expect(res.error).toBe('invalid_client_metadata')
+    expect(statusOf(e)).toBe(400)
+  })
+
+  it('a legitimate non-ASCII client_name is accepted (charset is an allowlist, not ASCII-only)', async () => {
+    const e = ev({ body: { client_name: '日本語クライアント 🚀', redirect_uris: [REDIRECT_URI] } })
+    const res = await call<{ client_id?: string; client_name?: string }>(registerHandler, e)
+    expect(statusOf(e)).toBe(201)
+    expect(res.client_name).toBe('日本語クライアント 🚀')
+  })
+
+  it('client_secret_expires_at is non-zero (bounded, not eternal per RFC 7591)', async () => {
+    const e = ev({ body: { client_name: 'Bounded Secret', redirect_uris: [REDIRECT_URI] } })
+    const res = await call<{ client_secret_expires_at: number }>(registerHandler, e)
+    expect(statusOf(e)).toBe(201)
+    expect(res.client_secret_expires_at).toBeGreaterThan(Math.floor(Date.now() / 1000))
+  })
+})
+
+// ── S6: registration ceiling — reserved headroom ───────────────────────────────
+describe('registration ceiling — reserved headroom (S6)', () => {
+  it('a fresh source still registers once the global ceiling is saturated by one flooding source', async () => {
+    // Saturate the GLOBAL ceiling with synthetic rows — no real registration
+    // flow needed for these; only their existence matters.
+    const countRows = [
+      ...(await t.db.execute<{ count: string }>(sql`SELECT COUNT(*)::text AS count FROM oauth_client`)),
+    ]
+    const needed = MAX_OAUTH_CLIENTS - Number(countRows[0]!.count)
+    if (needed > 0) {
+      await t.db.execute(sql`
+        INSERT INTO oauth_client (client_id, client_secret_hash, client_name, redirect_uris, internal, created_at)
+        SELECT gen_random_uuid(), 'synthetic-hash-' || gs, 'Synthetic Flood Client',
+               ARRAY['http://127.0.0.1/cb'], false, now()
+        FROM generate_series(1, ${needed}) AS gs
+      `)
+    }
+
+    const FLOOD_IP = '203.0.113.9'
+    // Drive the flooding source's OWN recent-registration count up to the
+    // per-source limit. Each of these succeeds — the global ceiling is
+    // already saturated, but THIS source's own recent volume is still
+    // trivial for every one of them.
+    for (let i = 0; i < SOURCE_REGISTRATION_LIMIT; i++) {
+      const e = ev({
+        body: { client_name: `Flood ${i}`, redirect_uris: [REDIRECT_URI] },
+        headers: { 'x-forwarded-for': FLOOD_IP },
+      })
+      const res = await call<{ client_id?: string; error?: string }>(registerHandler, e)
+      expect(statusOf(e)).toBe(201)
+      expect(res.client_id).toBeTruthy()
+    }
+
+    // The SAME flooding source is now denied — global ceiling hit AND its own
+    // recent volume is non-trivial.
+    const deniedE = ev({
+      body: { client_name: 'One Too Many', redirect_uris: [REDIRECT_URI] },
+      headers: { 'x-forwarded-for': FLOOD_IP },
+    })
+    const denied = await call<{ error: string }>(registerHandler, deniedE)
+    expect(denied.error).toBe('temporarily_unavailable')
+    expect(statusOf(deniedE)).toBe(429)
+
+    // A DIFFERENT, low-volume source still succeeds — the global ceiling can
+    // never fully lock out a fresh registrant (reserved headroom).
+    const freshE = ev({
+      body: { client_name: 'Fresh Registrant', redirect_uris: [REDIRECT_URI] },
+      headers: { 'x-forwarded-for': '198.51.100.42' },
+    })
+    const fresh = await call<{ client_id?: string; error?: string }>(registerHandler, freshE)
+    expect(statusOf(freshE)).toBe(201)
+    expect(fresh.client_id).toBeTruthy()
+  })
+})
+
+// ── S6: tokenscope.read discloses the read→emit provisioning crossing ─────────
+describe('oauth-scopes labels (S6)', () => {
+  it('the tokenscope.read label mentions device provisioning (ADR-0005 E1 disclosure)', () => {
+    expect(OAUTH_SCOPE_LABELS['tokenscope.read']).toMatch(/provision/i)
   })
 })

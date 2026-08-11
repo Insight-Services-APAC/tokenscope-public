@@ -6,10 +6,10 @@
  * spans, run the joiner, query /me/usage-equivalent SQL, assert the
  * cost bucket is populated.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { sql } from 'drizzle-orm'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
-import { runReadJoiner, selectRecentJoinableSessionIds } from '../../../server/workers/azure-monitor-reader'
+import { runReadJoiner, selectRecentJoinableSessionIds, selectJoinableInstances } from '../../../server/workers/azure-monitor-reader'
 import { runMitigationQuery } from '../../../server/workers/mitigation-query'
 import { WATERMARK_LOOKBACK_MS, type TelemetryReader, type UsageRecord } from '../../../server/azure/reader'
 
@@ -684,6 +684,51 @@ describe('runReadJoiner — org lanes (provider_org §2.1)', () => {
       SELECT COUNT(*)::text AS count FROM audit_event WHERE event_type = 'attribution-org-unclassified'`
     expect(Number(audit[0]!.count)).toBeGreaterThanOrEqual(1)
   })
+
+  it('an OVER-LONG org id still picks its lane, while emitting_org_id stores nothing', async () => {
+    /*
+     * mig 0119 bounded organization.id for STORAGE (emitting_org_id, 128 chars).
+     * The lane operand must not inherit that bound: this record's org is
+     * registered `indicative`, so the correct outcome is tier-2/telemetry-only,
+     * and a dropped operand would leave the joiner's tier-1/estimated DEFAULT —
+     * PROMOTING an indicative org's spend into reconciliation because a
+     * diagnostic column has a length limit.
+     *
+     * The record is the exact shape the parser now produces for such a value:
+     * `organizationId` raw, `emittingOrgId` absent (server/azure/reader.ts).
+     *
+     * MUTATIONS, one per half:
+     *   - lane reads the bounded field (`u.emittingOrgId` at
+     *     azure-monitor-reader.ts's org-lane block) → tier-1/estimated → red
+     *   - the write reads the raw field (`rec.organizationId` at the
+     *     emittingOrgId insert) → emitting_org_id holds 200 chars → red
+     */
+    const LONG_ORG = `org-indicative-${'x'.repeat(185)}` // 200 chars, control-free
+    expect(LONG_ORG.length).toBeGreaterThan(128)
+    const sid = 'aaaaaaaa-0000-0000-0000-000000000004'
+    await t.client.unsafe(`
+      INSERT INTO provider_org (provider, external_org_id, display_name, reconciliation_mode, billing, api_kind)
+      VALUES ('anthropic', '${LONG_ORG}', 'Long Indicative', 'indicative', 'tracked', 'claude-code-admin')
+      ON CONFLICT (provider, (lower(external_org_id))) DO NOTHING;
+      INSERT INTO instance_attestation
+        (instance_id, principal_oid, principal_email, teammate_id, project_code_hash, raw_project_code,
+         tool, session_token_hash, ts_start, ts_actual_end, region_id, org_unit_id, cost_owning_unit_id)
+      VALUES
+        ('${sid}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hD', '2026-05-24 13:00:00+00', '2026-05-24 13:30:00+00',
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
+         '22222222-2222-2222-2222-222222222222');
+    `)
+
+    await runReadJoiner(t.db, orgReader(sid, LONG_ORG), { sessionIds: [sid] })
+
+    const r = await t.client<{ fidelity_tier: string; cost_basis: string; emitting_org_id: string | null }[]>`
+      SELECT fidelity_tier, cost_basis, emitting_org_id
+        FROM attribution_record WHERE instance_id = ${sid}::uuid LIMIT 1`
+    expect(r).toHaveLength(1)
+    expect([r[0]!.fidelity_tier, r[0]!.cost_basis]).toEqual(['tier-2', 'telemetry-only'])
+    expect(r[0]!.emitting_org_id).toBeNull()
+  })
 })
 
 describe('runMitigationQuery', () => {
@@ -736,6 +781,16 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
   const DEAD_ACTIVE = '77777777-0000-0000-0000-000000000003' // active but ts_start 40d ago — past the cap
   const ENDED_UNATTRIB = '77777777-0000-0000-0000-000000000004' // ended recently, not yet attributed
   const ENDED_OLD = '77777777-0000-0000-0000-000000000005' // ended, ts_start 48h ago — outside the window
+  // The 2026-07-24 dead-zone outage: open, enrolled 40 DAYS ago (past the age cap)
+  // but minting bearers RIGHT NOW — i.e. actively emitting. Must be joinable.
+  const AGED_LIVE = '77777777-0000-0000-0000-000000000006'
+  // Same age, but its last bearer mint is 30 DAYS old — genuinely dormant, must NOT
+  // be scanned (the liveness window has to stay bounded).
+  const AGED_DORMANT = '77777777-0000-0000-0000-000000000007'
+  // Aged + live bearer, but its teammate was revoked after enrolment (E2, ADR-0005).
+  // Liveness must NOT become a bypass for revocation.
+  const AGED_LIVE_REVOKED = '77777777-0000-0000-0000-000000000008'
+  const REVOKED_TEAMMATE = '33333333-0000-0000-0000-000000000001'
 
   beforeAll(async () => {
     await t.client.unsafe(`
@@ -759,6 +814,27 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
         ('${ENDED_OLD}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
          'claude-code', 'hEndO', NOW() - INTERVAL '48 hours', NOW() - INTERVAL '47 hours',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
+
+      -- A teammate revoked AFTER the enrolment below, for the E2 bypass check.
+      INSERT INTO teammate (id, entra_oid, email, region_id, org_unit_id, revoked_at)
+        VALUES ('${REVOKED_TEAMMATE}', 'oid-revoked', 'revoked@i.com',
+                '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
+                NOW() - INTERVAL '1 day');
+
+      INSERT INTO instance_attestation
+        (instance_id, principal_oid, principal_email, teammate_id, project_code_hash,
+         raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
+         region_id, org_unit_id, cost_owning_unit_id)
+      VALUES
+        ('${AGED_LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hAgedLive', NOW() - INTERVAL '40 days', NULL, NOW() - INTERVAL '1 hour',
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
+        ('${AGED_DORMANT}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hAgedDorm', NOW() - INTERVAL '40 days', NULL, NOW() - INTERVAL '30 days',
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
+        ('${AGED_LIVE_REVOKED}', 'oid-revoked', 'revoked@i.com', '${REVOKED_TEAMMATE}', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hAgedRev', NOW() - INTERVAL '40 days', NULL, NOW() - INTERVAL '1 hour',
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
     `)
   }, 30_000)
 
@@ -767,8 +843,338 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
     expect(ids).toContain(ACTIVE)
     expect(ids).toContain(LONG_ACTIVE) // 10d-old but still active → keeps tracking
     expect(ids).toContain(ENDED_UNATTRIB)
-    expect(ids).not.toContain(DEAD_ACTIVE) // past the 30d cap (gc should have closed it)
+    expect(ids).not.toContain(DEAD_ACTIVE) // past the age cap AND never minted a bearer → dormant
     expect(ids).not.toContain(ENDED_OLD) // ended + outside the window
+  })
+
+  // ── The 2026-07-24 dead-zone outage ────────────────────────────────────────
+  // Enrolment age is NOT liveness. An open instance past `activeMaxAgeHours` that
+  // is still emitting matched no clause, so its spend was accepted by the DCE
+  // (HTTP 204) and never joined — silently, with emit-auth reporting healthy the
+  // whole time. session-gc could not rescue it either: it closes on
+  // ts_expected_end = REFRESH_TOKEN_TTL_MS (90d), 3x the 30d cap, so days 30..90
+  // were unreachable by every clause.
+
+  it('DEAD ZONE: scans an AGED, still-emitting instance (recent bearer mint beats enrolment age)', async () => {
+    const ids = await selectRecentJoinableSessionIds(t.db)
+    expect(ids).toContain(AGED_LIVE)
+  })
+
+  it('DEAD ZONE: keeps scanning it once it HAS attribution (not rescued by the never-attributed clause)', async () => {
+    // The real outage instance had months of old attribution_records, so the
+    // "ended/unknown but NEVER attributed" one-shot could never have covered it.
+    // Attribute it, then confirm liveness — not that clause — keeps it selected.
+    const reader = new StubReader(
+      new Map([
+        [AGED_LIVE, [{ tokens: 900, tokenType: 'input', model: 'claude-sonnet-4-7', tsEvent: '2026-06-02T08:00:00Z', projectCodeHash: 'h-afl-aii' }]],
+      ]),
+    ) as unknown as TelemetryReader
+    try {
+      const res = await runReadJoiner(t.db, reader, { sessionIds: [AGED_LIVE] })
+      expect(res.attributionRowsWritten).toBeGreaterThan(0)
+      expect(await selectRecentJoinableSessionIds(t.db)).toContain(AGED_LIVE)
+    } finally {
+      // Do not leak this write into sibling tests: without cleanup the block
+      // only passes in declaration order, and a reorder/.only turns it into a flake.
+      await t.client.unsafe(`DELETE FROM attribution_record WHERE instance_id = '${AGED_LIVE}'`)
+    }
+  })
+
+  it('bounds liveness: an aged instance whose last bearer mint is outside the window is NOT scanned', async () => {
+    // Liveness must not degrade into "scan every open instance forever".
+    expect(await selectRecentJoinableSessionIds(t.db)).not.toContain(AGED_DORMANT)
+  })
+
+  it('liveness is NOT a revocation bypass: an aged+live instance of a revoked teammate stays excluded (E2)', async () => {
+    expect(await selectRecentJoinableSessionIds(t.db)).not.toContain(AGED_LIVE_REVOKED)
+  })
+
+  it('CAP ORDERING: a live aged instance outranks a NEWER, less-recently-active one and survives the cap', async () => {
+    // R1 caught the earlier version of this test being VACUOUS: with fewer
+    // joinable rows than the limit the LIMIT never truncated, so it passed with
+    // the ORDER BY reverted. This version forces truncation — it inserts its own
+    // isolated cohort and asserts with limit = cohort-1, so exactly one row MUST
+    // be shed. Reverting the ORDER BY to `ts_start DESC` fails it: CAP_NEW_IDLE
+    // (enrolled most recently, never minted) would win on enrolment date and
+    // evict CAP_OLD_LIVE, which is the instance actually emitting.
+    const CAP_OLD_LIVE = '77777777-0000-0000-0000-0000000000c1' // enrolled 50d ago, minted 5 MIN ago
+    const CAP_NEW_IDLE = '77777777-0000-0000-0000-0000000000c2' // enrolled 2h ago, NEVER minted
+    await t.client.unsafe(`
+      INSERT INTO instance_attestation
+        (instance_id, principal_oid, principal_email, teammate_id, project_code_hash,
+         raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
+         region_id, org_unit_id, cost_owning_unit_id)
+      VALUES
+        ('${CAP_OLD_LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hCapLive', NOW() - INTERVAL '50 days', NULL, NOW() - INTERVAL '5 minutes',
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
+        ('${CAP_NEW_IDLE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hCapIdle', NOW() - INTERVAL '2 hours', NULL, NULL,
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
+    `)
+    try {
+      // Both are joinable on their own; RANK is what the cap then acts on.
+      // Assert the ordering head-to-head rather than via an arbitrary limit —
+      // the suite's other fixture rows (and closed rows, which always sort last)
+      // otherwise decide which row the cap sheds.
+      const uncapped = await selectRecentJoinableSessionIds(t.db)
+      const iLive = uncapped.indexOf(CAP_OLD_LIVE)
+      const iIdle = uncapped.indexOf(CAP_NEW_IDLE)
+      expect(iLive).toBeGreaterThanOrEqual(0)
+      expect(iIdle).toBeGreaterThanOrEqual(0)
+      // THE INVARIANT: emitting 5 minutes ago outranks enrolled 2 hours ago.
+      // Under `ORDER BY ts_start DESC` this inverts and the assertion fails.
+      expect(iLive).toBeLessThan(iIdle)
+
+      // And the consequence that matters: a cap falling between them keeps the
+      // live instance and sheds the idle one.
+      const cappedSel = await selectJoinableInstances(t.db, { limit: iIdle })
+      const capped = cappedSel.ids
+      expect(capped).toContain(CAP_OLD_LIVE) // emitting now → survives despite a 50d enrolment
+      expect(capped).not.toContain(CAP_NEW_IDLE) // newer enrolment, zero activity → shed first
+      // The cap-hit signal itself (every other test sees it only via a mock):
+      // truncation MUST report the cap, and an untruncated selection must not.
+      expect(cappedSel.capHit).toBe(iIdle)
+      expect((await selectJoinableInstances(t.db)).capHit).toBeNull()
+    } finally {
+      await t.client.unsafe(`DELETE FROM instance_attestation WHERE instance_id IN ('${CAP_OLD_LIVE}', '${CAP_NEW_IDLE}')`)
+    }
+  })
+
+  it('CAP ORDERING: a burst of recently-closed instances never evicts a live one (the standing R1 invariant)', async () => {
+    // Pre-existing invariant, previously unpinned: closed rows sort after open
+    // ones, so a wave of closures cannot starve a still-emitting instance.
+    const LIVE = '77777777-0000-0000-0000-0000000000d0'
+    const closed = ['d1', 'd2', 'd3'].map((s) => `77777777-0000-0000-0000-0000000000${s}`)
+    await t.client.unsafe(`
+      INSERT INTO instance_attestation
+        (instance_id, principal_oid, principal_email, teammate_id, project_code_hash,
+         raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
+         region_id, org_unit_id, cost_owning_unit_id)
+      VALUES
+        ('${LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hCapL', NOW() - INTERVAL '50 days', NULL, NOW() - INTERVAL '2 minutes',
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
+        ${closed
+          .map(
+            (id, i) => `('${id}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hCapC${i}', NOW() - INTERVAL '3 hours', NOW() - INTERVAL '${i + 1} minutes', NOW() - INTERVAL '1 minute',
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222')`,
+          )
+          .join(',\n        ')};
+    `)
+    try {
+      // Cap at 1: the single survivor must be an OPEN row, never one of the
+      // just-closed ones (which have fresher ts_actual_end / bearer stamps).
+      const capped = await selectRecentJoinableSessionIds(t.db, { limit: 1 })
+      expect(capped).toHaveLength(1)
+      for (const id of closed) expect(capped).not.toContain(id)
+    } finally {
+      await t.client.unsafe(
+        `DELETE FROM instance_attestation WHERE instance_id IN ('${LIVE}', ${closed.map((c) => `'${c}'`).join(', ')})`,
+      )
+    }
+  })
+
+  it('a never-minted OPEN instance ranks by ts_start and does NOT float above live ones', async () => {
+    // COALESCE(last_bearer_at, ts_start) must rank a never-minted row by its
+    // enrolment date. If it sorted NULLS FIRST instead, every never-minted row
+    // would float to the head of the cap and starve the instances that are
+    // actually emitting. Asserted by RANK against a known-live row, not by a
+    // COUNT(*) that the NOT NULL constraint already guarantees.
+    const OLD_NEVER = '77777777-0000-0000-0000-0000000000e1' // enrolled 10 min ago, never minted
+    await t.client.unsafe(`
+      INSERT INTO instance_attestation
+        (instance_id, principal_oid, principal_email, teammate_id, project_code_hash,
+         raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
+         region_id, org_unit_id, cost_owning_unit_id)
+      VALUES
+        ('${OLD_NEVER}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hNever', NOW() - INTERVAL '10 minutes', NULL, NULL,
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
+    `)
+    try {
+      const ids = await selectRecentJoinableSessionIds(t.db)
+      expect(ids).toContain(OLD_NEVER) // fresh enrolment is still selected (age clause)
+      // AGED_LIVE minted 1h ago; OLD_NEVER enrolled 10 min ago. Ranking by
+      // ts_start alone would put OLD_NEVER first; ranking by activity keeps the
+      // 10-min-old enrolment ahead only because its ts_start IS its activity.
+      // The load-bearing assertion is that it does not sort as NULL/unknown.
+      expect(ids.indexOf(OLD_NEVER)).toBeGreaterThanOrEqual(0)
+      expect(ids.indexOf(OLD_NEVER)).toBeLessThan(ids.indexOf(LONG_ACTIVE)) // 10 min > 10 days old
+    } finally {
+      await t.client.unsafe(`DELETE FROM instance_attestation WHERE instance_id = '${OLD_NEVER}'`)
+    }
+  })
+
+  it('liveness knob: out-of-range overrides clamp instead of disabling the clause or throwing', async () => {
+    // Floor: 0/negative/NaN would make the predicate `>= NOW()` — never true —
+    // silently re-opening the dead zone.
+    for (const bad of [0, -1, Number.NaN]) {
+      expect(await selectRecentJoinableSessionIds(t.db, { liveBearerHours: bad })).toContain(AGED_LIVE)
+    }
+    // A legitimate tightening still takes effect: 1h excludes the 1h-old mint.
+    expect(await selectRecentJoinableSessionIds(t.db, { liveBearerHours: 1 })).not.toContain(AGED_LIVE)
+  })
+
+  it('the RESULT carries the evidence fields (scoped + the window the READER applied)', async () => {
+    // These are what an operator checks to tell a real 90-day scoped recovery
+    // from a silently-downgraded default tick. Asserted on the RETURNED result,
+    // not on the options passed in — the registry test mocks runReadJoiner, so
+    // nothing else proves the values survive the return.
+    const plain = await runReadJoiner(t.db, new StubReader(new Map()) as unknown as TelemetryReader, { sessionIds: [ACTIVE] })
+    expect(plain.scoped).toBe(false)
+    // A stub reader exposes no appliedLookbackDays → null, never a fabricated window.
+    expect(plain.lookbackDaysApplied).toBeNull()
+
+    const scoped = await runReadJoiner(t.db, new StubReader(new Map()) as unknown as TelemetryReader, {
+      sessionIds: [ACTIVE],
+      scoped: true,
+    })
+    expect(scoped.scoped).toBe(true)
+
+    // The cap-hit echo is the third evidence field and the one runbook §4 queries.
+    // Zeroing it would silence "live instances went unscanned" forever.
+    expect(plain.selectionCapHit).toBeNull()
+    const capped = await runReadJoiner(t.db, new StubReader(new Map()) as unknown as TelemetryReader, {
+      sessionIds: [ACTIVE],
+      selectionCapHit: 500,
+    })
+    expect(capped.selectionCapHit).toBe(500)
+
+    // A reader that DOES declare a window has it reported verbatim.
+    const widened = Object.assign(new StubReader(new Map()), { appliedLookbackDays: 90 })
+    const rec = await runReadJoiner(t.db, widened as unknown as TelemetryReader, { sessionIds: [ACTIVE], scoped: true })
+    expect(rec.lookbackDaysApplied).toBe(90)
+  })
+
+  it('an explicit sessionIds run SKIPS a purged instance (the override feeds caller-supplied ids)', async () => {
+    // The scheduled selection gates on ts_purged; this branch takes ids straight
+    // from its caller, and since the operator recovery override those ids no
+    // longer necessarily passed that gate.
+    const PURGED = '77777777-0000-0000-0000-0000000000e9'
+    await t.client.unsafe(`
+      INSERT INTO instance_attestation
+        (instance_id, principal_oid, principal_email, teammate_id, project_code_hash,
+         raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at, ts_purged,
+         region_id, org_unit_id, cost_owning_unit_id)
+      VALUES
+        ('${PURGED}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hPurged', NOW() - INTERVAL '40 days', NULL, NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 day',
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
+    `)
+    const reader = new StubReader(
+      new Map([
+        [PURGED, [{ tokens: 100, tokenType: 'input', model: 'claude-sonnet-4-7', tsEvent: new Date().toISOString(), projectCodeHash: 'h-afl-aii' }]],
+      ]),
+    ) as unknown as TelemetryReader
+    try {
+      const res = await runReadJoiner(t.db, reader, { sessionIds: [PURGED] })
+      expect(res.sessionsProcessed).toBe(0) // gate held
+      expect((reader as unknown as StubReader).calls).toHaveLength(0) // never even read
+    } finally {
+      await t.client.unsafe(`DELETE FROM instance_attestation WHERE instance_id = '${PURGED}'`)
+    }
+  })
+
+  it('runReadJoiner WINDOW path (no sessionIds) also selects an aged+live instance', async () => {
+    // The joiner's own fallback query carries a second copy of the selection
+    // predicate. Every production caller passes explicit sessionIds, so this
+    // branch is dead today — and therefore was completely untested: R3 proved
+    // deleting its liveness disjunct left the whole integration suite green.
+    // Pinned so a future caller does not inherit the dead zone.
+    const WIN_LIVE = '77777777-0000-0000-0000-0000000000f2'
+    await t.client.unsafe(`
+      INSERT INTO instance_attestation
+        (instance_id, principal_oid, principal_email, teammate_id, project_code_hash,
+         raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
+         region_id, org_unit_id, cost_owning_unit_id)
+      VALUES
+        ('${WIN_LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hWinLive', NOW() - INTERVAL '60 days', NULL, NOW() - INTERVAL '10 minutes',
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
+    `)
+    const reader = new StubReader(
+      new Map([
+        [WIN_LIVE, [{ tokens: 400, tokenType: 'input', model: 'claude-sonnet-4-7', tsEvent: new Date().toISOString(), projectCodeHash: 'h-afl-aii' }]],
+      ]),
+    ) as unknown as TelemetryReader
+    try {
+      // No sessionIds → the window query decides. Enrolled 60d ago, so only the
+      // liveness disjunct can select it.
+      await runReadJoiner(t.db, reader, {})
+      expect((reader as unknown as StubReader).calls.map((c) => c.sessionId)).toContain(WIN_LIVE)
+    } finally {
+      await t.client.unsafe(`DELETE FROM attribution_record WHERE instance_id = '${WIN_LIVE}'`)
+      await t.client.unsafe(`DELETE FROM instance_attestation WHERE instance_id = '${WIN_LIVE}'`)
+    }
+  })
+
+  it('liveness knob: the NUXT_JOINER_LIVE_BEARER_HOURS env override actually takes effect', async () => {
+    // Documented in CONFIGURATION.md and .env.example but exercised by nothing —
+    // R6 proved the whole env path could be made inert with the suite green.
+    const saved = process.env.NUXT_JOINER_LIVE_BEARER_HOURS
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // A valid override tightens the window: 1h excludes the 1h-old mint.
+      process.env.NUXT_JOINER_LIVE_BEARER_HOURS = '1'
+      expect(await selectRecentJoinableSessionIds(t.db)).not.toContain(AGED_LIVE)
+
+      // A TYPO must warn and fall back to the default (which does include it) —
+      // silently ignoring a mistyped dead-zone guard is this branch's own bug class.
+      warn.mockClear()
+      process.env.NUXT_JOINER_LIVE_BEARER_HOURS = 'abc'
+      expect(await selectRecentJoinableSessionIds(t.db)).toContain(AGED_LIVE)
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('NUXT_JOINER_LIVE_BEARER_HOURS'))).toBe(true)
+
+      // A blank value is UNSET, not zero — no warning, default applies.
+      warn.mockClear()
+      process.env.NUXT_JOINER_LIVE_BEARER_HOURS = '   '
+      expect(await selectRecentJoinableSessionIds(t.db)).toContain(AGED_LIVE)
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('NUXT_JOINER_LIVE_BEARER_HOURS'))).toBe(false)
+    } finally {
+      warn.mockRestore()
+      if (saved === undefined) delete process.env.NUXT_JOINER_LIVE_BEARER_HOURS
+      else process.env.NUXT_JOINER_LIVE_BEARER_HOURS = saved
+    }
+  })
+
+  it('liveness knob: over-ceiling values CLAMP to the max window (not the default) and never throw', async () => {
+    // Postgres throws `interval out of range` on absurd values, which would fail
+    // the WHOLE tick. The clamp target matters and must be distinguishable: this
+    // instance's bearer is 30d old, so it is selected ONLY under the 90d ceiling
+    // — never under the 14d default. An earlier version of this test used a
+    // 1h-old bearer, which both windows match, so it could not tell them apart.
+    const CLAMP_PROBE = '77777777-0000-0000-0000-0000000000f1'
+    await t.client.unsafe(`
+      INSERT INTO instance_attestation
+        (instance_id, principal_oid, principal_email, teammate_id, project_code_hash,
+         raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
+         region_id, org_unit_id, cost_owning_unit_id)
+      VALUES
+        ('${CLAMP_PROBE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         'claude-code', 'hClamp', NOW() - INTERVAL '80 days', NULL, NOW() - INTERVAL '30 days',
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
+    `)
+    try {
+      // Baseline: outside the 14d default.
+      expect(await selectRecentJoinableSessionIds(t.db)).not.toContain(CLAMP_PROBE)
+      // Both spellings of "as wide as possible" clamp to the 90d ceiling, which
+      // DOES cover a 30d-old mint — proving the clamp target, not just no-throw.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        for (const huge of [1e18, Number.POSITIVE_INFINITY]) {
+          expect(await selectRecentJoinableSessionIds(t.db, { liveBearerHours: huge })).toContain(CLAMP_PROBE)
+        }
+        // A clamp changes WHICH instances get scanned, so it must not be silent —
+        // the message is the only signal that the value asked for was not used.
+        expect(warn.mock.calls.some((c) => String(c[0]).includes('out of range'))).toBe(true)
+      } finally {
+        warn.mockRestore()
+      }
+    } finally {
+      await t.client.unsafe(`DELETE FROM instance_attestation WHERE instance_id = '${CLAMP_PROBE}'`)
+    }
   })
 
   it('keeps re-scanning an ACTIVE session even after it has an attribution_record (incremental spend)', async () => {

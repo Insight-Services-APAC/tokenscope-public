@@ -82,12 +82,21 @@ export async function runVelocityWatch(
            t.region_id::text AS region_id,
            to_char(date_trunc('week', ar.ts_event AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS week_start,
            SUM(ar.cost_usd)::float8::text AS week_usd
+    -- §A COMPLETE spend, not raw attribution_record. Copilot per-user usage lands
+    -- in unaccounted_usage (native OTLP is default-off), so reading
+    -- attribution_record alone made this worker blind to Copilot: a Copilot-only
+    -- teammate had zero rows here and could never trip a spike, and a
+    -- claude→copilot switch read as a spurious velocity DROP. v_complete_usage
+    -- unions both lanes (no double-count) and drops dev-confirmed forgeries.
+    -- The canonical statement of this seam lives in server/usage/complete-spend.ts.
     FROM teammate t
-    JOIN attribution_record ar ON ar.teammate_id = t.id
+    JOIN v_complete_usage ar ON ar.teammate_id = t.id
     WHERE ar.ts_event >= ${windowStart.toISOString()}::timestamptz
       AND ar.ts_event <  ${addWeeksUtc(currentWeekStart, 1).toISOString()}::timestamptz
       -- Provisional (emit-on-install, pre-confirmation) usage must never feed this
       -- manager-facing velocity signal. NULL = legacy = treated as confirmed.
+      -- (identity_state was added to v_complete_usage by mig 0089 precisely so this
+      -- exclusion survives the move off raw attribution_record.)
       AND ar.identity_state IS DISTINCT FROM 'provisional'
     GROUP BY t.id, t.email, t.display_name, t.region_id, date_trunc('week', ar.ts_event AT TIME ZONE 'UTC')
     ORDER BY t.id, week_start

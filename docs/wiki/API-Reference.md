@@ -102,14 +102,35 @@ The signed-in user's own surface. All reads use `requireAuth` (cookie/OIDC);
 state-changing methods add CSRF. Identity resolution spans the primary
 `teammate.email` plus linked `teammate_identity_map` rows.
 
+The needs-tagging worklist (`me/sessions/untagged` + `me/unaccounted/**` +
+`me/worklist/bulk`) and the **Activity** list (`me/activity`) render on **both**
+Home and **My usage** — Home is where tagging pressure lands, My usage is the
+self-depth surface. One set of components serves both, so there is one
+implementation of the tagging contract and the endpoints below are called
+identically from either page.
+
+The two lists answer different questions and both are needed. The **worklist is
+a task list** — what still awaits a decision, so it filters `project_id IS
+NULL`. **Activity is a record** — what happened, decided or not. Making the
+worklist double as the only inventory of provider-recorded days is what made a
+tagged Copilot day unfindable: `/me/sessions/recent` read `attribution_record`
+(OTel only, by design) so it never held one, and tagging removed it from the
+only list that did.
+
 | Method | Path | Auth gate | Purpose |
 |---|---|---|---|
-| GET | `/api/v1/me/usage` | cookie/OIDC | Month-to-date project-bucket split (cost, tokens, allocation, `is_active_now`, source, freshness). |
+| GET | `/api/v1/me/home` | cookie/OIDC | Month-to-date project-bucket split (cost, tokens, allocation, `is_active_now`, source, freshness) — the **Home** dashboard payload. Renamed from `/api/v1/me/usage`, which now belongs to the My usage page below; there is no redirect. Also carries `has_ever_emitted` — the onboarding CTA's operand, answered on the **OTel lane alone** (`EXISTS` over `attribution_record`, all-time and unfiltered). It is deliberately NOT "has any record": Activity is a union that includes API-reported provider days, so a Copilot-only teammate who has never emitted would otherwise read as an onboarded one — the rollout gap mis-read as coverage. |
+| GET | `/api/v1/me/home/recent` | cookie/OIDC | Rolling-window (`window=7\|30\|90`, default 30) spend snapshot over `attribution_aggregate` for **Home**'s "recent spend" strip: `total_cost_usd`, `total_tokens`, `active_days`, `cost_per_active_day`, daily `series`, `by_model`. NO budget/quota framing (that stays month-to-date on `/me/home`); the honest home for the strip's time controls. Moved with the page it serves — it sat under `me/usage/` while serving Home, which is the exact word-collision this rename set out to remove, one level down. |
 | GET | `/api/v1/me/projects` | cookie/OIDC | Projects the caller is a current member of (powers the quick-assign picker). |
-| GET | `/api/v1/me/sessions/recent` | cookie/OIDC | Caller's recent attested sessions with summed tokens/cost (`limit` default 10, max 50). |
-| GET | `/api/v1/me/sessions/recent/export` | cookie/OIDC | Same as CSV, formula-injection-escaped (`limit` default 100, max 500). |
-| GET | `/api/v1/me/sessions/untagged` | cookie/OIDC | Caller's recent OTel sessions not yet attributed to a project (the retroactive-tagging worklist). |
+| GET | `/api/v1/me/activity` | cookie/OIDC | **Activity** — ONE list holding both kinds of record the platform can hold about the caller: OTel-observed **sessions** and **provider-recorded days** (`unaccounted_usage`), tagged or not, dismissed or not. Filters (`kind=all\|session\|provider-day`, `tool`, `project` = project CODE, `tagged=all\|tagged\|untagged`, `from`/`to` as inclusive **UTC** days, validated as REAL calendar days — `2026-02-31` is a `400`, not a `500`) and keyset paging (`cursor`, opaque; `limit` default 25, max 100). Both rows kinds sort on ONE key — the **UTC day** — and each branch of the union is bounded independently, so a heavy session user's provider-days can never be crowded out. **Grain:** a session row carries `ts_last` (a real instant, rendered in the viewer's zone); a provider-day row carries **no timestamp field at all** — no instant exists at day grain and a synthesised `00:00` would be a fabricated measurement. **Tokens may be `null`.** A provider-recorded day carries the token quantity the provider reported, and GitHub's `ai_credit/usage` reports none at all (Copilot is metered in ai-credits), so every Copilot day ships `tokens: null` — "not reported", never a measured `0`. A session row's tokens are OTel-observed and always a number. The response carries **no echo of the applied filters**: nothing read it, and it could not have proven list/CSV parity anyway (the CSV is a separate request off the same client state) — the guarantee is structural, one shared filter schema. **The list claims non-duplication, not conservation, and returns NO total**: the two kinds are different quantities (a session's ledger cost vs. a day's reconciled residual `max(0, API day total − Σ OTel captured)`), so summing across them would mean nothing. Month totals stay on `/me/usage`. An unrecognised `cursor` is a `400`, never a silent restart. |
+| GET | `/api/v1/me/activity/export` | cookie/OIDC | The same list as CSV under the **same filters** (`limit` default 1000, max 5000). The filter set is identical by construction; the ROW SET may be shorter — a match larger than `limit` is truncated to the newest `limit` rows. "Matches what you are looking at" is a claim about the filters, not about completeness, read through the same keyset walk so the file and the screen cannot disagree. Columns: `kind,id,day,when,tool,project_code,project_display_name,activity,tokens,cost_usd`; `when` is **empty** for a provider-recorded day. Formula-injection-escaped. The filename carries no date — the server owns the clock and this is not a windowing path. Note the routing: a static segment outranks a parameter, so `export` resolves here rather than at `/me/activity/{activity}`; the cost is that an activity label of exactly `export` is not reachable through the drill-down URL. |
+| ~~GET `/api/v1/me/sessions/recent`~~ | — | **RETIRED** (superseded by `/me/activity`). It read `attribution_record` — a single OTel source, by design — so a provider-recorded day could never appear on it. Removed with its handler; no redirect, no auth-reachable landmine. |
+| ~~GET `/api/v1/me/sessions/recent/export`~~ | — | **RETIRED** with the route above; the CSV is now `/me/activity/export`. |
+| GET | `/api/v1/me/sessions/untagged` | cookie/OIDC | Caller's recent OTel sessions and provider-recorded days not yet attributed to a project (the retroactive-tagging worklist), plus the dismissed set. **Stays** alongside `/me/activity`: this is the TASK list (`project_id IS NULL` by definition), Activity is the RECORD. |
 | POST | `/api/v1/me/sessions/{sid}/assign` | cookie/OIDC + CSRF | Retroactively tag an untagged session to a project (triple gate: project exists, caller is a member, session email is one of the caller's identities); attribution runs on the next scheduled tick. |
+| GET | `/api/v1/me/unaccounted/{id}` | cookie/OIDC | Full drill-down for one of the caller's provider-recorded days (`ProviderDayDetail`) — the counterpart of `/me/sessions/{sid}` for the unit that has no session: model mix, token lanes, cost by model and requests, read from the provider's own `provider_usage_fact` rows for that (teammate, day, tool). Ownership is the query's `WHERE` — a foreign or unknown id 404s identically, so neither can be probed. |
+| POST | `/api/v1/me/unaccounted/{id}/assign` | cookie/OIDC + CSRF | Tag a provider-recorded day (`{ project_id?, activity? }`, at least one present) — the same correction primitive as a session tag, membership-gated by the same rule; `project_id: null` returns the day to needs-tagging; `activity` omitted = preserved, `null` = cleared. Ownership + ended-budget + membership gates, then update + audit, atomically. |
+| POST | `/api/v1/me/worklist/bulk` | cookie/OIDC + CSRF | Apply ONE decision (`tag` / `dismiss` / `restore`) to a set of needs-tagging items — conversations and/or provider-recorded days — in one atomic transaction: ownership pre-flight on every item, all gates first, nothing changed if any item fails. Dismissal changes no money: the spend stays unallocated and still charges to the caller's cost centre. |
 | GET | `/api/v1/me/grants` | cookie/OIDC | The caller's own authorized OAuth connections (`oauth_token` rows): client name, plain-language scopes, derived state (active/inactive/revoked/expired), `created_at`, `last_used_at`, and `is_emit`. Owner-scoped. |
 | POST | `/api/v1/me/grants/{id}/revoke` | cookie/OIDC + CSRF | Revoke one of the caller's own grants (404 if not theirs). Revoking an emit grant also ends its instance so the silence is expected. |
 | GET | `/api/v1/me/quarantined-spend` | cookie/OIDC | The caller's sessions whose spend lacks covering emit-heartbeats ("unverified spend") pending reconciliation. |
@@ -119,13 +140,15 @@ state-changing methods add CSRF. Identity resolution spans the primary
 | GET | `/api/v1/me/inbox` | cookie/OIDC | List the caller's inbox items (filters: `ack_state` incl. open/closed shorthand, `category`, `severity`, `limit`). |
 | PATCH | `/api/v1/me/inbox/{id}` | cookie/OIDC + CSRF | Change `ack_state` (read/acknowledged/dismissed/resolved) on one's own item; audited. |
 | POST | `/api/v1/me/inbox/{id}/route` | `admin`/`global-finops` + CSRF | Forward an inbox item to another (active) recipient and resolve the source; audited. |
-| GET | `/api/v1/me/consumption` | cookie/OIDC | The caller's own consumption/quota view (teammate-scoped, over the same usage math as `/me/usage`). |
+| GET | `/api/v1/me/usage` | cookie/OIDC | The caller's own usage-detail view — the **My usage** page (teammate-scoped). Renamed from `/api/v1/me/consumption`; there is no redirect. The dashboard payload moved the other way and is now `/api/v1/me/home`. Accepts the report window vocabulary (`month=YYYY-MM` XOR `from`/`to`, resolved via `resolveReportWindow`) beside the trend card's own `window=30\|90`; `lane=usage\|chargeback` selects the lens. Payload: `headline`/`disclosure` (ADR 0012), `hero_tiles` (the four window-scoped KPI tiles with same-elapsed MoM deltas and named delta-empty reasons — the page's only hero since the §I3 basis-group `hero` leg retired with its card), `context_residency` (spend by provider-reported context-window band + reason-typed un-banded remainder), `session_economics` (OTel-arm conversation distribution: median/p90/top-3 share), `model_mix` (reason-typed Top-models rows + the mix's own denominator), `where_it_went` (per-project contribution rows with the PROJECT's window total + allocation, plus one untagged remainder), `engagement` (`claude` and `copilot` columns, each in its own vocabulary; `null` = empty state). `hero_tiles.window` echoes the resolved window and carries `spark_partial` — whether the tiles' sparks END on a still-filling day (the axis runs to `min(to, today)`). It is stated by the server because nothing else on the echo can distinguish a finished month from the current month's last day, and a client that guessed from the frame would draw the "still accruing" mark on completed days. The former `cache`, `aux` and `hero` legs are removed with their cards (`hero` fed "What kind of AI work drove this", retired 2026-08-05; `disclosure` stays — Home reads it too, and /usage now renders it behind the lane toggle's (i) rather than as a card). Tagged-activity chips on the page open the activity drill-down. |
 | GET | `/api/v1/me/cost-centres` | cookie/OIDC | Cost centres the caller belongs to (self-scoped). |
 | GET | `/api/v1/me/activity-types` | cookie/OIDC | Activity types visible to the caller (for self-tagging). |
-| GET | `/api/v1/me/projects/summary` | cookie/OIDC | Summary rollup across the caller's projects. |
-| GET | `/api/v1/me/projects/{code}` | cookie/OIDC | Detail for one of the caller's projects, keyed by project code. |
+| GET | `/api/v1/me/activity/{activity}` | cookie/OIDC | Tag/activity drill-down (`ActivityDetail`, `window=7\|30\|90`): the caller's spend on ONE activity label broken down by model, token lane, cache economics and fidelity, plus the session list carrying the tag (cost desc). Teammate-scoped ledger read (activity is not an aggregate dimension); an unused label returns an empty breakdown (no `404`). Surfaced by the **activity drill-down drawer**, whose session rows hand off to the session drawer. |
+| GET | `/api/v1/me/projects/summary` | cookie/OIDC | Summary rollup across the caller's projects (MTD). Each card carries `mine_mtd_usd` (the caller's own slice, same lane/window/provisional option as the card total) and `spark` (same-window per-day series); the response carries `untagged_usd` — the caller's taggable-but-untagged MTD spend behind the list band's worklist pull-through. |
+| GET | `/api/v1/me/projects/{code}` | cookie/OIDC | Detail for one of the caller's projects, keyed by project code. Windows on the report vocabulary (`?month=YYYY-MM` XOR `?from&to`; default = current month). Payload: `window` (bounds + `days_elapsed`/`days_in_window` pace operands), `budget.window_cost_usd`, `hero` (active/assigned member counts + per-tile MoM deltas paced on the data frontier, with a named `empty_reason` when withheld), reason-typed `mix.by_model` rows for the Top-models panel, `mix.by_activity`, windowed `series_by_model`, team, untagged pressure, and the chip-row operands (`providerStates`, `coverage`). **`?window=30\|90`** (default 30) governs the Daily-burn card ALONE: it returns `burn` — `window_days`, `from`/`settled_to`/`to`, a trailing `series_by_model`, `advisory_cost_usd` and `advisory_basis`. The bounds span `window_days` SETTLED days (`from`…`settled_to`) plus the still-filling `to` day beyond the settled edge, which is exactly the axis the chart draws — so a "30d" card spans 31 dates by design, the last one drawn partial and excluded from means. `advisory_cost_usd` is tier-2 / telemetry-only spend over that same trailing window (rendered as the chart's footer, omitted entirely at zero) and is **`null`, not `"0.00"`, when `attribution_aggregate` holds no row for the window** — an un-materialised rollup is not a measured zero. `advisory_uncovered_days` counts the window's SPENDING days the rollup provably has not covered (days the ledger series carries and the aggregate holds no row for) — non-zero means the figure is **not** a window total and the client must not present it as one; a partially materialised rollup used to be indistinguishable from a complete one. `advisory_basis` (`otel-aggregate-all-identities`) names the population that sum covers: the aggregate has no identity dimension, so unlike the chart above it the figure includes provisional identities, and it is OTel-only (no reconciliation or ingest-only arms). The trailing bounds are resolved from the request clock, so the series and its footer describe the same days; nothing else on the payload moves with it. The token-lane mix, cache stats, top-level `fidelity` and plain daily `series` legs stay retired. |
+| GET | `/api/v1/me/projects/{code}/team/export` | cookie/OIDC | CSV of the project page's team-contribution table (member, cost, tokens, active days, $/active day, share, last activity), windowed like the page (`?month` XOR `?from&to`). Membership-gated: a non-member — including a cost-centre-owner observer, who never sees named member rows — gets the same `404` as a missing project. |
 | GET | `/api/v1/me/instances` | cookie/OIDC | The caller's own enrolled instances/devices. |
-| GET | `/api/v1/me/sessions/{sid}` | cookie/OIDC | Detail for one of the caller's own sessions. |
+| GET | `/api/v1/me/sessions/{sid}` | cookie/OIDC | Full drill-down for one of the caller's own sessions (`SessionDetail`): model×token-type cost matrix, per-lane split (input/output/cache-read/cache-write), main-vs-aux (harness) split, cache economics (hit ratio + $ saved) and the estimated-vs-advisory fidelity split. AR-based ownership → `404` for a foreign/unknown id. Surfaced by the **session drill-down drawer** (opened from any recent-session row). |
 
 ## Allocations (governance)
 
@@ -170,20 +193,50 @@ policy** — the granted scopes per persona are the RBAC default (`standard`)
 unless an admin has loosened the org-wide mode (see
 [Report-visibility policy](Authentication-and-Security.md#report-visibility-policy-report-scoping)).
 `GET /reports/meta` returns only the **granted** scopes and drives which tabs
-render. The across-regions and finance routes enforce with `requireReportScope`
-(loosened modes flip a region admin / cost-centre owner's `403`→`200`); the
-regional and cost-centre routes take a policy-computed `crossRegion` /
-`unbounded` flag. All reads hit views / aggregate tables only (the lane
-firewall) — no raw `attribution_record`.
+render. The region route resolves both of its widths through
+`resolveRegionRequest` — `?region=all` (the whole-company answer) requires the
+`across` grant, a single region the `regional` scope (loosened modes flip a
+region admin / cost-centre owner's `403`→`200`); the finance routes enforce
+`requireReportScope('finance')`; the cost-centre routes take a policy-computed
+`crossRegion` / `unbounded` flag. All reads hit the lane views only (the lane
+firewall) — no `attribution_record`, no `attribution_aggregate`, no raw
+`actual_spend`.
 
 | Method | Path | Auth gate | Purpose |
 |---|---|---|---|
-| GET | `/api/v1/reports/meta` | `requireAuth` | Bootstrap: granted scopes (policy-derived), best-default scope, region default, month floors, provider settling states, copilot mode. |
-| GET | `/api/v1/reports/regional` (+ `/trend`, `/active-trend`, `/drivers`, `/seasonality`) | `requireAuth` + regional scope | Regional usage/spend for the caller's region (cross-region roles, and admins under a loosened mode, may pass `?region=`). |
-| GET | `/api/v1/reports/across-regions` (+ `/trend`, `/active-trend`, `/drivers`, `/seasonality`) | `requireAuth` + `requireReportScope('across')` | Whole-company across-regions view. `standard`: `global-finops`/`platform-admin` only; loosened modes admit region admins / cost-centre owners. |
-| GET | `/api/v1/reports/cost-centres` · `/{ccId}` | `requireAuth` + cost-centre scope | Cost-centre list + drill (owned-or-subtree under `standard`; all cost centres under a loosened `unbounded` grant). |
+| GET | `/api/v1/reports/meta` | `requireAuth` | Bootstrap: granted scopes (policy-derived), best-default scope, region default, month floors, provider settling states, copilot mode, and `drill` — the two grant columns (`teammate`, `project`) the client needs to decide link-or-plain-text on every reports row. |
+| GET | `/api/v1/reports/region` (+ `/trend`, `/active-trend`, `/drivers`, `/seasonality`, `/behaviour`) | `requireAuth` + region scope (see above) | ONE route, two widths. `?region=all` is the whole-company view (`standard`: `global-finops`/`platform-admin` only; loosened modes admit region admins / cost-centre owners); any other region is that region's view (cross-region roles, and admins under a loosened mode, may pass `?region=`). The retired `/reports/regional` and `/reports/across-regions` routes folded in here. `/drivers` takes `?axis` (width-specific enums) and `?lane=usage\|chargeback`. The response `meta` carries `settledThrough` — the last SETTLED UTC day (`today − 1`) the payload's day series were cut on — so a consumer can tell whether a series' last point is a finished day or the still-filling one without opening a second `/api/v1/clock` request with its own instant. |
+| GET | `/api/v1/reports/cost-centres` · `/{ccId}` | `requireAuth` + cost-centre scope | Cost-centre list + drill (owned-or-subtree under `standard`; all cost centres under a loosened `unbounded` grant). Both carry the centre's two lanes: `burnUsd` (§A usage, homed by emit-time `cost_owning_unit_id`) and `chargeUsd` (§B chargeable), from one shared fetcher so the list and the drill cannot disagree. Never summed. `copilotChargebackPartialMonth` is `true` when the pooled Copilot charge — billed monthly, so unsliceable — is excluded because the window is not month-aligned; it is a property of the WINDOW and does not assert that a given centre has a pool row. The drill's `vendor` split covers every surface a vendor ships, not its flagship tool. |
 | GET | `/api/v1/reports/finance` · `/{couId}` | `requireAuth` + `requireReportScope('finance')` | Per-CoU finance/chargeback (all-regions grant required; region admins denied under `standard`, admitted under loosened modes). |
+| GET | `/api/v1/reports/teammate/{id}` (+ `/export`) | `requireAuth` + `teammateDrillAdmission` | The per-teammate **contribution view** (reports depth only). Requires `?src=` — the entry scope frame (`cc:{id}` / `region:{id}` / `across` / `finance`); a request with no frame is a `400` and a frame the caller does not hold is a `403`. Every subject figure is computed over the frame's predicate; the TokenSheet's "share of project" and budget state are whole-project figures over ALL members. Writes a `report-teammate-viewed` audit row on every request (the export writes `report-teammate-export`); both responses are `Cache-Control: no-store`. Withholds its figures behind `refusal: { reason: 'coverage-stale', … }` when the stalest provider feeding the subject's in-scope rows is past the freshness threshold. |
+| GET | `/api/v1/reports/project/{code}` | `requireAuth` + the `project` grant | The project at **reports depth**, for a viewer admitted by a grant rather than by membership: total vs allocation + burn/day, top models, and contributors in the viewer's people-scope NAMED with ONE aggregate remainder so the rows foot to the project total over all members. Member depth is unchanged and stays at `/api/v1/me/projects/{code}`, which admits on TWO paths: current project membership (`access: 'member'`), or an active `cou_owner` row on the project's lead cost-owning unit (`access: 'cou-owner'` — the P&L drill-through). A caller with neither is 404, indistinguishable from a missing project. An out-of-scope project and a nonexistent code return the SAME 403. |
 | GET | `/api/v1/reports/export` | `requireAuth` + the active scope's gate | Synchronous CSV export of the active report (the gate runs in the same request that streams the bytes — no generate-vs-download re-auth gap). |
+
+### `GET /api/v1/clock` — the one clock
+
+| Method | Path | Auth gate | Purpose |
+|---|---|---|---|
+| GET | `/api/v1/clock` | `requireAuth` | The server's resolved clock: `{ now, today, settledThrough }`. `Cache-Control: no-store`. |
+
+Deliberately trivial — no database, no scope, no per-caller variation: the day is
+UTC for everyone. It exists because "today" on a chart is a **coverage** fact the
+browser cannot know (see [Reporting §3a](Reporting.md#3a-the-clock--what-today-means-on-a-report)).
+Every clock-sensitive client control consumes this rather than calling
+`new Date()`; the server resolves it once per request (`requestClock(event)`) so
+the SQL series frontier, the response-cache key and this payload are the same
+instant.
+
+**The clock pin (`?clock=`) — demo-capable environments only.** On a `local` or
+`sandbox` deployment (the same structural allowlist that gates persona
+impersonation — `shared/env/deploy-env.ts`), any request may carry
+`?clock=<ISO-8601 UTC instant>`. It pins that request's clock and sets a session
+cookie so the browser's own `/api/v1/clock` fetch resolves to the same instant;
+`?clock=off` clears it. A malformed value is a `400` rather than a silent
+fallback — a screenshot filed as "day 1" that was really taken mid-month is worse
+than a failed run. Outside `local`/`sandbox` the parameter and the cookie are
+inert. It exists so the parity capture (`scripts/parity-shots.sh`) can shoot the
+product on a real day 1, which is the only way that gate can see the month-start
+states.
 
 ## Admin
 
@@ -225,7 +278,8 @@ and emit audit events.
 | GET | `/api/v1/admin/governance-settings` · PUT | `admin`/`global-finops` (+ CSRF on write) + region scope | Read/set the governance settings for the caller's region. |
 | GET | `/api/v1/admin/settings/project-lifecycle` · PUT | GET `admin`/`global-finops`; PUT `global-finops` + CSRF | Org-wide project-lifecycle settings (the org-wide write is narrowed to `global-finops`). |
 | POST | `/api/v1/admin/org-units` · DELETE/PATCH `/{id}` · POST `/{id}/move` · POST `/{id}/owners` · DELETE `/{id}/owners/{teammateId}` | `admin`/`global-finops` + CSRF | Org-unit tree writes: create, edit, delete, re-parent (`move`), and owner add/remove. (The read is `GET /api/v1/admin/org-units` above.) |
-| DELETE/PATCH | `/api/v1/admin/projects/{id}` | `admin`/`global-finops` + CSRF | Delete or edit a project (region-clamped). |
+| DELETE/PATCH | `/api/v1/admin/projects/{id}` | `admin`/`global-finops` + CSRF | Delete or edit a project (region-clamped). PATCH also accepts `migrate_spend` — see **Migrate** below. |
+| POST | `/api/v1/admin/projects/{id}/migrate-preview` | `admin`/`global-finops` + CSRF | Read-only: what a Migrate would move. See **Migrate** below. |
 | GET | `/api/v1/admin/projects/{id}/assignments` | `manager`/`admin`/`global-finops` | List a project's teammate assignments (writes are the `assignments` POST/DELETE/PATCH rows above). |
 | GET | `/api/v1/admin/rate-cards` · POST · POST `/{id}/retire` | `admin`/`global-finops` (+ CSRF on writes) | Rate-card registry: list, create-card-with-lines (atomic; region admins bounded to own region, a global card is `global-finops`/`platform-admin`), and retire. No line-mutation endpoint by design — pricing changes mint a new card. (Distinct from the still-unbuilt bare `/api/v1/rate-cards`.) |
 | POST | `/api/v1/admin/regions` · DELETE/PATCH `/{id}` | `platform-admin` + CSRF | Region create / edit / delete — cross-region acts reserved for the super-admin. (The list `GET /api/v1/admin/regions` is above.) |
@@ -233,6 +287,7 @@ and emit audit events.
 | GET/PUT/DELETE | `/api/v1/admin/regions/{id}/project-lifecycle` | `admin`/`global-finops` (+ CSRF on writes) | Per-region project-lifecycle override: read, set, clear. |
 | GET | `/api/v1/admin/reconciliation/**` | `admin`/`global-finops` (+ CSRF on writes) | Provider-reconciliation admin subtree: `anthropic/{discover,health}`, `github/{discover-orgs,health,map,teammate-search,unresolved}`, `enterprises` (+ `/{id}` PATCH/DELETE), `orgs` (+ `/{id}` PATCH/DELETE), `backfill` (GET/POST), and `records` (GET). Configures and inspects the billing-reconciliation connectors. |
 | GET | `/api/v1/admin/diagnostics/network` | `admin`/`global-finops` | Network-reachability diagnostic snapshot. |
+| GET | `/api/v1/admin/diagnostics/multi-bu-owners` | `admin`/`global-finops` | Teammates who actively own more than one Business Unit. Returns `{ clean, violations[] }`; region-scoped unless global. |
 | GET | `/api/v1/admin/diagnostics/otel-logs` | `platform-admin` | Recent OTel log-ingest diagnostic (super-admin only). |
 | GET | `/api/v1/admin/worker-runs` · `/{id}` | `admin`/`global-finops` | Background-worker run history (list + one run's detail); admin-global, no region clamp. |
 | POST | `/api/v1/admin/workers/{name}/run` | `global-finops` + CSRF | Trigger a named worker from the admin UI (RBAC/cookie path). **Distinct from** the HMAC machine-to-machine `POST /api/v1/internal/run-worker/{name}` below — same worker registry, different auth (cookie+RBAC here vs. HMAC there). |
@@ -278,7 +333,7 @@ The following surfaces are designed but **not built** — none exist in
 treat them as a live API.
 
 - **Copilot OTLP bridge** — a separate ACA service receiving `POST /v1/{traces,logs,metrics}` from Copilot CLI, stamping attested identity and forwarding to Azure Monitor. *Not built; Copilot support is future-state.*
-- **Attribution ledger reads** — `GET /api/v1/attribution/by-{teammate,project,cou,region,tool-model,session}`. *Not built; attribution is surfaced only via `/me/usage` and `/rollups/*` aggregates today.*
+- **Attribution ledger reads** — `GET /api/v1/attribution/by-{teammate,project,cou,region,tool-model,session}`. *Not built; attribution is surfaced only via `/me/home`, `/me/usage` and `/rollups/*` aggregates today.*
 - **Spill reconciliation reads** — `GET /api/v1/spill/by-cou`, `/spill/by-workspace`, `/spill/report`. *Not built.*
 - **Retrospective claim workflow** — `POST/PATCH /api/v1/claims`, `GET /claims/unclaimed`, `GET /claims/by-teammate`, `POST /claims/{id}/override`. *Not built (the membership-gated `/me/sessions/{sid}/assign` partly meets the retroactive-tagging need by a different mechanism).*
 - **Bare rate-card CRUD** — the top-level `GET/POST /api/v1/rate-cards`, `PATCH /rate-cards/{id}`, `POST /rate-cards/{id}/lines`, `DELETE /rate-cards/{id}`, `POST /rate-cards/recost`. *Not built.* Note: the **admin** rate-card surface (`GET/POST /api/v1/admin/rate-cards` + `POST /api/v1/admin/rate-cards/{id}/retire`) **is** built — see the Admin table. There is deliberately no line-mutation or recost endpoint (pricing changes mint a new card; mistakes retire).
@@ -289,3 +344,65 @@ treat them as a live API.
 - **Financial connectors (FIN)** — the `FinancialConnector` interface, connector ingest `POST /api/v1/connectors/{id}/ingest`, and sync-conflict admin endpoints `/api/v1/admin/sync-conflicts`. *Not built; pilot config is manual.*
 - **OpenAPI / v2 / deprecation** — `GET /api/v1/openapi.json`, any `/api/v2/...` surface, and `410 Gone` + `Deprecation`/`Sunset` (RFC 8594) machinery. *Not built.*
 - **`/health/{live,ready,deep}` split** — superseded by the single `GET /api/health`. *Not built.*
+
+
+## Migrate — re-homing a project's recorded spend
+
+`attribution_record.cost_owning_unit_id` is stamped when a usage row is written
+and is never refreshed, so changing a project's Business Unit affects FUTURE
+usage only. Migrate applies the change to usage already recorded.
+
+Reachable only from these admin endpoints. Directory/graph placement never
+re-homes recorded spend.
+
+### `POST /api/v1/admin/projects/{id}/migrate-preview`
+
+```jsonc
+{
+  "to_cost_owning_unit_id": "<uuid>",           // must be active, and in the project's region
+  "range": { "from": "2026-08-01" }              // or { "from": "all", "confirm_unbounded": true }
+}
+```
+
+Writes nothing. Returns:
+
+| field | meaning |
+|---|---|
+| `affected[]` | `{ periodMonth, rows, usd }` per period that would change |
+| `refused[]` | `{ periodMonth, rows, usd, reason }` — `closed-period` or `archived`; left alone and named |
+| `fromCostOwningUnits[]` | every BU the rows are moving away from, with rows and dollars |
+| `totalRows` / `totalUsd` | totals over `affected` only |
+| `token` | binds this preview to the row set it described |
+
+`from: "all"` means every OPEN period and requires `confirm_unbounded: true`; a
+month with no `finance_period` row counts as open.
+
+### `PATCH /api/v1/admin/projects/{id}`
+
+Two additional optional fields, valid only together with `cost_owning_unit_id`:
+
+```jsonc
+{
+  "cost_owning_unit_id": "<uuid>",
+  "migrate_spend": { "from": "all", "confirm_unbounded": true },
+  "migrate_expect_token": "<token from the preview>"   // required with migrate_spend
+}
+```
+
+Omit `migrate_spend` and behaviour, response shape and audit payload are
+unchanged.
+
+The migrate runs in the same transaction as the project update, holds a
+`financePeriod` advisory lock for each period it touches, bumps `ts_recorded`
+so the rollup worker recomputes, and skips closed periods and archived days.
+On success the response gains `migrated` (`rows_updated`, `usd_moved`,
+`periods_affected`, `periods_refused`). The report cache is dropped after
+commit.
+
+**409** when the token no longer matches the current plan — the response carries
+`current_plan` so the caller can re-confirm. **400** when `migrate_spend` is sent
+without `cost_owning_unit_id`, or without `migrate_expect_token`.
+
+The `project-updated` audit row gains `migrate_spend` carrying every source BU,
+the target, the range, rows updated, dollars moved (measured from the rows that
+moved) and dollars planned, the affected periods and days, and every refusal.

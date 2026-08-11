@@ -8,12 +8,25 @@
  * with sha256 (plain hex) to match the server's project.code_hash exactly
  * (server: createHash('sha256').update(code).digest('hex')).
  */
-import { writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, renameSync, unlinkSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import {
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  chmodSync,
+  renameSync,
+  unlinkSync,
+} from 'node:fs'
+import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { execFileSync } from 'node:child_process'
 import { parseTokenscope } from './tokenscope-reader.mjs'
 import { buildRepoResourceAttrs, mergeClaudeSettings, readDeviceEnrolment } from './env-builder.mjs'
+// The single .gitignore-hygiene helper, shared with the Copilot forwarder.
+// Import is side-effect-free (that module main()-guards) and tag-repo.mjs is not
+// vendored into the standalone Copilot distribution — see ensureRepoTagGitignored.
+import { ensureGitignored } from './copilot-forwarder.mjs'
 
 // The client-neutral resolver/hasher (computeCodeHash, resolveRepoProjectCode)
 // was extracted into the syncable tokenscope-project.mjs (P0-2) so the Copilot
@@ -38,7 +51,9 @@ export function writeTokenscopeFile(cwd, code) {
   // project.code_hash than the one we tag with now, silently splitting the
   // repo's spend server-side. Reject them at write time with a clear error.
   if (!code || !String(code).trim()) {
-    throw new Error('Project code is empty — pass the canonical project code (e.g. TokenScope-MVP) via the project MCP prompt or a committed .tokenscope.')
+    throw new Error(
+      'Project code is empty — pass the canonical project code (e.g. TokenScope-MVP) via the project MCP prompt or a committed .tokenscope.',
+    )
   }
   if (/[#"\r\n]/.test(code)) {
     throw new Error(
@@ -49,7 +64,9 @@ export function writeTokenscopeFile(cwd, code) {
   // make a later read derive a different hash. The slash command trims its arg
   // already; this guards the exported function for any other caller.
   if (code !== String(code).trim()) {
-    throw new Error(`Project code ${JSON.stringify(code)} has leading/trailing whitespace — trim it to the canonical code.`)
+    throw new Error(
+      `Project code ${JSON.stringify(code)} has leading/trailing whitespace — trim it to the canonical code.`,
+    )
   }
   const path = join(cwd, '.tokenscope')
   let project = { code }
@@ -132,6 +149,72 @@ function resolveHelperPath(enrolment) {
 }
 
 /**
+ * S1 fix (4c) — resolve the git repository ROOT for `cwd`. writeRepoTag used
+ * to write `<cwd>/.claude/settings.local.json` with no root check at all, so
+ * running any plugin script from a SUBDIRECTORY planted a fresh
+ * credential-bearing artefact there — deleting the one at the repo root
+ * (or anywhere else) just made it come back on the next launch that happened
+ * to run from that subdirectory.
+ *
+ * `git rev-parse --show-toplevel` first (handles a git WORKTREE, where `.git`
+ * is a FILE pointing elsewhere, not a dir); falls back to walking up for the
+ * nearest ancestor containing a `.git` entry (dir or file — `existsSync`
+ * doesn't care which) when git itself is unavailable or the call fails (not a
+ * repo, no `git` on PATH). Returns null when NEITHER resolves — the caller
+ * refuses to write rather than guess a directory.
+ */
+function resolveRepoRoot(cwd) {
+  try {
+    const out = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    if (out) return out
+  } catch {
+    /* git unavailable / not inside a work tree — fall through to the ancestor walk */
+  }
+  let dir = resolve(cwd)
+  const fsRoot = resolve('/')
+  while (true) {
+    if (existsSync(join(dir, '.git'))) return dir
+    if (dir === fsRoot) return null
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+}
+
+/**
+ * S1 fix (4) — idempotently ensure `<root>/.gitignore` ignores the repo tag, so
+ * the credential-bearing `settings.local.json` this function writes can never be
+ * accidentally committed in a repo that doesn't already exclude `.claude/`.
+ *
+ * ONE implementation, shared with the Copilot forwarder. S1 originally landed a
+ * same-shaped private copy here because copilot-forwarder.mjs was outside its
+ * file-ownership boundary; S2 then parameterised the original. Both boundaries
+ * are gone now, so the duplicate is retired rather than left to drift — two
+ * copies of a "don't commit the credential" helper is exactly the sibling
+ * divergence this sprint exists to remove.
+ *
+ * Importing is side-effect-free: copilot-forwarder.mjs runs `main()` only under
+ * an `import.meta.url === process.argv[1]` guard. tag-repo.mjs is NOT vendored
+ * into the standalone Copilot distribution (see scripts/sync-copilot-plugin.mjs
+ * FILES), so this cross-file import cannot reach a checkout where the target is
+ * absent.
+ *
+ * The shared version additionally refuses to touch a non-git directory, which
+ * the private copy did not — a strict improvement: a repo tag written outside a
+ * work tree should not conjure a .gitignore beside it.
+ */
+function ensureRepoTagGitignored(root) {
+  return ensureGitignored(root, {
+    entry: '.claude/settings.local.json',
+    comment: '# TokenScope repo tag (carries device config; do not commit)',
+  })
+}
+
+/**
  * Write the repo-local ./.claude/settings.local.json, overriding
  * OTEL_RESOURCE_ATTRIBUTES with the device session id + the repo's code_hash.
  *
@@ -160,10 +243,21 @@ function resolveHelperPath(enrolment) {
  *              helper path or instance differed from the current global one (a
  *              drift this rewrite just corrected). false when there was no
  *              previous repo env to compare or nothing drifted.
+ *
+ * S1 fix (4c): anchored to the REPO ROOT (resolveRepoRoot), never a
+ * subdirectory `cwd` happens to be invoked from — see resolveRepoRoot's doc.
+ * Returns `{ settingsPath: null, changed: false, healed: false }` without
+ * writing anything when the root cannot be resolved (not inside a git work
+ * tree, or no `.git` found walking up) — refusing beats guessing a directory.
  */
 export function writeRepoTag({ cwd, enrolment, codeHash }) {
+  const root = resolveRepoRoot(cwd)
+  if (!root) {
+    return { settingsPath: null, changed: false, healed: false }
+  }
+  ensureRepoTagGitignored(root)
   const helperPath = resolveHelperPath(enrolment)
-  const claudeDir = join(cwd, '.claude')
+  const claudeDir = join(root, '.claude')
   mkdirSync(claudeDir, { recursive: true })
   const settingsPath = join(claudeDir, 'settings.local.json')
 
@@ -185,9 +279,12 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   let healed = false
   const prevEnv = existing && typeof existing.env === 'object' ? existing.env : null
   if (prevEnv) {
-    const prevHelper = typeof existing.otelHeadersHelper === 'string' ? existing.otelHeadersHelper : null
+    const prevHelper =
+      typeof existing.otelHeadersHelper === 'string' ? existing.otelHeadersHelper : null
     const prevInstance = parseInstanceId(prevEnv.OTEL_RESOURCE_ATTRIBUTES)
-    healed = (prevHelper != null && prevHelper !== helperPath) || (prevInstance != null && prevInstance !== enrolment.sessionId)
+    healed =
+      (prevHelper != null && prevHelper !== helperPath) ||
+      (prevInstance != null && prevInstance !== enrolment.sessionId)
   }
 
   // Target env: the WHOLE current device env, with OTEL_RESOURCE_ATTRIBUTES
@@ -196,9 +293,23 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   // config left over from a pre-cutover enrolment never copies that retired,
   // higher-privilege identity token at rest into every repo (the read credential
   // is gone — read now rides the MCP-client OAuth bearer, not settings env).
+  //
+  // S1 fix (4): ALSO strip the durable OAuth REFRESH token specifically — the
+  // long-lived credential a hostile repo could otherwise exfiltrate merely by
+  // being cloned and opened (every OTHER key, including the bearer endpoint
+  // and OAuth client id, stays; see the "Must not break" note on ADR-0006 §2 —
+  // narrowing the block itself would silently drop the endpoint/bearer
+  // fleet-wide, which is exactly what this must NOT do). This walks the
+  // SAME sibling path the two deletes above already established for the
+  // retired read credential — one design, three keys.
+  // otel-headers-helper.sh falls back to the device's own 0700 state-dir
+  // credential store (${STATE_DIR}/config.json) when this key is absent, so a
+  // tagged repo's session still mints a bearer — see that script's "OAuth
+  // refresh token: env, else the device credential store fallback".
   const deviceEnv = { ...(enrolment.env ?? {}) }
   delete deviceEnv.TOKENSCOPE_READ_REFRESH_TOKEN
   delete deviceEnv.TOKENSCOPE_READ_CLIENT_ID
+  delete deviceEnv.TOKENSCOPE_OAUTH_REFRESH_TOKEN
   const fullEnv = {
     ...deviceEnv,
     OTEL_RESOURCE_ATTRIBUTES: buildRepoResourceAttrs(enrolment.sessionId, codeHash),

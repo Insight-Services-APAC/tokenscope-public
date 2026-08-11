@@ -70,7 +70,9 @@ export async function runEndingSoon(
       SELECT teammate_id::text AS teammate_id FROM project_assignment
        WHERE project_id = ${p.id}::uuid AND effective @> now()
       UNION
-      SELECT DISTINCT teammate_id::text AS teammate_id FROM attribution_record
+      -- v_complete_usage: a Copilot-only contributor has no attribution_record
+      -- rows, so reading the raw table would never warn them their project ends.
+      SELECT DISTINCT teammate_id::text AS teammate_id FROM v_complete_usage
        WHERE project_id = ${p.id}::uuid AND ts_event >= ${monthStartIso}::timestamptz
     `)
 

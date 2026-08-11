@@ -42,7 +42,7 @@ try {
     ['[data-testid="project-bucket-list"]', 'project spend list'],
     ['[data-testid="spill-card"]', 'tagged spend card'],
     ['[data-testid="untagged-sessions"]', 'needs-tagging grid'],
-    ['[data-testid="recent-sessions"]', 'recent sessions'],
+    ['[data-testid="activity-card"]', 'activity list'],
   ]) await must(sel, label)
 
   // project bars present (budgeted projects seeded)

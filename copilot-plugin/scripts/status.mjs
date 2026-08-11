@@ -1,5 +1,5 @@
 #!/usr/bin/env node
- 
+
 /*
  * tokenscope-status (Copilot CLI) — "is my Copilot CLI emitting to TokenScope, and
  * did a record actually LAND?" The Copilot analogue of the Claude /tokenscope:status
@@ -28,6 +28,15 @@
  *     guess, we OMIT this sub-check and say so; the canonical readiness signal for the
  *     query side is whether the `my_usage` MCP tool returns data (see the status skill).
  *
+ *  4. MANAGED TELEMETRY (Workstream D §10.1). An enterprise-managed `telemetry`
+ *     block (server-managed / native-MDM / file-based) can force Copilot's exporter
+ *     away from the file lane, or turn telemetry off outright — SILENTLY, while the
+ *     credential probe above still mints a healthy bearer. `emitting` above therefore
+ *     answers "is the CREDENTIAL valid", not "will Copilot ever write a span at all" —
+ *     those are different questions, and conflating them is exactly the false-healthy
+ *     trap this check exists to close. `emission_healthy` is the composite: TRUE only
+ *     when the credential is valid AND no hostile managed setting was found.
+ *
  * ATTRIBUTION (landed != bound). A span LANDING is NOT the same as the spend being
  * ATTRIBUTED to a project/teammate. The highest-likelihood SILENT multi-org failure
  * is spend landing UNBOUND (untagged) — it counts as "landed" but reconciles to
@@ -55,6 +64,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { refreshLanded } from './landed-check.mjs'
+import { detectManagedTelemetry } from './managed-telemetry.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -134,7 +144,8 @@ export function interpretLanded(result) {
         landed: false,
         state: 'revoked',
         last_emission: result.lastEmission ?? null,
-        message: 'Instance is REVOKED/ended on the server — re-provision emit via the tokenscope-setup skill to start a fresh device.',
+        message:
+          'Instance is REVOKED/ended on the server — re-provision emit via the tokenscope-setup skill to start a fresh device.',
       }
     }
     if (result.lastEmission && !result.silent) {
@@ -158,9 +169,11 @@ export function interpretLanded(result) {
   const reason = (result && result.reason) || 'unknown'
   let message
   if (reason === 'not-configured') {
-    message = 'Landed check unavailable — no ~/.tokenscope/config.json (run the tokenscope-setup skill first).'
+    message =
+      'Landed check unavailable — no ~/.tokenscope/config.json (run the tokenscope-setup skill first).'
   } else if (reason === 'no-token') {
-    message = 'Landed check unavailable — no cached emit access token yet. The emission probe mints one; re-run after it succeeds.'
+    message =
+      'Landed check unavailable — no cached emit access token yet. The emission probe mints one; re-run after it succeeds.'
   } else if (reason === 'fetch-failed' || reason.startsWith('http-')) {
     message = `Landed check UNCONFIRMED — could not reach the health endpoint (${reason}). Often transient/offline; emission auth above is the primary signal.`
   } else {
@@ -222,7 +235,8 @@ export function interpretAttribution({ landed, needsTaggingCount }) {
       attributed: true,
       state: 'attributed',
       needs_tagging_count: 0,
-      message: 'Spend landed AND attributed — no untagged sessions (my_usage needs_tagging_count = 0).',
+      message:
+        'Spend landed AND attributed — no untagged sessions (my_usage needs_tagging_count = 0).',
     }
   }
   // landed, but the skill did not pass an unbound signal → genuinely unknown here.
@@ -232,6 +246,40 @@ export function interpretAttribution({ landed, needsTaggingCount }) {
     needs_tagging_count: null,
     message:
       'A span landed, but whether it ATTRIBUTED is UNKNOWN from this local probe — landing is not attribution. Call the `my_usage` MCP tool and read `unallocated.needs_tagging_count`: 0 = attributed/healthy; > 0 = spend is landing untagged (bind via the tokenscope-project skill).',
+  }
+}
+
+/**
+ * Interpret a detectManagedTelemetry() result into a small verdict + message. Pure +
+ * exported for tests. NEVER echoes an endpoint/header value (managed-telemetry.mjs's
+ * own contract) — only the classification, source, and safe boolean details.
+ */
+export function interpretManagedTelemetry(managed) {
+  if (managed.classification === 'hostile') {
+    return {
+      hostile: true,
+      state: 'hostile',
+      source: managed.source,
+      message: `Enterprise-managed Copilot telemetry settings (source: ${managed.source}) are HOSTILE to the file exporter — Copilot itself may be told to disable telemetry, or to export to a different collector, regardless of a valid TokenScope credential. This is a POLICY block, not a credential problem; ask your GitHub enterprise admin about the managed telemetry configuration.`,
+    }
+  }
+  if (managed.classification === 'benign') {
+    return {
+      hostile: false,
+      state: 'benign',
+      source: managed.source,
+      message: `Enterprise-managed Copilot telemetry settings (source: ${managed.source}) are present but compatible with the file exporter (only resourceAttributes/serviceName/captureContent-shaped fields).`,
+    }
+  }
+  if (managed.classification === 'none') {
+    return { hostile: false, state: 'none', source: managed.source, message: 'No enterprise-managed Copilot telemetry setting found on this device (file-based and native-MDM channels checked).' }
+  }
+  // 'unknown' — never asserts hostile OR healthy; says so and why.
+  return {
+    hostile: null,
+    state: 'unknown',
+    source: managed.source,
+    message: `Could not confirm whether an enterprise-managed Copilot telemetry setting is active (checked: ${managed.checkedPaths.join(', ') || 'none'}). ${managed.serverManagedNote}`,
   }
 }
 
@@ -247,17 +295,22 @@ function probeEmissionAuth(stateD) {
     return {
       emitting: false,
       probe_status: null,
-      message: 'Not configured — no ~/.tokenscope/config.json. Run the tokenscope-setup skill (provision_emit + local redeem), then re-check.',
+      message:
+        'Not configured — no ~/.tokenscope/config.json. Run the tokenscope-setup skill (provision_emit + local redeem), then re-check.',
     }
   }
   const hasCreds = Boolean(
-    cfg.bearer_endpoint && cfg.oauth_token_endpoint && cfg.oauth_client_id && cfg.oauth_refresh_token,
+    cfg.bearer_endpoint &&
+    cfg.oauth_token_endpoint &&
+    cfg.oauth_client_id &&
+    cfg.oauth_refresh_token,
   )
   if (!hasCreds) {
     return {
       emitting: false,
       probe_status: null,
-      message: 'Not fully provisioned — config.json is missing emit credentials (bearer_endpoint / oauth_*). Re-run the tokenscope-setup skill.',
+      message:
+        'Not fully provisioned — config.json is missing emit credentials (bearer_endpoint / oauth_*). Re-run the tokenscope-setup skill.',
     }
   }
 
@@ -279,14 +332,22 @@ function probeEmissionAuth(stateD) {
     TOKENSCOPE_OAUTH_REFRESH_TOKEN: cfg.oauth_refresh_token,
     TOKENSCOPE_STATE_DIR: stateD,
   }
-  const res = spawnSync('sh', [helperPath], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] })
+  const res = spawnSync('sh', [helperPath], {
+    encoding: 'utf8',
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
   let hasAuth = false
   try {
     hasAuth = Boolean(JSON.parse(res.stdout || '{}').Authorization)
   } catch {
     // Unparseable helper output → treat as no auth; `hasAuth` stays false.
   }
-  return interpretEmissionProbe({ status: res.status, stdoutHasAuth: hasAuth, sentinel: readEmitSentinel(stateD) })
+  return interpretEmissionProbe({
+    status: res.status,
+    stdoutHasAuth: hasAuth,
+    sentinel: readEmitSentinel(stateD),
+  })
 }
 
 /**
@@ -297,15 +358,36 @@ function probeEmissionAuth(stateD) {
  * `attribution` is the interpretAttribution verdict (landed-AND-attributed vs
  * landed-but-unbound). When omitted (older callers/tests), it defaults to the
  * "unknown" verdict so the shape always carries the landed!=attributed distinction.
+ *
+ * `managedTelemetry` is the interpretManagedTelemetry verdict. When omitted, defaults
+ * to 'unknown' (never silently assumes 'none') so `emission_healthy` never reads
+ * healthy on absent information.
  */
-export function composeStatus({ probe, landed, attribution, sentinel }) {
+export function composeStatus({ probe, landed, attribution, sentinel, managedTelemetry }) {
   const attr = attribution || interpretAttribution({ landed, needsTaggingCount: null })
+  const managed = managedTelemetry || { hostile: null, state: 'unknown', source: 'unknown', message: 'Managed-telemetry check was not run.' }
   return {
     tool: 'copilot-cli',
     emitting: probe.emitting,
     probe: { status: probe.probe_status, message: probe.message },
+    // Workstream D §10.1 — a credential-valid probe (emitting=true) is NEVER, by
+    // itself, proof that Copilot will ever write a span: a HOSTILE managed telemetry
+    // setting kills the file exporter regardless. emission_healthy is the composite
+    // an operator should actually read: true only when the credential is valid AND no
+    // hostile managed setting was found. False when either half fails; the two
+    // sub-fields (`emitting`, `managed_telemetry`) say WHICH.
+    emission_healthy: probe.emitting === true && managed.hostile !== true,
+    managed_telemetry: {
+      state: managed.state,
+      source: managed.source,
+      message: managed.message,
+    },
     landed: landed.landed,
-    landed_check: { state: landed.state, last_emission: landed.last_emission, message: landed.message },
+    landed_check: {
+      state: landed.state,
+      last_emission: landed.last_emission,
+      message: landed.message,
+    },
     // Landing != attribution. `attributed` distinguishes landed-AND-attributed
     // (true) from landed-but-unbound/untagged (false), with null = unknown here
     // (skill must read my_usage's needs_tagging_count) or not-yet-landed.
@@ -320,7 +402,7 @@ export function composeStatus({ probe, landed, attribution, sentinel }) {
     // ~/.claude/.credentials.json .mcpOAuth) — omit rather than guess.
     mcp_authed: null,
     mcp_authed_note:
-      "MCP-auth state is not script-readable for Copilot CLI — omitted. Confirm the query side by calling the `my_usage` MCP tool (data back = authed; \"Not authenticated\" = run the tokenscope-setup skill).",
+      'MCP-auth state is not script-readable for Copilot CLI — omitted. Confirm the query side by calling the `my_usage` MCP tool (data back = authed; "Not authenticated" = run the tokenscope-setup skill).',
   }
 }
 
@@ -345,14 +427,26 @@ async function main() {
   const needsTaggingCount = parseNeedsTaggingCount(process.env.TOKENSCOPE_NEEDS_TAGGING_COUNT)
   const attribution = interpretAttribution({ landed, needsTaggingCount })
 
-  console.log(JSON.stringify(composeStatus({ probe, landed, attribution, sentinel }), null, 2))
+  // Workstream D §10.1 — never let a detector bug crash status itself; a failure here
+  // degrades to 'unknown' (never asserted 'none'/'benign'), which composeStatus's
+  // emission_healthy already treats as NOT healthy-by-default.
+  let managedTelemetry
+  try {
+    managedTelemetry = interpretManagedTelemetry(await detectManagedTelemetry())
+  } catch (err) {
+    managedTelemetry = { hostile: null, state: 'unknown', source: 'unknown', message: `managed-telemetry check failed: ${String(err)}` }
+  }
+
+  console.log(JSON.stringify(composeStatus({ probe, landed, attribution, sentinel, managedTelemetry }), null, 2))
 }
 
 // CLI entry guard so tests can import the pure helpers without running the probe.
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
 if (isMain) {
   main().catch((err) => {
-    console.error(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }))
+    console.error(
+      JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }),
+    )
     process.exit(1)
   })
 }

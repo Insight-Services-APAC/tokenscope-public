@@ -41,6 +41,15 @@ export const attributionRecord = pgTable('attribution_record', {
     .notNull()
     .references(() => orgUnit.id),
   // Nullable (mig 0021): follows the project — NULL when there's no project budget.
+  // It is the PROJECT's cost-owning unit, stamped at emit time
+  // (azure-monitor-reader.ts sets it from proj.cost_owning_unit_id) — NOT the
+  // spender's home cost centre. So `WHERE cost_owning_unit_id = X` is a
+  // project-axis clamp: it selects whole projects, and can never express "the
+  // part X's own people spent". That question is a TEAMMATE-axis one (resolve
+  // the teammates homed in X, clamp on teammate_id) and it deliberately does not
+  // foot to a cost centre's burn — see me/cost-centres.get.ts's
+  // member_untagged_usd note. Two design reviews have now read this column as
+  // the spender's home; it is not.
   costOwningUnitId: uuid('cost_owning_unit_id').references(() => orgUnit.id),
   tool: text('tool').notNull(),
   model: text('model').notNull(),
@@ -75,6 +84,34 @@ export const attributionRecord = pgTable('attribution_record', {
   // display + human-paging discipline only. NULL = legacy rows written before
   // 0057 (treat as 'confirmed').
   identityState: text('identity_state'),
+  // ── Emitting identity + billing lane (mig 0119) ──────────────────────────
+  // WHICH ACCOUNT was signed in, as opposed to which DEVICE emitted. Money
+  // still binds to the device (instance_id → teammate); these decide only
+  // whether the dollar is inside the bill we reconcile against.
+  //
+  // Canonicalised (trim + lower, shared/identity/email.ts) at storage, so a
+  // comparison against a canonicalised address set is like-for-like. NULL =
+  // the emitter reported no address (or reported an unsafe one — see the
+  // optional-field bound in server/azure/reader.ts).
+  emittingEmail: text('emitting_email'),
+  // Hint + diagnostics only; it NEVER decides the lane. Distinct from the
+  // reconciliation lane pick, which uses one organization.id per grouped
+  // session — this is the per-RECORD value.
+  emittingOrgId: text('emitting_org_id'),
+  // 'provider-billed' | 'self-billed' | 'unknown' (CHECK in mig 0119).
+  //
+  // STAMPED ONCE AT JOIN, NEVER UPDATED. The only write that may change it is a
+  // backfill filling an 'unknown' — one way, never overwriting a decided lane
+  // (design §5/§9). Read that as a hard rule: a present-day identity action
+  // (email change, shadow confirm, marking an alias enterprise, erasure) must
+  // not rewrite a historic residual, project total or budget. Three earlier
+  // drafts of this design died on exactly that.
+  //
+  // 'unknown' is NOT folded into 'provider-billed' even though both net against
+  // the API: keeping it distinct is what lets a PARTIALLY classified
+  // (teammate, day, tool) cell be detected and held on the old operand
+  // (server/usage/corroborated-otel.ts).
+  billingLane: text('billing_lane').notNull().default('unknown'),
   metadata: jsonb('metadata'),
 }, (t) => [
   // Read-joiner idempotency (migrations 0011 + 0017 + 0035): one row per

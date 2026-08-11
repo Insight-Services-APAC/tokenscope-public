@@ -158,11 +158,10 @@ const unclassifiedUsd = computed(() => props.donut?.unclassifiedUsd ?? 0)
 
     <p class="mt-3 text-[11px] text-carbon-3 leading-snug" data-testid="chargeback-split-caveat">
       <template v-if="copilotPartial">
-        Anthropic per-teammate chargeback (day-accurate). Copilot pooled chargeback is monthly —
-        not shown for a partial-month range.
+        Anthropic only — Copilot pooled chargeback is monthly, not shown for a partial-month range.
       </template>
       <template v-else>
-        Anthropic per-teammate chargeback · Copilot is pooled per cost-centre (see the cost-centre ranking).
+        Anthropic per-teammate chargeback · Copilot is pooled per cost-centre.
       </template>
     </p>
   </UiCard>

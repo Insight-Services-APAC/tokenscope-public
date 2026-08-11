@@ -14,7 +14,7 @@ export default defineEventHandler(async (event) => {
   await requireRole(event, 'admin', 'global-finops')
   const db = getDb()
   const rows = await db.execute<{ id: string; code: string; display_name: string }>(sql`
-    SELECT id::text AS id, code, display_name FROM region ORDER BY display_name
+    SELECT id::text AS id, code, display_name FROM region ORDER BY display_name, code
   `)
   return { regions: [...rows] }
 })

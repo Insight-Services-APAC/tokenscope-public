@@ -21,6 +21,7 @@ import { withRequestRls } from '../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../db/audit'
 import { translatePgConstraintError } from '../../../../utils/pg-constraint-error'
 import { upnGlobToSqlLike, validateExclusionPattern } from '../../../../utils/directory-exclusions'
+import { LIKE_ESCAPE } from '../../../../utils/sql-like'
 
 const Body = z.object({
   pattern: z.string().trim().min(1).max(200),
@@ -86,10 +87,16 @@ export default defineEventHandler(async (event) => {
     // Blast-radius preview: count ACTIVE teammates whose stored email matches,
     // computed in the DB (not by loading the roster into memory). Emails are the
     // stored proxy for UPN (CLD rows store the onmicrosoft address as email).
+    //
+    // LIKE_ESCAPE is bound as a PARAMETER, never written as a literal `ESCAPE
+    // '\'` — that literal collapses to `ESCAPE ''` before Postgres ever sees
+    // it, silently disabling upnGlobToSqlLike's escaping and under-reporting
+    // this preview's blast radius (an admin would then approve a pattern
+    // blind — see server/utils/sql-like.ts).
     const like = upnGlobToSqlLike(pattern)
     const matchRows = await tx.execute<{ n: string }>(sql`
       SELECT count(*)::text AS n FROM teammate
-      WHERE is_active = TRUE AND NOT provisional AND lower(email) LIKE ${like} ESCAPE '\'
+      WHERE is_active = TRUE AND NOT provisional AND lower(email) LIKE ${like} ESCAPE ${LIKE_ESCAPE}
     `)
     const matchedExisting = Number([...matchRows][0]?.n ?? '0')
 

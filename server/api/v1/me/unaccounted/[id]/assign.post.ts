@@ -9,17 +9,17 @@
  *   - project_id: null → move it back to unallocated ("needs tagging")
  *   - activity: string → tag the activity axis; null = clear; omitted = preserve
  *
- * Ownership is explicit (the record's teammate_id must be the caller's). At least one
- * field must be present. Atomic: ownership read + membership gate + update + audit.
+ * The logic lives in tagUnaccountedTx (shared with the bulk worklist action):
+ * ownership + ended-budget + membership gates, then the update + audit, atomically.
+ * At least one field must be present.
  */
-import { createError, defineEventHandler, readValidatedBody, getRouterParam } from 'h3'
-import { sql } from 'drizzle-orm'
+import { defineEventHandler, getRouterParam, createError } from 'h3'
 import { z } from 'zod'
 import { requireAuth } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { getDb } from '../../../../../db'
-import { recordAuditEvent } from '../../../../../db/audit'
-import { endedProjectExpr } from '../../../../../db/project-predicates'
+import { readValidated } from '../../../../../utils/validated-body'
+import { tagUnaccountedTx } from '../../../../../utils/tag-unaccounted'
 
 const Body = z
   .object({
@@ -36,70 +36,21 @@ export default defineEventHandler(async (event) => {
   const idParsed = z.string().uuid().safeParse(getRouterParam(event, 'id'))
   if (!idParsed.success) throw createError({ statusCode: 400, statusMessage: 'Invalid record id' })
   const id = idParsed.data
-  const body = await readValidatedBody(event, (d) => Body.parse(d))
+  const body = await readValidated(event, Body)
   const db = getDb()
 
-  return await db.transaction(async (tx) => {
-    // 1. Ownership — the record must belong to THIS teammate (explicit, not RLS).
-    const owned = await tx.execute<{ project_id: string | null; activity: string | null }>(sql`
-      SELECT project_id::text AS project_id, activity FROM unaccounted_usage
-      WHERE id = ${id}::uuid AND teammate_id = ${session.teammateId}::uuid
-      FOR UPDATE
-    `)
-    const cur = [...owned][0]
-    if (!cur) {
-      throw createError({ statusCode: 404, statusMessage: 'Record not found or not yours' })
-    }
-
-    const setProject = Object.prototype.hasOwnProperty.call(body, 'project_id')
-    const setActivity = Object.prototype.hasOwnProperty.call(body, 'activity')
-
-    // 2. Membership gate — only when SETTING a non-null project (tag proposes, membership
-    //    disposes; identical rule to the session assign).
-    if (setProject && body.project_id != null) {
-      // Don't let a dev tag usage to an ENDED budget (the session path rejects this too).
-      const ended = await tx.execute(sql`
-        SELECT 1 FROM project p WHERE p.id = ${body.project_id}::uuid AND ${endedProjectExpr('p')} LIMIT 1
-      `)
-      if (ended.length > 0) {
-        throw createError({ statusCode: 409, statusMessage: 'That budget has ended; pick an active one.' })
-      }
-      const member = await tx.execute(sql`
-        SELECT 1 FROM project_assignment
-        WHERE project_id = ${body.project_id}::uuid AND teammate_id = ${session.teammateId}::uuid AND effective @> now()
-        LIMIT 1
-      `)
-      if (member.length === 0) {
-        throw createError({
-          statusCode: 403,
-          statusMessage: 'Forbidden',
-          data: {
-            type: 'https://tokenscope.example.com/errors/not-a-member',
-            title: 'Not a member of this budget',
-            status: 403,
-            detail: 'You can only assign usage to budgets you are a member of.',
-          },
-        })
-      }
-    }
-
-    // 3. Update only the supplied axes; stamp the tag provenance.
-    const sets = [sql`tagged_at = now()`, sql`tagged_by = ${session.teammateId}::uuid`]
-    if (setProject) sets.push(sql`project_id = ${body.project_id ?? null}::uuid`)
-    if (setActivity) sets.push(sql`activity = ${body.activity ?? null}`)
-    await tx.execute(sql`UPDATE unaccounted_usage SET ${sql.join(sets, sql`, `)} WHERE id = ${id}::uuid`)
-
-    await recordAuditEvent(tx, {
-      eventType: 'unaccounted-usage-tagged',
-      actorTeammateId: session.teammateId,
-      subjectKind: 'unaccounted-usage',
-      subjectId: id,
-      payload: {
-        ...(setProject ? { project_id: body.project_id ?? null } : {}),
-        ...(setActivity ? { activity: body.activity ?? null } : {}),
+  return await db.transaction((tx) =>
+    tagUnaccountedTx(
+      tx,
+      session.teammateId,
+      id,
+      {
+        setProject: body.project_id !== undefined,
+        projectVal: body.project_id ?? null,
+        setActivity: body.activity !== undefined,
+        activityVal: body.activity ?? null,
       },
-    })
-
-    return { id, tagged: true }
-  })
+      { actorSystem: 'me-unaccounted-assign' },
+    ),
+  )
 })

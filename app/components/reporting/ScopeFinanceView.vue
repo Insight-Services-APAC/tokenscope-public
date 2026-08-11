@@ -31,6 +31,11 @@ import FinanceBillCompare from './finance/FinanceBillCompare.vue'
 import FinanceExemptGap from './finance/FinanceExemptGap.vue'
 import FinanceCouTable from './finance/FinanceCouTable.vue'
 import FinanceDrill from './finance/FinanceDrill.vue'
+import {
+  NO_DRILL_GRANTS,
+  type DrillFrame,
+  type DrillGrants,
+} from './drill-contract'
 import type { FinanceReport, FinanceDrill as FinanceDrillData } from './finance-report-types'
 
 const props = withDefaults(
@@ -48,8 +53,17 @@ const props = withDefaults(
     exportFilename: string
     /** The ledger CSV is month-grained (D-Q8); hide the export in a multi-month range. */
     ledgerMonthOnly?: boolean
+    /** THE DRILL CONTRACT (D29/D30) — from the container; fail-closed defaults. */
+    drillGrants?: DrillGrants
+    drillWindow?: Omit<DrillFrame, 'src'>
   }>(),
-  { error: undefined, drillError: undefined, ledgerMonthOnly: false },
+  {
+    error: undefined,
+    drillError: undefined,
+    ledgerMonthOnly: false,
+    drillGrants: () => NO_DRILL_GRANTS,
+    drillWindow: () => ({}),
+  },
 )
 
 const emit = defineEmits<{
@@ -57,9 +71,32 @@ const emit = defineEmits<{
   clearDrill: []
 }>()
 
-// ── Index: exactly one of skeleton / error / empty / data ────────────────────
-const indexSkeleton = computed(() => props.pending && !props.report)
+/*
+ * ── Index: exactly one of skeleton / error / empty / data ────────────────────
+ *
+ * EXHAUSTIVE, not merely mutually exclusive. The four states have to COVER every
+ * prop combination; excluding each other is not enough, and this is where the
+ * blank Finance page came from.
+ *
+ * `report === null` with `pending === false` and no error is a REAL state: it is
+ * what Nuxt reports on the server pass for the container's
+ * `useFetch(..., { lazy: true, server: false })` — the fetch is deliberately not run
+ * during SSR, so nothing is in flight and no data has arrived. Keying the skeleton
+ * on `pending` meant that state matched skeleton=false, error=false, empty=false
+ * (the empty predicate returns false for a null report) and data=false — all four
+ * branches missed and the body rendered NOTHING. The header sits in the container,
+ * so the page painted its title, period control and "defaults to the last complete
+ * month" line above an empty space, then hydration mismatched against the client's
+ * skeleton.
+ *
+ * So the skeleton is keyed on the ABSENCE OF DATA, never on an in-flight flag:
+ * "no error and no report" IS the loading state, whichever pass we are on.
+ * `pending` stays the container's honest in-flight marker (and keeps already-loaded
+ * data on screen across a refetch instead of flashing a skeleton), but it can no
+ * longer be the difference between a body and a blank page.
+ */
 const indexError = computed(() => Boolean(props.error))
+const indexSkeleton = computed(() => !indexError.value && !props.report)
 const indexEmpty = computed(() => {
   const r = props.report
   if (!r) return false
@@ -73,8 +110,10 @@ const indexEmpty = computed(() => {
 const indexData = computed(() => Boolean(props.report) && !indexError.value && !indexEmpty.value)
 
 // ── Drill: exactly one of skeleton / error / empty / data ────────────────────
-const drillSkeleton = computed(() => props.drillPending && !props.drill)
+// Same exhaustiveness rule as the index above — a null drill with nothing in
+// flight is the loading state, not a fifth (blank) branch.
 const drillErr = computed(() => Boolean(props.drillError))
+const drillSkeleton = computed(() => !drillErr.value && !props.drill)
 const drillEmpty = computed(
   () =>
     Boolean(props.drill) &&
@@ -107,6 +146,8 @@ const unclassifiedWarning = computed(() => props.report?.copilot.unclassifiedWar
       <FinanceDrill
         v-else-if="drillData && drill"
         :drill="drill"
+        :drill-grants="drillGrants"
+        :drill-window="drillWindow"
         @clear-drill="emit('clearDrill')"
       />
     </template>
@@ -133,8 +174,7 @@ const unclassifiedWarning = computed(() => props.report?.copilot.unclassifiedWar
           data-testid="finance-unclassified-warning"
         >
           <span class="font-semibold">Copilot chargeback is enabled with unclassified Copilot spend in this period.</span>
-          Unclassified lines stay excluded from every chargeable figure — classify the SKU and re-run the month
-          (runbook: worker-scheduler.md, "Copilot bill — unclassified SKU response").
+          Unclassified lines stay excluded from every chargeable figure — classify the SKU and re-run the month.
         </div>
 
         <!-- The trust anchor: Σ chargeback = bill (RAG reconciliation status) -->

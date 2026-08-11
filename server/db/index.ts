@@ -8,11 +8,11 @@
  * Tests do NOT call this directly — they instantiate their own postgres
  * client against a testcontainers DB. See tests/integration/db/helper.ts.
  */
-import postgres from 'postgres'
 import { drizzle } from 'drizzle-orm/postgres-js'
+import { createDbClient } from '../../drizzle/connect'
 import * as schema from '../../drizzle/schema'
 
-let client: ReturnType<typeof postgres> | null = null
+let client: ReturnType<typeof createDbClient> | null = null
 let db: ReturnType<typeof drizzle<typeof schema>> | null = null
 
 export function getDb() {
@@ -27,7 +27,7 @@ export function getDb() {
   // writes) buckets identically regardless of the server's default TZ. The whole
   // app already treats ts_event as UTC; this enforces it at the connection so read
   // and write time can never disagree.
-  client = postgres(url, { max: 10, idle_timeout: 30, connection: { TimeZone: 'UTC' } })
+  client = createDbClient(url, { max: 10, idle_timeout: 30, connection: { TimeZone: 'UTC' } })
   db = drizzle(client, { schema })
   return db
 }

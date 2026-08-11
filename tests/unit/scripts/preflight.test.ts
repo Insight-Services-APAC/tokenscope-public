@@ -4,8 +4,9 @@
  * exercised against a real local listener; the env-resolution + formatting is
  * pure. No Azure / no network beyond loopback.
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import net from 'node:net'
+import { consola } from 'consola'
 import {
   probeTcp,
   parseHostPort,
@@ -13,6 +14,7 @@ import {
   probeServices,
   formatLine,
   criticalFailure,
+  runPreflight,
   type ServiceProbe,
 } from '../../../scripts/preflight'
 
@@ -183,5 +185,32 @@ describe('formatLine', () => {
     expect(
       formatLine({ ...base, status: 'unreachable', errorClass: 'timeout', error: 'ETIMEDOUT' } as ServiceProbe),
     ).toBe('postgres: UNREACHABLE pg:5432 [timeout ETIMEDOUT] (12ms)')
+  })
+})
+
+describe('runPreflight — the DATABASE_URL TLS warning is wired into the boot sequence', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    delete process.env.DATABASE_URL
+  })
+
+  it('warns before probing when DATABASE_URL is non-loopback without verify-full', async () => {
+    const spy = vi.spyOn(consola, 'warn').mockImplementation(() => undefined as never)
+    // 127.0.0.2 is within 127.0.0.0/8 (routes to `lo` — an instant, real-network-free
+    // ECONNREFUSED, unlike a routable-but-dark address) but is NOT one of the literal
+    // loopback forms checkDatabaseUrlTls special-cases (localhost/127.0.0.1/::1), so
+    // it deterministically exercises the "non-loopback" warn path without flakiness
+    // from DNS or an unbounded probe timeout.
+    process.env.DATABASE_URL = 'postgres://u:p@127.0.0.2:1/db'
+    await runPreflight()
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0]![0]).toContain('127.0.0.2')
+  })
+
+  it('stays silent when DATABASE_URL is unset', async () => {
+    const spy = vi.spyOn(consola, 'warn').mockImplementation(() => undefined as never)
+    delete process.env.DATABASE_URL
+    await runPreflight()
+    expect(spy).not.toHaveBeenCalled()
   })
 })

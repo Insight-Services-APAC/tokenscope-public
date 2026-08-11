@@ -54,6 +54,10 @@ test.describe('Convergence — data parity across surfaces', () => {
     await expect(aflRow.locator('[data-testid="contributed-badge"]')).toBeVisible()
     await expect(aflRow).toContainText('$12,710.00')
     await expect(aflRow).toContainText('$12,500.00')
+    // D8 split the pill's word: "Over" is now only the FACT of spend already
+    // past the allocation ('pace-over' forecasts read "On pace to exceed",
+    // which does not contain "Over"). This fixture IS the fact case — $12,710
+    // spent of $12,500 — so the badge text stays 'Over'.
     await expect(aflRow).toContainText('Over')
 
     // Assigned-only buckets must NOT carry the contributed chip.

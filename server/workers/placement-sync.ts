@@ -28,10 +28,16 @@ export interface PlacementSyncResult {
   // rule) / viaManager / viaBillingRegion = a region holding node; fellToGlobal = the
   // global bucket. `byAttribute` breaks viaAttribute down by which directory attribute
   // matched — the "which signal is placing people" coverage. `conflicts` counts placements
-  // where a lower-precedence attribute matched a DIFFERENT region (a rule misconfig to fix).
+  // where a lower-precedence attribute matched a DIFFERENT TARGET — another region, or
+  // another cost centre — which is a rule misconfig to fix; it is counted on UNIT-rule
+  // placements too, because "two rules name two different cost centres for this person"
+  // is the divergence that decides where their spend charges.
   // Watch the ratio before trusting the signal / running the one-shot backfill.
   viaCostCentre: number
   viaUnit: number
+  /** A curated attribute rule naming a cost-owning UNIT (mig 0112). A real
+   *  placement, like viaUnit, kept apart so a rule placing everybody is visible. */
+  viaUnitRule: number
   viaAttribute: number
   byAttribute: Record<string, number>
   viaManager: number
@@ -84,6 +90,7 @@ export async function runPlacementSync(
     errors: 0,
     viaCostCentre: 0,
     viaUnit: 0,
+    viaUnitRule: 0,
     viaAttribute: 0,
     byAttribute: {},
     viaManager: 0,
@@ -105,7 +112,19 @@ export async function runPlacementSync(
       if (r.homed) {
         if (r.placedVia === 'cost-centre') result.viaCostCentre += 1
         else if (r.placedVia === 'unit') result.viaUnit += 1
-        else if (r.placedVia === 'attribute') {
+        else if (r.placedVia === 'unit-rule') {
+          // Its OWN bucket, not viaUnit's: "which signal placed these people" is the
+          // question this breakdown answers, and a rule placing everybody (or
+          // nobody) is invisible folded into the chain walk's count. It was landing
+          // in `fellToGlobal` — the one bucket that means the opposite of what a
+          // unit-rule placement is.
+          result.viaUnitRule += 1
+          if (r.placedAttribute) result.byAttribute[r.placedAttribute] = (result.byAttribute[r.placedAttribute] ?? 0) + 1
+          // A divergent lower-precedence rule naming a DIFFERENT cost centre is the
+          // misconfiguration that decides whose P&L this spend lands on. Counting it
+          // only on region-rule placements left the finer, costlier case unreported.
+          if (r.placedConflict) result.conflicts += 1
+        } else if (r.placedVia === 'attribute') {
           result.viaAttribute += 1
           if (r.placedAttribute) result.byAttribute[r.placedAttribute] = (result.byAttribute[r.placedAttribute] ?? 0) + 1
           if (r.placedConflict) result.conflicts += 1

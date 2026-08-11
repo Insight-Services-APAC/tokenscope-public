@@ -56,6 +56,28 @@ export const instanceAttestation = pgTable('instance_attestation', {
   // authenticated provision flow — principal_email already carries the verified
   // identity there.
   claimedEmail: text('claimed_email'),
+  // ── CLIENT-ASSERTED version capture (mig 0092) ──────────────────────────────
+  // What the device SAYS it is running, reported as request headers on the
+  // /bearer mint (~29 min per live device). Exists because "does this device
+  // need to update?" was unanswerable from data during the 2026-07-24
+  // attribution-gap incident, and every version-specific incident before it
+  // ended in "go ask the human what version they are on".
+  //
+  // UNTRUSTED BY CONSTRUCTION. These are DIAGNOSTIC HINTS. Never gate
+  // authorisation on them (emit/mint/read), never feed them into costing or
+  // billing. A device can claim any version and a liar is indistinguishable
+  // from an honest reporter. The unspoofable binding is instance_id + the OAuth
+  // emit credential; this is metadata hanging off that.
+  //
+  // NULL = never reported = "running a build older than the one that reports",
+  // which is the single most useful signal during a rollout incident.
+  clientPluginVersion: text('client_plugin_version'),
+  clientCliVersion: text('client_cli_version'),
+  // When the two above were last reported. Deliberately separate from
+  // last_bearer_at: a device that keeps minting but stops reporting versions
+  // (a downgrade) advances last_bearer_at and leaves this behind — which is how
+  // a stale reading is spotted rather than trusted.
+  clientVersionAt: timestamp('client_version_at', { withTimezone: true }),
   // Cross-environment reuse guard (mig 0060). NUXT_DEPLOY_ENV-classified label
   // (dev/sandbox/production/local) of the deployment that minted/owns this
   // instance. Stamped on mint; on a re-provision that supplies this instance_id,

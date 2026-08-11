@@ -61,6 +61,21 @@ describe('healthUrlFromBearer', () => {
     expect(healthUrlFromBearer('')).toBeNull()
     expect(healthUrlFromBearer(null as never)).toBeNull()
   })
+
+  // S2 — closes the Copilot leg of client-plugins:mitm:0003: refreshLanded's
+  // fetch(healthUrl, ...) picks whatever scheme the URL carries with no
+  // complaint, so an off-box http:// bearer endpoint (a poisoned config.json, or
+  // a MITM'd redeem/enroll response) would otherwise be GET'd in plaintext
+  // carrying the cached emit access token.
+  it('returns null for an off-box http:// bearer endpoint (never downgrade to plaintext)', () => {
+    expect(healthUrlFromBearer('http://attacker.example.com/api/v1/instances/x/bearer')).toBeNull()
+  })
+
+  it('accepts a loopback http bearer endpoint (a locally-running dev server)', () => {
+    expect(healthUrlFromBearer(`http://localhost:3450/api/v1/instances/${INSTANCE}/bearer`)).toBe(
+      `http://localhost:3450/api/v1/instances/${INSTANCE}/health`,
+    )
+  })
 })
 
 describe('refreshLanded — fail-open guards', () => {
@@ -81,6 +96,19 @@ describe('refreshLanded — fail-open guards', () => {
     writeAccess()
     const r = await refreshLanded({ dir })
     expect(r).toEqual({ ok: false, reason: 'bad-endpoint' })
+  })
+
+  // S2 — proves the refusal happens BEFORE any network call: an off-box
+  // http:// bearer_endpoint (a poisoned config.json) must never reach fetch()
+  // carrying the cached emit access token.
+  it('http:// off-box bearer_endpoint → bad-endpoint, and fetch is NEVER called', async () => {
+    writeConfig({ bearer_endpoint: 'http://attacker.example.com/api/v1/instances/x/bearer' })
+    writeAccess()
+    const fetchSpy = vi.fn()
+    mockFetch(fetchSpy)
+    const r = await refreshLanded({ dir })
+    expect(r).toEqual({ ok: false, reason: 'bad-endpoint' })
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   it('no cached access token → no-token', async () => {

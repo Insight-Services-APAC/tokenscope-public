@@ -29,7 +29,7 @@
  */
 import { drizzle } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
-import postgres from 'postgres'
+import { createDbClient } from './connect'
 import * as schema from './schema'
 
 // Bump when the structure below changes and you want every environment to re-apply it on its next
@@ -107,7 +107,7 @@ function label(code: string): string {
 async function main(): Promise<void> {
   const url = process.env.DATABASE_URL
   if (!url) { console.error('DATABASE_URL not set'); process.exit(1) }
-  const client = postgres(url, { max: 1, idle_timeout: 5 })
+  const client = createDbClient(url, { max: 1, idle_timeout: 5 })
   const db = drizzle(client, { schema })
 
   // Upsert one unit (and recurse into its children). Cost-owning defaults to true for a leaf,

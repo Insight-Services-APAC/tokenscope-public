@@ -26,6 +26,7 @@
  * endpoint imports probeServices() from here (nitro bundles it at build).
  */
 import net from 'node:net'
+import { consola } from 'consola'
 
 export type ProbeStatus = 'ok' | 'unreachable' | 'skipped'
 export type ProbeErrorClass = 'timeout' | 'refused' | 'dns' | 'other'
@@ -156,7 +157,66 @@ export function criticalFailure(results: ServiceProbe[]): boolean {
   return results.some((s) => s.critical && s.status === 'unreachable')
 }
 
+// Literal loopback forms only — never a hostname allowlist. A docker/compose
+// service name (e.g. local dev's `tokenscope-postgres`) is deliberately
+// NOT loopback here: this is a WARN, not a gate, so it is safe (and honest)
+// to flag it too.
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1'])
+
+export interface DatabaseUrlTlsCheck {
+  /** true when a non-loopback host is configured without sslmode=verify-full. */
+  insecure: boolean
+  host: string | null
+  /** present only when insecure — the observed sslmode (or its absence). */
+  reason?: string
+}
+
+/*
+ * TLS posture of DATABASE_URL — pure, so it's unit-testable without a live
+ * connection. postgres@3.4.9 (connection.js:283-284) sets
+ * rejectUnauthorized=false for the literal strings require/allow/prefer;
+ * only sslmode=verify-full gets real server authentication (see
+ * drizzle/connect.ts). This is advisory: the actual fix is the connection
+ * STRING (infra/modules/keyvault-secrets.bicep), which only takes effect on
+ * the next `infra.yml` apply that rewrites the KV secret — this check exists
+ * so an environment still on the old secret is visible in the boot log.
+ */
+export function checkDatabaseUrlTls(url: string | undefined): DatabaseUrlTlsCheck {
+  if (!url) return { insecure: false, host: null }
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return { insecure: false, host: null }
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, '')
+  if (LOOPBACK_HOSTS.has(host)) return { insecure: false, host }
+  const sslmode = parsed.searchParams.get('sslmode')
+  if (sslmode === 'verify-full') return { insecure: false, host }
+  return { insecure: true, host, reason: sslmode ? `sslmode=${sslmode}` : 'no sslmode set' }
+}
+
+/*
+ * WARN (never throw — see the file-level rationale on checkDatabaseUrlTls)
+ * when DATABASE_URL looks unauthenticated. Flipping this to a boot-blocking
+ * check is UF-2, gated on the infra apply that rewrites the KV secret;
+ * shipping it as a throw here would boot-loop every environment still on
+ * the old secret, and migrate.ts (which runs right after preflight) is
+ * fatal on failure.
+ */
+export function warnOnInsecureDatabaseTls(env: NodeJS.ProcessEnv = process.env): void {
+  const result = checkDatabaseUrlTls(env.DATABASE_URL)
+  if (result.insecure) {
+    consola.warn(
+      `[preflight] DATABASE_URL host '${result.host}' is non-loopback without sslmode=verify-full ` +
+        `(${result.reason}) — the connection encrypts but does not authenticate the server. ` +
+        'WARNING only; does not block boot. See infra/modules/keyvault-secrets.bicep.',
+    )
+  }
+}
+
 export async function runPreflight(): Promise<number> {
+  warnOnInsecureDatabaseTls()
   const results = await probeServices()
   for (const s of results) {
     const line = formatLine(s)

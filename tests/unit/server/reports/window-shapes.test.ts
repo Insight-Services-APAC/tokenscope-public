@@ -111,10 +111,13 @@ describe('costCentreBudgetState + summariseCostCentres — CC RAG rollup', () =>
     expect(s.countNearBudget).toBe(1)
     expect(s.countOnTrack).toBe(1)
     expect(s.countNoAllocation).toBe(1)
+    expect(s.countNotStarted).toBe(0)
     expect(s.asOfDate).toBe('2026-07-03')
-    // The four counts partition the cards exactly.
+    // The FIVE counts partition the cards exactly (D26 split `not-started` out
+    // of `ok`, so the partition assertion has to move with it).
     const total =
-      s.countOverBudget + s.countNearBudget + s.countOnTrack + s.countNoAllocation
+      s.countOverBudget + s.countNearBudget + s.countOnTrack + s.countNotStarted +
+      s.countNoAllocation
     expect(total).toBe(cards.length)
   })
 })

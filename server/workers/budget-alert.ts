@@ -6,9 +6,10 @@
  * were hard-coded in `drizzle/seed.ts` while the homepage rendered live
  * numbers from `attribution_record + allocation`. The two surfaces diverged
  * — homepage said "Healthy" while the inbox said "$210 over". This worker
- * is the producer that closes that gap: it reads the SAME SQL shape the
- * homepage uses (server/api/v1/me/usage.get.ts) so the two surfaces agree
- * by construction.
+ * is the producer that closes that gap: it calls the SAME `completeProjectSpend`
+ * the project page, the /projects cards and the budget editor call, with the
+ * same window and the same options, so the surfaces agree by construction
+ * rather than by coincidence (server/usage/complete-spend.ts).
  *
  * Mirrors `runReconciliation`'s shape:
  *   - Pure SQL scan, no external clients.
@@ -19,21 +20,17 @@
  * Body field contract: matches app/components/inbox/DrawerBodyOverBudget.vue
  * exactly — `project`, `usedUsd`, `capUsd`, `overBy`, `otelPct`, `anthroPct`.
  *
- * On otelPct / anthroPct: today the codebase's per-project cost comes purely
- * from `attribution_record` (the OTel attribution path); `actual_spend`
- * (Anthropic Analytics API) is keyed by teammate+date and carries no
- * project_id, so a per-project Anthropic-API split is not directly
- * computable. We therefore emit `otelPct = 1.0`, `anthroPct = 0.0` —
- * truthful for the data path used by the homepage. A future refinement
- * could apportion `actual_spend` across a teammate's projects, but doing so
- * here would break homepage-parity, which is the bug class this worker
- * fixes.
+ * On otelPct / anthroPct: both are now the REAL arm split of the figure that
+ * tripped the alert, taken from the same `completeProjectSpend` row (arm 1
+ * `otel-emitted` vs arm 2 `api-reconciled`). See the loop below for why the old
+ * hard-coded 1.0/0.0 was wrong.
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
 import type * as schema from '../../drizzle/schema'
 import { dispatchInbox } from '../notifications/dispatch'
-import { monthStartIso as monthStartIsoFor } from '../utils/period'
+import { monthStartIso as monthStartIsoFor, monthToDateWindow, nextMonthStartIso } from '../utils/period'
+import { completeProjectSpend } from '../usage/complete-spend'
 
 export interface BudgetAlertResult {
   projectsScanned: number
@@ -45,7 +42,6 @@ interface ProjectRow extends Record<string, unknown> {
   project_id: string
   project_code: string
   display_name: string
-  used_usd: string
   cap_usd: string
 }
 
@@ -55,43 +51,115 @@ export async function runBudgetAlert(
 ): Promise<BudgetAlertResult> {
   const now = opts?.now ?? new Date()
   const monthStartIso = monthStartIsoFor(now)
+  /*
+   * TWO windows, deliberately, because the alert asks two different questions
+   * (server/utils/period.ts):
+   *   spendWindow — MONTH TO DATE `[monthStart, now)`. What has been spent. A
+   *     row dated later this month has not been spent yet, and counting it
+   *     would page a PM for an overage that has not happened.
+   *   nextMonthStartIso — the CALENDAR-month upper bound, used ONLY for the
+   *     allocation overlap below. A top-up effective on the 28th is real budget
+   *     for the month on the 3rd, so the cap must see the whole month even
+   *     though the spend must not.
+   */
+  const spendWindow = monthToDateWindow(now)
+  const monthEndIso = nextMonthStartIso(now)
 
-  // Per-project MTD spend (from attribution_record, mirroring
-  // server/api/v1/me/usage.get.ts) and current allocation cap
-  // (baseline + top-up effective at month-start; burst excluded —
-  // matches usage.get.ts and the allocation_total_usd contract).
+  // Per-project MTD spend and the current allocation cap (baseline + top-up
+  // effective at month-start; burst excluded — matches usage.get.ts and the
+  // allocation_total_usd contract).
   //
   // Only projects with at least one allocation row (cap > 0) are
   // candidates; a project with no allocation has no over-budget concept.
+  //
+  // completeProjectSpend is THE project-spend definition (server/usage/
+  // complete-spend.ts) — the SAME call the project page, the /projects cards,
+  // the budget editor and the manager rollup make, with the SAME window and the
+  // SAME named `excludeProvisional` option. That is deliberate: the alert that
+  // pages a PM must be computed on the number they will see when they click
+  // through, or "Manage budget →" walks them from one figure to another at the
+  // exact moment they decide whether to extend.
+  /*
+   * ── Mid-recompute protection (mig 0119, design §10) ───────────────────────
+   *
+   * This worker runs on its own hourly cron, independently of the usage
+   * reconciliation that recomputes the §A residual. The residual reaches this
+   * figure through `v_complete_usage` arm 2, and the emitting-identity design
+   * makes residuals GROW (self-billed OTel leaves the subtrahend), so a
+   * threshold can be crossed while a recompute is in flight.
+   *
+   * The protection is implemented WHERE THE PARTIAL STATE IS PRODUCED, not
+   * here: `reconcileUnaccountedUsage` now writes its upsert and both orphan
+   * passes in ONE transaction, so this read cannot land between them. Putting a
+   * guard in this worker instead would have protected the alert and left every
+   * report and project page exposed to the same intermediate state.
+   *
+   * WHAT THAT GUARANTEES for this worker: the residual component of every
+   * figure below is a committed generation of the reconciliation — never a
+   * half-applied one.
+   *
+   * WHAT IT DOES NOT GUARANTEE, and this worker must not be read as claiming:
+   *   - It spans only `unaccounted_usage`. `over_emission`, the rollups and the
+   *     joiner's own writes are separate transactions, so a figure assembled
+   *     from more than one of those can still mix generations. The design's
+   *     full answer is a generation-carrying restatement window (§10); this is
+   *     not that, and does not pretend to be.
+   *   - It does not suppress a LEGITIMATE page. Once the corrected figures are
+   *     committed, a project genuinely over its cap pages on the next tick —
+   *     that is §10's "re-evaluate once", not a leak. There is deliberately no
+   *     developer-facing "we corrected this" notice: the figure was wrong and is
+   *     now right.
+   *   - Cutover is gradual, not a big bang, which is what keeps the exposure
+   *     small: the lane is stamped at join, so a `(teammate, day, tool)` cell is
+   *     held on the OLD operand until every row in it is stamped
+   *     (server/usage/corroborated-otel.ts). In practice figures move a day at a
+   *     time as fully-stamped days accumulate, rather than all at once.
+   */
+  const spendByProject = await completeProjectSpend(db, spendWindow, { excludeProvisional: true })
+
+  // Cap = baseline + top-up allocations OVERLAPPING the month (`&&`), not merely
+  // containing month-start (`@>`). A mid-month top-up is real budget: with `@>` it
+  // was invisible here while the dev's own usage page (which uses `&&`) counted it,
+  // so the worker could page "over budget" against a cap the PM had already raised.
   const rows = await db.execute<ProjectRow>(
     sql`
       SELECT p.id::text   AS project_id,
              p.code       AS project_code,
              p.display_name AS display_name,
-             COALESCE((
-               SELECT SUM(ar.cost_usd)
-                 FROM attribution_record ar
-                WHERE ar.project_id = p.id
-                  AND ar.ts_event >= ${monthStartIso}::timestamptz
-                  -- Provisional (emit-on-install, pre-confirmation) usage must never
-                  -- drive a budget-alert page. NULL = legacy = treated as confirmed.
-                  AND ar.identity_state IS DISTINCT FROM 'provisional'
-             ), 0)::text AS used_usd,
+             -- Cap = the ONE baseline in force at month-start + EVERY top-up
+             -- overlapping the month. The two kinds need different window rules:
+             --   baseline: point-containment (@>). Baselines are non-overlapping
+             --     but SUCCESSIVE ones are allowed (change the budget mid-month →
+             --     [May1,May15) + [May15,Jun1)). Range-overlap would SUM both and
+             --     silently double the cap, suppressing real over-budget pages.
+             --   top-up: range-overlap (&&). Top-ups stack by design, and a
+             --     mid-month top-up is real budget that must count — with @> it
+             --     was invisible here while the dev's own page counted it, so the
+             --     worker could page against a cap the PM had already raised.
              COALESCE((
                SELECT SUM(al.budget_usd)
                  FROM allocation al
                 WHERE al.scope_type = 'project'
                   AND al.scope_id = p.id
-                  AND al.allocation_kind IN ('baseline', 'top-up')
-                  AND al.effective @> ${monthStartIso}::timestamptz
+                  AND (
+                    (al.allocation_kind = 'baseline'
+                       AND al.effective @> ${monthStartIso}::timestamptz)
+                    OR
+                    (al.allocation_kind = 'top-up'
+                       AND al.effective && tstzrange(${monthStartIso}::timestamptz, ${monthEndIso}::timestamptz, '[)'))
+                  )
              ), 0)::text AS cap_usd
         FROM project p
        WHERE EXISTS (
               SELECT 1 FROM allocation al
                WHERE al.scope_type = 'project'
                  AND al.scope_id = p.id
-                 AND al.allocation_kind IN ('baseline', 'top-up')
-                 AND al.effective @> ${monthStartIso}::timestamptz
+                 AND (
+                   (al.allocation_kind = 'baseline' AND al.effective @> ${monthStartIso}::timestamptz)
+                   OR
+                   (al.allocation_kind = 'top-up'
+                      AND al.effective && tstzrange(${monthStartIso}::timestamptz, ${monthEndIso}::timestamptz, '[)'))
+                 )
              )
     `,
   )
@@ -101,7 +169,7 @@ export async function runBudgetAlert(
   const projectsScanned = rows.length
 
   for (const r of rows) {
-    const usedUsd = Number(r.used_usd)
+    const usedUsd = spendByProject.get(r.project_id)?.costUsd ?? 0
     const capUsd = Number(r.cap_usd)
     if (capUsd <= 0) continue
     if (usedUsd <= capUsd) continue
@@ -121,7 +189,11 @@ export async function runBudgetAlert(
          WHERE category = 'over-budget'
            AND related_entity_kind = 'project'
            AND related_entity_id = ${r.project_id}::uuid
-           AND ack_state IN ('unread', 'read', 'acknowledged')
+           -- ANY item this month, regardless of ack_state. Counting only OPEN
+           -- states meant a DISMISSED or RESOLVED item stopped suppressing the
+           -- next tick, so a still-over project re-paged its PM + CoU owner +
+           -- every contributor on EVERY tick for the rest of the month. Dismiss
+           -- must stick: one over-budget item per project per month, full stop.
            AND created_at >= ${monthStartIso}::timestamptz
          LIMIT 1
       `,
@@ -132,12 +204,22 @@ export async function runBudgetAlert(
     }
 
     const overBy = usedUsd - capUsd
-    // See file-header comment: per-project Anthropic-API spend isn't
-    // directly computable today. Emit otelPct=1.0 to mirror the data
-    // path the homepage uses; a future refinement would split this
-    // when actual_spend gains a project_id.
-    const otelPct = 1
-    const anthroPct = 0
+    // "How we know" (DrawerBodyOverBudget): the REAL arm split of the figure
+    // that tripped the alert. This used to be hard-coded otelPct=1.0 /
+    // anthroPct=0.0 on the claim that a per-project API split "isn't directly
+    // computable" — untrue since this worker moved to the §A lane: arm 2 IS the
+    // reconciled API−OTel gap, per project, and it is exactly the share the PM
+    // most needs disclosed (it is the part `attribution_aggregate` never had).
+    const spend = spendByProject.get(r.project_id)
+    // ONE denominator, guarded once. This branch only runs when usedUsd > capUsd,
+    // and an allocation is non-negative, so usedUsd > 0 is already implied — the
+    // per-share `usedUsd > 0` tests it replaced were each individually dead, which
+    // is what static analysis flagged. The guard is not dead, though: it is the
+    // only thing standing between a nonsensical negative cap and a NaN percentage
+    // on a PM's alert. Kept as a floor rather than repeated as a test.
+    const denom = usedUsd > 0 ? usedUsd : 1
+    const otelPct = (spend?.otelUsd ?? 0) / denom
+    const anthroPct = (spend?.reconciledUsd ?? 0) / denom
 
     const dispatched = await dispatchInbox(db, {
       category: 'over-budget',

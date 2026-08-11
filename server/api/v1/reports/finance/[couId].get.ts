@@ -23,7 +23,13 @@
 import { defineEventHandler, getValidatedQuery, getRouterParam, createError } from 'h3'
 import { z } from 'zod'
 import { requireReportScope } from '../../../../auth/report-scope'
+import { requireAuth } from '../../../../utils/auth'
 import { withRequestRls } from '../../../../db/request-rls'
+import {
+  withReportCache,
+  identityKey,
+  normalizedQuery,
+} from '../../../../reporting/report-cache'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
   resolveFinanceCou,
@@ -35,6 +41,7 @@ import {
   HOMING_NOTE,
 } from '../../../../reporting/finance'
 import { providerStatesForWindow } from '../../../../reports/settling'
+import { reportCoverageMeta } from '../../../../reports/coverage-meta'
 import { copilotChargebackEnabled, copilotFinanceMode } from '../../../../reports/copilot-mode'
 import { MONTH_REGEX, monthKeyUtc } from '../../../../utils/period'
 import type { ReportMeta } from '../../../../../shared/reports/types'
@@ -69,12 +76,24 @@ export default defineEventHandler(async (event) => {
   const month = win.monthStr ?? monthKeyUtc(new Date(win.startIso))
   const copilotChargeback = copilotChargebackEnabled()
 
-  return await withRequestRls(event, async (tx) => {
-    // Whole-company finance drill: same finance gate as the finance index
-    // (reportGrants.finance === true). Denies are audited.
+  // Authz tx first (plan D5/r1-M2): the finance gate + CoU resolution run
+  // LIVE, then the connection is released; the compute tx below runs only for
+  // a cache-miss leader.
+  //
+  // Whole-company finance drill: same finance gate as the finance index
+  // (reportGrants.finance === true). Denies are audited.
+  const cou = await withRequestRls(event, async (tx) => {
     await requireReportScope(event, tx, 'finance')
-    const cou = await resolveFinanceCou(tx, couId)
+    return await resolveFinanceCou(tx, couId)
+  })
+  const session = await requireAuth(event)
 
+  return await withReportCache(
+    event,
+    // couId is a ROUTE PARAM, not a query param — named in the key explicitly
+    // (r1-H1: two drills with identical queries must never share a body).
+    ['finance/drill', `cou:${cou.id}`, normalizedQuery(query), identityKey(session)],
+    () => withRequestRls(event, async (tx) => {
     const anthropic = await fetchAnthropicCharges(tx, cou.id, win)
     const pool = await fetchCopilotPool(tx, cou.id, win)
     const projectOverlay = await fetchFinanceProjectOverlay(tx, cou.id, win, anthropic.totalUsd)
@@ -100,6 +119,7 @@ export default defineEventHandler(async (event) => {
       monthFloor: month,
       asOfDate: null,
       providerStates: providerStatesForWindow(win, now),
+      coverage: await reportCoverageMeta(tx),
       scope: 'finance',
       // Current-org homing (D-Homing interim).
       pointInTimeDims: false,
@@ -134,5 +154,6 @@ export default defineEventHandler(async (event) => {
       overageDrivers,
       homingNote: HOMING_NOTE,
     }
-  })
+    }),
+  )
 })

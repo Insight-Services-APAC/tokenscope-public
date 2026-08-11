@@ -40,6 +40,10 @@ describe('reportGrants — standard-mode is byte-identical to meta.get.ts (real 
       regional: 'all-regions',
       costCentre: 'owned-or-subtree',
       finance: true,
+      // W4 (D38): the two drill columns are part of the grant object now, so
+      // "byte-identical to meta.get.ts" has to include them.
+      teammate: 'people-scope',
+      project: 'region-wide',
     } satisfies ReportScopeGrants)
     // A region admin sees finance ONLY via a loosened mode — never under standard.
     expect(reportGrants('standard', { role: 'admin', ownsCostCentre: false }).finance).toBe(false)
@@ -52,6 +56,10 @@ describe('reportGrants — standard-mode is byte-identical to meta.get.ts (real 
       regional: 'own-region',
       costCentre: false,
       finance: false,
+      // A plain developer holds NO people-scope: the per-person drill is a
+      // governance surface, and `regional: 'own-region'` is a reporting width.
+      teammate: false,
+      project: 'membership',
     } satisfies ReportScopeGrants)
   })
 })
@@ -82,12 +90,12 @@ describe('reportGrants — sg-L10 revoked/expired ownership grants nothing', () 
     // A revoked cou_owner row resolves to ownsCostCentre=false at the call site, so the
     // matrix treats it as a plain developer — no full report set.
     const g = reportGrants('all-admins-see-all', { role: 'developer', ownsCostCentre: false })
-    expect(g).toEqual({ across: false, regional: 'own-region', costCentre: false, finance: false })
+    expect(g).toEqual({ across: false, regional: 'own-region', costCentre: false, finance: false, teammate: false, project: 'membership' })
   })
 
   it('an ACTIVE owner (ownsCostCentre=true) IS elevated under all-admins-see-all', () => {
     const g = reportGrants('all-admins-see-all', { role: 'developer', ownsCostCentre: true })
-    expect(g).toEqual({ across: true, regional: 'all-regions', costCentre: 'all', finance: true })
+    expect(g).toEqual({ across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' })
   })
 })
 

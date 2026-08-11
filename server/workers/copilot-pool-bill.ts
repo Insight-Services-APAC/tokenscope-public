@@ -50,8 +50,14 @@ import {
 } from '../reconciliation/adapters/github-client'
 import { GithubAppAuth } from '../reconciliation/adapters/github-app-auth'
 import { resolveEnterpriseCredential } from '../reconciliation/credentials'
-import { chargebackExemptOrgSet, isChargebackExemptOrg } from '../reconciliation/adapters/github'
+import { loadGovernanceResolutionContext, resolveGithubVerdict } from '../governance/verdict'
 import { dispatchInbox } from '../notifications/dispatch'
+import { advisoryXactLock } from '../db/advisory-lock'
+import { getFinancePeriod } from '../governance/finance-period'
+import {
+  persistCopilotOverageAllocation,
+  type PersistCopilotOverageAllocationResult,
+} from '../governance/copilot-overage-allocation'
 
 type Db = PostgresJsDatabase<typeof schema>
 
@@ -264,8 +270,16 @@ export interface CopilotPoolBillOptions {
    *  live credential + constructing a client. */
   clientOverride?: BillingReportClient
   /** How many months BEFORE the current one to also pull (default 1 → current + previous, so
-   *  late prior-month settling is captured). */
+   *  late prior-month settling is captured). Ignored when `explicitMonths` is supplied. */
   monthsBack?: number
+  /** Workstream C: scope the run to ONE provider_enterprise (by id) — used by the admin
+   *  historical bill re-pull route. Default: every reconciled github enterprise. */
+  enterpriseId?: string
+  /** Workstream C: an explicit list of calendar months (YYYY-MM-01), OVERRIDING the
+   *  now/monthsBack rolling-window derivation entirely. Used by the admin historical
+   *  re-pull so a targeted re-pull can reach an ARBITRARY past month without widening
+   *  the worker's normal current+monthsBack window. */
+  explicitMonths?: string[]
 }
 
 export interface CopilotPoolBillResult {
@@ -288,6 +302,16 @@ export interface CopilotPoolBillResult {
    *  distinguishable from the same product in another (r1 finding 8). Counted,
    *  never booked — visible drift, never silence. */
   ignoredProducts: Record<string, Record<string, number>>
+  /** Workstream C (design §8.4 "no silent rewrite"): (enterprise, month) pairs whose
+   *  finance_period is CLOSED — the bill rewrite (and its allocation) was refused, not
+   *  silently applied. Reopen or restate the period first. */
+  monthsSkippedClosedPeriod: number
+  /** Workstream C: (enterprise, month) pairs whose overage allocation was recomputed
+   *  this run (incl. a $0 clear-only recompute). */
+  overageAllocationsComputed: number
+  /** Of the above, how many landed a `__unallocated` (NULL cost_owning_unit_id) row
+   *  because total attributable weight was zero for a paid overage. */
+  overageAllocationsUnallocated: number
 }
 
 interface OrgGroup {
@@ -534,11 +558,21 @@ async function alertUnclassified(
   return dispatched.length > 0
 }
 
+/** Parse a 'YYYY-MM-01' string into a MonthKey (the `explicitMonths` shape, Workstream C). */
+function monthKeyFromDateString(monthStart: string): MonthKey {
+  const m = /^(\d{4})-(\d{2})-01$/.exec(monthStart)
+  if (!m) throw new Error(`copilot-pool-bill: explicitMonths entries must be 'YYYY-MM-01', got '${monthStart}'`)
+  return { monthStart, year: Number(m[1]), month: Number(m[2]) }
+}
+
 export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions): Promise<CopilotPoolBillResult> {
   const now = opts?.now ?? new Date()
   const monthsBack = opts?.monthsBack ?? 1
-  const months = billingMonths(now, monthsBack)
-  const exemptSet = chargebackExemptOrgSet()
+  // Workstream C: an explicit month list (the admin historical re-pull) bypasses the
+  // current+monthsBack rolling window entirely, so a targeted re-pull can reach an
+  // arbitrary past month without widening the worker's normal window.
+  const months = opts?.explicitMonths ? opts.explicitMonths.map(monthKeyFromDateString) : billingMonths(now, monthsBack)
+  const govCtx = await loadGovernanceResolutionContext(db)
 
   const result: CopilotPoolBillResult = {
     enterprisesConsidered: 0,
@@ -553,6 +587,9 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
     unclassifiedOrgMonths: 0,
     alertsEmitted: 0,
     ignoredProducts: {},
+    monthsSkippedClosedPeriod: 0,
+    overageAllocationsComputed: 0,
+    overageAllocationsUnallocated: 0,
   }
 
   const ents = await db.execute<{
@@ -563,6 +600,7 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
     SELECT id::text AS id, external_id, github_app_id
     FROM provider_enterprise
     WHERE provider = 'github' AND reconciliation_mode = 'reconciled'
+      AND (${opts?.enterpriseId ?? null}::uuid IS NULL OR id = ${opts?.enterpriseId ?? null}::uuid)
     ORDER BY external_id
   `)
 
@@ -676,7 +714,11 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
         }
 
         const registered = orgRegistry.byName.get(key)
-        const exempt = isChargebackExemptOrg(group.orgName, exemptSet)
+        const exempt = resolveGithubVerdict(govCtx, {
+          providerEnterpriseId: ent.id,
+          enterpriseSlug: ent.external_id,
+          licenseOrg: group.orgName,
+        }).exempt
 
         if (exempt) {
           // Canonical §B: exempt orgs are NOT written (no pool leak). Usage still surfaces
@@ -764,35 +806,82 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
           monthIgnoredProducts
       }
 
-      // LOW: the whole (enterprise, month) DELETE + re-INSERT runs in ONE transaction.
-      await db.transaction(async (tx) => {
-        await tx.execute(sql`
-          DELETE FROM copilot_pool_bill
-          WHERE provider_enterprise_id = ${ent.id}::uuid AND month = ${mk.monthStart}::date
-        `)
-        for (const r of orgRows) {
-          await insertRow(tx, {
-            monthStart: mk.monthStart,
-            enterpriseId: ent.id,
-            providerOrgId: r.providerOrgId,
-            costOwningUnitId: r.costOwningUnitId,
-            agg: r.agg,
-            raw: r.raw,
+      // Workstream C (design §8.4): the whole (enterprise, month) DELETE + re-INSERT,
+      // AND the overage-allocation recompute that must stay consistent with it, run in
+      // ONE transaction, under the financePeriod + copilotOverageAllocation advisory
+      // locks — the SAME lock persistCopilotOverageAllocation itself takes, so a
+      // concurrent admin re-pull (or a second worker tick) for this exact
+      // (enterprise, month) can never interleave with this write. A CLOSED finance
+      // period refuses the whole rewrite outright (never a silent recost of history —
+      // reopen or restate first).
+      let txResult:
+        | { skippedClosed: true }
+        | { skippedClosed: false; allocation: PersistCopilotOverageAllocationResult }
+      try {
+        txResult = await db.transaction(async (tx) => {
+          await tx.execute(advisoryXactLock('financePeriod', mk.monthStart))
+          await tx.execute(advisoryXactLock('copilotOverageAllocation', `${ent.id}:${mk.monthStart}`))
+          const period = await getFinancePeriod(tx, mk.monthStart)
+          if (period.state === 'closed') {
+            return { skippedClosed: true as const }
+          }
+
+          await tx.execute(sql`
+            DELETE FROM copilot_pool_bill
+            WHERE provider_enterprise_id = ${ent.id}::uuid AND month = ${mk.monthStart}::date
+          `)
+          for (const r of orgRows) {
+            await insertRow(tx, {
+              monthStart: mk.monthStart,
+              enterpriseId: ent.id,
+              providerOrgId: r.providerOrgId,
+              costOwningUnitId: r.costOwningUnitId,
+              agg: r.agg,
+              raw: r.raw,
+            })
+          }
+          if (residualHasContent) {
+            await insertRow(tx, {
+              monthStart: mk.monthStart,
+              enterpriseId: ent.id,
+              providerOrgId: null,
+              costOwningUnitId: null,
+              agg: residualFinal,
+              raw: { organizationName: null, month: mk.monthStart, kind: 'unallocated-enterprise-residual' },
+            })
+          }
+
+          // ADR-0011 D10: recompute the persisted overage-allocation distribution to
+          // match the bill just written, in the SAME transaction (bill + its
+          // allocation are never observably out of step with each other).
+          const allocation = await persistCopilotOverageAllocation(tx, {
+            providerEnterpriseId: ent.id,
+            enterpriseExternalId: ent.external_id,
+            month: mk.monthStart,
+            governanceContext: govCtx,
+            actorSystem: 'worker:copilot-pool-bill',
           })
-        }
-        if (residualHasContent) {
-          await insertRow(tx, {
-            monthStart: mk.monthStart,
-            enterpriseId: ent.id,
-            providerOrgId: null,
-            costOwningUnitId: null,
-            agg: residualFinal,
-            raw: { organizationName: null, month: mk.monthStart, kind: 'unallocated-enterprise-residual' },
-          })
-        }
-      })
+          return { skippedClosed: false as const, allocation }
+        })
+      } catch (err) {
+        result.enterprisesErrored += 1
+        consola.warn(
+          `[copilot-pool-bill] ${ent.external_id} bill/allocation persist ${mk.monthStart} failed: ${String(err)}`,
+        )
+        continue
+      }
+
+      if (txResult.skippedClosed) {
+        result.monthsSkippedClosedPeriod += 1
+        consola.warn(
+          `[copilot-pool-bill] ${ent.external_id} ${mk.monthStart} — finance period is CLOSED; bill rewrite and overage-allocation recompute skipped (no silent rewrite). Reopen or restate the period first.`,
+        )
+        continue
+      }
       result.orgRowsWritten += orgRows.length
       if (residualHasContent) result.residualRowsWritten += 1
+      result.overageAllocationsComputed += 1
+      if (txResult.allocation.unallocated) result.overageAllocationsUnallocated += 1
 
       // Alerts fire AFTER the rewrite COMMITS — never alert on a rolled-back month.
       for (const a of orgAlerts) {

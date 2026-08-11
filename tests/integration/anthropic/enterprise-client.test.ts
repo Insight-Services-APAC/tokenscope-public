@@ -222,3 +222,325 @@ describe('AnthropicEnterpriseClient.getUserCostReport', () => {
     expect(centsStringToUsd(report.data[0]!.amount)).toBeCloseTo(2.505, 9)
   })
 })
+
+describe('cost_type grouping — the request shape that makes the tool-cost split reachable', () => {
+  it('parses a cost row whose `requests` is NULL', async () => {
+    /*
+     * Anthropic returns `requests: null` whenever group_by includes cost_type
+     * or token_type. `z.number().optional().default(0)` substitutes only for an
+     * ABSENT key, so an explicit null threw a ZodError.
+     *
+     * That throw is not contained: it escapes the per-day loop in
+     * runEnterpriseAnalyticsPoll, the per-org catch records "poll failed", and
+     * the org writes NO actual_spend rows on that cycle or any cycle after,
+     * until a human notices. Requesting cost_type without this is a
+     * deterministic outage on the next poll, which is why it is pinned here
+     * rather than left to the poller's own tests.
+     */
+    const base = await serve((_req, res) => {
+      res.setHeader('content-type', 'application/json')
+      res.end(
+        JSON.stringify({
+          data: [
+            {
+              actor: { type: 'user_actor', email: 'a@x.test' },
+              amount: '4200.000000',
+              currency: 'USD',
+              cost_type: 'web_search',
+              product: 'claude_code',
+              requests: null,
+            },
+          ],
+          has_more: false,
+          next_page: null,
+        }),
+      )
+    })
+    const client = new AnthropicEnterpriseClient(base, 'k')
+    const report = await client.getUserCostReport({
+      startingAt: '2026-07-31T00:00:00Z',
+      endingAt: '2026-08-01T00:00:00Z',
+      groupBy: ['product', 'model', 'cost_type'],
+    })
+    expect(report.data).toHaveLength(1)
+    expect(report.data[0]!.requests).toBe(0)
+    expect(report.data[0]!.cost_type).toBe('web_search')
+  })
+
+  /*
+   * TASK #32 — THE MODEL DIMENSION MUST SURVIVE THE PARSE.
+   *
+   * We have always ASKED for it (`group_by[]=model` on both reports) and the
+   * provider has always sent it: the 2026-08-02 wire capture observed
+   * `data[].model` on 255/255 live cost rows — and listed it under
+   * `undeclaredByOurSchema`. Nothing then read it, and the model axis was built
+   * from OTel instead, which is how 58% of Dev spend rendered as "not split by
+   * model" under a label blaming collection. "We ask for the model, get it,
+   * discard it, then blame OTel."
+   *
+   * THIS IS THE FIRST LINK OF THE CARRY, and the only one no test covered. The
+   * rest is pinned in tests/integration/provider/provider-transform.test.ts,
+   * whose fake client hands the poller row objects DIRECTLY — so it proves
+   * raw_payload → provider_usage_fact.model and cannot see this parse at all.
+   * Together: wire → parse → actual_spend.raw_payload → provider_usage_fact →
+   * the billed model axis.
+   *
+   * MUTATION: delete `model` from CostRow and its `.passthrough()` — the field
+   * is stripped and this goes red. (`.passthrough()` alone kept it, which is
+   * exactly the accident the declaration replaces: the billed lane's whole model
+   * axis rested on an undeclared field.)
+   */
+  it('carries the model through on BOTH reports, cost included', async () => {
+    const base = await serve((req, res) => {
+      const isCost = (req.url ?? '').includes('user_cost_report')
+      res.setHeader('content-type', 'application/json')
+      res.end(
+        JSON.stringify({
+          data: [
+            isCost
+              ? {
+                  actor: ACTOR,
+                  amount: '1234.5',
+                  currency: 'USD',
+                  cost_type: 'tokens',
+                  product: 'claude_code',
+                  model: 'claude-opus-5',
+                  requests: null,
+                }
+              : { actor: ACTOR, product: 'chat', model: 'claude-opus-5', output_tokens: 7 },
+          ],
+          has_more: false,
+          next_page: null,
+        }),
+      )
+    })
+    const client = new AnthropicEnterpriseClient(base, 'k')
+    const window = { startingAt: '2026-07-31T00:00:00Z', endingAt: '2026-08-01T00:00:00Z' }
+
+    const cost = await client.getUserCostReport({ ...window, groupBy: ['product', 'model', 'cost_type'] })
+    expect(cost.data[0]!.model).toBe('claude-opus-5')
+
+    const usage = await client.getUserUsageReport({ ...window, groupBy: ['product', 'model'] })
+    expect(usage.data[0]!.model).toBe('claude-opus-5')
+  })
+
+  it('accepts an explicit null model without throwing the poll away', async () => {
+    /*
+     * Same failure mode `requests: null` had, one field over: a ZodError here
+     * escapes the per-day loop and the org stops writing actual_spend entirely.
+     * `.nullable().optional()` is what makes an absent OR null model a bucket
+     * rather than an outage.
+     */
+    const base = await serve((_req, res) => {
+      res.setHeader('content-type', 'application/json')
+      res.end(
+        JSON.stringify({
+          data: [
+            { actor: ACTOR, amount: '10', currency: 'USD', cost_type: 'web_search', model: null, requests: null },
+            { actor: ACTOR, amount: '20', currency: 'USD', cost_type: 'tokens', requests: null },
+          ],
+          has_more: false,
+          next_page: null,
+        }),
+      )
+    })
+    const client = new AnthropicEnterpriseClient(base, 'k')
+    const report = await client.getUserCostReport({
+      startingAt: '2026-07-31T00:00:00Z',
+      endingAt: '2026-08-01T00:00:00Z',
+      groupBy: ['product', 'model', 'cost_type'],
+    })
+    expect(report.data).toHaveLength(2)
+    expect(report.data[0]!.model).toBeNull()
+    expect(report.data[1]!.model).toBeUndefined()
+  })
+
+  /*
+   * `server_tool_use` MUST SURVIVE THE PARSE — the same first link the model
+   * dimension needed, one field later.
+   *
+   * The 2026-08-02 wire capture observed
+   * `data[].server_tool_use.web_search_requests` on 85/85 live and 257/257
+   * stored usage rows and listed BOTH the parent and the leaf under
+   * `undeclaredByOurSchema`. It reached `actual_spend.raw_payload` only through
+   * `.passthrough()`, so the carry rested on a field no schema declared.
+   *
+   * THIS TEST IS THE ONLY ONE THAT SEES THE PARSE.
+   * tests/integration/provider/provider-server-tool-use.test.ts pins the rest of
+   * the chain, but its fake client hands the poller row objects DIRECTLY and
+   * therefore cannot detect a schema change at all — narrowing the declaration
+   * leaves every assertion in that file green. Together: wire → parse →
+   * actual_spend.raw_payload → provider_usage_fact.web_search_requests.
+   *
+   * MUTATION: delete `server_tool_use` from UsageRow — `.passthrough()` types
+   * the property `unknown`, `report.data[0]!.server_tool_use?.web_search_requests`
+   * stops compiling, and with the access loosened the value assertion still
+   * holds only by accident of passthrough. The type-level guard
+   * tests/unit/server/enterprise-server-tool-use.test-d.ts is the companion that
+   * catches the declaration going away; this one catches the VALUE going away.
+   */
+  it('carries server_tool_use.web_search_requests through the parse', async () => {
+    const base = await serve((_req, res) => {
+      res.setHeader('content-type', 'application/json')
+      res.end(
+        JSON.stringify({
+          data: [
+            {
+              actor: ACTOR,
+              product: 'claude_code',
+              model: 'claude-opus-5',
+              output_tokens: 7,
+              server_tool_use: { web_search_requests: 12 },
+            },
+          ],
+          has_more: false,
+          next_page: null,
+        }),
+      )
+    })
+    const client = new AnthropicEnterpriseClient(base, 'k')
+    const report = await client.getUserUsageReport({
+      startingAt: '2026-07-31T00:00:00Z',
+      endingAt: '2026-08-01T00:00:00Z',
+      groupBy: ['product', 'model'],
+    })
+    expect(report.data[0]!.server_tool_use?.web_search_requests).toBe(12)
+  })
+
+  /*
+   * THE OUTAGE SHAPE. `.default()` substitutes only for an ABSENT key, so an
+   * explicit `null` fails the parse — and that failure is not local: the throw
+   * escapes the per-day loop in runEnterpriseAnalyticsPoll, the per-org catch
+   * records "poll failed", and the org writes NO actual_spend rows on that cycle
+   * or any cycle after, silently. This is the identical failure mode
+   * `CostRow.requests` documents, and the reason the declaration is `.nullish()`
+   * at BOTH levels rather than `.optional()`.
+   *
+   * MUTATION (verified): change the declaration to
+   * `z.object({ web_search_requests: z.number().int().nonnegative() }).optional()`
+   * — both rows below throw a ZodError and this goes red.
+   */
+  it('accepts an explicit null server_tool_use, and a null leaf, without throwing the poll away', async () => {
+    const base = await serve((_req, res) => {
+      res.setHeader('content-type', 'application/json')
+      res.end(
+        JSON.stringify({
+          data: [
+            { actor: ACTOR, product: 'claude_code', model: 'claude-opus-5', server_tool_use: null },
+            {
+              actor: ACTOR,
+              product: 'claude_code',
+              model: 'claude-sonnet-5',
+              server_tool_use: { web_search_requests: null },
+            },
+            { actor: ACTOR, product: 'claude_code', model: 'claude-haiku-5' },
+          ],
+          has_more: false,
+          next_page: null,
+        }),
+      )
+    })
+    const client = new AnthropicEnterpriseClient(base, 'k')
+    const report = await client.getUserUsageReport({
+      startingAt: '2026-07-31T00:00:00Z',
+      endingAt: '2026-08-01T00:00:00Z',
+      groupBy: ['product', 'model'],
+    })
+    // All three rows parsed — the day was not lost.
+    expect(report.data).toHaveLength(3)
+    expect(report.data[0]!.server_tool_use).toBeNull()
+    expect(report.data[1]!.server_tool_use?.web_search_requests).toBeNull()
+    expect(report.data[2]!.server_tool_use).toBeUndefined()
+  })
+
+  /*
+   * T3 (W0a) — `context_window` MUST SURVIVE THE PARSE, on BOTH reports, in all
+   * three wire states: a known band, an UNKNOWN band (the vocabulary is the
+   * provider's to extend — no enum, so '1m+' rides through verbatim, never a
+   * 500), and an explicit null — which is the `.default()` outage trap: the
+   * wire sends `context_window: null` on every row whenever the dimension is
+   * not in `group_by`, so a declaration that rejects null kills the org's
+   * polling on the first ungrouped call.
+   *
+   * THIS TEST IS THE ONLY ONE THAT SEES THE PARSE — the provider suite's fake
+   * client hands the poller row objects directly
+   * (tests/integration/provider/provider-context-window.test.ts pins the rest
+   * of the chain: raw_payload → provider_usage_fact.context_window).
+   *
+   * MUTATION: declare `context_window: z.enum(['0-200k', '200k+']).nullish()`
+   * — the '1m+' rows throw and both unknown-band assertions go red. MUTATION:
+   * declare `.optional()` instead of `.nullish()` — the explicit-null rows
+   * throw and the null assertions go red.
+   */
+  it('carries context_window through the parse on BOTH reports — unknown bands and nulls included', async () => {
+    const base = await serve((req, res) => {
+      const isCost = (req.url ?? '').includes('user_cost_report')
+      res.setHeader('content-type', 'application/json')
+      res.end(
+        JSON.stringify({
+          data: isCost
+            ? [
+                { actor: ACTOR, amount: '10', currency: 'USD', cost_type: 'tokens', model: 'claude-opus-5', context_window: '0-200k', requests: null },
+                { actor: ACTOR, amount: '20', currency: 'USD', cost_type: 'tokens', model: 'claude-opus-5', context_window: '1m+', requests: null },
+                { actor: ACTOR, amount: '30', currency: 'USD', cost_type: 'tokens', model: 'claude-opus-5', context_window: null, requests: null },
+              ]
+            : [
+                { actor: ACTOR, product: 'claude_code', model: 'claude-opus-5', output_tokens: 7, context_window: '200k+' },
+                { actor: ACTOR, product: 'claude_code', model: 'claude-opus-5', output_tokens: 8, context_window: '1m+' },
+                { actor: ACTOR, product: 'claude_code', model: 'claude-opus-5', output_tokens: 9, context_window: null },
+                { actor: ACTOR, product: 'claude_code', model: 'claude-opus-5', output_tokens: 10 },
+              ],
+          has_more: false,
+          next_page: null,
+        }),
+      )
+    })
+    const client = new AnthropicEnterpriseClient(base, 'k')
+    const window = { startingAt: '2026-07-31T00:00:00Z', endingAt: '2026-08-01T00:00:00Z' }
+
+    const usage = await client.getUserUsageReport({ ...window, groupBy: ['product', 'model', 'context_window'] })
+    expect(usage.data).toHaveLength(4)
+    expect(usage.data[0]!.context_window).toBe('200k+')
+    expect(usage.data[1]!.context_window).toBe('1m+')
+    expect(usage.data[2]!.context_window).toBeNull()
+    expect(usage.data[3]!.context_window).toBeUndefined()
+
+    const cost = await client.getUserCostReport({
+      ...window,
+      groupBy: ['product', 'model', 'cost_type', 'context_window'],
+    })
+    expect(cost.data).toHaveLength(3)
+    expect(cost.data[0]!.context_window).toBe('0-200k')
+    expect(cost.data[1]!.context_window).toBe('1m+')
+    expect(cost.data[2]!.context_window).toBeNull()
+  })
+
+  it('sends cost_type to the COST report only', async () => {
+    /*
+     * `group_by[]` applies to whichever report receives it, and `cost_type`
+     * exists only on CostRow. Sending it to the usage report fragments those
+     * rows by a dimension we cannot read back -- more rows against the
+     * 100-page ceiling, for nothing. The two callers build separate arrays;
+     * this pins that they stay separate.
+     */
+    const seen: string[] = []
+    const base = await serve((req, res) => {
+      seen.push(req.url ?? '')
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ data: [], has_more: false, next_page: null }))
+    })
+    const client = new AnthropicEnterpriseClient(base, 'k')
+    const window = { startingAt: '2026-07-31T00:00:00Z', endingAt: '2026-08-01T00:00:00Z' }
+    await client.getUserUsageReport({ ...window, groupBy: ['product', 'model'] })
+    await client.getUserCostReport({ ...window, groupBy: ['product', 'model', 'cost_type'] })
+
+    const [usageUrl, costUrl] = seen
+    expect(usageUrl).toContain('user_usage_report')
+    expect(usageUrl).not.toContain('cost_type')
+    expect(costUrl).toContain('user_cost_report')
+    // Literal brackets, not percent-encoded — the client builds `group_by[]=`
+    // by hand (buildUrl), which the file's header calls out as the bracket
+    // notation Anthropic requires.
+    expect(costUrl).toContain('group_by[]=cost_type')
+  })
+})

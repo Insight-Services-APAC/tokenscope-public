@@ -18,13 +18,11 @@ import { withRequestRls } from '../../../../../db/request-rls'
 import { conversationKeyExpr } from '../../../../../db/conversation-key'
 import type { SessionDetail } from '../../../../../../shared/schemas/usage'
 import {
-  cacheStats,
   fetchBreakdownCells,
   fetchQuerySourceSplit,
   fidelitySplit,
   pivotByModel,
-  pivotByTokenType,
-  toMatrix,
+  sessionLaneView,
 } from '../../../../../usage/breakdowns'
 
 interface HeaderRow extends Record<string, unknown> {
@@ -88,6 +86,10 @@ export default defineEventHandler(async (event): Promise<SessionDetail> => {
 
     const cells = await fetchBreakdownCells(tx, session.teammateId, [conversationId])
     const byQuerySource = await fetchQuerySourceSplit(tx, session.teammateId, conversationId)
+    // The lane axis (D14/D15). On a credit-priced session the per-lane money is
+    // a carrier convention, not a set of prices, so it ships as NULL rather than
+    // as fabricated zeros — the session's money is stated once, in cost_usd.
+    const lanes = sessionLaneView(cells)
 
     return {
       session_id: conversationId,
@@ -103,11 +105,12 @@ export default defineEventHandler(async (event): Promise<SessionDetail> => {
       span_count: Number(header.span_count),
       tokens: Number(header.tokens),
       cost_usd: Number(header.cost_usd).toFixed(2),
-      matrix: toMatrix(cells),
+      priced_per_lane: lanes.priced_per_lane,
+      matrix: lanes.matrix,
       by_model: pivotByModel(cells),
-      by_token_type: pivotByTokenType(cells),
+      by_token_type: lanes.by_token_type,
       by_query_source: byQuerySource,
-      cache: cacheStats(cells),
+      cache: lanes.cache,
       fidelity: fidelitySplit(cells),
     }
   })

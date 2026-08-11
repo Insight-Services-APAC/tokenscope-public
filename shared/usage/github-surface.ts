@@ -59,6 +59,23 @@ export type GithubChargebackLane = (typeof GITHUB_ALL_CHARGEBACK_LANES)[number]
  * mode. copilot-unclassified is deliberately absent — an unclassified bill
  * line is money we cannot yet attribute to a SKU class, so it is surfaced
  * (lane + column + alert) but NEVER charged (design D2, r1-F10).
+ *
+ * copilot-license IS chargeable, and that is not in tension with Copilot
+ * being usage-billed. Two different things get conflated here (a reviewer
+ * has read it the wrong way, which is why this paragraph exists):
+ *
+ *   - FORBIDDEN is DERIVING license money as seats x flat rate. That is
+ *     "WRONG model #2" in copilot-pool-bill.ts, and it is why
+ *     `flat_seat_price_usd` may never reach a chargeback figure.
+ *   - REQUIRED is charging the license NET that is READ off the invoice's
+ *     own "Copilot Enterprise" SKU line (copilot-pool-bill.ts: "READ, never
+ *     recompute"). It is real money someone must pay.
+ *
+ * Dropping it would break the load-bearing finance invariant that
+ * Sigma v_finance_chargeback_month = Sigma v_finance_bill_totals_month
+ * (00-build-design.md §invariant 1): license + overage + unclassified must
+ * equal the raw Copilot net exactly. Removing this lane turns 9 tests red,
+ * four of them named "fold license+usage, never unclassified".
  */
 export const GITHUB_CHARGEABLE_LANES = [COPILOT_LICENSE_LANE, COPILOT_USAGE_LANE] as const
 
@@ -90,12 +107,15 @@ export const GITHUB_USAGE_TOOLS: readonly string[] = githubSurfaceAdapter.lanes.
 ])
 
 /*
- * The DISPLAY-ONLY subset of the usage tools: ingest_only reconciliation
- * categories (OTel-invisible — no session, no emission, nothing to tag).
- * The §A needs-tagging reconciliation (unaccounted-reconciliation.ts) excludes
- * these so a coding-agent dollar can never become a taggable worklist item.
+ * SUPERSEDED (Workstream A, migration 0101): the DISPLAY-ONLY subset used to
+ * live here as GitHub-only (`[COPILOT_AGENT_TOOL]`). It is now the
+ * provider-neutral `INGEST_ONLY_USAGE_TOOLS` in `shared/usage/surface.ts`
+ * (`[COPILOT_AGENT_TOOL, ...NON_CODE_CLAUDE_TOOLS]`), because the non-Code
+ * Claude surfaces are the identical shape (ingest_only, OTel-invisible, never
+ * taggable) and belong in the SAME exclusion set `reconcileUnaccountedUsage`
+ * reads — two sets would have let one drift from the other. Import
+ * `INGEST_ONLY_USAGE_TOOLS` from `shared/usage/surface.ts` instead.
  */
-export const GITHUB_INGEST_ONLY_USAGE_TOOLS: readonly string[] = [COPILOT_AGENT_TOOL]
 
 /** Every GitHub lane id (usage + chargeback). Prefer GITHUB_FIREWALL_EXCLUSIONS
  * for Anthropic-remainder predicates — the lane ids alone miss 'copilot-cli'. */
@@ -117,3 +137,18 @@ export const GITHUB_LANES: readonly string[] = githubSurfaceAdapter.lanes.map((l
 export const GITHUB_FIREWALL_EXCLUSIONS: readonly string[] = [
   ...new Set<string>([...GITHUB_LANES, ...GITHUB_USAGE_TOOLS]),
 ]
+
+/*
+ * The registry-derived §A GitHub USAGE lane ids ('copilot' + 'copilot-agent') —
+ * the two lanes that draw against the SAME pooled per-org AI-Credit allowance
+ * (docs/wiki/Reporting.md §5: "ALL Copilot usage lanes weigh in... the coding
+ * agent draws from exactly like interactive use"). Derived from the adapter
+ * (never a hand-typed `['copilot', 'copilot-agent']` literal) by filtering to
+ * lanes that own at least one emit tool — the three §B chargeback lanes have
+ * none (billing-fed), so this is exactly the two usage lanes. Used to mark a
+ * `surface`-axis driver row `pooled-usage` (the per-teammate $ is informational
+ * — GitHub Copilot bills the ORG pool, never a per-user charge).
+ */
+export const GITHUB_USAGE_LANE_IDS: readonly string[] = githubSurfaceAdapter.lanes
+  .filter((l) => l.tools.length > 0)
+  .map((l) => l.id)

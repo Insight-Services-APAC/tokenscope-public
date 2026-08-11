@@ -35,7 +35,11 @@ const STALE_RUNNING_MINUTES = 180
 const RESULT_MAX_BYTES = 64_000
 
 export interface WorkerRunOutcome {
-  status: 'success' | 'failure'
+  // 'skipped' = an admin has the worker disabled (mig 0090). Deliberately NOT
+  // 'success': read-path-health treats a recent SUCCESS as evidence the read path
+  // is alive, so recording a skip as success would let a disabled worker mask a
+  // real outage.
+  status: 'success' | 'failure' | 'skipped'
   durationMs: number
   rowsAffected?: number | null
   error?: string | null

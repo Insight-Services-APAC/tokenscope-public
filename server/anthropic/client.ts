@@ -27,6 +27,7 @@
  */
 import { z } from 'zod'
 import { resilientFetch } from '../utils/resilient-fetch'
+import { readRawPage, paramPairsOf, pathOf, type RawPage } from '../utils/raw-page'
 
 /**
  * Inclusive list of UTC YYYY-MM-DD days from start..end. The Claude Code report is
@@ -197,6 +198,20 @@ export class AnthropicAnalyticsClient {
   }
 
   /*
+   * The claude_code usage-report URL for one day, WITHOUT the `page` cursor.
+   * Single source of truth for the three callers below (the paginating pull, the
+   * liveness probe and the wire-shape probe) so a diagnostic can never end up
+   * describing a differently-shaped request than the one production issues.
+   */
+  private claudeCodeUrl(startingAt: string, limit: number): string {
+    return (
+      `${this.endpoint}/v1/organizations/usage_report/claude_code` +
+      `?starting_at=${encodeURIComponent(startingAt)}` +
+      `&limit=${limit}`
+    )
+  }
+
+  /*
    * Claude Code per-user usage for a SINGLE day. There is NO ending_at on this
    * endpoint — starting_at is one day. Follows the next_page cursor until exhausted
    * and returns the CONCATENATED records (has_more: false — pagination is internal).
@@ -205,10 +220,7 @@ export class AnthropicAnalyticsClient {
    * for call-site compatibility with the per-day iteration both consumers do.
    */
   async getClaudeCodeUsage(opts: { startingAt: string; endingAt?: string }): Promise<UsageReport> {
-    const base =
-      `${this.endpoint}/v1/organizations/usage_report/claude_code` +
-      `?starting_at=${encodeURIComponent(opts.startingAt)}` +
-      `&limit=${PAGE_LIMIT}`
+    const base = this.claudeCodeUrl(opts.startingAt, PAGE_LIMIT)
     const data: UsageReport['data'] = []
     let page: string | null = null
     for (let i = 0; i < MAX_PAGES; i++) {
@@ -237,9 +249,7 @@ export class AnthropicAnalyticsClient {
    * status 200 = endpoint answered but wrong shape (parse-mismatch signal).
    */
   async probe(startingAt: string): Promise<{ ok: boolean; status: number; parsed: boolean }> {
-    const url =
-      `${this.endpoint}/v1/organizations/usage_report/claude_code` +
-      `?starting_at=${encodeURIComponent(startingAt)}&limit=1`
+    const url = this.claudeCodeUrl(startingAt, 1)
     try {
       const res = await resilientFetch(url, { headers: this.headers() })
       if (!res.ok) return { ok: false, status: res.status, parsed: false }
@@ -251,6 +261,25 @@ export class AnthropicAnalyticsClient {
       }
     } catch {
       return { ok: false, status: 0, parsed: false }
+    }
+  }
+
+  /*
+   * DIAGNOSTICS ONLY — the FIRST page of the claude_code usage report, UNPARSED.
+   * See the twin on AnthropicEnterpriseClient for why the probe must bypass Zod
+   * (defaults fabricate presence; a non-passthrough envelope strips added keys).
+   * Reuses claudeCodeUrl + headers; never follows the cursor.
+   */
+  async rawClaudeCodeUsagePage(opts: {
+    startingAt: string
+    limit: number
+  }): Promise<{ path: string; params: Array<[string, string]>; page: RawPage }> {
+    const url = this.claudeCodeUrl(opts.startingAt, opts.limit)
+    const res = await resilientFetch(url, { headers: this.headers() })
+    return {
+      path: pathOf(url),
+      params: paramPairsOf(url),
+      page: await readRawPage(res, { secrets: [this.apiKey] }),
     }
   }
 

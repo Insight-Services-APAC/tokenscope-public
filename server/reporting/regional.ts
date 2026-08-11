@@ -18,35 +18,55 @@
  * byte-identical to the screen figures (build-design §2 "byte-identical rule").
  */
 import { sql, type SQL } from 'drizzle-orm'
+import { clampedFinance, clampedUsage } from './engine/scope'
+import { vendorSplitAggregates } from './vendor-split'
+import { fetchKpiCore, type ReportKpiCore } from './engine/kpis'
+import { fetchPerPerson, type PerPersonKpi } from './engine/per-person'
+import { fetchDrivers, type DriversResult } from './engine/drivers'
+import type { ServerClock } from '../../shared/reports/clock'
+import { fetchUsageWeeklyLanes, fetchDailyMetrics } from './engine/usage-series'
+import { fetchUsageBudgetCoverage } from './engine/usage-coverage'
+import { fetchSpendTrend, fetchActiveTrend, type TrendPoint } from './engine/trend-series'
+import { fetchTierExposure } from './engine/tier-exposure'
+import {
+  fetchChargebackTrend,
+  fetchChargebackLaneTrend,
+  fetchChargebackLanes,
+} from './engine/chargeback-series'
 import { createError } from 'h3'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
-import { managerScopePredicate, orgSubtreeScopePredicate } from '../auth/org-subtree-scope'
-import { orgSubtreeIds } from '../auth/org-subtree'
-import { isPlatformAdmin } from '../../shared/auth/roles'
-import { csvEscape } from '../utils/csv-escape'
 import {
-  laneListSql,
-  chargeToVendor,
-  SECTION_A_USAGE_TOOLS,
-  VENDOR_LANES,
-  type Vendor,
-} from '../../shared/usage/vendor'
+  callerHomeUnitQuery,
+  managerScopePredicate,
+  orgSubtreeScopePredicate,
+} from '../auth/org-subtree-scope'
+import { orgSubtreeIds } from '../auth/org-subtree'
+import { TEAMMATE_DRILL_FACTS, teammateDrillFacts } from './teammate-drill-facts'
+import { isOrgWideRole } from '../../shared/auth/roles'
+import { csvEscape } from '../utils/csv-escape'
+import { laneListSql, SECTION_A_USAGE_TOOLS } from '../../shared/usage/vendor'
 import { CLAUDE_CODE_TOOL } from '../../shared/usage/surface'
+import type { SpendLens } from '../../shared/usage/lens'
+import { UNALLOCATED_KEY, UNALLOCATED_LABEL } from '../../shared/reports/unallocated'
+import { UNASSIGNED_REGION_CODE } from '../../shared/placement/holding-nodes'
 import {
   GITHUB_CHARGEABLE_LANES,
-  GITHUB_FIREWALL_EXCLUSIONS,
   COPILOT_CLI_TOOL,
   COPILOT_AGENT_TOOL,
 } from '../../shared/usage/github-surface'
 import {
   buildSeasonality,
   fillDowBuckets,
-  isMonthAlignedWindow,
-  mergeWeeklyLaneRows,
+  driverProvenanceCsvCells,
+  driverSurfaceMixCsvCell,
+  driverArmCsvLines,
   type UsageWindow,
 } from './params'
-import { monthKeyUtc, monthRangeUtc, type MonthRangeUtc } from '../utils/period'
+import type { MonthRangeUtc } from '../utils/period'
 import type {
+  MeasureLane,
+  BilledLaneMeta,
+  ChargebackCoverage,
   DriverRow,
   DailyMetric,
   SpendClass,
@@ -57,8 +77,10 @@ import type {
   ChargeLanePoint,
   ChargebackLaneRow,
   ChargeDowBucket,
-  ShowbackWeeklyLaneCell,
+  UsageSurfaceWeeklyCell,
+  UsageBudgetCoverage,
 } from '../../shared/reports/types'
+import type { TierExposure } from '../../shared/reports/tier-exposure'
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
 
@@ -83,7 +105,7 @@ export interface OuRef {
 }
 
 /** The drivers axis (build-design §2 `/reports/regional/drivers`). */
-export const REGIONAL_DRIVER_AXES = ['practice', 'teammate', 'model', 'project'] as const
+export const REGIONAL_DRIVER_AXES = ['practice', 'teammate', 'model', 'project', 'surface'] as const
 export type RegionalDriverAxis = (typeof REGIONAL_DRIVER_AXES)[number]
 
 /**
@@ -101,8 +123,54 @@ export interface RegionalScope {
   usageScope: (regionCol: string, subtreeCol: string) => SQL
   /** Finance-lane predicate over (`region_id`, `cost_owning_unit_id`)-style columns. */
   financeScope: (regionCol: string, costOwningCol: string) => SQL
+  /**
+   * Stable identity of THIS scope, for caching scope-derived values (the month
+   * floor). Built from exactly the inputs `usageScope` closes over, in the same
+   * place, so the two cannot drift: a key that failed to vary with the
+   * predicate would serve one scope's floor to another — a wrong 400 on a month
+   * the caller does have data in.
+   */
+  scopeKey: string
+  /**
+   * WHAT `usageScope` ACTUALLY CLAMPS TO, in the words a reader names it — the drilled
+   * unit, else the caller's own org unit (dev/manager subtree), else the region. It is
+   * built here, beside the predicate, because nothing downstream can see the predicate:
+   * a component reading `drill ?? region` names the REGION for a manager whose figures
+   * are their subtree's, which is contract C11's over-wide denominator (the defect this
+   * field exists to remove).
+   *
+   * `null` when the subtree clamp resolves to NO org unit — the caller's own placement
+   * is the region root or a holding node, so `placedBelowRegionRootPredicate` degrades
+   * the clamp to zero rows. Consumers must render "no resolved scope", NEVER fall back
+   * to the region: that fallback is exactly what was wrong.
+   */
+  scopeLabel: string | null
   /** `true` while dims are point-in-time "as at emit" (Regional usage lane always is). */
   pointInTimeDims: boolean
+}
+
+/**
+ * Every selectable region, in the selector's order.
+ *
+ * ORDER BY (display_name, code) — a TOTAL order, not just a pleasant one. The
+ * org-wide default region is `regionOptions[0]`, and `region.display_name` carries
+ * no unique constraint (only `region.code` does, 0001_schema.sql), so `ORDER BY
+ * display_name` alone leaves two same-named regions in whatever order the scan
+ * happened to produce — which can differ between two executions of the same query
+ * once a row is rewritten. Six endpoints plus the CSV export run this
+ * independently, so an unbroken tie is exactly the "wrong region under a wrong
+ * name" state the owner's default-region rule forbids. `code` is UNIQUE NOT NULL,
+ * so appending it makes the order total and the default reproducible.
+ *
+ * Exported because the Region scope's WHOLE-COMPANY width needs the same list for
+ * the same selector while resolving no regional clamp at all — and a second copy of
+ * this query is a second order.
+ */
+export async function fetchRegionOptions(tx: Tx): Promise<RegionRef[]> {
+  const rows = await tx.execute<{ id: string; code: string; display_name: string }>(sql`
+    SELECT id::text AS id, code, display_name FROM region
+    WHERE code <> ${UNASSIGNED_REGION_CODE} ORDER BY display_name, code`)
+  return [...rows].map((r) => ({ id: r.id, code: r.code, displayName: r.display_name }))
 }
 
 function forbid(detail: string): never {
@@ -122,10 +190,17 @@ function forbid(detail: string): never {
  * Resolve + AUTHORISE the Regional scope in-query (build-design §2 RBAC branch):
  *   - admin                          → own region FORCED (`region` param ignored)
  *   - global-finops / platform-admin → any region (validated) + the region picker
+ *                                      (ORG_WIDE_ROLES — the org-wide, region-less roles)
  *   - developer / manager            → their org SUBTREE, region-clamped
  *   - `ou` drill                     → the unit's subtree, gated by
  *     orgSubtreeScopePredicate OR active ownership (anti-IDOR: a foreign-region /
  *     out-of-scope unit → 403).
+ *
+ * A cross-region caller who names NO `?region` gets a default that is a function of
+ * the CALLER ALONE (see the effective-region branch below) — no window, no spend.
+ * Every Regional endpoint resolves this scope independently, so a default that
+ * varied with anything else would let the page header name one region while the
+ * drivers table computed another.
  */
 export async function resolveRegionalScope(
   tx: Tx,
@@ -133,13 +208,17 @@ export async function resolveRegionalScope(
   params: { region?: string | null; ou?: string | null },
   opts?: { crossRegion?: boolean },
 ): Promise<RegionalScope> {
-  // A role is cross-region by its enum (global-finops / platform-admin) OR by the
-  // report-visibility policy loosening it (an admin under modes 2/3, a cost-centre
-  // owner under mode 3 — reportGrants.regional === 'all-regions', threaded here as
-  // `opts.crossRegion`). The policy grant is a LEVEL, not a bypass: an elevated
-  // caller sees the region SELECTOR + a honoured `?region`, exactly as global-finops
-  // does — one region at a time, never an unclamped union.
-  const roleCrossRegion = caller.role === 'global-finops' || isPlatformAdmin(caller.role)
+  // A role is cross-region by its enum (ORG_WIDE_ROLES — global-finops /
+  // platform-admin) OR by the report-visibility policy loosening it (an admin under
+  // modes 2/3, a cost-centre owner under mode 3 — reportGrants.regional ===
+  // 'all-regions', threaded here as `opts.crossRegion`). The policy grant is a LEVEL,
+  // not a bypass: an elevated caller sees the region SELECTOR + a honoured `?region`,
+  // exactly as global-finops does — one region at a time, never an unclamped union.
+  //
+  // ONE predicate for "org-wide role", shared with the default-region branch below.
+  // Spelling it out twice is how the two would drift if ORG_WIDE_ROLES ever grew a
+  // member: a role that reached the picker but not the region-less default.
+  const roleCrossRegion = isOrgWideRole(caller.role)
   const isCrossRegion = roleCrossRegion || opts?.crossRegion === true
   const isAdmin = caller.role === 'admin'
   const isSubtree = caller.role === 'developer' || caller.role === 'manager'
@@ -148,13 +227,18 @@ export async function resolveRegionalScope(
   }
 
   // Cross-region callers (by role or policy) get the region list (selector + validation).
+  //
+  // ORDER BY (display_name, code) — a TOTAL order, not just a pleasant one. The
+  // platform-admin default below is `regionOptions[0]`, and `region.display_name`
+  // carries no unique constraint (only `region.code` does, 0001_schema.sql), so
+  // `ORDER BY display_name` alone leaves two same-named regions in whatever order
+  // the sort happened to produce for that scan — which can differ between two
+  // executions of the same query once a row is rewritten. Five endpoints plus the
+  // CSV export run this independently, so an unbroken tie is exactly the "wrong
+  // region under a wrong name" state the owner's rule forbids. `code` is UNIQUE
+  // NOT NULL, so appending it makes the order total and the default reproducible.
   let regionOptions: RegionRef[] = []
-  if (isCrossRegion) {
-    const rows = await tx.execute<{ id: string; code: string; display_name: string }>(sql`
-      SELECT id::text AS id, code, display_name FROM region
-      WHERE code <> '__unassigned__' ORDER BY display_name`)
-    regionOptions = [...rows].map((r) => ({ id: r.id, code: r.code, displayName: r.display_name }))
-  }
+  if (isCrossRegion) regionOptions = await fetchRegionOptions(tx)
 
   // `ou` drill — resolve WITHIN scope OR active ownership (practice-page pattern). A
   // policy-elevated cross-region caller resolves ANY existing unit (consistent with
@@ -193,9 +277,9 @@ export async function resolveRegionalScope(
   }
 
   // Effective region: the drill fixes it; else a cross-region caller honours a
-  // validated `region` (else home-or-first); a non-cross admin/subtree is hard-bound
-  // to their own region. Cross-region is checked FIRST so an elevated admin is no
-  // longer collapsed to own-region by the subtree/admin branch.
+  // validated `region` (else the caller-only default below); a non-cross admin/subtree
+  // is hard-bound to their own region. Cross-region is checked FIRST so an elevated
+  // admin is no longer collapsed to own-region by the subtree/admin branch.
   let effectiveRegionId: string
   if (ou) {
     effectiveRegionId = ou.regionId
@@ -203,9 +287,39 @@ export async function resolveRegionalScope(
     if (params.region && !regionOptions.some((o) => o.id === params.region)) {
       throw createError({ statusCode: 404, statusMessage: 'region not found' })
     }
+    /*
+     * THE DEFAULT REGION, decided on the caller's ROLE (owner decision, updated
+     * 2026-08-01 — verbatim: "global-finops should get alphabetical too, they have
+     * no region"):
+     *
+     *   - an ORG-WIDE role (ORG_WIDE_ROLES = global-finops, platform-admin) has no
+     *     region of its own — it is org-wide by definition — so it opens on the
+     *     FIRST of `regionOptions`, ordered by (display_name, code): a TOTAL order
+     *     (see the region-list query above for why the `code` tiebreaker is
+     *     load-bearing). `caller.regionId` is where such a caller's Entra record
+     *     happens to sit, not a region they answer for, so it is ignored here.
+     *   - every other caller in this branch is a REGION-BOUND role the
+     *     report-visibility policy elevated to all-regions (a region admin under
+     *     modes 2/3, a cost-centre owner under mode 3). They DO have a region of
+     *     their own, so they open on it — `caller.regionId`, when it is a real
+     *     region in the list.
+     *
+     * The test is the ROLE, not "does this caller have a home region": every caller
+     * has one. That is why global-finops, homed like anyone else, still gets the
+     * alphabetical default.
+     *
+     * The rule reads only the caller's role, the caller's own region and the region
+     * list — never the window and never a spend figure. That is the point: all five
+     * Regional endpoints plus the CSV export resolve this scope independently and
+     * cannot compare notes, so a default that varied with the window would name one
+     * region in the header while another was computed underneath it.
+     */
+    const ownRegionId = isOrgWideRole(caller.role)
+      ? undefined
+      : regionOptions.find((o) => o.id === caller.regionId)?.id
     effectiveRegionId =
       (params.region && regionOptions.find((o) => o.id === params.region)?.id) ??
-      regionOptions.find((o) => o.id === caller.regionId)?.id ??
+      ownRegionId ??
       regionOptions[0]?.id ??
       caller.regionId
   } else {
@@ -235,6 +349,60 @@ export async function resolveRegionalScope(
       ? sql`${sql.raw(costOwningCol)} IN (${orgSubtreeIds(ou.path, ou.regionId, { costOwningOnly: true })})`
       : managerScopePredicate(scopeCaller, effectiveRegionId, regionCol, costOwningCol)
 
+  /*
+   * The scope key must vary with the PREDICATE, and the predicate is not fully
+   * determined by anything in `caller`. managerScopePredicate's manager arm
+   * scopes by the RLS session GUCs — app.user_org_path, and app.user_region_id
+   * inside placedBelowRegionRootPredicate — read at execution time, not closed
+   * over here (server/auth/org-subtree-scope.ts:145,103).
+   *
+   * An earlier version of this key listed the values it believed the predicate
+   * used and missed exactly those, so two managers in ONE region with DIFFERENT
+   * subtrees produced different predicates under an identical key. The floor is
+   * enforced server-side as a 400, so the symptom was one manager being refused
+   * a month they DO have data in, on the strength of another manager's floor.
+   *
+   * Reading the GUCs back rather than re-listing the inputs is the point: the
+   * key is derived from the SAME source the predicate reads, so the two cannot
+   * drift no matter how the predicate is later changed. Three cheap
+   * current_setting() calls, no table access.
+   */
+  const gucRows = await tx.execute<{ org_path: string | null; region: string | null; role: string | null }>(
+    sql`SELECT current_setting('app.user_org_path', true) AS org_path,
+               current_setting('app.user_region_id', true) AS region,
+               current_setting('app.user_role', true) AS role`,
+  )
+  const g = [...gucRows][0]
+  const gucKey = `${g?.org_path ?? '-'}|${g?.region ?? '-'}|${g?.role ?? '-'}`
+
+  /*
+   * The NAME of the scope the predicate above just built, resolved from the same
+   * inputs and in the same place for the same reason `scopeKey` is: a name derived
+   * anywhere else is a name for a DIFFERENT scope the moment the predicate changes.
+   *
+   * Three arms, one per arm of `usageScope`:
+   *   - a drill clamps to the unit's own subtree → the unit names it;
+   *   - a dev/manager (NOT elevated cross-region) clamps to `app.user_org_path`'s
+   *     subtree → their own home unit names it, read back through the SAME predicate
+   *     the clamp is gated on, so an unqualified placement yields null rather than the
+   *     region. Both roles hold `regional: 'own-region'` and NEITHER sees the region;
+   *     the grant is an authorisation level, not the extent of the figures;
+   *   - everyone else (admin, global-finops/platform-admin, a policy-elevated caller)
+   *     clamps to `region_id = effectiveRegionId` → the region names it. 'this region'
+   *     only when the region row itself is unreadable — still the caller's own scope,
+   *     just unnamed, never a wider one.
+   */
+  const usesSubtreeClamp = !isCrossRegion && isSubtree
+  let scopeLabel: string | null
+  if (ou) {
+    scopeLabel = ou.displayName
+  } else if (usesSubtreeClamp) {
+    const homeRows = await tx.execute<{ display_name: string }>(callerHomeUnitQuery())
+    scopeLabel = [...homeRows][0]?.display_name ?? null
+  } else {
+    scopeLabel = region?.displayName ?? 'this region'
+  }
+
   return {
     effectiveRegionId,
     region,
@@ -243,75 +411,36 @@ export async function resolveRegionalScope(
     ou,
     usageScope,
     financeScope,
+    // `ou.path` as well as `ou.id`: the drill predicate scopes by the unit's
+    // PATH, so a unit moved in the tree keeps its id while its subtree changes.
+    scopeKey: `regional:${scopeRole}:${caller.regionId ?? '-'}:${effectiveRegionId}:${ou?.id ?? '-'}:${ou?.path ?? '-'}:${gucKey}`,
+    scopeLabel,
     pointInTimeDims: true,
   }
 }
 
 // ── KPIs ─────────────────────────────────────────────────────────────────────
-export interface RegionalKpis {
-  /** Usage-lane genuine total for the month (all genuine cost incl. NFR/exempt). */
-  genuineUsd: number
-  /** The chargeable subset (finance lane) — Anthropic only until Copilot validates. */
-  chargeableUsd: number
-  /** Anthropic chargeable (always included). */
-  anthropicChargeableUsd: number
-  /** Copilot pooled net chargeable (finance lane) — included in the total only in chargeback mode. */
-  copilotChargeableUsd: number
-  tokens: number
-  activeUsers: number
-  /**
-   * Previous-CALENDAR-month chargeable total (§B finance lane) composed like
-   * `chargeableUsd`; the chargeback MoM operand. 0 in range mode. Month-grained, so
-   * this compares whole months (no day-of-month pacing — a usage-lane concern).
-   */
-  prevChargeableUsd: number
-  /**
-   * (chargeable − prevChargeable)/prevChargeable as a FRACTION, or null (no prior /
-   * range mode). The §B analogue of the usage MoM — the two are NEVER mixed.
-   */
-  chargeMomDeltaPct: number | null
-  /**
-   * §B — distinct teammates carrying an ANTHROPIC chargeback bill over the window
-   * (`v_finance_bill_chargeback`, scope-clamped). The chargeback-mode "Billed teammates"
-   * tile. Anthropic-lane (per-teammate); Copilot has no per-user chargeback (pooled).
-   */
-  billedTeammates: number
-  /** §B — Σ ANTHROPIC bill tokens over the window (`v_finance_bill_chargeback.bill_tokens`). */
-  billedTokens: number
-  /** §B — Anthropic chargeable ÷ billed teammates (0 when none; Anthropic-only, not Copilot). */
-  avgChargePerBilledUser: number
-  /**
-   * §B — copilot chargeback is ON but the window is NOT month-aligned, so the pooled
-   * (monthly) Copilot net is withheld from `chargeableUsd` (never a partial slice, never
-   * a silent $0). The UI shows a "Copilot pooled (monthly) not shown for partial-month
-   * ranges" caveat instead.
-   */
-  copilotPartialMonthUnavailable: boolean
-  /** MAX(ts_event) in the month (`YYYY-MM-DD`), or null when the month has no data. */
-  asOfDate: string | null
-  /** Earliest month with data in scope (`YYYY-MM`), or null. */
-  monthFloor: string | null
-}
-
-interface KpiRow extends Record<string, unknown> {
-  genuine: string
-  tokens: string
-  active_users: number
-  as_of: string | null
-}
-interface ChargeRow extends Record<string, unknown> {
-  anthropic: string
-  copilot: string
-}
-interface FloorRow extends Record<string, unknown> {
-  floor_month: string | null
-}
+/**
+ * The Regional KPI row is the engine's KPI core exactly — every field it defines
+ * and none beyond it. The §A month-over-month trio the whole-company scope adds
+ * (`prevGenuineUsd` / `momDeltaPct` / `avgPerUserUsd`) is not rendered at this
+ * scope and is not computed for it.
+ */
+export type RegionalKpis = ReportKpiCore
 
 /**
  * The Regional KPI row: usage-lane genuine total + the finance-lane chargeable
- * pair. `copilotChargeback` decides whether the Copilot pooled net is folded
- * into `chargeableUsd` (chargeback mode) or held back with a "pending" marker
- * (pool-utilisation mode) — build-design §6.
+ * pair, each clamped by this scope's own predicate for its own lane.
+ *
+ * The §A clamp addresses UNALIASED `region_id` / `org_unit_id` because the
+ * engine's totals query selects from `v_complete_usage` with no alias; the §B
+ * clamp addresses `region_id` / `cost_owning_unit_id`. Both are the SAME
+ * predicates the region's series queries pass, so a tile and the card under it
+ * cannot be summed over different scopes.
+ *
+ * `scope.scopeKey` is the month floor's cache identity, and it is built beside
+ * `usageScope` in the resolver (see RegionalScope.scopeKey) so the two cannot
+ * drift; the floor's predicate itself comes from the §A clamp passed here.
  */
 export async function fetchRegionalKpis(
   tx: Tx,
@@ -319,122 +448,34 @@ export async function fetchRegionalKpis(
   range: UsageWindow,
   opts: { copilotChargeback: boolean; momMonthRange?: MonthRangeUtc | null; now?: Date },
 ): Promise<RegionalKpis> {
-  const usageScope = scope.usageScope('region_id', 'org_unit_id')
-  const [totals] = [
-    ...(await tx.execute<KpiRow>(sql`
-      SELECT COALESCE(SUM(cost_usd), 0)::text AS genuine,
-             COALESCE(SUM(tokens), 0)::text AS tokens,
-             COUNT(DISTINCT teammate_id)::int AS active_users,
-             to_char(MAX(ts_event), 'YYYY-MM-DD') AS as_of
-      FROM v_complete_usage
-      WHERE ${usageScope}
-        AND ts_event >= ${range.startIso}::timestamptz
-        AND ts_event <  ${range.endIso}::timestamptz`)),
-  ]
+  return fetchKpiCore(
+    tx,
+    {
+      usage: clampedUsage(scope.usageScope('region_id', 'org_unit_id')),
+      finance: clampedFinance(scope.financeScope('region_id', 'cost_owning_unit_id')),
+      monthFloorKey: scope.scopeKey,
+    },
+    range,
+    opts,
+  )
+}
 
-  const [floor] = [
-    ...(await tx.execute<FloorRow>(sql`
-      SELECT to_char(MIN(ts_event), 'YYYY-MM') AS floor_month
-      FROM v_complete_usage
-      WHERE ${usageScope}`)),
-  ]
-
-  const startDate = range.startIso.slice(0, 10)
-  const endDate = range.endIso.slice(0, 10)
-  // §B ANTHROPIC chargeable + the per-teammate bill grain — BOTH from the DAILY bill lane
-  // (`v_finance_bill_chargeback`, `period_date`-windowed, scope-clamped by the SAME finance
-  // predicate). The month view's Anthropic portion is EXACTLY this view rolled to month, so
-  // reading it daily is correct for ANY window — a non-month-aligned custom range no longer
-  // drops the charge to $0 — and keeps the Anthropic chargeable, billed teammates + billed
-  // tokens on ONE window+grain (so `avgChargePerBilledUser` divides same-day-set operands).
-  // Copilot is ABSENT from this view (pooled, per-org, no per-teammate row).
-  const [billed] = [
-    ...(await tx.execute<{ anthropic: string; billed_teammates: number; billed_tokens: string }>(sql`
-      SELECT COALESCE(SUM(bill_usd), 0)::text AS anthropic,
-             COUNT(DISTINCT teammate_id)::int AS billed_teammates,
-             COALESCE(SUM(bill_tokens), 0)::text AS billed_tokens
-      FROM v_finance_bill_chargeback
-      WHERE ${scope.financeScope('region_id', 'cost_owning_unit_id')}
-        AND period_date >= ${startDate}::date AND period_date < ${endDate}::date`)),
-  ]
-
-  // §B COPILOT pooled net is POOLED-MONTHLY (`v_finance_copilot_pool_chargeback`, month
-  // grain — no daily grain). Keep it month-grained (summed over every `period_month` inside
-  // the window, same convention the Across bill query uses) and fold on top only in
-  // chargeback mode. Scope-clamped by the SAME finance predicate. CHARGEABLE lanes only
-  // (registry-driven, mig 0085): copilot-license + copilot-usage; copilot-unclassified
-  // NEVER enters a chargeable figure (design D2).
-  const [charge] = [
-    ...(await tx.execute<{ copilot: string }>(sql`
-      SELECT COALESCE(SUM(charge_usd), 0)::text AS copilot
-      FROM v_finance_chargeback_month
-      WHERE ${scope.financeScope('region_id', 'cost_owning_unit_id')}
-        AND tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})
-        AND period_month >= ${startDate}::date AND period_month < ${endDate}::date`)),
-  ]
-
-  // §B chargeback MoM is computed ONLY for a fully-CLOSED calendar month. The bill lane
-  // accrues intra-month, so an in-progress month is a PARTIAL MTD accrual; comparing it
-  // against a WHOLE prior month understates it (a spurious decline), and month-grained
-  // data CANNOT be day-paced the way the usage lane is. So the MoM is withheld (null)
-  // until the viewed month closes. Range mode (no momMonthRange) is null for the same reason.
-  const now = opts.now ?? new Date()
-  // Closed = strictly BEFORE the current month (YYYY-MM string compare); `!==` would
-  // treat a FUTURE month as closed vs the still-open current month (round-2 #5).
-  const chargeMomClosed =
-    opts.momMonthRange != null && opts.momMonthRange.month < monthKeyUtc(now)
-  let prevChargeableAnthropic = 0
-  let prevChargeableCopilot = 0
-  if (chargeMomClosed) {
-    const prevMonth = monthRangeUtc(
-      monthKeyUtc(new Date(opts.momMonthRange!.monthStartUtc.getTime() - 1)),
-    )
-    const prevStart = prevMonth.startIso.slice(0, 10)
-    const prevEnd = prevMonth.endIso.slice(0, 10)
-    // Anthropic = everything OUTSIDE the unified GitHub firewall set (every lane id
-    // + §A tool literal — never the narrower chargeback-lane list, r1 finding 1);
-    // copilot = the CHARGEABLE lanes only (unclassified never charges).
-    const [prevCharge] = [
-      ...(await tx.execute<ChargeRow>(sql`
-        SELECT COALESCE(SUM(charge_usd) FILTER (WHERE tool NOT IN (${laneListSql(GITHUB_FIREWALL_EXCLUSIONS)})), 0)::text AS anthropic,
-               COALESCE(SUM(charge_usd) FILTER (WHERE tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})), 0)::text  AS copilot
-        FROM v_finance_chargeback_month
-        WHERE ${scope.financeScope('region_id', 'cost_owning_unit_id')}
-          AND period_month >= ${prevStart}::date AND period_month < ${prevEnd}::date`)),
-    ]
-    prevChargeableAnthropic = Number(prevCharge?.anthropic ?? 0)
-    prevChargeableCopilot = Number(prevCharge?.copilot ?? 0)
-  }
-
-  // Anthropic from the DAILY bill lane (windowed); Copilot from the MONTH pool view.
-  const anthropicChargeableUsd = Number(billed?.anthropic ?? 0)
-  const copilotChargeableUsd = Number(charge?.copilot ?? 0)
-  // The Copilot pool is POOLED-MONTHLY (no daily grain), so it may only be folded over a
-  // MONTH-ALIGNED window. Over a partial-month range it is withheld (never a partial slice,
-  // never a silent $0 under a "+ Copilot pooled net" label) and flagged for the UI.
-  const isMonthAligned = isMonthAlignedWindow(range)
-  const foldCopilot = opts.copilotChargeback && isMonthAligned
-  const copilotPartialMonthUnavailable = opts.copilotChargeback && !isMonthAligned
-  const chargeableUsd = anthropicChargeableUsd + (foldCopilot ? copilotChargeableUsd : 0)
-  const prevChargeableUsd = prevChargeableAnthropic + (foldCopilot ? prevChargeableCopilot : 0)
-  const billedTeammates = Number(billed?.billed_teammates ?? 0)
-  return {
-    genuineUsd: Number(totals?.genuine ?? 0),
-    anthropicChargeableUsd,
-    copilotChargeableUsd,
-    chargeableUsd,
-    tokens: Number(totals?.tokens ?? 0),
-    activeUsers: Number(totals?.active_users ?? 0),
-    prevChargeableUsd,
-    chargeMomDeltaPct:
-      prevChargeableUsd > 0 ? (chargeableUsd - prevChargeableUsd) / prevChargeableUsd : null,
-    billedTeammates,
-    billedTokens: Number(billed?.billed_tokens ?? 0),
-    avgChargePerBilledUser: billedTeammates > 0 ? anthropicChargeableUsd / billedTeammates : 0,
-    copilotPartialMonthUnavailable,
-    asOfDate: totals?.as_of ?? null,
-    monthFloor: floor?.floor_month ?? null,
-  }
+// ── Per-person KPI (the "Median per person" tile and its percentiles) ────────
+/**
+ * The region-clamped §A per-person cohort — the SAME engine read the whole-company
+ * width uses (engine/per-person.ts), with this scope's §A predicate.
+ *
+ * The clamp addresses UNALIASED `region_id` / `org_unit_id`, matching the cohort
+ * query's own FROM, exactly as `fetchRegionalKpis` above does — so the median's
+ * denominator and the `activeUsers` count beside it are summed over one scope.
+ */
+export async function fetchRegionalPerPerson(
+  tx: Tx,
+  scope: RegionalScope,
+  range: UsageWindow,
+  opts: { momMonthRange?: MonthRangeUtc | null; asOfDate?: string | null } = {},
+): Promise<PerPersonKpi> {
+  return fetchPerPerson(tx, clampedUsage(scope.usageScope('region_id', 'org_unit_id')), range, opts)
 }
 
 // ── Vendor split (drill donut) ───────────────────────────────────────────────
@@ -452,9 +493,7 @@ export async function fetchRegionalVendorSplit(
 ): Promise<VendorSplit> {
   const [r] = [
     ...(await tx.execute<{ claude: string; copilot: string; other: string }>(sql`
-      SELECT COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool = 'claude-code'), 0)::text AS claude,
-             COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool = 'copilot-cli'), 0)::text AS copilot,
-             COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool NOT IN ('claude-code', 'copilot-cli') OR u.tool IS NULL), 0)::text AS other
+      SELECT ${vendorSplitAggregates}
       FROM v_complete_usage u
       WHERE ${scope.usageScope('u.region_id', 'u.org_unit_id')}
         AND u.ts_event >= ${range.startIso}::timestamptz
@@ -501,20 +540,17 @@ export async function fetchRegionalPractices(
     value: string
     is_default: boolean | null
   }>(sql`
-    SELECT cou.id::text AS key, cou.display_name AS label,
-           (cou.code = 'default') AS is_default,
+    SELECT cou.cost_owning_unit_id::text AS key, cou.cost_owning_unit_name AS label,
+           (cou.cost_owning_unit_code = 'default') AS is_default,
            COALESCE(SUM(u.cost_usd), 0)::text AS value
     FROM v_complete_usage u
-    LEFT JOIN LATERAL (
-      SELECT anc.id, anc.display_name, anc.code
-      FROM org_unit home JOIN org_unit anc ON home.path <@ anc.path
-      WHERE home.id = u.org_unit_id AND anc.is_cost_owning_unit = TRUE AND anc.retired_at IS NULL
-      ORDER BY nlevel(anc.path) DESC LIMIT 1
-    ) cou ON TRUE
+    -- ONE cost-owner resolution (v_org_unit_cost_owner, mig 0114), not a
+    -- correlated LATERAL per usage row. LEFT, so unhomed spend keeps its row.
+    LEFT JOIN v_org_unit_cost_owner cou ON cou.org_unit_id = u.org_unit_id
     WHERE ${scope.usageScope('u.region_id', 'u.org_unit_id')}
       AND u.ts_event >= ${range.startIso}::timestamptz
       AND u.ts_event <  ${range.endIso}::timestamptz
-    GROUP BY cou.id, cou.display_name, cou.code
+    GROUP BY cou.cost_owning_unit_id, cou.cost_owning_unit_name, cou.cost_owning_unit_code
     ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)
   return [...rows].map((r) => ({
     key: r.key ?? 'unattributed',
@@ -587,8 +623,8 @@ export async function fetchRegionalChargebackByCostCentre(
     GROUP BY c.cost_owning_unit_id, cou.display_name
     ORDER BY SUM(c.value) DESC NULLS LAST`)
   return [...rows].map((r) => ({
-    key: r.cou_id ?? 'unallocated',
-    label: r.label ?? 'Unallocated',
+    key: r.cou_id ?? UNALLOCATED_KEY,
+    label: r.label ?? UNALLOCATED_LABEL,
     value: Number(r.value),
   }))
 }
@@ -596,57 +632,79 @@ export async function fetchRegionalChargebackByCostCentre(
 // ── Daily metrics (§A usage sparkline series, region-scoped) ──────────────────
 /**
  * The region-scoped §A per-day usage series over the window (`v_complete_usage`) —
- * one row per UTC day with usage: `SUM(cost_usd)`, `SUM(tokens)`,
- * `COUNT(DISTINCT teammate_id)`, ordered by day. Feeds the KPI-tile sparklines,
- * mirroring the Across variant one tier down (scope-clamped). Pure usage lane.
+ * one row per UTC day in the window THAT HAS HAPPENED — zero-filled, so a day
+ * with no in-scope usage is present with 0s rather than absent: `SUM(cost_usd)`,
+ * `SUM(tokens)`, `COUNT(DISTINCT teammate_id)`, ordered by day. That matters
+ * because this feeds the KPI-tile sparklines: dropping empty days would compress
+ * scattered activity into contiguous points, and emitting days that have not
+ * occurred would draw spend collapsing to zero. The exact bound lives on
+ * `fetchDailyMetrics` (engine/usage-series.ts).
+ * Mirrors the Across variant one tier down (scope-clamped). Pure usage lane.
  */
 export async function fetchRegionalDailyMetrics(
   tx: Tx,
   scope: RegionalScope,
   window: UsageWindow,
+  clock: ServerClock,
 ): Promise<DailyMetric[]> {
-  const startDate = window.startIso.slice(0, 10)
-  const endDate = window.endIso.slice(0, 10)
-  // Zero-fill EVERY calendar day in the window (generate_series LEFT JOIN the daily
-  // aggregate) so a day with NO in-scope usage renders a genuine 0 — the sparkline's
-  // temporal shape stays accurate instead of compressing scattered activity into
-  // contiguous points. `endDate` is EXCLUSIVE, so the series stops one day before it.
-  const rows = await tx.execute<{
-    day: string
-    genuine: string
-    tokens: string
-    active_users: number
-  }>(sql`
-    WITH days AS (
-      SELECT generate_series(
-               ${startDate}::timestamp,
-               ${endDate}::timestamp - INTERVAL '1 day',
-               INTERVAL '1 day'
-             )::date AS day
-    ),
-    agg AS (
-      SELECT date_trunc('day', u.ts_event)::date AS day,
-             SUM(u.cost_usd) AS genuine,
-             SUM(u.tokens) AS tokens,
-             COUNT(DISTINCT u.teammate_id) AS active_users
-      FROM v_complete_usage u
-      WHERE ${scope.usageScope('u.region_id', 'u.org_unit_id')}
-        AND u.ts_event >= ${window.startIso}::timestamptz
-        AND u.ts_event <  ${window.endIso}::timestamptz
-      GROUP BY 1
-    )
-    SELECT to_char(d.day, 'YYYY-MM-DD') AS day,
-           COALESCE(a.genuine, 0)::text AS genuine,
-           COALESCE(a.tokens, 0)::text AS tokens,
-           COALESCE(a.active_users, 0)::int AS active_users
-    FROM days d LEFT JOIN agg a ON a.day = d.day
-    ORDER BY d.day`)
-  return [...rows].map((r) => ({
-    day: r.day,
-    genuineUsd: Number(r.genuine),
-    tokens: Number(r.tokens),
-    activeUsers: Number(r.active_users),
-  }))
+  return fetchDailyMetrics(
+    tx,
+    clampedUsage(scope.usageScope('u.region_id', 'u.org_unit_id')),
+    window,
+    clock,
+  )
+}
+
+// ── §A budget coverage (the denominator beside the region's own headline) ────
+/**
+ * The region-scoped budget-coverage decomposition of `fetchRegionalKpis`'
+ * `genuineUsd` — how much of this region's attributed usage sits on a budgeted
+ * project and how much sits outside the budget lens.
+ *
+ * Clamped by the SAME usage predicate `fetchRegionalDailyMetrics` uses
+ * (`scope.usageScope('u.region_id', 'u.org_unit_id')`), so its `totalUsd` IS the
+ * region's headline and the parts foot to the number they are rendered beside.
+ * Pure §A — no bill-lane operand (contract C2).
+ *
+ * "Region-scoped" is the ADMIN reading of this scope, and it is only one of three:
+ * a drill clamps to the drilled unit, and a manager or developer clamps to their own
+ * subtree. `scope.scopeLabel` is that distinction carried in words, taken from the same
+ * object as the predicate so the name and the numbers cannot come from different scopes.
+ */
+export async function fetchRegionalUsageBudgetCoverage(
+  tx: Tx,
+  scope: RegionalScope,
+  window: UsageWindow,
+): Promise<UsageBudgetCoverage> {
+  return fetchUsageBudgetCoverage(
+    tx,
+    clampedUsage(scope.usageScope('u.region_id', 'u.org_unit_id')),
+    window,
+    scope.scopeLabel,
+  )
+}
+
+// ── §B behavioural exposure (model-tier bands over provider_usage_fact) ──────
+/**
+ * The region-scoped Behavioural-exposure card — the same primitive the
+ * whole-company surface calls, with the scope predicate supplied instead of
+ * declared away. Clamped by the SAME finance predicate the KPI charge uses
+ * (`scope.financeScope('region_id', 'cost_owning_unit_id')`), which is also the
+ * clamp `provider_usage_fact` can serve: it stamps `region_id` /
+ * `cost_owning_unit_id` at ingest (`0118:70-79`).
+ *
+ * §B lane — NEVER summed with the §A `genuineUsd` on the same page (contract C2).
+ */
+export async function fetchRegionalTierExposure(
+  tx: Tx,
+  scope: RegionalScope,
+  window: UsageWindow,
+): Promise<TierExposure> {
+  return fetchTierExposure(
+    tx,
+    clampedFinance(scope.financeScope('region_id', 'cost_owning_unit_id')),
+    window,
+  )
 }
 
 // ── §B chargeback daily trend (bill lane — day-grained, region-scoped) ───────
@@ -654,7 +712,8 @@ export async function fetchRegionalDailyMetrics(
  * The region-scoped §B ANTHROPIC chargeback per-day series over the window
  * (`v_finance_bill_chargeback`, the per-teammate DAILY bill lane), scope-clamped by the
  * SAME finance predicate the KPI charge uses so the two can never diverge. Zero-filled
- * across the window (like the §A daily metrics). Anthropic-only (Copilot pooled/monthly).
+ * across every day of the window that has HAPPENED (like the §A daily metrics — same
+ * bound, see engine/chargeback-series.ts). Anthropic-only (Copilot pooled/monthly).
  * The region-scoped mirror of `fetchAcrossChargebackTrend`; feeds the chargeback-mode
  * spend-trend card + the Chargeable KPI-tile sparkline. Never summed with §A usage.
  */
@@ -662,33 +721,17 @@ export async function fetchRegionalChargebackTrend(
   tx: Tx,
   scope: RegionalScope,
   window: UsageWindow,
+  clock: ServerClock,
 ): Promise<ChargeDailyPoint[]> {
-  const startDate = window.startIso.slice(0, 10)
-  const endDate = window.endIso.slice(0, 10)
-  const rows = await tx.execute<{ day: string; charge: string }>(sql`
-    WITH days AS (
-      SELECT generate_series(
-               ${startDate}::timestamp,
-               ${endDate}::timestamp - INTERVAL '1 day',
-               INTERVAL '1 day'
-             )::date AS day
-    ),
-    agg AS (
-      SELECT period_date AS day, SUM(bill_usd) AS charge
-      FROM v_finance_bill_chargeback
-      WHERE ${scope.financeScope('region_id', 'cost_owning_unit_id')}
-        AND period_date >= ${startDate}::date AND period_date < ${endDate}::date
-      GROUP BY period_date
-    )
-    SELECT to_char(d.day, 'YYYY-MM-DD') AS day, COALESCE(a.charge, 0)::text AS charge
-    FROM days d LEFT JOIN agg a ON a.day = d.day
-    ORDER BY d.day`)
-  return [...rows].map((r) => ({ day: r.day, chargeUsd: Number(r.charge) }))
+  return fetchChargebackTrend(
+    tx,
+    clampedFinance(scope.financeScope('region_id', 'cost_owning_unit_id')),
+    window,
+    clock,
+  )
 }
 
 // ── §B chargeback lane trend (bill lane, per-lane — lane-visuals V2-Regional) ─
-/** Canonical lane order index for deterministic per-day lane ordering. */
-const LANE_ORDER = new Map<string, number>(VENDOR_LANES.map((l, i) => [l, i]))
 
 /**
  * The per-LANE widening of {@link fetchRegionalChargebackTrend}: the SAME
@@ -706,63 +749,33 @@ export async function fetchRegionalChargebackLaneTrend(
   scope: RegionalScope,
   window: UsageWindow,
 ): Promise<ChargeLanePoint[]> {
-  const startDate = window.startIso.slice(0, 10)
-  const endDate = window.endIso.slice(0, 10)
-  const rows = await tx.execute<{ day: string; tool: string | null; charge: string }>(sql`
-    SELECT to_char(period_date, 'YYYY-MM-DD') AS day, tool, SUM(bill_usd)::text AS charge
-    FROM v_finance_bill_chargeback
-    WHERE ${scope.financeScope('region_id', 'cost_owning_unit_id')}
-      AND period_date >= ${startDate}::date AND period_date < ${endDate}::date
-    GROUP BY period_date, tool
-    ORDER BY 1`)
-  // Merge tools sharing a lane (the mapping is N:1 by contract) and emit
-  // (day asc, canonical lane order) deterministically.
-  const byDayLane = new Map<string, number>()
-  for (const r of rows) {
-    const k = `${r.day} ${chargeToVendor(r.tool)}`
-    byDayLane.set(k, (byDayLane.get(k) ?? 0) + Number(r.charge))
-  }
-  return [...byDayLane.entries()]
-    .map(([k, chargeUsd]) => {
-      const [day, lane] = k.split(' ') as [string, string]
-      return { day, lane, chargeUsd }
-    })
-    .sort(
-      (a, b) =>
-        (a.day < b.day ? -1 : a.day > b.day ? 1 : 0) ||
-        (LANE_ORDER.get(a.lane) ?? 99) - (LANE_ORDER.get(b.lane) ?? 99),
-    )
+  return fetchChargebackLaneTrend(
+    tx,
+    clampedFinance(scope.financeScope('region_id', 'cost_owning_unit_id')),
+    window,
+  )
 }
 
-// ── §B billed showback weekly lanes (bill lane — the usage-view hero, Regional) ─
+// ── §A per-surface weekly usage lanes (the usage-view hero, Regional) ────────
 /**
- * The region-scoped BILLED showback weekly lane series over the window — the
- * regional mirror of `fetchAcrossShowbackWeeklyLanes` (lane-visuals iter-2 I1),
- * REGION-CLAMPED by the SAME finance predicate every other §B regional query
- * uses (`v_finance_bill_showback` carries `region_id` + `cost_owning_unit_id`,
- * so the clamp is identical to the chargeback lane trend's and the two can
- * never diverge). SHOWBACK basis (incl. NFR/exempt); §A GitHub usage tools
- * firewalled OUT (GITHUB_FIREWALL_EXCLUSIONS). Σ cells == the scope's
- * GitHub-excluded showback window total, cent-exact (test-pinned). NOT
- * zero-filled; NEVER summed with §A usage.
+ * The region-scoped canonical §A USAGE weekly lane series over the window — the
+ * regional mirror of `fetchAcrossUsageWeeklyLanes` (requirement 1),
+ * REGION-CLAMPED by the SAME usage-lane predicate every other §A regional query
+ * uses (`scope.usageScope('region_id', 'org_unit_id')` — identical to
+ * `fetchRegionalKpis`', so this can never diverge from the region's genuine
+ * headline). REPLACES the former billed-showback-basis fetcher
+ * (`v_finance_bill_showback`) that fed this same hero while it was still
+ * labelled "usage". EVERY §A surface rides this cell natively (no GitHub
+ * firewall — this view IS the usage basis). Σ cells over this window ==
+ * `fetchRegionalKpis(...).genuineUsd` for the SAME scope + window, cent-exact
+ * (test-pinned). NOT zero-filled; NEVER summed with any §B chargeback figure.
  */
-export async function fetchRegionalShowbackWeeklyLanes(
+export async function fetchRegionalUsageWeeklyLanes(
   tx: Tx,
   scope: RegionalScope,
   window: UsageWindow,
-): Promise<ShowbackWeeklyLaneCell[]> {
-  const startDate = window.startIso.slice(0, 10)
-  const endDate = window.endIso.slice(0, 10)
-  const rows = await tx.execute<{ week_start: string; tool: string | null; usd: string }>(sql`
-    SELECT date_trunc('week', period_date)::date::text AS week_start, tool,
-           COALESCE(SUM(bill_usd), 0)::text AS usd
-    FROM v_finance_bill_showback
-    WHERE ${scope.financeScope('region_id', 'cost_owning_unit_id')}
-      AND period_date >= ${startDate}::date AND period_date < ${endDate}::date
-      AND (tool NOT IN (${laneListSql(GITHUB_FIREWALL_EXCLUSIONS)}) OR tool IS NULL)
-    GROUP BY 1, tool
-    ORDER BY 1`)
-  return mergeWeeklyLaneRows(rows)
+): Promise<UsageSurfaceWeeklyCell[]> {
+  return fetchUsageWeeklyLanes(tx, clampedUsage(scope.usageScope('region_id', 'org_unit_id')), window)
 }
 
 // ── §B chargeback lane totals (bill lane — the split-donut operand, V2-Regional) ─
@@ -791,39 +804,12 @@ export async function fetchRegionalChargebackLanes(
   window: UsageWindow,
   opts: { copilotChargeback: boolean },
 ): Promise<ChargebackLaneRow[]> {
-  const startDate = window.startIso.slice(0, 10)
-  const endDate = window.endIso.slice(0, 10)
-  const byLane = new Map<Vendor, number>()
-
-  const anthropicRows = await tx.execute<{ tool: string | null; charge: string }>(sql`
-    SELECT tool, SUM(bill_usd)::text AS charge
-    FROM v_finance_bill_chargeback
-    WHERE ${scope.financeScope('region_id', 'cost_owning_unit_id')}
-      AND period_date >= ${startDate}::date AND period_date < ${endDate}::date
-    GROUP BY tool`)
-  for (const r of anthropicRows) {
-    const lane = chargeToVendor(r.tool)
-    byLane.set(lane, (byLane.get(lane) ?? 0) + Number(r.charge))
-  }
-
-  // Copilot pooled lanes: month-grained, so only over a month-aligned window and
-  // only once chargeback mode is validated (the KPI's exact gate).
-  if (opts.copilotChargeback && isMonthAlignedWindow(window)) {
-    const poolRows = await tx.execute<{ tool: string | null; charge: string }>(sql`
-      SELECT tool, SUM(charge_usd)::text AS charge
-      FROM v_finance_copilot_pool_chargeback
-      WHERE ${scope.financeScope('region_id', 'cost_owning_unit_id')}
-        AND period_month >= ${startDate}::date AND period_month < ${endDate}::date
-      GROUP BY tool`)
-    for (const r of poolRows) {
-      const lane = chargeToVendor(r.tool)
-      byLane.set(lane, (byLane.get(lane) ?? 0) + Number(r.charge))
-    }
-  }
-
-  return [...byLane.entries()]
-    .sort(([a], [b]) => (LANE_ORDER.get(a) ?? 99) - (LANE_ORDER.get(b) ?? 99))
-    .map(([lane, chargeUsd]) => ({ lane, chargeUsd }))
+  return fetchChargebackLanes(
+    tx,
+    clampedFinance(scope.financeScope('region_id', 'cost_owning_unit_id')),
+    window,
+    opts,
+  )
 }
 
 // ── §B chargeback day-of-week (bill lane — "when spend happens", region-scoped) ─
@@ -854,142 +840,69 @@ export async function fetchRegionalChargebackDow(
 
 // ── Drivers (axis-switchable) ────────────────────────────────────────────────
 /**
- * Ranked drivers for one axis, in-scope denominators, summing back to the
- * genuine headline (build-design §7(4)). The NULL bucket (unattributed model /
- * untagged project / no-practice) is always present so the sum-back holds.
+ * Ranked drivers for one axis, region-clamped, with in-scope denominators that
+ * sum back to the genuine headline (build-design §7(4)).
+ *
+ * The clamp is `u.`-aliased because the engine aliases the §A lane `u` and three
+ * of its branches JOIN a second relation — the same contract
+ * `fetchRegionalDailyMetrics` passes. REGIONAL_DRIVER_AXES is what gates the axis
+ * a request may name: the engine also knows a `region` axis, which is meaningless
+ * inside a single-region clamp and is not offered here.
  */
 export async function fetchRegionalDrivers(
   tx: Tx,
   scope: RegionalScope,
   range: UsageWindow,
   axis: RegionalDriverAxis,
-): Promise<{ rows: DriverRow[]; headlineUsd: number }> {
-  const usageScope = scope.usageScope('u.region_id', 'u.org_unit_id')
-  const window = sql`u.ts_event >= ${range.startIso}::timestamptz AND u.ts_event < ${range.endIso}::timestamptz`
-
-  interface Raw extends Record<string, unknown> {
-    key: string | null
-    label: string | null
-    value: string
-    pooled: boolean
-  }
-  let raws: Raw[]
-  if (axis === 'teammate') {
-    raws = [
-      ...(await tx.execute<Raw>(sql`
-        SELECT u.teammate_id::text AS key,
-               COALESCE(t.display_name, t.email) AS label,
-               COALESCE(SUM(u.cost_usd), 0)::text AS value,
-               -- A teammate whose entire usage is Copilot is pooled-usage (never a
-               -- per-user charge); mixed/Claude users are indicative (build-design §5).
-               (COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool = 'copilot-cli'), 0)
-                 = COALESCE(SUM(u.cost_usd), 0) AND COALESCE(SUM(u.cost_usd), 0) > 0) AS pooled
-        FROM v_complete_usage u JOIN teammate t ON t.id = u.teammate_id
-        WHERE ${usageScope} AND ${window}
-        GROUP BY u.teammate_id, t.display_name, t.email
-        ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)),
-    ]
-  } else if (axis === 'model') {
-    raws = [
-      ...(await tx.execute<Raw>(sql`
-        SELECT u.model AS key, u.model AS label, COALESCE(SUM(u.cost_usd), 0)::text AS value, FALSE AS pooled
-        FROM v_complete_usage u
-        WHERE ${usageScope} AND ${window}
-        GROUP BY u.model
-        ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)),
-    ]
-  } else if (axis === 'project') {
-    raws = [
-      ...(await tx.execute<Raw>(sql`
-        SELECT p.id::text AS key, COALESCE(p.display_name, p.code) AS label,
-               COALESCE(SUM(u.cost_usd), 0)::text AS value, FALSE AS pooled
-        FROM v_complete_usage u LEFT JOIN project p ON p.id = u.project_id
-        WHERE ${usageScope} AND ${window}
-        GROUP BY p.id, p.display_name, p.code
-        ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)),
-    ]
-  } else {
-    // practice
-    raws = [
-      ...(await tx.execute<Raw>(sql`
-        SELECT cou.id::text AS key, cou.display_name AS label, COALESCE(SUM(u.cost_usd), 0)::text AS value, FALSE AS pooled
-        FROM v_complete_usage u
-        LEFT JOIN LATERAL (
-          SELECT anc.id, anc.display_name
-          FROM org_unit home JOIN org_unit anc ON home.path <@ anc.path
-          WHERE home.id = u.org_unit_id AND anc.is_cost_owning_unit = TRUE AND anc.retired_at IS NULL
-          ORDER BY nlevel(anc.path) DESC LIMIT 1
-        ) cou ON TRUE
-        WHERE ${usageScope} AND ${window}
-        GROUP BY cou.id, cou.display_name
-        ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)),
-    ]
-  }
-
-  const headlineUsd = raws.reduce((a, r) => a + Number(r.value), 0)
-  const nullLabel =
-    axis === 'model' ? 'Unattributed' : axis === 'project' ? 'Untagged' : 'Unattributed'
-  const rows: DriverRow[] = raws.map((r) => {
-    const usd = Number(r.value)
-    return {
-      key: r.key ?? `__null_${axis}`,
-      label: r.label ?? nullLabel,
-      usd,
-      sharePct: headlineUsd > 0 ? usd / headlineUsd : 0,
-      spendClass: r.pooled ? 'pooled-usage' : 'indicative',
-    }
-  })
-  return { rows, headlineUsd }
+  lens: SpendLens = 'usage',
+  /** `copilotChargebackEnabled()` — gates the POOLED Copilot chargeback arm. */
+  opts: { copilotChargeback?: boolean } = {},
+): Promise<DriversResult> {
+  return fetchDrivers(
+    tx,
+    clampedUsage(scope.usageScope('u.region_id', 'u.org_unit_id')),
+    range,
+    axis,
+    lens,
+    {
+      /*
+       * The §B clamp, `u.`-aliased to match the pooled view's alias. It is the
+       * OTHER pair of columns (`cost_owning_unit_id`, not `org_unit_id`): the
+       * pooled Copilot charge homes through the org→CoU map, and a non-cost-
+       * owning child unit exists in the §A clamp and not this one.
+       */
+      financeScope: clampedFinance(scope.financeScope('u.region_id', 'u.cost_owning_unit_id')),
+      copilotChargeback: opts.copilotChargeback ?? false,
+      // This scope's OWN gate, so a "break down by …" gap sentence can only name
+      // a pivot this reader actually has. `region` is meaningless inside a
+      // single-region clamp and has never been offered here.
+      offeredAxes: REGIONAL_DRIVER_AXES,
+    },
+  )
 }
 
 // ── Trend (day grain, vendor-stacked) ────────────────────────────────────────
-export interface TrendPoint {
-  day: string
-  /** §A trend key — the three named §A usage tools + the live 'other' catch-all
-   *  (the three-lane §A ceiling, lane-visuals V2-Regional wire widening; mirrors
-   *  `AcrossTrendPoint.key` one tier down). Historically the DISPLAY names
-   *  ('Claude'/'Copilot'/'Other') — now registry-driven tool ids. */
-  key: 'claude-code' | 'copilot-cli' | 'copilot-agent' | 'other'
-  value: number
-}
+/*
+ * Re-exported from `engine/trend-series`, where the fetcher now lives. Kept as a
+ * named export here so existing importers of `TrendPoint` from this module are
+ * untouched by the move.
+ */
+export type { TrendPoint } from './engine/trend-series'
 
 /**
  * Per-day §A vendor split over the window, for the stacked bars — one point per
  * (day, lane) with a positive cost. Registry-driven (SECTION_A_USAGE_TOOLS, the
  * three-lane §A ceiling) + the live `other` catch-all, mirroring
- * `fetchAcrossTrend` one tier down but scope-clamped. `copilot-agent` is
- * structurally absent from `v_complete_usage` today (mig 0086), so its points
- * only appear once the owner follow-up lands the completeness feed.
+ * `fetchAcrossTrend` one tier down but scope-clamped. `copilot-agent` is a real,
+ * live `v_complete_usage` lane (migration 0101's ingest-only completeness arm),
+ * so its points appear on any day the coding agent is used.
  */
 export async function fetchRegionalTrend(
   tx: Tx,
   scope: RegionalScope,
   range: UsageWindow,
 ): Promise<{ series: TrendPoint[]; windowDays: number }> {
-  const rows = await tx.execute<{ day: string; claude: string; copilot: string; agent: string; other: string }>(sql`
-    SELECT to_char(date_trunc('day', u.ts_event), 'YYYY-MM-DD') AS day,
-           COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool = ${CLAUDE_CODE_TOOL}), 0)::text AS claude,
-           COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool = ${COPILOT_CLI_TOOL}), 0)::text AS copilot,
-           COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool = ${COPILOT_AGENT_TOOL}), 0)::text AS agent,
-           COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool NOT IN (${laneListSql(SECTION_A_USAGE_TOOLS)}) OR u.tool IS NULL), 0)::text AS other
-    FROM v_complete_usage u
-    WHERE ${scope.usageScope('u.region_id', 'u.org_unit_id')}
-      AND u.ts_event >= ${range.startIso}::timestamptz
-      AND u.ts_event <  ${range.endIso}::timestamptz
-    GROUP BY 1 ORDER BY 1`)
-  const series: TrendPoint[] = []
-  for (const r of rows) {
-    if (Number(r.claude) > 0) series.push({ day: r.day, key: 'claude-code', value: Number(r.claude) })
-    if (Number(r.copilot) > 0) series.push({ day: r.day, key: 'copilot-cli', value: Number(r.copilot) })
-    if (Number(r.agent) > 0) series.push({ day: r.day, key: 'copilot-agent', value: Number(r.agent) })
-    if (Number(r.other) > 0) series.push({ day: r.day, key: 'other', value: Number(r.other) })
-  }
-  // Window length in days — the half-open [start, end) span. For a month window
-  // this is the month length (byte-identical); for a custom range it is the span.
-  const windowDays = Math.round(
-    (new Date(range.endIso).getTime() - new Date(range.startIso).getTime()) / 86_400_000,
-  )
-  return { series, windowDays }
+  return fetchSpendTrend(tx, clampedUsage(scope.usageScope('u.region_id', 'u.org_unit_id')), range)
 }
 
 // ── Provider split (region-scoped, spend + active users) ─────────────────────
@@ -1001,9 +914,9 @@ export async function fetchRegionalTrend(
  * catch-all (incl. NULL tool). Mirrors the Across `fetchProviderSplit` one tier
  * down but clamped by the resolved regional scope. `spendUsd` sums back to the
  * region genuine headline; `activeUsers` is `COUNT(DISTINCT teammate_id)` per
- * bucket (NOT additive across buckets). `copilot-agent` is structurally absent
- * from `v_complete_usage` today (mig 0086) — its bucket reads 0 until the owner
- * follow-up lands the non-taggable completeness feed.
+ * bucket (NOT additive across buckets). `copilot-agent` is a real, live
+ * `v_complete_usage` lane (migration 0101's ingest-only completeness arm) — its
+ * bucket carries genuine spend once the coding agent is used.
  */
 export async function fetchRegionalProviderSplit(
   tx: Tx,
@@ -1078,20 +991,7 @@ export async function fetchRegionalActiveTrend(
   scope: RegionalScope,
   window: UsageWindow,
 ): Promise<ActiveTrendPoint[]> {
-  const rows = await tx.execute<{ day: string; claude: number; copilot: number }>(sql`
-    SELECT to_char(date_trunc('day', u.ts_event), 'YYYY-MM-DD') AS day,
-           COUNT(DISTINCT u.teammate_id) FILTER (WHERE u.tool = 'claude-code')::int AS claude,
-           COUNT(DISTINCT u.teammate_id) FILTER (WHERE u.tool = 'copilot-cli')::int AS copilot
-    FROM v_complete_usage u
-    WHERE ${scope.usageScope('u.region_id', 'u.org_unit_id')}
-      AND u.ts_event >= ${window.startIso}::timestamptz
-      AND u.ts_event <  ${window.endIso}::timestamptz
-    GROUP BY 1 ORDER BY 1`)
-  return [...rows].map((r) => ({
-    day: r.day,
-    claudeCode: Number(r.claude),
-    copilot: Number(r.copilot),
-  }))
+  return fetchActiveTrend(tx, clampedUsage(scope.usageScope('u.region_id', 'u.org_unit_id')), window)
 }
 
 // ── Exceptions (velocity-flagged, dial-driven) ───────────────────────────────
@@ -1101,12 +1001,40 @@ export interface RegionalException {
   currentWeekUsd: number
   baselineMeanUsd: number
   deltaPct: number
+  /**
+   * `teammate.is_active` — carried for the DRILL CONTRACT (developer pages
+   * D29/D34), not for the signal itself. A deactivated subject 403s at
+   * `/reports/teammate/{id}`, so its name renders as plain text here rather
+   * than as a link that cannot open.
+   */
+  isActive: boolean
+  /**
+   * `teammate.provisional` — D34's THIRD conjunct (r3-H2 / r5-H1), and the one
+   * this strip was missing. A SHADOW teammate minted by the unauthenticated
+   * enrol path is `is_active = true`, so the two conjuncts above admitted it and
+   * the strip published an UNCONFIRMED email claim as a live link onto a page
+   * that 403s. Both facts now come from the ONE shared producer
+   * (`reporting/teammate-drill-facts.ts`) rather than from a per-query column
+   * list, because a per-query column list is exactly how this one was forgotten.
+   *
+   * The ROW is not dropped, only the DOOR is closed — the same decision the
+   * drivers axes take, and for a narrower reason: this strip is a top-N callout
+   * that foots to nothing, so dropping the row would silently unreport a real
+   * velocity spike. (Whether an unconfirmed identity should be NAMED here at all
+   * is a separate question from whether it should be a LINK; it is raised, not
+   * settled, by this change.)
+   */
+  isProvisional: boolean
 }
 
 /**
  * Teammates whose current-week usage spikes over their rolling 4-week mean by at
  * least the governance dial (`threshold`, a fractional delta — server/reports/
- * velocity.ts). A "now" signal (trailing weeks), NOT month-bounded. Bounded LIMIT.
+ * velocity.ts). A "now" signal (trailing weeks), NOT month-bounded. Bounded LIMIT
+ * (default 25) because this is a CALLOUT list — the spikes worth someone's
+ * attention this week — and a callout that runs to hundreds of rows is not one.
+ * It is a relevance bound on a top-N, not a bound on what the caller may see:
+ * the driver table beside it reports the same population in full.
  */
 export async function fetchRegionalExceptions(
   tx: Tx,
@@ -1119,6 +1047,8 @@ export async function fetchRegionalExceptions(
     name: string
     current_week_usd: string
     rolling_mean_usd: string
+    drill_is_active: boolean | null
+    drill_is_provisional: boolean | null
   }>(sql`
     WITH weekly AS (
       SELECT u.teammate_id,
@@ -1137,7 +1067,13 @@ export async function fetchRegionalExceptions(
     )
     SELECT v.teammate_id::text AS teammate_id, COALESCE(t.display_name, t.email) AS name,
            v.current_week_usd::text AS current_week_usd,
-           COALESCE(v.rolling_mean_usd, 0)::text AS rolling_mean_usd
+           COALESCE(v.rolling_mean_usd, 0)::text AS rolling_mean_usd,
+           -- The drill facts, from the ONE shared producer (teammate-drill-facts.ts).
+           -- Not a hand-rolled column list: that is how provisional came to be
+           -- missing here while every drivers axis carried it (r5-H1).
+           -- (No backticks inside this literal -- one in a SQL comment CLOSES the
+           -- sql template and the parse error points at the wrong line.)
+           ${TEAMMATE_DRILL_FACTS}
     FROM velocity v JOIN teammate t ON t.id = v.teammate_id
     WHERE v.rolling_mean_usd IS NOT NULL AND v.rolling_mean_usd > 0
       AND (v.current_week_usd - v.rolling_mean_usd) / v.rolling_mean_usd >= ${threshold}
@@ -1152,6 +1088,7 @@ export async function fetchRegionalExceptions(
       currentWeekUsd: current,
       baselineMeanUsd: mean,
       deltaPct: mean > 0 ? (current - mean) / mean : 0,
+      ...teammateDrillFacts(r),
     }
   })
 }
@@ -1162,18 +1099,47 @@ function usd(n: number): string {
   return n.toFixed(2)
 }
 
-/** Drivers CSV — one row per driver, plus a leading provenance stamp (asOf). */
+/**
+ * Drivers CSV — one row per driver, plus a leading provenance stamp (asOf).
+ * Every row the caller's scope authorises is written: the file is byte-identical
+ * to the on-screen table (build-design §2), at any size.
+ */
 export function driversToCsv(
   rows: DriverRow[],
-  meta: { month: string; asOfDate: string | null; axis: string; scopeLabel: string },
+  meta: {
+    month: string
+    asOfDate: string | null
+    axis: string
+    scopeLabel: string
+    /**
+     * WHICH LANE these figures are, stamped in the FILE because a CSV outlives
+     * the page that produced it. In the chargeback lane most axes are BILLED
+     * money (`provider_usage_fact`) and the budget axis is still ATTRIBUTED
+     * usage; a spreadsheet that stacks two exports without knowing which is
+     * which sums across lanes that were never meant to reconcile.
+     */
+    lane: MeasureLane
+    /**
+     * The per-provider arms behind a chargeback answer, and whose charge it is.
+     * Serialised as a SECOND grain (`driverArmCsvLines`) because they are ON
+     * SCREEN — the consumption blocks under the table, and the arms the headline
+     * itself is folded from — and a file stamped `lane=billed` that carries only
+     * the folded ranking is not the screen. Absent on every attributed export,
+     * which therefore stays byte-for-byte what it was.
+     */
+    billedLane?: BilledLaneMeta
+    chargebackCoverage?: ChargebackCoverage
+  },
 ): string {
   const lines = [
-    `# tokenscope regional drivers · axis=${meta.axis} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=${meta.scopeLabel}`,
-    'driver,spend_usd,share_pct,spend_class',
+    `# tokenscope regional drivers · axis=${meta.axis} · lane=${meta.lane} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=${meta.scopeLabel}`,
+    'driver,spend_usd,share_pct,spend_class,otel_emitted_usd,api_reconciled_usd,provider_usage_usd,surface_mix',
     ...rows.map(
       (r) =>
-        `${csvEscape(r.label)},${usd(r.usd)},${(r.sharePct * 100).toFixed(1)},${csvEscape(r.spendClass)}`,
+        `${csvEscape(r.label)},${usd(r.usd)},${(r.sharePct * 100).toFixed(1)},${csvEscape(r.spendClass)},` +
+        `${driverProvenanceCsvCells(r).join(',')},${csvEscape(driverSurfaceMixCsvCell(r))}`,
     ),
+    ...driverArmCsvLines(meta.billedLane, meta.chargebackCoverage),
   ]
   return lines.join('\n') + '\n'
 }

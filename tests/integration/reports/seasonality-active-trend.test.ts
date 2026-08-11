@@ -15,10 +15,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
 import type { Session } from '../../../server/utils/auth'
-import acrossSeasonality from '../../../server/api/v1/reports/across-regions/seasonality.get'
-import acrossActiveTrend from '../../../server/api/v1/reports/across-regions/active-trend.get'
-import regionalSeasonality from '../../../server/api/v1/reports/regional/seasonality.get'
-import regionalActiveTrend from '../../../server/api/v1/reports/regional/active-trend.get'
+import regionSeasonality from '../../../server/api/v1/reports/region/seasonality.get'
+import regionActiveTrend from '../../../server/api/v1/reports/region/active-trend.get'
 
 let t: TestDb
 let regionA = ''
@@ -39,8 +37,17 @@ const ev = (session: Session, query = '') => {
     },
   }
   injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], session)
-  return e as unknown as Parameters<typeof acrossSeasonality>[0]
+  return e as unknown as Parameters<typeof regionSeasonality>[0]
 }
+/*
+ * The WHOLE-COMPANY width of the merged `/reports/region*` family (was the
+ * separate `/reports/across-regions*` routes). `region=all` is not an optional
+ * extra here — it is what selects the unclamped engine scope, so every call that
+ * used to reach an across route reaches it through this.
+ */
+const evAll = (session: Session, query = '') =>
+  ev(session, query ? `${query}&region=all` : 'region=all')
+
 const sess = (role: string, regionId: string, orgPath = 'a'): Session =>
   ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role, regionId, orgPath, issuedAt: new Date().toISOString() } as unknown as Session)
 const gfo = () => sess('global-finops', regionA)
@@ -140,12 +147,12 @@ const assertWellFormed = (r: SeasonalityResp) => {
 describe('GET /reports/across-regions/seasonality — whole-company heatmap', () => {
   for (const role of ['admin', 'manager', 'developer'] as const) {
     it(`a ${role} is FORBIDDEN (403) — whole-company-only, same gate as the index`, async () => {
-      await expect(acrossSeasonality(ev(sess(role, regionA), 'month=2026-07'))).rejects.toMatchObject({ statusCode: 403 })
+      await expect(regionSeasonality(evAll(sess(role, regionA), 'month=2026-07'))).rejects.toMatchObject({ statusCode: 403 })
     })
   }
 
   it('cells sum back to whole-company window spend; well-formed axis; two ISO weeks', async () => {
-    const r = (await acrossSeasonality(ev(gfo(), 'month=2026-07'))) as unknown as SeasonalityResp
+    const r = (await regionSeasonality(evAll(gfo(), 'month=2026-07'))) as unknown as SeasonalityResp
     expect(r.window).toEqual({ from: '2026-07-01', to: '2026-07-31' })
     assertWellFormed(r)
     // 07-02 = 20+8+100+5 = 133; 07-06 = 10+30 = 40 → total 173 (two distinct days/weeks).
@@ -159,7 +166,7 @@ describe('GET /reports/across-regions/seasonality — whole-company heatmap', ()
 
   it('a custom from/to range re-windows the heatmap to just that span', async () => {
     // [07-05, 07-08] → only 07-06 (=40); 07-02 excluded.
-    const r = (await acrossSeasonality(ev(gfo(), 'from=2026-07-05&to=2026-07-08'))) as unknown as SeasonalityResp
+    const r = (await regionSeasonality(evAll(gfo(), 'from=2026-07-05&to=2026-07-08'))) as unknown as SeasonalityResp
     expect(r.window).toEqual({ from: '2026-07-05', to: '2026-07-08' })
     expect(sumCells(r)).toBe(40)
     expect(r.cells.length).toBe(1)
@@ -169,7 +176,7 @@ describe('GET /reports/across-regions/seasonality — whole-company heatmap', ()
 
 describe('GET /reports/across-regions/active-trend — distinct active users per tool per day', () => {
   it('counts DISTINCT teammates per tool per day (a 2-claude-user day)', async () => {
-    const r = (await acrossActiveTrend(ev(gfo(), 'month=2026-07'))) as unknown as ActiveTrendResp
+    const r = (await regionActiveTrend(evAll(gfo(), 'month=2026-07'))) as unknown as ActiveTrendResp
     expect(r.window).toEqual({ from: '2026-07-01', to: '2026-07-31' })
     const byDay = new Map(r.series.map((p) => [p.day, p]))
     // 07-02: alice + carol + bob claude = 3, dave copilot = 1.
@@ -180,20 +187,20 @@ describe('GET /reports/across-regions/active-trend — distinct active users per
   })
 
   it('a partial range (only from) is a 400', async () => {
-    await expect(acrossActiveTrend(ev(gfo(), 'from=2026-07-05'))).rejects.toMatchObject({ statusCode: 400 })
+    await expect(regionActiveTrend(evAll(gfo(), 'from=2026-07-05'))).rejects.toMatchObject({ statusCode: 400 })
   })
 })
 
 describe('GET /reports/regional/{seasonality,active-trend} — region-scoped', () => {
   it('regional seasonality is clamped to the region (bob in region B excluded)', async () => {
-    const r = (await regionalSeasonality(ev(gfo(), 'month=2026-07&region=' + regionA))) as unknown as SeasonalityResp
+    const r = (await regionSeasonality(ev(gfo(), 'month=2026-07&region=' + regionA))) as unknown as SeasonalityResp
     assertWellFormed(r)
     // Region A only: 07-02 = 20+8+5 = 33; 07-06 = 40 → 73 (bob's 100 in region B excluded).
     expect(sumCells(r)).toBe(73)
   })
 
   it('regional active-trend is clamped to the region', async () => {
-    const r = (await regionalActiveTrend(ev(gfo(), 'month=2026-07&region=' + regionA))) as unknown as ActiveTrendResp
+    const r = (await regionActiveTrend(ev(gfo(), 'month=2026-07&region=' + regionA))) as unknown as ActiveTrendResp
     const byDay = new Map(r.series.map((p) => [p.day, p]))
     // Region A 07-02: alice + carol claude = 2, dave copilot = 1 (bob excluded).
     expect(byDay.get('2026-07-02')).toMatchObject({ claudeCode: 2, copilot: 1 })

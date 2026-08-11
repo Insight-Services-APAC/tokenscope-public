@@ -19,6 +19,7 @@ import { and, eq, isNull, sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { hashSessionToken, constantTimeEqualHex } from './hmac'
 import { oauthClient, oauthAuthCode, oauthToken } from '../../drizzle/schema'
+import { clientNameSchema, MAX_REDIRECT_URIS, REDIRECT_URI_MAX_LEN } from '../../shared/schemas/oauth'
 
 // ── Scopes ────────────────────────────────────────────────────────────────
 //
@@ -42,6 +43,21 @@ export function isValidScope(s: string): s is OAuthScope {
 // here closes the second, un-isolated route to an emit credential (adversarial R1
 // F1; mcp-client-backbone §"Emit-credential isolation").
 export const INTERACTIVE_GRANTABLE_SCOPES: readonly string[] = ['tokenscope.read', 'tokenscope.tag']
+
+/**
+ * The INTERACTIVE-grantable subset of a requested scope string, defaulting to
+ * `tokenscope.read` when no scope was requested. Single source of truth for
+ * "what will actually be granted" — authorize.get.ts's consent-page info fetch
+ * uses this to RENDER the permission list and authorize.post.ts uses the SAME
+ * function to ISSUE the grant, so the two can never drift (S6 Consent (b)). An
+ * unknown/unrecognised scope in the request is silently dropped, never echoed.
+ */
+export function computeGrantedScopes(scopeParam: string | undefined): OAuthScope[] {
+  if (!scopeParam) return ['tokenscope.read']
+  return scopeParam
+    .split(' ')
+    .filter((s): s is OAuthScope => Boolean(s) && (INTERACTIVE_GRANTABLE_SCOPES as readonly string[]).includes(s))
+}
 
 // ── Lifetimes ───────────────────────────────────────────────────────────────
 /** Auth code: 5 min, single-use (RFC 6749 recommends ≤10 min). */
@@ -103,6 +119,8 @@ export interface RegisteredClient {
   clientSecret: string
   clientName: string
   redirectUris: string[]
+  /** RFC 7591 `client_secret_expires_at` — unix seconds. See MAX_CLIENT_SECRET_AGE_MS. */
+  clientSecretExpiresAt: number
 }
 
 /**
@@ -121,20 +139,84 @@ export const RESERVED_EMIT_CLIENT_NAME = 'tokenscope-emit'
 export const MAX_OAUTH_CLIENTS = 1000
 
 /**
+ * Client secrets are bounded, not eternal (S6 — a never-expiring secret was
+ * part of the original registration root cause). A year is generous for the
+ * MVP's low-dozens client scale (mirrors MAX_OAUTH_CLIENTS' "generous
+ * ceiling" posture) — enforced against the client row's OWN created_at in
+ * validateClientCredentials, so no schema/migration is needed to carry it.
+ */
+export const MAX_CLIENT_SECRET_AGE_MS = 365 * 24 * 60 * 60 * 1000
+
+/**
+ * Per-source registration ceiling (S6 Ceiling fix), alongside the global one.
+ * Root cause: a single global COUNT(*) ceiling turned ANY one anonymous
+ * caller's write volume into a durable denial of every first-time MCP
+ * onboarding. The global cap alone is therefore too blunt — once it's
+ * saturated, EVERY registrant is refused regardless of who caused it.
+ *
+ * The fix reserves headroom: the global ceiling only ever denies a caller
+ * whose OWN recent registration volume is non-trivial. A low-volume new
+ * registrant is never blocked by someone else's flood. This in-memory sliding
+ * window (no Redis in MVP, consistent with the global cap's "no Redis; a
+ * COUNT(*) is cheap" posture) is per-process — it blunts a single-replica
+ * flood rather than providing airtight cross-replica limiting, and the
+ * session-gc.ts abandonment sweep reclaims a flood's rows within the hour
+ * regardless of which replica served it.
+ */
+const SOURCE_WINDOW_MS = 60 * 60 * 1000
+export const SOURCE_REGISTRATION_LIMIT = 20
+const recentRegistrationsBySource = new Map<string, number[]>()
+
+function recentSourceRegistrationCount(source: string, now: number): number {
+  const timestamps = recentRegistrationsBySource.get(source)
+  if (!timestamps) return 0
+  const cutoff = now - SOURCE_WINDOW_MS
+  const live = timestamps.filter((ts) => ts > cutoff)
+  if (live.length > 0) recentRegistrationsBySource.set(source, live)
+  else recentRegistrationsBySource.delete(source)
+  return live.length
+}
+
+function recordSourceRegistration(source: string, now: number): void {
+  const timestamps = recentRegistrationsBySource.get(source) ?? []
+  timestamps.push(now)
+  recentRegistrationsBySource.set(source, timestamps)
+}
+
+/**
  * Register a new dynamic PUBLIC client; returns the raw secret ONCE.
  *
  * Always writes `internal = false` — the internal emit client is created ONLY
  * by ensureEmitClient (no public path can set the flag). Rejects the reserved
- * emit client_name and enforces a registration ceiling (DoS backstop).
+ * emit client_name and enforces the registration ceilings (DoS backstop).
+ *
+ * `source` (typically the caller IP) drives the per-source ceiling — optional
+ * so a non-HTTP caller of this helper degrades to the global cap only, same
+ * as before this fix.
  */
 export async function registerClient(
   db: Db,
-  input: { clientName?: string; redirectUris: string[] },
+  input: { clientName?: string; redirectUris: string[]; source?: string },
 ): Promise<RegisteredClient> {
   if (!input.redirectUris || input.redirectUris.length === 0) {
     throw new OAuthError('invalid_client_metadata', 'At least one redirect_uri is required')
   }
+  // Bounds re-asserted here (not just at the HTTP schema) so a non-HTTP caller
+  // of this helper is bounded too (S6 Bounds fix). Same schema the HTTP layer
+  // uses (shared/schemas/oauth.ts) — one definition, two enforcement points.
+  if (input.redirectUris.length > MAX_REDIRECT_URIS) {
+    throw new OAuthError(
+      'invalid_client_metadata',
+      `At most ${MAX_REDIRECT_URIS} redirect_uris are allowed`,
+    )
+  }
   for (const uri of input.redirectUris) {
+    if (uri.length > REDIRECT_URI_MAX_LEN) {
+      throw new OAuthError(
+        'invalid_redirect_uri',
+        `redirect_uri must be at most ${REDIRECT_URI_MAX_LEN} characters`,
+      )
+    }
     if (!isValidRedirectUri(uri)) {
       throw new OAuthError(
         'invalid_redirect_uri',
@@ -144,17 +226,31 @@ export async function registerClient(
   }
 
   const clientName = input.clientName || 'MCP Client'
+  const nameCheck = clientNameSchema.safeParse(input.clientName)
+  if (!nameCheck.success) {
+    throw new OAuthError(
+      'invalid_client_metadata',
+      nameCheck.error.issues[0]?.message ?? 'Invalid client_name',
+    )
+  }
   // Reserved-name guard: the internal emit client's name is off-limits to public
   // registrants (even though identity is the `internal` flag, not the name).
   if (clientName === RESERVED_EMIT_CLIENT_NAME) {
     throw new OAuthError('invalid_client_metadata', 'client_name is reserved')
   }
 
-  // Registration cap (coarse DoS backstop on the unauthenticated endpoint).
+  const now = Date.now()
+  const source = input.source ?? 'unknown'
+  const sourceCount = recentSourceRegistrationCount(source, now)
+
+  // Registration ceiling (coarse DoS backstop on the unauthenticated endpoint).
+  // Deny ONLY when the global ceiling is saturated AND this source's own
+  // recent volume is non-trivial — see the Ceiling doc comment above.
   const countRows = await db.execute<{ count: string }>(
     sql`SELECT COUNT(*)::text AS count FROM oauth_client`,
   )
-  if (Number([...countRows][0]?.count ?? 0) >= MAX_OAUTH_CLIENTS) {
+  const globalCount = Number([...countRows][0]?.count ?? 0)
+  if (globalCount >= MAX_OAUTH_CLIENTS && sourceCount >= SOURCE_REGISTRATION_LIMIT) {
     throw new OAuthError('temporarily_unavailable', 'Client registration limit reached')
   }
 
@@ -167,11 +263,23 @@ export async function registerClient(
       redirectUris: input.redirectUris,
       internal: false,
     })
-    .returning({ clientId: oauthClient.clientId })
+    .returning({ clientId: oauthClient.clientId, createdAt: oauthClient.createdAt })
 
   if (!row) throw new OAuthError('server_error', 'Client registration failed')
 
-  return { clientId: row.clientId, clientSecret, clientName, redirectUris: input.redirectUris }
+  recordSourceRegistration(source, now)
+
+  const clientSecretExpiresAt = Math.floor(
+    (new Date(row.createdAt).getTime() + MAX_CLIENT_SECRET_AGE_MS) / 1000,
+  )
+
+  return {
+    clientId: row.clientId,
+    clientSecret,
+    clientName,
+    redirectUris: input.redirectUris,
+    clientSecretExpiresAt,
+  }
 }
 
 export interface ClientRow {
@@ -212,12 +320,22 @@ export async function validateClientCredentials(
       redirectUris: oauthClient.redirectUris,
       internal: oauthClient.internal,
       clientSecretHash: oauthClient.clientSecretHash,
+      createdAt: oauthClient.createdAt,
     })
     .from(oauthClient)
     .where(eq(oauthClient.clientId, clientId))
     .limit(1)
   if (!row) return null
   if (!constantTimeEqualHex(hashSessionToken(clientSecret), row.clientSecretHash)) return null
+  // Bounded client secrets (S6): a secret past MAX_CLIENT_SECRET_AGE_MS
+  // authenticates as invalid, same as a wrong one — RFC 6749 doesn't
+  // distinguish "wrong" from "expired" client credentials, so there is no
+  // separate error surface to leak which case applies. The internal emit
+  // client never reaches this function (token.post.ts routes it through a
+  // secretless public-client path), but `!row.internal` guards it anyway.
+  if (!row.internal && Date.now() - new Date(row.createdAt).getTime() > MAX_CLIENT_SECRET_AGE_MS) {
+    return null
+  }
   return {
     clientId: row.clientId,
     clientName: row.clientName,

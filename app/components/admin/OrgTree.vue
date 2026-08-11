@@ -27,7 +27,40 @@ export interface OrgNode {
   teammate_count: number
   project_count: number
   // J4 (mig 0048): active P&L owners of this unit (cost-owning units only).
-  owners: Array<{ teammate_id: string; display_name: string | null; email: string }>
+  //
+  // C8b/C8c — each owner carries whether the manager-chain walk can actually USE
+  // them, straight from the walk's own condition (server/api/v1/admin/
+  // org-units.get.ts):
+  //   placement_status 'resolves'  → the walk places reports into this unit;
+  //                    'ambiguous' → they own >1 active cost-owning unit, so the
+  //                                  walk skips them and they place NOBODY;
+  //                    'inert'     → they own none the walk can see (placeholder
+  //                                  identity, or a non-cost-owning unit).
+  //   places_count     → teammates in this unit whose recorded chain placement
+  //                      names this owner. Realised reach, not a projection.
+  owners: Array<{
+    teammate_id: string
+    display_name: string | null
+    email: string
+    placement_status: 'resolves' | 'ambiguous' | 'inert'
+    owns_unit_count: number
+    places_count: number
+  }>
+  // C9 — this is the region's catch-all root (`default`), and how much of what
+  // is in it does not belong there. Present on that node only; null elsewhere.
+  //   direct_reports     their manager IS an owner of this unit — expected.
+  //   not_direct_reports their manager is NOT — they landed here because the
+  //                      chain walk found no nearer owner. THE warning.
+  //   manager_unknown    never looked up. Not counted as misplaced: that number
+  //                      shrinks by running a placement pass, not by placing.
+  is_default: boolean
+  default_occupancy: {
+    occupants: number
+    direct_reports: number
+    not_direct_reports: number
+    manager_unknown: number
+    warn: boolean
+  } | null
 }
 
 const props = defineProps<{

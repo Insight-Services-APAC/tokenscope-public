@@ -2,8 +2,17 @@
  * GET /api/v1/rollups/manager — manager rollup view (Journey 5 / Screen 3).
  *
  * Returns per-teammate + per-project rollups for the manager's org scope.
- * RLS handles the LTREE-subtree scope; the query joins
- * attribution_record → teammate / project for the current MTD.
+ * RLS handles the LTREE-subtree scope; the MTD figures read the §A completeness
+ * lane — per-teammate inline against `v_complete_usage`, per-PROJECT through
+ * `completeProjectSpendRanked` (server/usage/complete-spend.ts), the one
+ * project-spend definition every other project surface calls, ranked and
+ * LIMITed in the database rather than in JS.
+ *
+ * KNOWN REMAINING SPLIT: the week-over-week tile below still reads
+ * `attribution_record` directly. It is an org-scoped teammate figure, not a
+ * project one, so it is outside the project-spend slice — but it means this one
+ * payload still quotes two lanes, and the WoW delta is blind to reconciled
+ * spend. Moving it is a separate change with its own expected-value shift.
  *
  * Epic 12 extension (MVP-Final): per-teammate top-project + velocity
  * signal (current week vs rolling 4-week mean, flagged at the
@@ -20,14 +29,18 @@ import {
   GOV_VELOCITY_SPIKE_THRESHOLD,
   loadGovernanceSettingResolver,
 } from '../../../utils/governance-settings'
-import { monthStartIso as monthStartIsoFor } from '../../../utils/period'
+import { monthStartIso as monthStartIsoFor, monthToDateWindow } from '../../../utils/period'
+import { completeProjectSpendRanked } from '../../../usage/complete-spend'
 import { managerScopePredicate } from '../../../auth/org-subtree-scope'
+import { UNASSIGNED_REGION_CODE } from '../../../../shared/placement/holding-nodes'
 
 // Region selector — honoured only for the cross-region roles (global-finops / platform-admin);
 // a region admin is hard-bound to its own region and the param is ignored (org-subtree-scope contract).
 const Query = z.object({ regionId: z.string().uuid().optional() })
 
 const VELOCITY_ROLLING_WEEKS = 4
+/** Rows on the per-project table. Applied as a SQL LIMIT, never a JS slice. */
+const PER_PROJECT_LIMIT = 100
 
 interface PerTeammateRow extends Record<string, unknown> {
   teammate_id: string
@@ -61,7 +74,12 @@ export default defineEventHandler(async (event) => {
   const { regionId: requestedRegionId } = Query.parse(getQuery(event))
   // Cross-region roles may pick a region (or see all); admin is locked to its own.
   const crossRegion = caller.role === 'global-finops' || isPlatformAdmin(caller.role)
+  // MONTH TO DATE — `[month start, now)`. The upper bound is `now`, not the
+  // month end: a row dated later this month has not been spent yet, and a
+  // manager's MTD column that counts it is not month-to-date (period.ts).
+  const monthWindow = monthToDateWindow()
   const monthStartIso = monthStartIsoFor()
+  const monthToDateEndIso = monthWindow.endIso
 
   return await withRequestRls(event, async (tx) => {
     // Spike-threshold dial (mig 0049): one snapshot per request, applied
@@ -82,7 +100,7 @@ export default defineEventHandler(async (event) => {
     let effectiveRegionId: string | null = null
     if (crossRegion) {
       const rgRows = await tx.execute<{ id: string; code: string; display_name: string }>(sql`
-        SELECT id::text AS id, code, display_name FROM region WHERE code <> '__unassigned__' ORDER BY display_name`)
+        SELECT id::text AS id, code, display_name FROM region WHERE code <> ${UNASSIGNED_REGION_CODE} ORDER BY display_name, code`)
       regionOptions = [...rgRows].map((r) => ({ id: r.id, code: r.code, display_name: r.display_name }))
       if (requestedRegionId) {
         if (!regionOptions.some((r) => r.id === requestedRegionId)) {
@@ -115,6 +133,7 @@ export default defineEventHandler(async (event) => {
         LEFT JOIN v_complete_usage ar
           ON ar.teammate_id = t.id
          AND ar.ts_event >= ${monthStartIso}::timestamptz
+         AND ar.ts_event <  ${monthToDateEndIso}::timestamptz
         GROUP BY t.id
       ),
       top_project AS (
@@ -129,6 +148,7 @@ export default defineEventHandler(async (event) => {
           JOIN project p ON p.id = ar.project_id
           WHERE ar.teammate_id IN (SELECT id FROM in_scope)
             AND ar.ts_event >= ${monthStartIso}::timestamptz
+            AND ar.ts_event <  ${monthToDateEndIso}::timestamptz
           GROUP BY ar.teammate_id, p.code, p.display_name
         ) ranked
         WHERE rn = 1
@@ -172,32 +192,52 @@ export default defineEventHandler(async (event) => {
       LIMIT 100
     `)
 
-    const perProject = await tx.execute<PerProjectRow>(sql`
-      WITH proj_alloc AS (
-        SELECT scope_id::text AS project_id,
-               SUM(budget_usd)::text AS allocation_usd
+    /*
+     * Per-project rollup. The scoped project list + allocation come from SQL;
+     * the SPEND comes from `completeProjectSpend` (server/usage/complete-spend.ts)
+     * — THE project-spend definition, the same call the project page, the
+     * /projects cards, the budget editor and the budget alert make. It used to
+     * be a `LEFT JOIN attribution_record` here, which made this the fourth
+     * implementation of one number and left the manager's project list blind to
+     * reconciled (arm 2) spend while the per-teammate block above it already
+     * read the complete lane.
+     *
+     * The rank-and-truncate stays IN THE DATABASE: `completeProjectSpendRanked`
+     * takes the scope PREDICATE, not a list of ids, so a manager over a large
+     * subtree does not ship every project id out to the app tier, scan the lane
+     * for all of them and then throw away everything past the hundredth in JS.
+     */
+    const ranked = await completeProjectSpendRanked(tx, monthWindow, {
+      projectScope: scopeClause('p.region_id', 'p.cost_owning_unit_id'),
+      limit: PER_PROJECT_LIMIT,
+      excludeProvisional: true,
+    })
+    // Allocations for the ranked page only — bounded by the LIMIT above, not by
+    // the size of the subtree.
+    const allocByProject = new Map<string, string>()
+    if (ranked.length > 0) {
+      const allocRows = await tx.execute<{ project_id: string; allocation_usd: string }>(sql`
+        SELECT scope_id::text AS project_id, SUM(budget_usd)::text AS allocation_usd
         FROM allocation
         WHERE scope_type = 'project'
           AND allocation_kind IN ('baseline', 'top-up')
           AND effective @> ${monthStartIso}::timestamptz
+          AND scope_id = ANY(ARRAY[${sql.join(
+            ranked.map((p) => sql`${p.projectId}::uuid`),
+            sql`, `,
+          )}])
         GROUP BY scope_id
-      )
-      SELECT p.id::text AS project_id,
-             p.code,
-             p.display_name,
-             COALESCE(SUM(ar.tokens), 0)::text  AS total_tokens,
-             COALESCE(SUM(ar.cost_usd), 0)::text AS total_cost_usd,
-             pa.allocation_usd
-      FROM project p
-      LEFT JOIN attribution_record ar
-        ON ar.project_id = p.id
-       AND ar.ts_event >= ${monthStartIso}::timestamptz
-      LEFT JOIN proj_alloc pa ON pa.project_id = p.id::text
-      WHERE ${scopeClause('p.region_id', 'p.cost_owning_unit_id')}
-      GROUP BY p.id, p.code, p.display_name, pa.allocation_usd
-      ORDER BY SUM(ar.cost_usd) DESC NULLS LAST
-      LIMIT 100
-    `)
+      `)
+      for (const r of [...allocRows]) allocByProject.set(r.project_id, r.allocation_usd)
+    }
+    const perProject: PerProjectRow[] = ranked.map((p) => ({
+      project_id: p.projectId,
+      code: p.code,
+      display_name: p.displayName,
+      total_tokens: String(p.tokens),
+      total_cost_usd: p.costUsd.toFixed(2),
+      allocation_usd: allocByProject.get(p.projectId) ?? null,
+    }))
 
     // Week-over-week: this-week-to-date vs same days of prior week. Scoped via the same
     // scopeClause as in_scope (manager subtree / admin region / global region-or-all) — else
@@ -242,7 +282,7 @@ export default defineEventHandler(async (event) => {
         // velocity-watch inbox verdict for the same person and week.
         is_flagged: r.delta_pct !== null && Number(r.delta_pct) >= thresholdFor(r.region_id),
       })),
-      per_project: [...perProject],
+      per_project: perProject,
       wow: {
         this_week_usd: thisWeek.toFixed(2),
         prior_week_usd: priorWeek.toFixed(2),

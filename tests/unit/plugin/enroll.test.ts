@@ -224,4 +224,78 @@ describe('enrollIfNeeded — decision logic', () => {
     expect(r).toEqual({ enrolled: false, reason: 'write-failed' })
     expect(writeSettings).not.toHaveBeenCalled()
   })
+
+  // S1 fix 2/3: resolveApiBase now VALIDATES the resolved base and THROWS on
+  // an unsafe one (e.g. a repo-poisoned TOKENSCOPE_API_BASE downgrading to
+  // plaintext http). enrollIfNeeded's contract is fail-OPEN / never-throws —
+  // prove the throw is caught and surfaces as reason:'no-base', not an
+  // unhandled rejection, and that nothing is POSTed to the unsafe base.
+  it('an unsafe apiBase (plaintext http, off-box) never throws — surfaces as reason:no-base, no POST', async () => {
+    const post = vi.fn()
+    const writeSettings = vi.fn()
+    const r = await enrollIfNeeded({ ...baseOpts(), apiBase: 'http://evil.example.com', env: {}, post, writeSettings })
+    expect(r).toEqual({ enrolled: false, reason: 'no-base' })
+    expect(post).not.toHaveBeenCalled()
+    expect(writeSettings).not.toHaveBeenCalled()
+  })
+
+  /*
+   * The hostile-repository boundary, on the door that carries the most.
+   *
+   * Claude Code merges a repository's .claude/settings.json env OVER the global
+   * one, so TOKENSCOPE_API_BASE is a value a cloned repo controls, and the
+   * SessionStart hook calls enrollIfNeeded with no apiBase. This is the call
+   * that ships the bundled ENROLLMENT SECRET and then persists whatever
+   * endpoints come back, so a repo winning here gets the org-wide secret on the
+   * way out and every future token and span on the way back — strictly worse
+   * than the redeem door, whose handoff code is single-use and device-bound.
+   *
+   * `discoverOrigin` is stubbed so the assertion is about precedence and not
+   * about whether the machine running the test has an MCP registration.
+   */
+  describe('repo-supplied env is not a destination', () => {
+    let prior: string | undefined
+    beforeEach(() => {
+      prior = process.env.TOKENSCOPE_API_BASE
+      process.env.TOKENSCOPE_API_BASE = 'https://attacker.example.com'
+    })
+    afterEach(() => {
+      if (prior === undefined) delete process.env.TOKENSCOPE_API_BASE
+      else process.env.TOKENSCOPE_API_BASE = prior
+    })
+
+    it('never POSTs the enrollment secret to a host named by TOKENSCOPE_API_BASE', async () => {
+      const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
+      const writeSettings = vi.fn()
+      await enrollIfNeeded({
+        ...baseOpts(),
+        apiBase: null, // the SessionStart hook passes none
+        discoverOrigin: () => null, // stock install: nothing registered locally
+        env: {},
+        post,
+        writeSettings,
+      })
+      expect(post).toHaveBeenCalledTimes(1)
+      const [url, body] = post.mock.calls[0]
+      expect(url).toBe('https://tokenscope.example.com/api/v1/setup/enroll')
+      expect(url).not.toContain('attacker')
+      // Name what would have leaked, so a future reader sees the stake.
+      expect(body.enrollment_secret).toBe('BUNDLED_SECRET')
+    })
+
+    it('prefers the operator’s own registered MCP origin over the env var', async () => {
+      const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
+      const writeSettings = vi.fn()
+      await enrollIfNeeded({
+        ...baseOpts(),
+        apiBase: null,
+        discoverOrigin: () => 'https://ts-own.example.com',
+        env: {},
+        post,
+        writeSettings,
+      })
+      const [url] = post.mock.calls[0]
+      expect(url).toBe('https://ts-own.example.com/api/v1/setup/enroll')
+    })
+  })
 })

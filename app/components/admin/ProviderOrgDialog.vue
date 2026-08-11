@@ -67,6 +67,12 @@ const props = defineProps<{
   enterprises: EnterpriseOption[]
   /* All regions, for the GitHub org→region home picker (ADR-0010 D4). */
   regions: RegionOption[]
+  /* Workstream B (ADR-0011 D11): once true, provider_org.billing is meaningless
+   * for a github org (the enterprise is authoritative) — the field is hidden
+   * for github and never sent on save (the server rejects the write anyway;
+   * this keeps the form from 409ing on an unrelated edit). Always shown/sent
+   * for anthropic, where the org remains its own billing unit. */
+  governanceActivated?: boolean
 }>()
 const emit = defineEmits<{ close: []; saved: [] }>()
 
@@ -189,6 +195,10 @@ const canDiscover = computed(
     CRED_RE.test(credentialSecretName.value.trim()),
 )
 
+// ADR-0011 D11: billing is org-level ONLY for anthropic once activated; a
+// github org's billing lives on its enterprise and this field is inert.
+const billingAppliesToOrg = computed(() => provider.value === 'anthropic' || !props.governanceActivated)
+
 const canSubmit = computed(() => {
   if (saving.value) return false
   if (!externalOrgId.value.trim() || !displayName.value.trim()) return false
@@ -253,7 +263,7 @@ async function save() {
         body: {
           displayName: displayName.value.trim(),
           reconciliationMode: reconciliationMode.value,
-          billing: billing.value,
+          ...(billingAppliesToOrg.value ? { billing: billing.value } : {}),
           apiKind: provider.value === 'anthropic' ? apiKind.value : null,
           credentialSecretName: provider.value === 'anthropic' ? cred : null,
           ...(provider.value === 'github' ? { providerEnterpriseId: entId, regionId: regionId.value || null } : {}),
@@ -267,7 +277,7 @@ async function save() {
           externalOrgId: externalOrgId.value.trim(),
           displayName: displayName.value.trim(),
           reconciliationMode: reconciliationMode.value,
-          billing: billing.value,
+          ...(billingAppliesToOrg.value ? { billing: billing.value } : {}),
           apiKind: provider.value === 'anthropic' ? apiKind.value : null,
           credentialSecretName: provider.value === 'anthropic' ? cred : null,
           providerEnterpriseId: provider.value === 'github' ? entId : null,
@@ -488,7 +498,7 @@ async function save() {
               A reconciled anthropic org needs a credential.
             </p>
           </div>
-          <div>
+          <div v-if="billingAppliesToOrg">
             <label for="po-billing" class="text-[12px] font-semibold text-carbon">Billing</label>
             <select
               id="po-billing"
@@ -500,6 +510,9 @@ async function save() {
               <option value="billed">billed</option>
             </select>
           </div>
+          <p v-else class="text-[12px] text-carbon-3" data-testid="po-billing-on-enterprise">
+            Billing is set on the linked GitHub enterprise (governance is active — ADR-0011 D11).
+          </p>
         </div>
 
         <p v-if="error" class="text-xs text-rag-red mt-3" data-testid="provider-org-error" role="alert">

@@ -38,8 +38,14 @@ describe('resolveScriptsDir / resolveHelperPath', () => {
 })
 
 describe('stateDir', () => {
-  it('prefers TOKENSCOPE_STATE_DIR', () => {
-    expect(stateDir({ TOKENSCOPE_STATE_DIR: '/custom/state' })).toBe('/custom/state')
+  // S1 hardening: TOKENSCOPE_STATE_DIR is resolved from process.env ONLY — a
+  // PASSED `env` object (readEmitSentinel's argument, or any settings-derived
+  // object) is IGNORED for this key, because nothing legitimately writes
+  // TOKENSCOPE_STATE_DIR to global OR repo settings.json (a settings-derived
+  // object is attacker-reachable in a hostile repo; process.env is not routed
+  // through that path the same way — see plugin-runtime.mjs's stateDir doc).
+  it('IGNORES TOKENSCOPE_STATE_DIR on a passed env object — process.env only', () => {
+    expect(stateDir({ TOKENSCOPE_STATE_DIR: '/custom/state' }).endsWith('/.tokenscope')).toBe(true)
   })
   it('falls back to ~/.tokenscope', () => {
     const d = stateDir({})
@@ -54,15 +60,19 @@ describe('stateDir', () => {
     expect(leaked).toBe(join(real, '.tokenscope'))
     expect(leaked).not.toContain('/tmp/ts-home-LEAKED')
   })
-  it('honours a process-level TOKENSCOPE_STATE_DIR even when the passed env lacks it', () => {
-    // The override is a process/deployment concern; a call site handed a
-    // settings block (no override key) must still resolve the pinned dir, so
-    // every call site agrees. Restored after the assertion.
+  it('honours a process-level TOKENSCOPE_STATE_DIR — and a passed env object can never override it', () => {
+    // The override is a genuine PROCESS/deployment concern (a real shell
+    // export or container config) — never a per-settings OTEL env block.
+    // Restored after the assertion.
     const prev = process.env.TOKENSCOPE_STATE_DIR
     process.env.TOKENSCOPE_STATE_DIR = '/pinned/state'
     try {
       expect(stateDir({ SOME_OTHER: 'x' })).toBe('/pinned/state')
-      expect(stateDir({ TOKENSCOPE_STATE_DIR: '/explicit' })).toBe('/explicit') // explicit wins
+      // A passed env's OWN TOKENSCOPE_STATE_DIR does NOT win over the real
+      // process-level pin — it is not consulted at all (S1 hardening: a
+      // hostile-repo-tainted `env` object must not be able to redirect where
+      // otel-headers-helper.sh would later write a live access token).
+      expect(stateDir({ TOKENSCOPE_STATE_DIR: '/attacker-supplied' })).toBe('/pinned/state')
     } finally {
       if (prev === undefined) delete process.env.TOKENSCOPE_STATE_DIR
       else process.env.TOKENSCOPE_STATE_DIR = prev
@@ -84,13 +94,24 @@ describe('readSettingsEnv', () => {
 })
 
 describe('readEmitSentinel', () => {
+  // readEmitSentinel(env) resolves its dir via stateDir(env) — which (S1
+  // hardening) reads TOKENSCOPE_STATE_DIR from process.env only, never from
+  // the passed `env` object. Pin the dir via process.env here, matching how
+  // production callers actually get a real state dir (a genuine deployment
+  // pin), not by handing a settings-derived object the key. The file's OWN
+  // top-level afterEach already restores the full process.env after every
+  // test, so no extra cleanup is needed here.
+  beforeEach(() => {
+    process.env.TOKENSCOPE_STATE_DIR = join(tmp, '.tokenscope')
+  })
+
   it('reads emit-failure.json from the state dir', () => {
     mkdirSync(join(tmp, '.tokenscope'), { recursive: true })
     writeFileSync(join(tmp, '.tokenscope', 'emit-failure.json'), JSON.stringify({ http_status: 401, message: 'x' }))
-    expect(readEmitSentinel({ TOKENSCOPE_STATE_DIR: join(tmp, '.tokenscope') })).toEqual({ http_status: 401, message: 'x' })
+    expect(readEmitSentinel({})).toEqual({ http_status: 401, message: 'x' })
   })
   it('returns null when no sentinel', () => {
-    expect(readEmitSentinel({ TOKENSCOPE_STATE_DIR: join(tmp, '.tokenscope') })).toBeNull()
+    expect(readEmitSentinel({})).toBeNull()
   })
 })
 

@@ -12,6 +12,14 @@
  * Also pins the regression invariant: with only the seeded global card
  * (mig 0004 — region_id NULL, effective [2026-01-01, 2099-01-01)), costing
  * output is byte-identical to the pre-0050 joiner.
+ *
+ * SCOPE AFTER docs/design/provider-cost-precedence.md: every record below is
+ * DELIBERATELY emitted without a provider cost (no lawCostUsd), so the ladder
+ * drops to rung 2 and this file keeps testing exactly what it was written to
+ * test — rate-card SELECTION. Selection still matters on rung 1 too, because
+ * the selected card is what SLICES the provider's total; the last test pins
+ * that the selection ladder is unchanged when a provider cost is present, and
+ * that the amount then comes from the provider rather than from the card.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
@@ -30,6 +38,7 @@ const TEAM = '33333333-3333-3333-3333-333333333333'
 const INST_REG = '66666666-6666-6666-6666-666666666666' // regression (global card only)
 const INST_APAC = '67676767-6767-6767-6767-676767676767' // temporal tests (APAC region cards)
 const INST_EMEA = '68686868-6868-6868-6868-686868686868' // scope test (no EMEA card → global)
+const INST_SLICE = '69696969-6969-4969-8969-696969696969' // provider-costed slice (APAC current card)
 
 const GLOBAL_CARD = '90000000-0000-4000-8000-000000000001' // mig 0004 seed, v1, input $3/1M, output $15/1M
 const APAC_OLD = 'a0000000-0000-4000-8000-000000000001' // APAC, OLD period, version 2 (HIGHER)
@@ -84,7 +93,9 @@ beforeAll(async () => {
       ('${INST_APAC}','oid','dev@i.com','${TEAM}',NULL,NULL,'claude-code','hApac',
        '2026-05-01T09:00:00Z','2026-09-01T11:00:00Z','${APAC}','${OU_APAC}',NULL,'unassigned'),
       ('${INST_EMEA}','oid','dev@i.com','${TEAM}',NULL,NULL,'claude-code','hEmea',
-       '2026-05-01T09:00:00Z','2026-09-01T11:00:00Z','${EMEA}','${OU_EMEA}',NULL,'unassigned');
+       '2026-05-01T09:00:00Z','2026-09-01T11:00:00Z','${EMEA}','${OU_EMEA}',NULL,'unassigned'),
+      ('${INST_SLICE}','oid','dev@i.com','${TEAM}',NULL,NULL,'claude-code','hSlice',
+       '2026-05-01T09:00:00Z','2026-09-01T11:00:00Z','${APAC}','${OU_APAC}',NULL,'unassigned');
   `)
 }, 120_000)
 
@@ -104,6 +115,9 @@ describe('regression — only the seeded global card (mig 0004)', () => {
     )
     expect(res.attributionRowsWritten).toBe(2)
     expect(res.spansSkippedNoRateCard).toBe(0)
+    // No provider cost on these records → rung 2 for both spans, which is what
+    // keeps the pre-0050 numbers below meaningful.
+    expect(res.costingRungs).toEqual({ provider: 0, rateCard: 2, carrier: 0, skipped: 0 })
 
     // Seeded lines: input $3/1M, output $15/1M (mig 0004).
     const input = await cardOf(INST_REG, '2026-05-10T10:00:00Z')
@@ -128,6 +142,42 @@ describe('regression — only the seeded global card (mig 0004)', () => {
     )
     expect(res.spansSkippedNoRateCard).toBe(1)
     expect(res.attributionRowsWritten).toBe(0)
+    // Rung 3: no provider cost AND no card in force for that instant.
+    expect(res.costingRungs).toEqual({ provider: 0, rateCard: 0, carrier: 0, skipped: 1 })
+  })
+
+  it('the SAME out-of-range event is NOT skipped once the provider reports a cost — carrier fallback', async () => {
+    // The behaviour change the design buys: "no card in force" used to mean
+    // "drop the spend". It now means "we cannot SLICE it", and the provider's
+    // total lands whole on the deterministic carrier row instead. Under-report
+    // was the old safety net; it is no longer needed when the provider spoke.
+    const res = await runReadJoiner(
+      t.db,
+      reader(INST_EMEA, [
+        {
+          tokens: 999,
+          tokenType: 'output',
+          model: 'claude-sonnet-4-7',
+          tsEvent: '2025-12-15T10:05:00Z',
+          sourceRunId: 'req_no_card',
+          lawCostUsd: 0.004_2,
+        },
+      ]),
+      { sessionIds: [INST_EMEA] },
+    )
+    expect(res.attributionRowsWritten).toBe(1)
+    expect(res.spansSkippedNoRateCard).toBe(0)
+    expect(res.costingRungs).toEqual({ provider: 0, rateCard: 0, carrier: 1, skipped: 0 })
+
+    const [carried] = await t.client<
+      { cost_usd: string; cost_basis: string; rate_card_id: string | null }[]
+    >`
+      SELECT cost_usd::text AS cost_usd, cost_basis, rate_card_id::text AS rate_card_id
+      FROM attribution_record
+      WHERE instance_id = ${INST_EMEA}::uuid AND source_run_id = 'req_no_card'`
+    expect(carried!.cost_usd).toBe('0.004200')
+    expect(carried!.cost_basis).toBe('provider-reported')
+    expect(carried!.rate_card_id).toBeNull()
   })
 })
 
@@ -149,6 +199,9 @@ describe('scope + temporal — region cards alongside the global card (mig 0050)
       INSERT INTO rate_line (rate_card_id, unit, unit_qty, unit_cost_usd, model, notes) VALUES
         ('${APAC_OLD}', 'input', 1000000, 10.00, NULL, 'APAC old period'),
         ('${APAC_CUR}', 'input', 1000000, 20.00, NULL, 'APAC current period'),
+        -- Second unit on the current APAC card so the SLICE ratio it implies
+        -- (1:3) is distinguishable from the global card's (1:5).
+        ('${APAC_CUR}', 'output', 1000000, 60.00, NULL, 'APAC current period'),
         ('${APAC_COU}', 'input', 1000000, 50.00, NULL, 'CoU-scoped — must not be selected yet');
     `)
   }, 30_000)
@@ -215,6 +268,57 @@ describe('scope + temporal — region cards alongside the global card (mig 0050)
     const row = await cardOf(INST_APAC, '2026-08-15T10:00:00Z')
     expect(row.rate_card_id).toBe(GLOBAL_CARD)
     expect(row.cost_usd).toBe('3.000000')
+  })
+
+  it('with a provider cost, the SELECTED card still decides the slice — but not the amount', async () => {
+    // The selection ladder is unchanged on rung 1; what changes is what the
+    // selected card is FOR. Here the APAC current card (input $20 / output $60,
+    // ratio 1:3) slices the provider's $0.12, where the global card would have
+    // implied 1:5. The total is the provider's number either way.
+    const res = await runReadJoiner(
+      t.db,
+      reader(INST_SLICE, [
+        {
+          tokens: 1_000_000,
+          tokenType: 'input',
+          model: 'claude-sonnet-4-7',
+          tsEvent: '2026-06-20T10:00:00Z',
+          sourceRunId: 'req_apac_slice',
+          lawCostUsd: 0.12,
+        },
+        {
+          tokens: 1_000_000,
+          tokenType: 'output',
+          model: 'claude-sonnet-4-7',
+          tsEvent: '2026-06-20T10:00:00Z',
+          sourceRunId: 'req_apac_slice',
+          lawCostUsd: 0.12,
+        },
+      ]),
+      { sessionIds: [INST_SLICE] },
+    )
+    expect(res.attributionRowsWritten).toBe(2)
+    expect(res.costingRungs).toEqual({ provider: 1, rateCard: 0, carrier: 0, skipped: 0 })
+
+    const rows = await t.client<
+      { token_type: string; cost_usd: string; rate_card_id: string | null; cost_basis: string }[]
+    >`
+      SELECT token_type, cost_usd::text AS cost_usd, rate_card_id::text AS rate_card_id, cost_basis
+      FROM attribution_record
+      WHERE instance_id = ${INST_SLICE}::uuid AND source_run_id = 'req_apac_slice'
+      ORDER BY token_type`
+    expect(rows.map((r) => [r.token_type, r.cost_usd])).toEqual([
+      ['input', '0.030000'], // 1/4 of $0.12 — the APAC ratio, not the global 1/6
+      ['output', '0.090000'],
+    ])
+    for (const r of rows) {
+      expect(r.rate_card_id).toBeNull()
+      expect(r.cost_basis).toBe('provider-reported')
+    }
+    const [total] = await t.client<{ total: string }[]>`
+      SELECT SUM(cost_usd)::text AS total FROM attribution_record
+      WHERE instance_id = ${INST_SLICE}::uuid AND source_run_id = 'req_apac_slice'`
+    expect(total!.total).toBe('0.120000')
   })
 
   it('CHECK: a CoU-scoped card without a region is rejected (strict scope ladder)', async () => {

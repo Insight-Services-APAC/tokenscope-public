@@ -24,8 +24,6 @@ const codeChallengeMethod = computed(() => (route.query.code_challenge_method as
 const state = computed(() => (route.query.state as string) || '')
 const scope = computed(() => (route.query.scope as string) || '')
 
-const scopes = computed(() => (scope.value ? scope.value.split(/[+ ]/).filter(Boolean) : []))
-
 const paramError = computed(() => {
   if (!clientId.value) return 'Missing client_id parameter'
   if (!redirectUri.value) return 'Missing redirect_uri parameter'
@@ -34,6 +32,61 @@ const paramError = computed(() => {
     return 'Invalid code_challenge_method — only S256 is supported'
   return null
 })
+
+/*
+ * Client identity + the effective granted scope set (S6) — fetched from the
+ * SAME GET /api/v1/oauth/authorize handler that already validated client_id +
+ * redirect_uri against the DB (server/api/v1/oauth/authorize.get.ts), never
+ * read from route.query. This page is a directly-navigable Nuxt route, so an
+ * attacker can link straight to it with any query params they like — a
+ * client_name (or scope list) sourced from route.query would be exactly as
+ * trustworthy as whatever the attacker put in the link. Sourcing it from this
+ * fetch's response instead means the rendered name/host/scopes are always the
+ * server's own validated row for the given client_id, and an unknown scope
+ * can never reach scopeLabel() from this page.
+ */
+interface ClientInfo {
+  client_name: string
+  redirect_host: string
+  granted_scopes: string[]
+}
+type ClientInfoFetcher = (
+  path: string,
+  opts: { method: 'GET'; query: Record<string, string>; headers: Record<string, string> },
+) => Promise<ClientInfo>
+
+const clientInfo = ref<ClientInfo | null>(null)
+const clientInfoError = ref<string | null>(null)
+const scopes = computed(() => clientInfo.value?.granted_scopes ?? [])
+
+async function loadClientInfo() {
+  if (paramError.value) return
+  // useRequestFetch forwards the SSR cookie (mirrors useSession.ts) — without
+  // it this call would look unauthenticated during server rendering.
+  const fetcher: ClientInfoFetcher = import.meta.server
+    ? (useRequestFetch() as ClientInfoFetcher)
+    : ($fetch as ClientInfoFetcher)
+  try {
+    clientInfo.value = await fetcher('/api/v1/oauth/authorize', {
+      method: 'GET',
+      query: {
+        response_type: responseType.value || 'code',
+        client_id: clientId.value,
+        redirect_uri: redirectUri.value,
+        code_challenge: codeChallenge.value,
+        code_challenge_method: codeChallengeMethod.value || 'S256',
+        scope: scope.value,
+        state: state.value,
+      },
+      headers: { accept: 'application/json' },
+    })
+  } catch (err) {
+    const e = err as { data?: { error_description?: string; error?: string }; message?: string }
+    clientInfoError.value =
+      e?.data?.error_description || e?.data?.error || e?.message || 'Could not verify this client.'
+  }
+}
+await loadClientInfo()
 
 const submitting = ref(false)
 const callbackUrl = ref<string | null>(null)
@@ -124,6 +177,23 @@ async function copyCallbackUrl() {
         <p class="mt-1 text-sm text-carbon-2">An MCP client wants to connect to your TokenScope account.</p>
       </div>
 
+      <!-- Server-verified client identity — NEVER sourced from route.query
+           (see loadClientInfo). "Self-registered, unverified" is honest: RFC
+           7591 registration is open, so this is what the registrant CALLED
+           itself, not a vetted identity. -->
+      <div
+        v-if="clientInfo"
+        class="mb-4 rounded-lg border border-rag-amber/40 bg-rag-amber/10 px-3 py-2.5"
+        data-testid="authorize-client-identity"
+      >
+        <p class="text-sm font-semibold text-carbon">{{ clientInfo.client_name }}</p>
+        <p class="mt-0.5 text-[11px] text-[#92400E]">
+          Self-registered, unverified — TokenScope hasn't vetted this application's identity.
+          It will receive the authorization code at
+          <span class="font-mono" data-testid="authorize-redirect-host">{{ clientInfo.redirect_host }}</span>.
+        </p>
+      </div>
+
       <div v-if="scopes.length" class="mb-5">
         <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-carbon-3">Requested permissions</p>
         <ul class="space-y-1.5">
@@ -136,6 +206,9 @@ async function copyCallbackUrl() {
 
       <div v-if="paramError" class="mb-4 rounded-lg border border-rag-red/30 bg-rag-red/5 px-3 py-2.5 text-sm text-rag-red" data-testid="authorize-param-error">
         {{ paramError }}
+      </div>
+      <div v-else-if="clientInfoError" class="mb-4 rounded-lg border border-rag-red/30 bg-rag-red/5 px-3 py-2.5 text-sm text-rag-red" data-testid="authorize-client-info-error">
+        {{ clientInfoError }}
       </div>
       <div v-else-if="submitError" class="mb-4 rounded-lg border border-rag-red/30 bg-rag-red/5 px-3 py-2.5 text-sm text-rag-red" role="alert">
         {{ submitError }}

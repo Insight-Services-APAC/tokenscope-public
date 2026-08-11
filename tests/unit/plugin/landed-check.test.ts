@@ -77,6 +77,45 @@ describe('refreshLanded (Claude) — fail-open guards leave the cache untouched'
   })
 })
 
+describe('refreshLanded (Claude) — S1 fixes 2+3: state dir + endpoint safety', () => {
+  it('a non-https, off-loopback health URL is rejected before any fetch', async () => {
+    writeAccess()
+    const spy = vi.fn()
+    mockFetch(spy)
+    const r = await refreshLanded({
+      env: {
+        TOKENSCOPE_BEARER_ENDPOINT: 'http://evil.example/api/v1/instances/x/bearer',
+        OTEL_RESOURCE_ATTRIBUTES: `tokenscope.instance_id=${INSTANCE},tool=claude-code`,
+      },
+      stateDir: dir,
+    })
+    expect(r).toEqual({ ok: false, reason: 'bad-endpoint' })
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('resolves the state dir through stateDir(), NOT a repo-supplied process.env.TOKENSCOPE_STATE_DIR', async () => {
+    // No explicit `stateDir` param passed — refreshLanded must resolve via the
+    // shared stateDir() helper (env-passed override, else process env, else
+    // the passwd home), never a second, independent process.env read that a
+    // repo-tagged process.env could poison. Simulate exactly that: a
+    // PROCESS-level override (the legitimate deployment-pin use of
+    // TOKENSCOPE_STATE_DIR) must still be honoured — proving the read really
+    // does go through stateDir()'s resolution order, not skip it.
+    const saved = process.env.TOKENSCOPE_STATE_DIR
+    process.env.TOKENSCOPE_STATE_DIR = dir
+    try {
+      writeAccess()
+      mockFetch(() => ({ ok: true, json: async () => ({ last_emission: null, silent: true, revoked: false }) }))
+      const r = await refreshLanded({ env }) // no `stateDir` override — must resolve via process.env
+      expect(r.ok).toBe(true)
+      expect(existsSync(join(dir, 'last-landed.json'))).toBe(true)
+    } finally {
+      if (saved === undefined) delete process.env.TOKENSCOPE_STATE_DIR
+      else process.env.TOKENSCOPE_STATE_DIR = saved
+    }
+  })
+})
+
 describe('refreshLanded (Claude) — success writes the cache the statusline reads', () => {
   it('200 → writes ok:true + lastEmission + lastBearer + revoked (the fields classifyLanding needs)', async () => {
     writeAccess()

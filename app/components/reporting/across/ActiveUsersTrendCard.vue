@@ -8,10 +8,16 @@
  * window the spend trend uses. Counts, not dollars — the axis + tooltip format as
  * whole developers. The two series are NOT additive (a teammate active in both
  * tools counts in both), so this is deliberately two lines, never a stacked total.
+ *
+ * Headcount is a working-week signal too, and more sharply than spend: nobody is
+ * active on a Sunday, so the raw daily line is a sawtooth that drops to near zero
+ * twice a week. The daily line is kept faint under a bold 7-DAY TRAILING MEAN
+ * (prototype fix 5), which is the line that answers "are more people using this".
  */
 import { computed } from 'vue'
 import UiCard from '../../ui/Card.vue'
 import ChartTrend from '../charts/ChartTrend.client.vue'
+import { TRAILING_MEAN_DAYS } from '../charts/chart-utils'
 import type { TrendSeries } from './build-trend'
 import type { ActiveTrend } from '#shared/reports/types'
 
@@ -48,10 +54,12 @@ function devCount(v: number): string {
 
     <p v-if="!active" class="text-xs text-carbon-3 italic py-8 text-center">Loading developer activity…</p>
     <ChartTrend
+      empty-label="No Claude Code or Copilot CLI sessions in this window — this chart counts developers in those two lanes, so other surfaces' spend does not appear here."
       v-else
       :series="series"
       :value-format="devCount"
       :height="240"
+      :trailing-mean-days="TRAILING_MEAN_DAYS"
     />
 
     <p class="mt-2 text-[11px] text-carbon-3 leading-snug">

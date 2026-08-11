@@ -44,6 +44,14 @@
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
 import type * as schema from '../../drizzle/schema'
+import { dispatchInbox } from '../notifications/dispatch'
+import { CLAUDE_FAMILY_TOOLS } from '../../shared/usage/surface'
+import { corroboratedOtelDaily } from './corroborated-otel'
+import { advisoryXactLock } from '../db/advisory-lock'
+import {
+  hasActivePersonalSubscription,
+  personalSubscriptionLockKey,
+} from '../governance/personal-subscription'
 
 type Db = PostgresJsDatabase<typeof schema>
 
@@ -56,17 +64,66 @@ export const OVER_EMISSION_SETTLED_LAG_DAYS = 3
 /** A resolved flag re-opens only when the new over exceeds the watermark by this factor. */
 export const OVER_EMISSION_REFLAG_FACTOR = 1.5
 
+/*
+ * (A) — the "api_usd = 0" gap. `material` below requires `api_usd > 0`
+ * (line ~121's WHERE), by design: api=0 means EITHER the org isn't
+ * reconciled yet OR spend is genuinely zero, and the two are indistinguishable
+ * from this view alone — so a naive widen-the-threshold fix would flag every
+ * teammate in an unreconciled org as a suspected forger (the false positive
+ * this gate exists to avoid). But that same design means a FULLY unreconciled
+ * org has NO high-confidence flag no matter how large the OTel total — a real
+ * detection hole the audit correctly called out.
+ *
+ * The fix is a SEPARATE, LOWER-CONFIDENCE lane (never merged into the
+ * high-confidence flag): when api_usd = 0, an OTel total above a floor
+ * MATERIALLY HIGHER than OVER_EMISSION_MIN_USD is worth a developer's
+ * attention even without a bill to corroborate against. Set high on purpose —
+ * see the Must-not-break note this story shipped with: a floor set too low
+ * flags ordinary usage in an unreconciled org as a suspected forger and burns
+ * the credibility of the whole quarantine UX. This is a JUDGEMENT CALL (no
+ * prior art in this codebase to anchor it to) — flagged as such in the story
+ * return value; revisit with real unreconciled-org volume once observed.
+ *
+ * PERSISTENCE GAP (also flagged in the story return value): the audit's fix
+ * text writes these rows to `over_emission` with `reason='no-bill-to-
+ * corroborate'`. `over_emission` (drizzle/migrations/0072_over_emission.sql,
+ * drizzle/schema/unaccounted.ts) has NO `reason` column, and adding one is a
+ * migration + schema change — outside this file's (and this story's)
+ * ownership. Rather than either (a) silently skip the no-bill lane, or (b)
+ * hack the discriminator onto an existing column with the wrong semantics,
+ * this file does not create a high-confidence `over_emission` row. It does,
+ * however, persist a non-accusatory `personal-subscription-prompt` inbox item
+ * for declarable Claude tools. The prompt asks rather than classifies, and
+ * migration 0109 deduplicates it per teammate/tool/signal-month.
+ */
+export const OVER_EMISSION_NO_BILL_FLOOR_USD = 250.0
+
 export interface OverEmissionOptions {
   startDate: string
   endDate: string
   teammateId?: string
   /** Don't flag days newer than (endDate − this). Default OVER_EMISSION_SETTLED_LAG_DAYS. */
   settledLagDays?: number
+  /** Disable teammate prompts for historical administrative backfills. The
+   *  scheduled trailing-window worker leaves this enabled. */
+  dispatchPersonalPrompts?: boolean
 }
 
 export interface OverEmissionResult {
   flagged: number
   totalOverUsd: number
+  /**
+   * (A) — (teammate, day, tool) combinations with OTel spend but NO bill to
+   * corroborate against (api_usd = 0) whose OTel total clears
+   * OVER_EMISSION_NO_BILL_FLOOR_USD. NOT written to `over_emission`; reported
+   * here and used only for the lower-confidence declaration prompt. Never
+   * merged into `flagged`/`totalOverUsd`.
+   */
+  noBillFlagged: number
+  totalNoBillUsd: number
+  /** Teammate prompts inserted for likely-personal Claude usage. The database
+   *  deduplicates these per teammate/tool/signal-month. */
+  personalPromptsDispatched: number
 }
 
 export async function detectOverEmission(db: Db, opts: OverEmissionOptions): Promise<OverEmissionResult> {
@@ -87,23 +144,20 @@ export async function detectOverEmission(db: Db, opts: OverEmissionOptions): Pro
       FROM v_teammate_usage_daily
       WHERE day >= ${opts.startDate}::date AND day <= ${opts.endDate}::date ${teammateFilterApi}
     ),
-    otel AS (
-      SELECT ar.teammate_id, (ar.ts_event AT TIME ZONE 'UTC')::date AS day, ar.tool, SUM(ar.cost_usd) AS otel_usd
-      FROM attribution_record ar
-      WHERE ar.ts_event >= ${opts.startDate}::date::timestamptz
-        AND ar.ts_event < (${opts.endDate}::date + 1)::timestamptz ${teammateFilterOtel}
-        AND NOT EXISTS (
-          -- Exclude conversations the dev has CONFIRMED as forgeries (over-emission resolve
-          -- writes reason='api-uncorroborated'); the existing informational heartbeat badge
-          -- ('no-covering-heartbeat') is NOT excluded — it never wipes spend (ADR-0008).
-          SELECT 1 FROM session_quarantine sq
-          WHERE sq.teammate_id = ar.teammate_id
-            AND sq.conversation_id = ar.claude_session_id
-            AND sq.resolved_at IS NULL
-            AND sq.reason = 'api-uncorroborated'
-        )
-      GROUP BY ar.teammate_id, (ar.ts_event AT TIME ZONE 'UTC')::date, ar.tool
-    ),
+    -- THE shared operand (server/usage/corroborated-otel.ts) — byte-identical to
+    -- the one the UNDER direction nets against (unaccounted-reconciliation.ts).
+    -- The two directions must agree or a dollar can be both "un-enrolled usage we
+    -- missed" and "emission we cannot corroborate" at once. Since mig 0119 that
+    -- operand also drops self-billed rows in a fully-stamped cell: personal-
+    -- subscription usage has no bill to corroborate against, so counting it here
+    -- manufactured over-emission flags against developers doing nothing wrong.
+    otel AS (${corroboratedOtelDaily({
+      startExpr: sql`${opts.startDate}::date::timestamptz`,
+      endExpr: sql`(${opts.endDate}::date + 1)::timestamptz`,
+      extra: teammateFilterOtel,
+      withTool: true,
+      withTokens: false,
+    })}),
     recon AS (
       SELECT otel.teammate_id, otel.day, otel.tool,
              otel.otel_usd,
@@ -121,6 +175,30 @@ export async function detectOverEmission(db: Db, opts: OverEmissionOptions): Pro
       WHERE api_usd > 0
         AND over_usd > GREATEST(${OVER_EMISSION_MIN_USD}, ${OVER_EMISSION_REL} * api_usd)
         AND day <= ${settledBefore}::date   -- settled-bill only (don't flag a still-filling day)
+    ),
+    -- (A) — the SEPARATE, lower-confidence lane: api_usd = 0 (no bill at all,
+    -- so no ratio to compare against — only the absolute floor applies), OTel
+    -- above OVER_EMISSION_NO_BILL_FLOOR_USD, same settled-bill guard. NEVER
+    -- unioned with the material CTE above — see OverEmissionResult.noBillFlagged.
+    --
+    -- PERSONAL-DECLARATION CARVE-OUT (ADR-0011 D3/D4, design §4.3): a teammate
+    -- who has explicitly declared a (tool) as their OWN personal subscription
+    -- is, by construction, never going to have a bill to corroborate against —
+    -- there IS no Insight-paid org for it. Without this exclusion, EVERY
+    -- declared-personal teammate's usage would sit in this lane forever,
+    -- reading as a suspected forger for doing exactly what they told us they
+    -- were doing. Scoped PRECISELY to the declared (teammate, tool) contract —
+    -- never a blanket exemption, and never applied to the 'material' lane
+    -- above (a REAL bill mismatch is never waived by a personal declaration).
+    material_no_bill AS (
+      SELECT recon.* FROM recon
+      WHERE api_usd = 0
+        AND over_usd > ${OVER_EMISSION_NO_BILL_FLOOR_USD}
+        AND day <= ${settledBefore}::date
+        AND NOT EXISTS (
+          SELECT 1 FROM personal_subscription_declaration psd
+          WHERE psd.teammate_id = recon.teammate_id AND psd.tool = recon.tool AND psd.revoked_at IS NULL
+        )
     )`
 
   // 1. Upsert the material over-emissions (preserve the dev's state + suspect-session call).
@@ -171,5 +249,78 @@ export async function detectOverEmission(db: Db, opts: OverEmissionOptions): Pro
       ${opts.teammateId ? sql`AND teammate_id = ${opts.teammateId}::uuid` : sql``}
   `)
 
-  return { flagged: flagged.length, totalOverUsd: Number(agg?.usd ?? 0) }
+  // 3. (A) — the no-bill lane is freshly recomputed every call. It never
+  // becomes a high-confidence over_emission row; declarable Claude tools are
+  // grouped into the lower-confidence prompt stream below.
+  const promptRows =
+    opts.dispatchPersonalPrompts === false
+      ? []
+      : await db.execute<{
+          teammate_id: string
+          tool: string
+          signal_month: string
+          usage_usd: string
+          days: string
+          first_day: string
+          last_day: string
+        }>(sql`
+          ${computed}
+          SELECT teammate_id::text AS teammate_id,
+                 tool,
+                 to_char(day, 'YYYY-MM') AS signal_month,
+                 SUM(over_usd)::text AS usage_usd,
+                 COUNT(*)::text AS days,
+                 MIN(day)::text AS first_day,
+                 MAX(day)::text AS last_day
+          FROM material_no_bill
+          WHERE tool IN (${sql.join(CLAUDE_FAMILY_TOOLS.map((tool) => sql`${tool}`), sql`, `)})
+          GROUP BY teammate_id, tool, to_char(day, 'YYYY-MM')
+          ORDER BY teammate_id, tool, signal_month
+        `)
+
+  const [noBillAgg] = await db.execute<{
+    n: string
+    usd: string
+  }>(sql`
+    ${computed}
+    SELECT COUNT(*)::text AS n, COALESCE(SUM(over_usd), 0)::text AS usd
+    FROM material_no_bill
+  `)
+
+  let personalPromptsDispatched = 0
+  for (const prompt of promptRows) {
+    personalPromptsDispatched += await db.transaction(async (tx) => {
+      const keyArgs = { teammateId: prompt.teammate_id, tool: prompt.tool }
+      await tx.execute(advisoryXactLock('personalSubscription', personalSubscriptionLockKey(keyArgs)))
+      if (await hasActivePersonalSubscription(tx, keyArgs)) return 0
+
+      const dispatched = await dispatchInbox(tx, {
+        category: 'personal-subscription-prompt',
+        severity: 'info',
+        subject: `Could your ${prompt.tool} usage be from a personal subscription?`,
+        body: {
+          kind: 'likely-personal-subscription',
+          tool: prompt.tool,
+          signalMonth: prompt.signal_month,
+          usageUsd: Number(prompt.usage_usd),
+          days: Number(prompt.days),
+          firstDay: prompt.first_day,
+          lastDay: prompt.last_day,
+          actionHref: '/account#personal-subscription',
+        },
+        recipientTeammateIdHint: prompt.teammate_id,
+        relatedEntityKind: 'teammate',
+        relatedEntityId: prompt.teammate_id,
+      })
+      return dispatched.length
+    })
+  }
+
+  return {
+    flagged: flagged.length,
+    totalOverUsd: Number(agg?.usd ?? 0),
+    noBillFlagged: Number(noBillAgg?.n ?? 0),
+    totalNoBillUsd: Number(noBillAgg?.usd ?? 0),
+    personalPromptsDispatched,
+  }
 }

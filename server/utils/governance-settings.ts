@@ -30,12 +30,25 @@ export const GOV_VELOCITY_SPIKE_THRESHOLD = 'velocity.spike_threshold'
 export const GOV_RECONCILIATION_GAP_THRESHOLD = 'reconciliation.gap_threshold'
 export const GOV_RECONCILIATION_EPSILON_USD = 'reconciliation.epsilon_usd'
 export const GOV_RECONCILIATION_LAG_BUFFER_HOURS = 'reconciliation.lag_buffer_hours'
+/**
+ * C9 — how many occupants of a region's `default` unit may NOT be direct reports
+ * of its owner before the region page warns.
+ *
+ * A count, not a ratio, and deliberately a DIAL: the default unit's expected
+ * population is "the owner's own direct reports", so the tolerance is a span of
+ * control, and span of control differs by organisation. Anything hard-coded here
+ * would be one tenant's shape shipped as a product constant. mig 0112 seeds the
+ * platform baseline; a region admin overrides it for their own region through the
+ * same PUT as every other dial.
+ */
+export const GOV_DEFAULT_UNIT_WARN_THRESHOLD = 'placement.default_unit_warn_threshold'
 
 export type GovernanceSettingKey =
   | typeof GOV_VELOCITY_SPIKE_THRESHOLD
   | typeof GOV_RECONCILIATION_GAP_THRESHOLD
   | typeof GOV_RECONCILIATION_EPSILON_USD
   | typeof GOV_RECONCILIATION_LAG_BUFFER_HOURS
+  | typeof GOV_DEFAULT_UNIT_WARN_THRESHOLD
 
 /*
  * Per-key value bounds, enforced by the admin PUT (the DB stores any
@@ -50,6 +63,10 @@ export const GOVERNANCE_SETTING_BOUNDS: Record<
   [GOV_RECONCILIATION_GAP_THRESHOLD]: { min: 0, max: 1, minExclusive: true },
   [GOV_RECONCILIATION_EPSILON_USD]: { min: 0, max: 100, minExclusive: true },
   [GOV_RECONCILIATION_LAG_BUFFER_HOURS]: { min: 0, max: 720, minExclusive: false },
+  // A whole-person count. 0 is admissible and means "warn as soon as anyone in
+  // the default unit does not report to its owner" — a legitimate posture for a
+  // small region, not a misconfiguration, so the bound is inclusive.
+  [GOV_DEFAULT_UNIT_WARN_THRESHOLD]: { min: 0, max: 10_000, minExclusive: false },
 }
 
 export const GOVERNANCE_SETTING_KEYS = Object.keys(

@@ -62,7 +62,14 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { readEmitSentinel, globalSettingsEnv, stateDir } from './plugin-runtime.mjs'
 
-const C = { green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m', cyan: '\x1b[36m', dim: '\x1b[2m', reset: '\x1b[0m' }
+const C = {
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  red: '\x1b[31m',
+  cyan: '\x1b[36m',
+  dim: '\x1b[2m',
+  reset: '\x1b[0m',
+}
 
 /**
  * How recently the client must have minted a /bearer to count as LIVE ENOUGH to
@@ -198,7 +205,15 @@ function parseTs(v) {
  *                 (NEVER green, so "unconfirmed" is visually distinct from "landed").
  *   - mcpAuthed:  the TokenScope MCP server is OAuth-authed in Claude's store.
  */
-export function formatStatusLine({ configured, emitting, mcpAuthed, landing = 'unknown', sessionId, envLabel = null, color = true }) {
+export function formatStatusLine({
+  configured,
+  emitting,
+  mcpAuthed,
+  landing = 'unknown',
+  sessionId,
+  envLabel = null,
+  color = true,
+}) {
   const paint = (c, s) => (color ? `${c}${s}${C.reset}` : s)
   if (!configured) return paint(C.dim, 'TokenScope · not configured')
   const sid = sessionId ? ` ${paint(C.dim, `#${String(sessionId).slice(0, 8)}`)}` : ''
@@ -212,7 +227,8 @@ export function formatStatusLine({ configured, emitting, mcpAuthed, landing = 'u
   if (landing === 'dead') return line(C.red, '✗ not landing')
   // 4. Delivery CONFIRMED. Green when you can also query it; yellow when MCP isn't
   //    connected yet (records land, but my_usage / tag_session aren't wired).
-  if (landing === 'landed') return mcpAuthed ? line(C.green, '✓ landed') : line(C.yellow, '⚠ landed · emit-only')
+  if (landing === 'landed')
+    return mcpAuthed ? line(C.green, '✓ landed') : line(C.yellow, '⚠ landed · emit-only')
   // 5. 'unknown' — /health unreachable: we can neither confirm nor deny landing.
   //    NEVER red (no false dead-export alarm). Cyan `◎ emit-auth` is the neutral
   //    "auth fine, delivery unconfirmed" fallback — visually distinct from green.
@@ -352,9 +368,13 @@ function maybeSpawnLandedRefresh(env, cache) {
     const dir = stateDir()
     try {
       mkdirSync(dir, { recursive: true })
-      writeFileSync(join(dir, 'landed-poll.stamp'), `${JSON.stringify({ at: new Date().toISOString() })}\n`, {
-        mode: 0o600,
-      })
+      writeFileSync(
+        join(dir, 'landed-poll.stamp'),
+        `${JSON.stringify({ at: new Date().toISOString() })}\n`,
+        {
+          mode: 0o600,
+        },
+      )
     } catch {
       /* stamp is best-effort; a failed write just means the throttle can't engage */
     }

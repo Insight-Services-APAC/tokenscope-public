@@ -21,11 +21,22 @@
  * Validation order matters: client + redirect_uri are validated BEFORE any
  * redirect, to prevent open-redirect via a crafted error. Errors that CANNOT
  * safely redirect (bad/unknown client or redirect_uri) are returned as OAuth JSON.
+ *
+ * `Accept: application/json` (S6): the consent page is a directly-navigable
+ * Nuxt route, so `route.query` there is exactly as caller-controlled as this
+ * endpoint's OWN query params — a client_name shown on the page could never be
+ * trusted if it were just echoed back as another query param on the redirect.
+ * Instead the page calls straight back into THIS handler (server-verified
+ * cookie session forwarded via useRequestFetch, same as useSession.ts) once
+ * client + redirect_uri are validated, and gets the DB row's client_name +
+ * the matched redirect_uri's host + the effective granted scope set as JSON —
+ * never derived from route.query. See app/pages/oauth/authorize.vue.
  */
 import {
   defineEventHandler,
   getValidatedQuery,
   getRequestURL,
+  getRequestHeader,
   sendRedirect,
   setResponseHeaders,
   setResponseStatus,
@@ -33,14 +44,18 @@ import {
 } from 'h3'
 import { consola } from 'consola'
 import { tryAuth } from '../../../utils/auth'
-import { getClient } from '../../../auth/oauth'
+import { getClient, computeGrantedScopes } from '../../../auth/oauth'
 import { getDb } from '../../../db'
 import { authorizeQuerySchema } from '../../../../shared/schemas/oauth'
 
-function oauthJsonError(event: H3Event, code: string, detail: string) {
+function oauthJsonError(event: H3Event, code: string, detail: string, status = 400) {
   setResponseHeaders(event, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-  setResponseStatus(event, 400)
+  setResponseStatus(event, status)
   return { error: code, error_description: detail }
+}
+
+function wantsJson(event: H3Event): boolean {
+  return (getRequestHeader(event, 'accept') || '').includes('application/json')
 }
 
 export default defineEventHandler(async (event) => {
@@ -61,9 +76,14 @@ export default defineEventHandler(async (event) => {
   }
 
   // Auth gate — reuse the existing Entra session. Unauthenticated ⇒ bounce to
-  // login, preserving the full authorize URL so the user lands back here.
+  // login, preserving the full authorize URL so the user lands back here. The
+  // consent page's own info fetch (Accept: application/json) can't be bounced
+  // through a browser redirect — it gets a clean JSON error instead.
   const session = await tryAuth(event)
   if (!session) {
+    if (wantsJson(event)) {
+      return oauthJsonError(event, 'login_required', 'Sign in required', 401)
+    }
     const returnTo = getRequestURL(event).pathname + getRequestURL(event).search
     // nuxt-oidc-auth login route for the default provider. The module's post-login
     // return target is `callbackRedirectUrl` (login.get.js stores it in the session)
@@ -92,6 +112,20 @@ export default defineEventHandler(async (event) => {
       'invalid_request',
       'redirect_uri does not match any registered redirect URIs',
     )
+  }
+
+  // The consent page's own info fetch (S6 Consent (a)/(b)): server-verified
+  // client_name + the MATCHED redirect_uri's host + the effective granted
+  // scope set, returned as DATA rather than a redirect. computeGrantedScopes
+  // is the SAME filter authorize.post.ts applies to actually issue the grant
+  // — this display and that grant can never drift.
+  if (wantsJson(event)) {
+    setResponseHeaders(event, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    return {
+      client_name: client.clientName,
+      redirect_host: new URL(q.redirect_uri).host,
+      granted_scopes: computeGrantedScopes(q.scope),
+    }
   }
 
   // Client + redirect_uri are validated → HAND OFF to the consent PAGE. The

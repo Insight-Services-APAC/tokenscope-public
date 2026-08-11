@@ -39,8 +39,16 @@ type Db = PostgresJsDatabase<typeof schema>
 
 /** Incremental window: today + this many prior days, keyed on ts_recorded. */
 const DEFAULT_LOOKBACK_DAYS = 2
-/** First-run (empty table) backfill horizon, keyed on ts_event. */
-const DEFAULT_BACKFILL_DAYS = 90
+/**
+ * First-run (empty table) backfill horizon, keyed on ts_event.
+ *
+ * Exported because it is a HORIZON, and a test that seeds a day has to know
+ * where it is. `spend-rollup.test.ts` used to hard-code 90 alongside its own
+ * seed day; when the calendar walked past the day it seeded, the worker
+ * correctly wrote nothing and seven assertions read "expected 29, got 0" for a
+ * reason none of them had changed. A copied constant cannot notice that.
+ */
+export const DEFAULT_BACKFILL_DAYS = 90
 /** Days recomputed per transaction — bounds lock duration during backfill. */
 const CHUNK_DAYS = 10
 

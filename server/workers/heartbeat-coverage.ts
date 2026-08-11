@@ -66,6 +66,20 @@ export interface HeartbeatCoverageResult {
   sessionsScanned: number
   quarantined: number
   resolved: number
+  /*
+   * (B) — the `AND ar.tool = 'claude-code'` filter above is CORRECT on its
+   * merits (Copilot's reactive ~hourly bearer mint would false-quarantine —
+   * see the module doc), not merely unimplemented. But an exemption that is
+   * silent is indistinguishable from a gap nobody noticed, so this counts the
+   * non-Claude population THIS RUN did not (and structurally cannot)
+   * evaluate — every distinct (conversation, instance) with attribution_record
+   * activity in the same lookback window whose tool is NOT 'claude-code'.
+   * Making the exemption COUNTABLE is the fix; the exemption itself is
+   * unchanged. Purely informational: nothing alarms on it (that would need a
+   * decision about which surface pages an operator, out of this story's
+   * scope — the same UF-11 boundary as JoinResult.telemetryOnlySpend).
+   */
+  notEvaluable: number
 }
 
 /** Grace minutes added to the instance's authenticated-live window on both ends. */
@@ -133,6 +147,14 @@ export async function runHeartbeatCoverage(
         SUM(ar.tokens)                                       AS tokens
       FROM attribution_record ar
       WHERE ar.ts_event >= ${lookbackCutoff.toISOString()}::timestamptz
+        -- CLAUDE-ONLY. The grace window is calibrated to Claude Code's proactive
+        -- ~29-min otelHeadersHelper /bearer mint. copilot-cli DOES mint /bearer,
+        -- but its forwarder mints REACTIVELY (~hourly, on 401/403), so last_bearer_at
+        -- lags a long Copilot session and the coverage check would false-quarantine
+        -- it. copilot-cli cross-instance-spoof detection is handled by §A
+        -- reconciliation against GitHub actuals (usage-reconciliation, already
+        -- scheduled) — ADR-0008's layer-1 money backstop — not this early-warning leg.
+        AND ar.tool = 'claude-code'
       GROUP BY COALESCE(ar.claude_session_id, ar.instance_id::text), ar.instance_id
     )
     SELECT
@@ -160,6 +182,23 @@ export async function runHeartbeatCoverage(
     -- HISTORICAL GUARD: only instances with a heartbeat are evaluable.
     WHERE ia.last_bearer_at IS NOT NULL
   `)
+
+  // (B) — the SAME lookback window's complement: distinct (conversation,
+  // instance) pairs whose tool is NOT 'claude-code'. Deliberately does NOT
+  // apply the `ia.last_bearer_at IS NOT NULL` historical guard the Claude scan
+  // uses — that guard exists to avoid retroactively quarantining pre-rollout
+  // data, which does not apply to a population this worker never evaluates in
+  // the first place regardless of heartbeat history.
+  const [notEvaluableRow] = await db.execute<{ n: string }>(sql`
+    SELECT count(*)::text AS n FROM (
+      SELECT DISTINCT COALESCE(ar.claude_session_id, ar.instance_id::text) AS conversation_id,
+             ar.instance_id AS instance_id
+      FROM attribution_record ar
+      WHERE ar.ts_event >= ${lookbackCutoff.toISOString()}::timestamptz
+        AND ar.tool <> 'claude-code'
+    ) non_claude
+  `)
+  const notEvaluable = Number(notEvaluableRow?.n ?? 0)
 
   let quarantined = 0
   const nowIso = now.toISOString()
@@ -191,6 +230,13 @@ export async function runHeartbeatCoverage(
         tokens           = EXCLUDED.tokens,
         updated_at       = EXCLUDED.updated_at,
         resolved_at      = NULL
+        -- ONLY ever touch OUR OWN rows. session_quarantine has ONE unique key
+        -- (conversation_id, instance_id) shared with the dev-confirmed-forgery
+        -- lane (reason='api-uncorroborated', written by /me/over-emission/resolve).
+        -- Without this guard, an unrelated informational tick would overwrite a
+        -- forgery row's cost/window and reset its resolved_at — corrupting the
+        -- record that EXCLUDES forged spend from v_complete_usage.
+        WHERE session_quarantine.reason = 'no-covering-heartbeat'
       RETURNING (xmax = 0) AS inserted
     `)
     const wasNew = [...upserted][0]?.inserted === true
@@ -234,10 +280,19 @@ export async function runHeartbeatCoverage(
        WHERE conversation_id = ${k.conversation_id}
          AND instance_id = ${k.instance_id}::uuid
          AND resolved_at IS NULL
+         -- CRITICAL: only resolve OUR OWN informational rows. The unique key
+         -- (conversation_id, instance_id) is SHARED with the dev-confirmed-forgery
+         -- lane ('api-uncorroborated'), which is what keeps forged spend OUT of
+         -- v_complete_usage / me-queries. Without this filter a single covered
+         -- tick silently un-quarantines a forgery — and since budget-alert and
+         -- velocity-watch now read v_complete_usage, that re-admitted spend can
+         -- page a PM. Latent for the life of the code; this branch is the first
+         -- thing that ever schedules the worker.
+         AND reason = 'no-covering-heartbeat'
       RETURNING id::text AS id
     `)
     resolved += [...res].length
   }
 
-  return { sessionsScanned: rows.length, quarantined, resolved }
+  return { sessionsScanned: rows.length, quarantined, resolved, notEvaluable }
 }

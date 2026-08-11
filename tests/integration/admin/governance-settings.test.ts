@@ -15,6 +15,7 @@ import {
   GOV_RECONCILIATION_GAP_THRESHOLD,
   GOV_RECONCILIATION_EPSILON_USD,
   GOV_RECONCILIATION_LAG_BUFFER_HOURS,
+  GOVERNANCE_SETTING_KEYS,
   resolveGovernanceSetting,
   resolveGovernanceSettings,
   loadGovernanceSettingResolver,
@@ -228,7 +229,11 @@ describe('read endpoints', () => {
       platform: { key: string; value: number }[]
       region_overrides: { key: string; region_id: string; value: number }[]
     }
-    expect(got.platform.length).toBe(4)
+    // Every allowlisted dial must have a seeded platform baseline — the
+    // resolver throws rather than inventing one, so a missing seed is a broken
+    // deploy. Asserted against the key list rather than a literal, so adding a
+    // dial cannot make this pass by being forgotten here.
+    expect(got.platform.map((p) => p.key).sort()).toEqual([...GOVERNANCE_SETTING_KEYS].sort())
     expect(got.region_overrides).toHaveLength(1)
     expect(got.region_overrides[0]).toMatchObject({
       key: GOV_VELOCITY_SPIKE_THRESHOLD,

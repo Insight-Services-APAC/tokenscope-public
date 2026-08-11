@@ -6,7 +6,7 @@
  * runs server-side, fetches /me without the cookie, sees authenticated:false,
  * and redirects back to /login — even for a freshly-signed-in user.
  */
-import type { MeResponse } from '../../shared/schemas/auth'
+import type { MeResponse } from '#shared/schemas/auth'
 
 export function useSession() {
   const session = useState<MeResponse | null>('ts:session', () => null)

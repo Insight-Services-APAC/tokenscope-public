@@ -1,0 +1,787 @@
+diff --git a/app/components/charts/MonthSpark.vue b/app/components/charts/MonthSpark.vue
+index 4d8cb8d5..d6fffb65 100644
+--- a/app/components/charts/MonthSpark.vue
++++ b/app/components/charts/MonthSpark.vue
+@@ -87,7 +87,7 @@ const props = withDefaults(
+ 
+ /* The drawing box. 100 × 28 user units, stretched to the tile's width — the
+  * prototype's own geometry, so the app and the drawing cannot drift. */
+-const VB_W = 100
++const VB_W = 350
+ const BASELINE = 26
+ const TOP = 2
+ 
+@@ -96,14 +96,49 @@ const n = computed(() => props.data.length)
+  *  in the caller, and silently cropping the measured days would hide it. */
+ const span = computed(() => Math.max(props.span ?? n.value, n.value, 1))
+ const den = computed(() => Math.max(span.value - 1, 1))
+-/** Zero-based scale: the peak sets the top, the floor is always 0. */
++/*
++ * Zero-based scale: the peak sets the top, the floor is always 0.
++ *
++ * THE PARTIAL DAY IS IN THIS MAX, DELIBERATELY, and it is the one place D4 does
++ * not reach (external review, round 2). The partial day is still DRAWN — as the
++ * detached endpoint below — so excluding it from the scale would let that mark
++ * escape the viewBox on any day that outruns the settled peak. D4 governs the
++ * trend LINE, the means and peak LABELS, none of which include it.
++ *
++ * The cost is real and worth naming: settled `[10, 10]` under a partial of
++ * `1000` draws the settled line compressed near the floor. That is a faithful
++ * picture of an unusually large day in progress rather than a fabricated dip,
++ * but it IS the partial day influencing how the settled days read. Fixing it
++ * properly means clamping the partial mark to the top of a settled-only scale
++ * and marking it as clipped — a chart change, not a comment change, and not one
++ * to make unreviewed. Left as-is, stated rather than implied.
++ */
+ const peak = computed(() => Math.max(...props.data, 0) || 1)
+ 
+ const x = (i: number) => (i / den.value) * VB_W
+ const y = (v: number) => BASELINE - (v / peak.value) * (BASELINE - TOP)
+ 
++/*
++ * THE LINE STOPS AT THE LAST SETTLED DAY (clock doc D4: the partial day is
++ * "excluded from trend lines, means and any peak label").
++ *
++ * It used to run through the still-filling day, and the hollow endpoint was
++ * drawn on top of it — so every KPI spark PLUNGED to the floor each UTC morning
++ * while the hero chart on the same page, which excludes it, did not. That is the
++ * morning-dip defect surviving in miniature: F1 applied the rule to the hero,
++ * F2 built this component in a different slice, and nothing checked the rule had
++ * reached both. The endpoint below still marks the partial day — as a DETACHED
++ * mark, which is what the hero does and what "still accruing" should look like.
++ */
++/** Hollow ⇒ "still accruing". Only ever the caller's own statement. */
++const lastIsPartial = computed(() => props.partial === true)
++const settledCount = computed(() => (lastIsPartial.value ? n.value - 1 : n.value))
++
+ const points = computed(() =>
+-  props.data.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' '),
++  props.data
++    .slice(0, settledCount.value)
++    .map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`)
++    .join(' '),
+ )
+ /** The days still to come — a track, at the baseline, in a recessive ink. */
+ const dots = computed(() =>
+@@ -115,15 +150,60 @@ const endpoint = computed(() => {
+   const v = props.data[n.value - 1]!
+   return { cx: x(n.value - 1), cy: y(v) }
+ })
++/*
++ * THE DASHED CONTINUATION. The still-filling day is deliberately NOT part of the
++ * settled polyline (D4) — joining it would let a day that is three hours old
++ * read as a measured dip. But leaving it as a bare detached mark made it read as
++ * a rendering artefact instead: the marker says "there is a value here" while
++ * its isolation says "this is not part of the series", and a viewer resolves
++ * that conflict as "something rendered wrong".
++ *
++ * A DASH resolves it the way every chart resolves it. Dashed = provisional is
++ * read without a legend, so the segment belongs to the series while visibly
++ * claiming less confidence than the solid line beside it — which is exactly the
++ * distinction D4 wants, expressed as weight rather than as absence.
++ *
++ * Null unless the caller says the last day is partial AND there is a settled day
++ * to draw from: one lone point has nothing to continue.
++ *
++ * DASHED, matching the Spend-trend chart, which has always rendered its
++ * projection correctly for one reason: it scales UNIFORMLY.
++ *
++ * This component set `preserveAspectRatio="none"` against a 100x28 viewBox while
++ * rendering ~350x28, stretching x by ~3.5x. That single attribute caused every
++ * symptom here — the endpoint circle drawn as an ellipse, and two dash attempts
++ * that rendered as a fleck because the pattern was consumed by the transform.
++ * The viewBox now matches the render aspect, so no stretch is needed, circles
++ * are circles and a dash is a dash.
++ *
++ * Superseded note, kept because it is the reasoning that found it: A dashed
++ * connector is the better convention, but `preserveAspectRatio="none"` makes the
++ * dash pattern unpredictable here: measured in screen pixels it spends its whole
++ * first dash inside the first few pixels of the segment; measured in user units
++ * it is consumed by the horizontal stretch. Both attempts rendered as a fleck at
++ * the line's end — worse than no connector, because a fragment reads as damage.
++ *
++ * A faint solid connector cannot fail to draw, and carries the same meaning: it
++ * joins the mark to the series while claiming visibly less than the solid line
++ * beside it. If the aspect ratio is ever fixed, a dash becomes available and is
++ * the upgrade.
++ */
++const partialSegment = computed(() => {
++  if (!lastIsPartial.value || n.value < 2) return null
++  const prev = props.data[n.value - 2]!
++  const last = props.data[n.value - 1]!
++  return {
++    x1: x(n.value - 2), y1: y(prev),
++    x2: x(n.value - 1), y2: y(last),
++  }
++})
+ const stroke = computed(() => props.color ?? 'var(--brand-vision)')
+-/** Hollow ⇒ "still accruing". Only ever the caller's own statement. */
+-const lastIsPartial = computed(() => props.partial === true)
++
+ </script>
+ 
+ <template>
+   <svg
+     :viewBox="`0 0 ${VB_W} 28`"
+-    preserveAspectRatio="none"
+     :style="{ height: `${height}px` }"
+     class="block w-full"
+     aria-hidden="true"
+@@ -149,6 +229,21 @@ const lastIsPartial = computed(() => props.partial === true)
+       vector-effect="non-scaling-stroke"
+       data-testid="month-spark-line"
+     />
++    <!-- The unfinished segment: dashed, so it joins the series without claiming
++         the solid line's confidence. Drawn BEFORE the endpoint so the mark sits
++         on top of it. -->
++    <line
++      v-if="partialSegment"
++      :x1="partialSegment.x1.toFixed(1)"
++      :y1="partialSegment.y1.toFixed(1)"
++      :x2="partialSegment.x2.toFixed(1)"
++      :y2="partialSegment.y2.toFixed(1)"
++      :stroke="stroke"
++      stroke-width="1.6"
++      stroke-dasharray="4 3"
++      stroke-opacity="0.85"
++      data-testid="month-spark-partial-segment"
++    />
+     <!-- Hollow ONLY while the last day is still filling; solid once it is a
+          finished day, so the partial mark keeps meaning something. -->
+     <circle
+diff --git a/app/components/charts/TrendArea.vue b/app/components/charts/TrendArea.vue
+index b4eea64e..0139eb7a 100644
+--- a/app/components/charts/TrendArea.vue
++++ b/app/components/charts/TrendArea.vue
+@@ -34,8 +34,14 @@ const props = withDefaults(
+      * formatter to retire the `$` hardwire (e.g. tokens / credits).
+      */
+     format?: (v: number) => string
++    /**
++     * Empty-state sentence. Additive: omitted keeps a lane-neutral default.
++     * Pass one wherever the chart draws a SINGLE lane, so an empty chart says
++     * which lane is empty instead of denying spend the page is showing.
++     */
++    emptyLabel?: string
+   }>(),
+-  { height: 160, format: undefined, partialDay: null },
++  { height: 160, format: undefined, partialDay: null, emptyLabel: undefined },
+ )
+ 
+ // Defaults reproduce the pre-existing output byte-for-byte per render site.
+@@ -141,15 +147,25 @@ const xLabels = computed(() => {
+       <!-- The still-filling day: hollow, faded, OFF the line (D4). It is not
+            joined to the area path, so a day that is three hours old cannot read
+            as a drop. -->
+-      <circle
+-        v-if="partial"
+-        :cx="x(dense.length)" :cy="y(partial.value)" r="2.5"
+-        fill="none" stroke="var(--brand-harmony)" stroke-width="1.5" stroke-opacity="0.5"
+-        :data-partial-day="partial.day"
+-        data-testid="trend-area-partial"
+-      >
++      <!--
++        A TICK, NOT A CIRCLE. This was an r=2.5 circle, and the SVG scales
++        non-uniformly (`w-full` against a fixed `height`), so it rendered as a
++        stretched ellipse — a stray blob at the end of the line that nobody could
++        name without hovering. A vertical tick is immune to that scaling by
++        construction: it has no width to distort.
++        It also says the right thing. The mark means "this day is still filling",
++        which is a BOUNDARY, not a data point — a tick reads as an edge where a
++        dot reads as another reading.
++      -->
++      <g v-if="partial" :data-partial-day="partial.day" data-testid="trend-area-partial">
++        <line
++          :x1="x(dense.length)" :x2="x(dense.length)"
++          :y1="y(partial.value) - 4" :y2="y(partial.value) + 4"
++          stroke="var(--brand-harmony)" stroke-width="1.5" stroke-opacity="0.55"
++          stroke-linecap="round"
++        />
+         <title>{{ partial.day }} — {{ fmtPoint(partial.value) }} · still accruing</title>
+-      </circle>
++      </g>
+       <text
+         v-for="l in xLabels"
+         :key="l.i"
+@@ -157,8 +173,16 @@ const xLabels = computed(() => {
+         text-anchor="middle" class="fill-carbon-3" font-size="9"
+       >{{ l.label }}</text>
+     </svg>
+-    <p v-else class="text-xs text-carbon-3 italic py-8 text-center">
+-      No spend in this window yet — the chart fills in as sessions land.
++    <!--
++      The default no longer promises SESSIONS. This chart draws OTel-observed
++      spend, which is one lane; a person whose spend arrived as provider-recorded
++      days has no session behind any of it, so "fills in as sessions land" told
++      them to wait for something that is never coming — directly under a headline
++      showing the money they had already spent. Callers that know their lane pass
++      `emptyLabel` and name it.
++    -->
++    <p v-else class="text-xs text-carbon-3 italic py-8 text-center" data-testid="trend-area-empty">
++      {{ emptyLabel ?? 'No spend in this window yet.' }}
+     </p>
+     <p
+       v-if="hasData && partial"
+diff --git a/app/components/reporting/BudgetStateCell.vue b/app/components/reporting/BudgetStateCell.vue
+index bd14f7d6..e3feb520 100644
+--- a/app/components/reporting/BudgetStateCell.vue
++++ b/app/components/reporting/BudgetStateCell.vue
+@@ -66,6 +66,18 @@ const TEXT_CLASS: Record<CostCentreBudgetState, string> = {
+   'not-started': 'text-carbon-3',
+   none: 'text-carbon-3',
+ }
++/*
++ * Projected spend as a percentage of budget, ONLY when it exceeds it. Null
++ * otherwise, so the ordinary pace line keeps its quiet treatment — severity is
++ * spent where it is earned, not sprayed across every row.
++ */
++const projectedOverPct = computed(() => {
++  const b = props.budgetUsd
++  const proj = props.projectedUsd
++  if (b == null || proj == null || Number(b) <= 0) return null
++  const pct = Math.round((Number(proj) / Number(b)) * 100)
++  return pct > 100 ? pct : null
++})
+ </script>
+ 
+ <template>
+@@ -80,8 +92,26 @@ const TEXT_CLASS: Record<CostCentreBudgetState, string> = {
+     <!-- Not "no budget set": this row has nothing a budget could be set ON. -->
+     <span v-else class="text-carbon-3" aria-label="not applicable">—</span>
+ 
++    <!--
++      THE PACE LINE CARRIES ITS OWN SEVERITY. It used to render at one weight
++      whatever it said, so "~$962.50 by Aug 31" against a $203.21 budget — 474%
++      of it — was set in the same 11px grey as a pace that lands comfortably. The
++      alarming fact and the mundane one were typographically identical, and the
++      alarming one was the third clause of three.
++      A projection over budget is now a FIGURE, not a clause: the multiple leads,
++      the money follows.
++    -->
++    <span
++      v-if="projectedUsd != null && projectedOverPct != null"
++      class="block text-[13px] font-semibold text-rag-red"
++      style="font-variant-numeric: tabular-nums"
++      data-testid="budget-state-pace-over"
++    >{{ projectedOverPct }}% projected
++      <span class="block text-[11px] font-normal text-carbon-3"
++      >~{{ fmtUsd(projectedUsd) }} by {{ monthEnd || 'month end' }}</span>
++    </span>
+     <span
+-      v-if="projectedUsd != null"
++      v-else-if="projectedUsd != null"
+       class="block text-[11px] font-normal text-carbon-3"
+       style="font-variant-numeric: tabular-nums"
+       data-testid="budget-state-pace"
+diff --git a/app/components/reporting/ScopeCostCentreView.vue b/app/components/reporting/ScopeCostCentreView.vue
+index e0c39a3d..8ce510f9 100644
+--- a/app/components/reporting/ScopeCostCentreView.vue
++++ b/app/components/reporting/ScopeCostCentreView.vue
+@@ -204,12 +204,54 @@ const drillEmpty = computed(
+   () =>
+     Boolean(props.drill) &&
+     props.drill!.burnUsd === 0 &&
++    /*
++     * §B IS A FIFTH CONJUNCT, added with `chargeUsd` itself. The drill now
++     * renders a CHARGE in the chargeback lane, so a centre that is billed but
++     * has no §A burn — Copilot-pooled money homed here with nothing attributed,
++     * the exact shape §A and §B are separate to express — would otherwise hit
++     * "No usage recorded for X" while X is charged real money.
++     *
++     * This is the same mistake the burn-only gate made before the roster arm was
++     * added: gating an empty state on ONE lane and calling it empty overall.
++     */
++    props.drill!.chargeUsd === 0 &&
+     props.drill!.budgets.rows.length === 0 &&
+     props.drill!.people.rows.length === 0 &&
+     props.drill!.overSoftCap.rosterUsd === 0,
+ )
+ const drillData = computed(() => Boolean(props.drill) && !drillErr.value && !drillEmpty.value)
+ 
++/*
++ * THE EMPTY STATE NAMES THE CENTRE AND THE REASON (owner, Dev report 2026-08-06:
++ * "hard to tell as I don't know WHAT cost centre I'm looking at").
++ *
++ * The header's `CcScopeLine` names it, but this is the ONE state where the
++ * reader has no figure, no table and no donut to orient on — so the empty card
++ * is where the name is load-bearing, not redundant.
++ *
++ * The sub-line states WHY, and the reason is knowable rather than guessed: all
++ * four conjuncts of `drillEmpty` are zero, and `rosterUsd` is the widest of them
++ * (every arm, both tag states, over everyone PLACED here — see
++ * over-soft-cap.ts:35-43). So "no usage from anyone placed here" is a fact about
++ * the roster, and it is the correct thing to say instead of the old copy's
++ * "as usage lands ... appear here", which promised money was merely in transit.
++ *
++ * `rosterCount` distinguishes the two genuinely different empties: a centre with
++ * NOBODY in it is an org-structure fact and no amount of waiting fixes it; a
++ * staffed centre that spent nothing is an ordinary quiet month.
++ */
++const drillEmptyCopy = computed(() => {
++  const name = props.drill?.cc.displayName ?? 'this cost centre'
++  const staffed = (props.drill?.overSoftCap.rosterCount ?? 0) > 0
++  return {
++    headline: `No usage recorded for ${name} in this period.`,
++    sub: staffed
++      // "period", not "month": the page also serves custom ranges (`meta.range`).
++      ? 'Nobody placed in this cost centre recorded usage in the selected period — across both the tagged and untagged lanes. Spend tagged to another centre’s projects is reported there, not here.'
++      : 'No active teammates are placed in this cost centre, so there is no usage to report. Place people here, or pick another centre above.',
++  }
++})
++
+ // ── Header: the collapsed caveat chips (requirement 5, one popover deeper) ───
+ // Every vendor clock still reaches the reader — the grid re-lenses to §B
+ // `chargeUsd` in chargeback mode adjacent to the §A burn drill, so usage's
+@@ -326,14 +368,27 @@ const copilotPartialMonth = computed(() => props.report?.copilotChargebackPartia
+              forbids summing with the burn — so the fix is the claim, not the
+              card. `Reporting.md` §1 forbids MIXING the lanes; it does not forbid
+              a page carrying both where each says which it is. -->
+-        <span
+-          v-if="isDrill"
+-          class="text-[11px] font-semibold text-carbon-2 border border-calm-2 rounded-full px-2.5 py-1"
+-          title="The burn and its drivers are attributed usage — what was consumed, not an invoice. Switching lanes would change nothing here. Billed spend for this centre is the separately labelled tier-exposure card below, and the invoice itself is the Finance tab."
+-          data-testid="cc-usage-lane-pill"
+-        >§A · usage lane</span>
+-        <!-- The lens explainer rides CcHeaderNotes' popover, not the control. -->
+-        <LaneToggle v-else :show-caption="false" />
++        <!--
++          THE TOGGLE IS BACK AT COST-CENTRE SCOPE (reverses D24, owner 2026-08-06).
++          It was replaced with a static "§A · usage lane" pill on the argument
++          that the drill is usage-only "by construction" and switching lanes
++          "would change nothing here". Both halves were wrong:
++
++            - The drawing has it. `controls(d)` renders BOTH lanes and is called
++              UNCONDITIONALLY (`R:561`), before any scope branch; the Region tab
++              ships it today. D24 justified removal by quoting the `scope` note
++              "a cost-centre owner does not pivot" (`R:772`) — which is about the
++              PIVOT control, not the LANE control. One sentence, two controls.
++            - Switching DOES change something: every card already carries
++              `chargeUsd`, the §B figure for that centre. Removing the control
++              left the figure orphaned, not absent.
++
++          A cost-centre owner is accountable for a budget: "am I on track" is
++          answered by what the centre is CHARGED, "what is driving it" by what
++          their people CONSUMED. Denying either half does not simplify the page,
++          it makes half the job impossible on it.
++        -->
++        <LaneToggle :show-caption="false" />
+         <DateRangeControl />
+       </div>
+     </header>
+@@ -344,12 +399,13 @@ const copilotPartialMonth = computed(() => props.report?.copilotChargebackPartia
+       <UiFetchErrorBanner v-else-if="drillErr" :error="drillError" />
+       <ReportEmpty
+         v-else-if="drillEmpty"
+-        headline="No burn for this cost centre and month yet."
+-        sub="As usage lands for the selected month, the burn and who is driving it appear here."
++        :headline="drillEmptyCopy.headline"
++        :sub="drillEmptyCopy.sub"
+       />
+       <CcDrill
+         v-else-if="drillData && drill"
+         :drill="drill"
++        :lane="lane"
+         :over-soft-cap-export-params="overSoftCapExportParams"
+         :over-soft-cap-export-filename="overSoftCapExportFilename"
+         :budgets-export-params="budgetsExportParams"
+diff --git a/app/components/reporting/cost-centre-report-types.ts b/app/components/reporting/cost-centre-report-types.ts
+index 5bc4b1b9..b1c40040 100644
+--- a/app/components/reporting/cost-centre-report-types.ts
++++ b/app/components/reporting/cost-centre-report-types.ts
+@@ -69,6 +69,19 @@ export interface CostCentreDrill {
+    * billing for this CC lives in the Finance tab, never mixed in here).
+    */
+   burnUsd: number
++  /**
++   * §B — what this centre is CHARGED over the window; the SAME figure its card
++   * in the list carries, from the same fetcher. Rendered INSTEAD of `burnUsd` in
++   * the chargeback lane, never beside it and never summed with it: the two are
++   * different lanes over different bases (contract C2).
++   */
++  chargeUsd: number
++  /**
++   * The Copilot pool is POOLED-MONTHLY, so it is withheld from `chargeUsd` on a
++   * window that is not month-aligned. True means "a real charge is missing from
++   * the figure" — the surface must caveat it rather than let it read as $0.
++   */
++  copilotChargebackPartialMonth: boolean
+   /** Burn split by vendor (feeds the donut). Copilot pooled NULL-CoU is excluded. */
+   vendor: { claudeUsd: number; copilotUsd: number; otherUsd: number }
+   /**
+diff --git a/app/components/reporting/cost-centre/CcDrill.vue b/app/components/reporting/cost-centre/CcDrill.vue
+index 2b3f2c4e..a0535363 100644
+--- a/app/components/reporting/cost-centre/CcDrill.vue
++++ b/app/components/reporting/cost-centre/CcDrill.vue
+@@ -79,6 +79,14 @@ const props = withDefaults(
+   /** THE DRILL CONTRACT (D29/D30) — from the container; fail-closed defaults. */
+   drillGrants?: DrillGrants
+   drillWindow?: Omit<DrillFrame, 'src'>
++  /**
++   * The reader's selected lane, PASSED IN rather than read from the store.
++   * CcDrill is mounted by a view that already knows it, and reaching for
++   * `useReportState()` here made the component un-mountable in every unit test
++   * that does not stub Nuxt's auto-imports — 32 of them, none about lanes.
++   * A prop keeps the component pure and the failure visible at the call site.
++   */
++  lane?: 'usage' | 'chargeback'
+   }>(),
+   {
+     // These two were optional before this component gained defaults at all;
+@@ -87,6 +95,7 @@ const props = withDefaults(
+     overSoftCapExportFilename: undefined,
+     drillGrants: () => NO_DRILL_GRANTS,
+     drillWindow: () => ({}),
++    lane: 'usage',
+   },
+ )
+ 
+@@ -97,6 +106,18 @@ const props = withDefaults(
+  * each gets its own decision function rather than one switching on a pivot that
+  * does not exist here.
+  */
++/*
++ * THE DRILL IS §A BY CONSTRUCTION, AND MUST SAY SO WHEN THE READER IS NOT.
++ * The lane toggle is back at this scope (owner 2026-08-06): the headline above
++ * switches to the centre's `chargeUsd`, which every card already carries. These
++ * two tables do NOT have a §B equivalent — they compute usage burn — so in the
++ * chargeback lens they keep showing §A and declare it. Silently leaving them
++ * unlabelled is what would let a reader foot §A drivers against a §B headline,
++ * which is the mixing `Reporting.md` §1 forbids. Building §B drivers is a real
++ * slice and is not this fix.
++ */
++const chargebackLens = computed(() => props.lane === 'chargeback')
++
+ const drillGrants = computed(() => props.drillGrants)
+ const drillFrame = computed<DrillFrame>(() => ({
+   ...props.drillWindow,
+@@ -156,7 +177,11 @@ function vendorPct(value: number): number {
+ const vendorSlices = computed(() => {
+   const v = props.drill.vendor
+   return [
+-    { name: 'Claude Code', key: 'claude-code', value: v.claudeUsd },
++    // "Anthropic", not "Claude Code": the slice carries EVERY Anthropic surface
++    // (CLAUDE_FAMILY_TOOLS — chat, Cowork, Office, Design …), so naming it after
++    // one tool told a reader whose spend is chat that their money sat in a
++    // product they have never opened. See server/reporting/vendor-split.ts.
++    { name: 'Anthropic', key: 'claude-code', value: v.claudeUsd },
+     { name: 'GitHub Copilot', key: 'copilot-cli', value: v.copilotUsd },
+     { name: 'Other', key: 'other', value: v.otherUsd },
+   ].filter((s) => s.value > 0)
+@@ -219,16 +244,59 @@ const zeroBurnTagged = computed(() => hasAllocation.value && props.drill.burnUsd
+     <p class="text-[11px] text-carbon-3 italic" data-testid="cc-drill-lane-note">
+       Burn = usage <span class="font-semibold not-italic">homed to this cost centre</span> —
+       <span class="font-semibold not-italic">not</span> a person's total usage.
++      <span v-if="chargebackLens" data-testid="cc-drill-lane-mismatch">
++        The headline above is what this centre is
++        <span class="font-semibold not-italic">charged</span>; the two tables below
++        stay on <span class="font-semibold not-italic">attributed usage</span>,
++        because there is no chargeback breakdown of who drove a charge. They do not
++        add up to it, and are not meant to.
++      </span>
+     </p>
+ 
+-    <!-- Burn headline (§A usage axis — matches the tracker row) -->
++    <!--
++      THE HEADLINE FOLLOWS THE LANE (external review, 2026-08-06).
++      In §A it is the usage BURN and matches the tracker row. In §B it is what
++      the centre is CHARGED — the same figure its card in the list carries.
++
++      It used to render `burnUsd` in BOTH lanes, so the restored toggle changed
++      nothing here and the note below called the §A burn "the billed figure
++      above". A control that cannot change anything teaches readers to ignore
++      controls, and the note was simply false. One figure fixes both.
++
++      The two are never summed and never shown side by side: different lanes
++      over different bases (contract C2).
++    -->
+     <div
+       class="bg-white rounded-xl border border-calm-2/80 shadow-[0_1px_2px_rgba(62,51,45,0.03)] px-5 py-4 flex flex-col gap-1.5 min-w-0"
+       data-testid="cc-burn-headline"
+     >
+-      <span class="text-[10.5px] font-bold uppercase tracking-[1.1px] text-carbon-3">Burn</span>
+-      <span class="text-[26px] leading-none font-bold tracking-[-0.5px] tabular-nums text-carbon">
+-        {{ fmtUsd(drill.burnUsd) }}
++      <span class="text-[10.5px] font-bold uppercase tracking-[1.1px] text-carbon-3">
++        {{ chargebackLens ? 'Charged' : 'Burn' }}
++      </span>
++      <span
++        class="text-[26px] leading-none font-bold tracking-[-0.5px] tabular-nums text-carbon"
++        :data-testid="chargebackLens ? 'cc-charge-figure' : 'cc-burn-figure'"
++      >
++        {{ fmtUsd(chargebackLens ? drill.chargeUsd : drill.burnUsd) }}
++      </span>
++      <!--
++        The pooled Copilot charge is MONTHLY, so a non-month-aligned window cannot
++        slice it and omits it. Saying so is the difference between a smaller
++        number and a wrong one.
++
++        WORDED AS A PROPERTY OF THE WINDOW, NOT OF THIS CENTRE (external review,
++        round 2). The flag means "chargeback is on AND the range is not
++        month-aligned" — it does NOT know whether this centre has a Copilot pool
++        row at all. "Any Copilot charge is excluded" is true either way; "the
++        figure is missing Copilot money" would be false for a centre that has none.
++      -->
++      <span
++        v-if="chargebackLens && drill.copilotChargebackPartialMonth"
++        class="text-[12px] text-carbon-2"
++        data-testid="cc-charge-partial-month"
++      >
++        Anthropic charge only — Copilot's pooled charge is monthly, so any share of
++        it is excluded over a partial-month range.
+       </span>
+       <!-- DERIVED, and it says so: the budgeted unit of account is the project, so
+            a cost-centre allocation is the roll-up of its projects' budgets, never a
+diff --git a/app/components/reporting/cost-centre/CcOverSoftCap.vue b/app/components/reporting/cost-centre/CcOverSoftCap.vue
+index abe25346..16ae2ed7 100644
+--- a/app/components/reporting/cost-centre/CcOverSoftCap.vue
++++ b/app/components/reporting/cost-centre/CcOverSoftCap.vue
+@@ -243,14 +243,23 @@ const showExport = computed(() => Boolean(props.exportParams && props.exportFile
+     <!-- ═══════════ Nobody is over the cap ═══════════
+          A sentence, not a $0. The distinction matters: "$0" beside a card about
+          unnoticed money reads as a failed fetch. -->
+-    <p v-else class="text-[13px] text-carbon-2 mt-3" data-testid="cc-osc-all-within">
+-      <b class="text-carbon-1">All within allowance.</b>
+-      No one of the {{ people(d.rosterCount) }} placed in this cost centre is over the
+-      {{ fmtUsd(d.softCapUsd, { whole: true }) }} soft cap this period.
+-      <template v-if="d.withinAllowance.unallocatedUsd > 0">
+-        {{ fmtUsd(d.withinAllowance.unallocatedUsd) }} is unallocated between them, under the cap.
+-      </template>
+-    </p>
++    <!--
++      A VERDICT AND ITS EVIDENCE, not a 32-word sentence. This read "All within
++      allowance. No one of the 24 people placed in this cost centre is over the
++      $100 soft cap this period. $53.22 is unallocated between them, under the
++      cap." — three facts (nobody over, the cap, the unallocated total) the
++      reader had to extract from prose. The sentence-not-a-$0 rule the old
++      comment protected still holds: the verdict leads, and it is a WORD.
++    -->
++    <div class="mt-3 flex flex-wrap items-baseline gap-x-5 gap-y-1 text-[13px]"
++      style="font-variant-numeric: tabular-nums" data-testid="cc-osc-all-within">
++      <span class="font-semibold text-rag-green">✓ All within allowance</span>
++      <span class="text-carbon-3">{{ people(d.rosterCount) }} · cap
++        {{ fmtUsd(d.softCapUsd, { whole: true }) }}</span>
++      <span v-if="d.withinAllowance.unallocatedUsd > 0" class="text-carbon-2">
++        <b class="text-carbon-1">{{ fmtUsd(d.withinAllowance.unallocatedUsd) }}</b> unallocated
++      </span>
++    </div>
+ 
+     <!-- NO "nothing to action from here — this is who to talk to" NOTE. It told the
+          reader how to interpret a list of names and defended the absence of a
+diff --git a/app/pages/index.vue b/app/pages/index.vue
+index 03a2bd5a..df1a3ef0 100644
+--- a/app/pages/index.vue
++++ b/app/pages/index.vue
+@@ -820,14 +820,21 @@ const softCapTickPct = computed(() =>
+         <div class="grid md:grid-cols-2 gap-6">
+           <!-- PRIMARY: budgeted / allocated -->
+           <div class="md:border-r md:border-brand-harmony/10 md:pr-6">
+-            <div class="text-[11px] font-bold uppercase tracking-wide text-carbon-3">Budgeted · {{ budgetedBuckets.length }} {{ budgetedBuckets.length === 1 ? 'budget' : 'budgets' }}</div>
++            <!--
++              With NO allocation anywhere, `budgetedSpend` is arithmetically
++              forced to $0.00 — the eyebrow already said "0 budgets", so the
++              40px figure below restated it and carried no information, while
++              the month's real money sat in 11px underneath. In that state the
++              card's subject is project spend, so it says so and shows it.
++            -->
++            <div class="text-[11px] font-bold uppercase tracking-wide text-carbon-3">{{ totals.allocations > 0 ? 'Budgeted' : 'On projects' }} · {{ budgetedBuckets.length }} {{ budgetedBuckets.length === 1 ? 'budget' : 'budgets' }}</div>
+             <div
+               class="text-[40px] font-bold tracking-[-1.5px] text-carbon mt-1 leading-[1]"
+               style="font-variant-numeric: tabular-nums"
+               data-testid="hero-primary-figure"
+               data-mtd-scalar="usage"
+             >
+-              {{ fmtUsd(budgetedSpend) }}
++              {{ fmtUsd(totals.allocations > 0 ? budgetedSpend : noBudgetSpend) }}
+               <span v-if="totals.allocations > 0" class="text-xl text-carbon-3 font-medium">/ {{ fmtUsd(totals.allocations) }}</span>
+               <span v-else class="text-base text-carbon-3 font-medium align-middle"> · no budget allocated</span>
+             </div>
+@@ -850,8 +857,13 @@ const softCapTickPct = computed(() =>
+                  above because it has no denominator in the bar's quotient — but
+                  inside the month total in the band, so it is named here rather
+                  than dropped. -->
++            <!--
++              Only when a budget EXISTS to be "plus" to. With none, this figure
++              IS the one above and repeating it as an afterthought is what made
++              the card unreadable.
++            -->
+             <div
+-              v-if="noBudgetSpend > 0"
++              v-if="noBudgetSpend > 0 && totals.allocations > 0"
+               class="text-[11px] text-carbon-3 mt-1"
+               style="font-variant-numeric: tabular-nums"
+               data-testid="hero-no-budget-spend"
+diff --git a/app/pages/usage/index.vue b/app/pages/usage/index.vue
+index 6088875c..22a61428 100644
+--- a/app/pages/usage/index.vue
++++ b/app/pages/usage/index.vue
+@@ -456,6 +456,27 @@ const copilotLanguages = computed(() =>
+     colour: LANG_COLOURS[i % LANG_COLOURS.length],
+   })),
+ )
++/*
++ * Does the card have anything to SAY, as opposed to an object to render from?
++ *
++ * The template branched on `copilotEng` itself, but an object whose every field
++ * is null is the normal shape for most spenders — these counters ride
++ * `reconciliation_record.raw` and are not read yet. So that case fell between
++ * the v-if and the v-else and produced a card holding a heading and nothing
++ * else: 29 characters, on a persona with live Copilot spend. An empty card is
++ * the one outcome the design rules out — a field the provider does not report
++ * is ABSENT and SAID SO, never a blank and never a zero.
++ */
++const copilotHasDetail = computed(() => {
++  const c = copilotEng.value
++  if (!c) return false
++  return (
++    c.interactions != null ||
++    (c.locKept != null && c.locSuggested != null) ||
++    (c.locDeleted != null && c.locSuggestedToDelete != null) ||
++    copilotLanguages.value.length > 0
++  )
++})
+ function fmtLines(n: number): string {
+   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+ }
+@@ -606,7 +627,7 @@ async function onWorklistChanged() {
+   <div v-if="session" class="max-w-[1400px] mx-auto px-10 py-8 pb-20" data-testid="my-consumption">
+     <UiPageHead
+       title="My usage"
+-      sub="Your own usage patterns — what it cost, where it went, and what you could change if you want to."
++      sub="What you spent, where it went, and what you could change."
+       :crumbs="['My usage']"
+     >
+       <template #actions>
+@@ -722,6 +743,7 @@ async function onWorklistChanged() {
+           :window-days="windowDays"
+           :end-day="chartEndDay"
+           :partial-day="chartPartialDay"
++          empty-label="No telemetry-observed spend in this window — provider-recorded days are listed below, not charted here."
+         />
+         <p v-if="advisory > 0" class="text-[10px] text-carbon-3 mt-1 text-right">
+           {{ fmtUsd(advisory) }} of the last {{ windowDays }}d is advisory (telemetry-only) spend
+@@ -774,8 +796,47 @@ async function onWorklistChanged() {
+               </span>
+             </p>
+           </template>
++          <!--
++            AN ABSENT DIMENSION IS NOT ABSENT SPEND.
++            This card reads ONE lane: `provider_usage_fact` where
++            `provider='anthropic'` — Anthropic's own billing feed. It is not a
++            view of the teammate's Anthropic usage, and the difference is the
++            whole subject of this comment.
++
++            Two very different things make it empty:
++              (a) rows exist but `context_window` is NULL — the band was not
++                  reported for them. `residency.remainder` carries that money.
++              (b) there are no Anthropic API-lane rows AT ALL. This says nothing
++                  about whether the person used Claude: OTel-observed usage never
++                  appears in this table, so a Max-subscription developer with
++                  thousands of dollars of `claude-code` in `v_complete_usage` sits
++                  here with zero rows.
++
++            It once answered BOTH with "No Anthropic spend in this window" — false
++            to a developer with Claude usage on the same screen, and the
++            most-reported defect of the last release.
++
++            THE ROUND-1 FIX OF THAT DEFECT INTRODUCED A SECOND ONE (external
++            review, round 2): case (b) was rewritten as "none of your spend in
++            this window is Anthropic", which reads API-lane absence as VENDOR
++            absence — the same conflation wearing the opposite coat, and wrong for
++            exactly the OTel-only Claude user the original defect was about.
++
++            So (b) now names the LANE and claims nothing about the vendor or the
++            spend. The rule this card keeps failing and must not fail again: state
++            what is missing from the lane you read, never what the reader spent.
++          -->
+           <p v-else class="text-xs text-carbon-3 italic py-6 text-center" data-testid="residency-empty">
+-            No Anthropic spend in this window.
++            <template v-if="residency?.remainder">
++              Context-window bands aren't available for this window — your Anthropic
++              spend is counted, it just isn't split by band yet.
++            </template>
++            <template v-else-if="Number(data?.month?.spend_usd ?? 0) > 0">
++              Context-window bands come from Anthropic's billing feed, and none of
++              your spend in this window reached us through it — your spend is
++              counted in full elsewhere on this page.
++            </template>
++            <template v-else>No usage in this window.</template>
+           </p>
+         </UiCard>
+ 
+@@ -1021,10 +1082,42 @@ async function onWorklistChanged() {
+         <UiCard data-testid="engagement-claude">
+           <UiEyebrow>Claude — what the spend was</UiEyebrow>
+           <template v-if="claudeEng">
++            <!--
++              A ZERO FROM AN ABSENT LANE IS NOT A MEASUREMENT.
++              `sessions` counts OTel-observed sessions; `surfaces` splits MONEY,
++              which includes provider-recorded days that carry no session at all
++              (F4: "a provider-recorded day is not a conversation"). A teammate
++              whose spend is entirely provider-recorded therefore produced
++              "0 sessions · Claude Code 100%" — two true numbers making one false
++              sentence. The server's own comment says "empty = null, never
++              zeros"; the `||` at usage.get.ts:530 lets a partially-empty block
++              through with the zero still in it.
++              So the count is stated only when it was MEASURED, and its absence
++              is named rather than printed as nought.
++            -->
+             <p class="text-sm text-carbon-2 mt-2" data-testid="engagement-claude-lede">
+-              {{ claudeEng.sessions }} session{{ claudeEng.sessions === 1 ? '' : 's' }} ·
+-              {{ claudeEng.active_days }} active day{{ claudeEng.active_days === 1 ? '' : 's' }} ·
+-              {{ claudeEng.web_searches }} web search{{ claudeEng.web_searches === 1 ? '' : 'es' }}
++              <template v-if="claudeEng.sessions > 0">
++                {{ claudeEng.sessions }} session{{ claudeEng.sessions === 1 ? '' : 's' }} ·
++                {{ claudeEng.active_days }} active day{{ claudeEng.active_days === 1 ? '' : 's' }} ·
++                {{ claudeEng.web_searches }} web search{{ claudeEng.web_searches === 1 ? '' : 'es' }}
++              </template>
++              <!-- A <span>, not a <template>: a template renders nothing, so the
++                   testid was silently dropped and could never have been asserted.
++
++                   TWO NO-SESSION CASES (external review, round 2). The server
++                   builds this block on `sessions > 0 || surfaces.length > 0 ||
++                   webSearches > 0`, so web-search activity ALONE opens it — with
++                   no surfaces and no money. Saying "no sessions behind this
++                   spend" there asserts a spend that does not exist, which is the
++                   same class as the defect above, inverted. `claudeSurfaces` is
++                   the money split, so it is what decides which sentence is true. -->
++              <span v-else-if="claudeSurfaces.length" data-testid="engagement-claude-no-sessions">
++                No sessions behind this spend — it arrived as provider-recorded days,
++                which carry no session to count.
++              </span>
++              <span v-else data-testid="engagement-claude-no-spend">
++                No sessions and no spend recorded in this window.
++              </span>
+             </p>
+             <template v-if="claudeSurfaces.length">
+               <div class="flex items-center gap-2 mt-3">
+@@ -1054,7 +1147,9 @@ async function onWorklistChanged() {
+ 
+         <UiCard data-testid="engagement-copilot">
+           <UiEyebrow>Copilot — what you got for it</UiEyebrow>
+-          <template v-if="copilotEng">
++          <!-- `copilotEng &&` is redundant at runtime (copilotHasDetail implies
++               it) and required for the compiler to narrow the block below. -->
++          <template v-if="copilotEng && copilotHasDetail">
+             <p class="text-sm text-carbon-2 mt-2" data-testid="engagement-copilot-lede">
+               <template v-if="copilotEng.interactions != null">{{ copilotEng.interactions }} interactions</template>
+               <template v-if="copilotEng.locKept != null && copilotEng.locSuggested != null">
+@@ -1093,6 +1188,19 @@ async function onWorklistChanged() {
+               </div>
+             </template>
+           </template>
++          <!--
++            Two DIFFERENT absences, said differently: nothing happened, versus
++            something happened and the detail behind it is not reported. Folding
++            them into one sentence would tell a spending Copilot user they had
++            no activity.
++          -->
++          <p
++            v-else-if="copilotEng"
++            class="text-xs text-carbon-3 italic py-6 text-center"
++            data-testid="engagement-copilot-nodetail"
++          >
++            No Copilot engagement detail in this window.
++          </p>
+           <p v-else class="text-xs text-carbon-3 italic py-6 text-center" data-testid="engagement-copilot-empty">
+             No Copilot activity in this window.
+           </p>

@@ -1,6 +1,6 @@
 // @vitest-environment node
 /*
- * Epic 11 /api/v1/me/usage extension — SQL-contract integration test.
+ * Epic 11 /api/v1/me/home extension — SQL-contract integration test.
  *
  * Validates the contract that the handler relies on:
  *   - allocation_total_usd per bucket = SUM(allocation.budget_usd) for
@@ -20,7 +20,7 @@ import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import * as schema from '../../../drizzle/schema'
 import { injectTestSession } from '../../helpers/auth'
 import type { Session } from '../../../server/utils/auth'
-import usageHandler from '../../../server/api/v1/me/usage.get'
+import usageHandler from '../../../server/api/v1/me/home.get'
 
 let t: TestDb
 let priyaId: string
@@ -163,7 +163,7 @@ afterAll(async () => {
   await stopTestDb(t)
 }, 30_000)
 
-describe('Epic 11 /me/usage allocation rollup contract', () => {
+describe('Epic 11 /me/home allocation rollup contract', () => {
   it('sums baseline + top-up allocations and excludes burst kind', async () => {
     const rows = await t.db.execute<{ project_id: string; allocation_total_usd: string }>(
       sql`
@@ -281,7 +281,7 @@ function evForSession(session: Session) {
   return e
 }
 
-describe('/me/usage quota model — base allowance + unattributed gap (handler)', () => {
+describe('/me/home quota model — base allowance + unattributed gap (handler)', () => {
   it('returns base allowance, unattributed gap, total quota and total spend', async () => {
     // base allowance via env (proves the config path; deterministic)
     process.env.NUXT_BASE_ALLOWANCE_USD = '150'

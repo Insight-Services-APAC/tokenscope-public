@@ -51,9 +51,13 @@ function runHelper(env: Record<string, string>) {
       PATH: `${stubDir}:${process.env.PATH}`,
       HOME: tmp,
       TOKENSCOPE_STATE_DIR: stateDir,
-      TOKENSCOPE_BEARER_ENDPOINT: 'http://stub.local/api/v1/instances/x/bearer',
+      // S1 fix 3: the helper now pre-flight-validates both endpoints (https
+      // required off-box) before any curl call — https:// here, not http://,
+      // so this fixture exercises the retry logic through the validator
+      // rather than getting rejected by it.
+      TOKENSCOPE_BEARER_ENDPOINT: 'https://stub.local/api/v1/instances/x/bearer',
       TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'rt',
-      TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'http://stub.local/api/v1/oauth/token',
+      TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://stub.local/api/v1/oauth/token',
       TOKENSCOPE_OAUTH_CLIENT_ID: 'cid',
       STUB_COUNTER: join(tmp, 'counter'),
       ...env,
@@ -126,5 +130,92 @@ describe('otel-headers-helper retry-once-on-401', () => {
     expect(r.stdout).toContain('stub-bearer')
     expect(bearerCalls()).toBe(1) // no retry needed
     expect(sentinelExists()).toBe(false)
+  })
+})
+
+describe('otel-headers-helper — S1 fix 3: endpoint pre-flight (assert_safe_endpoint)', () => {
+  function argvLogEmpty(logPath: string): boolean {
+    return !existsSync(logPath) || readFileSync(logPath, 'utf8').trim() === ''
+  }
+
+  it("a bearer endpoint starting with '-' → exit 1 + sentinel, curl NEVER invoked", () => {
+    const argvLog = join(tmp, 'argv.log')
+    const r = runHelper({ TOKENSCOPE_BEARER_ENDPOINT: '-K/tmp/x', STUB_ARGV: argvLog })
+    expect(r.status).toBe(1)
+    expect(sentinelExists()).toBe(true)
+    expect(argvLogEmpty(argvLog)).toBe(true) // curl never ran — rejected before the first call
+    expect(bearerCalls()).toBe(0)
+  })
+
+  it('a plaintext http bearer endpoint for an off-box host → exit 1 + sentinel, curl NEVER invoked', () => {
+    const argvLog = join(tmp, 'argv.log')
+    const r = runHelper({ TOKENSCOPE_BEARER_ENDPOINT: 'http://evil.example.com/bearer', STUB_ARGV: argvLog })
+    expect(r.status).toBe(1)
+    expect(sentinelExists()).toBe(true)
+    expect(argvLogEmpty(argvLog)).toBe(true)
+    expect(bearerCalls()).toBe(0)
+  })
+
+  it("a plaintext http OAuth token endpoint for an off-box host → exit 1 + sentinel, curl NEVER invoked", () => {
+    const argvLog = join(tmp, 'argv.log')
+    const r = runHelper({ TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'http://evil.example.com/oauth/token', STUB_ARGV: argvLog })
+    expect(r.status).toBe(1)
+    expect(sentinelExists()).toBe(true)
+    expect(argvLogEmpty(argvLog)).toBe(true)
+  })
+
+  it('a loopback bearer endpoint (local dev) PASSES the pre-flight and proceeds to curl', () => {
+    const r = runHelper({ TOKENSCOPE_BEARER_ENDPOINT: 'http://127.0.0.1:3450/api/v1/instances/x/bearer', STUB_BEARER_MODE: 'ok' })
+    expect(r.status).toBe(0)
+    expect(bearerCalls()).toBeGreaterThan(0) // reached curl — the loopback exception cleared it
+  })
+})
+
+describe('otel-headers-helper — S1 fix 4: the shared device credential store fallback', () => {
+  /** Run the helper WITHOUT TOKENSCOPE_OAUTH_REFRESH_TOKEN in its env at all
+   * (unlike runHelper(), which always sets it — a tagged-repo session omits
+   * it entirely per tag-repo.mjs's `delete deviceEnv.TOKENSCOPE_OAUTH_REFRESH_TOKEN`). */
+  function runHelperNoRefreshTokenEnv(env: Record<string, string>) {
+    return spawnSync('sh', [HELPER], {
+      encoding: 'utf8',
+      env: {
+        PATH: `${stubDir}:${process.env.PATH}`,
+        HOME: tmp,
+        TOKENSCOPE_STATE_DIR: stateDir,
+        TOKENSCOPE_BEARER_ENDPOINT: 'https://stub.local/api/v1/instances/x/bearer',
+        TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://stub.local/api/v1/oauth/token',
+        TOKENSCOPE_OAUTH_CLIENT_ID: 'cid',
+        STUB_COUNTER: join(tmp, 'counter'),
+        ...env,
+        // NOTE: TOKENSCOPE_OAUTH_REFRESH_TOKEN deliberately absent.
+      },
+    })
+  }
+
+  it('TOKENSCOPE_OAUTH_REFRESH_TOKEN unset + a 0600 ${STATE_DIR}/config.json present → mints a bearer from the stored value', () => {
+    writeFileSync(join(stateDir, 'config.json'), JSON.stringify({ oauth_refresh_token: 'rt-from-device-store' }))
+    chmodSync(join(stateDir, 'config.json'), 0o600)
+    const argvLog = join(tmp, 'argv.log')
+    const r = runHelperNoRefreshTokenEnv({ STUB_BEARER_MODE: 'ok', STUB_ARGV: argvLog })
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('stub-bearer')
+    // The refresh POST fired (using the store's value) and never leaked it to argv.
+    const logged = readFileSync(argvLog, 'utf8')
+    expect(logged).toContain('/oauth/token')
+    expect(logged).not.toContain('rt-from-device-store')
+  })
+
+  it('TOKENSCOPE_OAUTH_REFRESH_TOKEN unset AND no config.json in the state dir → fails loud (sentinel + exit 1), never silently', () => {
+    const r = runHelperNoRefreshTokenEnv({})
+    expect(r.status).toBe(1)
+    expect(sentinelExists()).toBe(true)
+    expect(r.stderr).toMatch(/NOT CONFIGURED/)
+  })
+
+  it('a config.json present but WITHOUT an oauth_refresh_token field → still fails loud (no silent half-config)', () => {
+    writeFileSync(join(stateDir, 'config.json'), JSON.stringify({ instance_id: 'x' }))
+    const r = runHelperNoRefreshTokenEnv({})
+    expect(r.status).toBe(1)
+    expect(sentinelExists()).toBe(true)
   })
 })

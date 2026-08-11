@@ -22,6 +22,13 @@ export default defineEventHandler((event) => {
   setResponseHeaders(event, {
     'Content-Type': 'application/json',
     'Cache-Control': 'public, max-age=3600',
+    // The body VARIES with the forwarded host/proto (getPublicRequestURL
+    // resolves `issuer` + every endpoint URL from them behind Front Door).
+    // Without Vary, a shared cache sitting in front of this public,
+    // `max-age=3600` response can serve one caller's resolved origin to a
+    // different caller that hit us via a different forwarded host —
+    // cache poisoning of the OAuth metadata document.
+    Vary: 'X-Forwarded-Host, X-Forwarded-Proto, Host',
     'Access-Control-Allow-Origin': '*',
   })
 

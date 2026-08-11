@@ -38,6 +38,13 @@ let regionId: string
 let ouId: string
 let finopsId: string
 let devId: string
+// Cross-region clamp fixtures (server-api-app:idor:0004 / T3-xregion-05).
+let regionBId: string
+let ouBId: string
+let couAId: string // cost-owning unit in region A
+let couBId: string // cost-owning unit in region B
+let adminAId: string
+let adminBId: string
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -59,6 +66,34 @@ beforeAll(async () => {
     .values({ entraOid: 'oid-rp-dev', email: 'rp-dev@x.test', role: 'developer', regionId, orgUnitId: ouId })
     .returning()
   devId = d!.id
+
+  const [rb] = await t.db.insert(schema.region).values({ code: 'rp-rb', displayName: 'RP RB' }).returning()
+  regionBId = rb!.id
+  const [ob] = await t.db
+    .insert(schema.orgUnit)
+    .values({ regionId: regionBId, path: 'rpb.svc', code: 'rpb-svc', displayName: 'Svc B', unitType: 'bu' })
+    .returning()
+  ouBId = ob!.id
+  const [couA] = await t.db
+    .insert(schema.orgUnit)
+    .values({ regionId, path: 'rp.cou', code: 'rp-cou', displayName: 'CoU A', unitType: 'bu', isCostOwningUnit: true })
+    .returning()
+  couAId = couA!.id
+  const [couB] = await t.db
+    .insert(schema.orgUnit)
+    .values({ regionId: regionBId, path: 'rpb.cou', code: 'rpb-cou', displayName: 'CoU B', unitType: 'bu', isCostOwningUnit: true })
+    .returning()
+  couBId = couB!.id
+  const [aa] = await t.db
+    .insert(schema.teammate)
+    .values({ entraOid: 'oid-rp-admin-a', email: 'rp-admin-a@x.test', role: 'admin', regionId, orgUnitId: ouId })
+    .returning()
+  adminAId = aa!.id
+  const [ab] = await t.db
+    .insert(schema.teammate)
+    .values({ entraOid: 'oid-rp-admin-b', email: 'rp-admin-b@x.test', role: 'admin', regionId: regionBId, orgUnitId: ouBId })
+    .returning()
+  adminBId = ab!.id
 }, 180_000)
 
 afterAll(async () => {
@@ -114,6 +149,8 @@ function ev(opts: {
 
 const finops = (): Session => ({ teammateId: finopsId, email: 'rp-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'rp.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'rp-dev@x.test', displayName: 'Dev', role: 'developer', regionId, orgPath: 'rp.svc' })
+const adminA = (): Session => ({ teammateId: adminAId, email: 'rp-admin-a@x.test', displayName: 'Admin A', role: 'admin', regionId, orgPath: 'rp.svc' })
+const adminB = (): Session => ({ teammateId: adminBId, email: 'rp-admin-b@x.test', displayName: 'Admin B', role: 'admin', regionId: regionBId, orgPath: 'rpb.svc' })
 
 async function auditCount(eventType: string, subjectId: string): Promise<number> {
   const rows = await t.client<{ n: string }[]>`
@@ -569,6 +606,230 @@ describe('anthropic key-shape write-guard (validateKeyFormat)', () => {
     await expect(
       orgPatch(ev({ method: 'PATCH', session: finops(), params: { id: created.id }, body: { apiKind: 'enterprise-analytics' } })),
     ).rejects.toMatchObject({ statusCode: 400 })
+  })
+})
+
+describe('provider_org cross-region clamp — create/patch (idor:0004 / T3-xregion-05)', () => {
+  beforeAll(clearProviders)
+
+  it('region-A admin creating a provider_org mapped to region B → 403', async () => {
+    await expect(
+      orgsPost(ev({
+        method: 'POST', session: adminA(),
+        body: { provider: 'github', externalOrgId: 'xr-create-b', displayName: 'X', reconciliationMode: 'indicative', regionId: regionBId },
+      })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    const rows = await t.client<{ n: string }[]>`SELECT COUNT(*)::text AS n FROM provider_org WHERE external_org_id = 'xr-create-b'`
+    expect(Number(rows[0]!.n)).toBe(0)
+  })
+
+  it('region-A admin creating a region-A org WITH a region-B costOwningUnitId → rejected', async () => {
+    await expect(
+      orgsPost(ev({
+        method: 'POST', session: adminA(),
+        body: { provider: 'github', externalOrgId: 'xr-cou-b', displayName: 'X', reconciliationMode: 'indicative', regionId, costOwningUnitId: couBId },
+      })),
+    ).rejects.toMatchObject({ statusCode: 422 })
+  })
+
+  it('region-A admin creates a region-A org with a region-A costOwningUnitId → 200', async () => {
+    const res = (await orgsPost(ev({
+      method: 'POST', session: adminA(),
+      body: { provider: 'github', externalOrgId: 'xr-own-a', displayName: 'Own A', reconciliationMode: 'indicative', regionId, costOwningUnitId: couAId },
+    }))) as { id: string }
+    expect(res.id).toBeTruthy()
+  })
+
+  it('region-A admin patching a provider_org to regionId=B → 403', async () => {
+    const created = (await orgsPost(ev({
+      method: 'POST', session: adminA(),
+      body: { provider: 'github', externalOrgId: 'xr-patch-target', displayName: 'X', reconciliationMode: 'indicative' },
+    }))) as { id: string }
+    await expect(
+      orgPatch(ev({ method: 'PATCH', session: adminA(), params: { id: created.id }, body: { regionId: regionBId } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    const rows = await t.client<{ region_id: string | null }[]>`SELECT region_id::text AS region_id FROM provider_org WHERE id = ${created.id}::uuid`
+    expect(rows[0]!.region_id).toBeNull() // patch rolled back — still unmapped
+  })
+
+  it('region-A admin patching a region-B org WITHOUT regionId in the body → 403 (the source-side clamp)', async () => {
+    // The destination clamp keys on what the caller SENT, so omitting regionId
+    // skipped it entirely and let a region-A admin rewrite any other field of a
+    // region-B-mapped org. The clamp must key on the ROW's region, not the body's.
+    const b = (await orgsPost(ev({
+      method: 'POST', session: finops(),
+      body: { provider: 'github', externalOrgId: 'xr-src-clamp-b', displayName: 'Src B', reconciliationMode: 'indicative', regionId: regionBId },
+    }))) as { id: string }
+    await expect(
+      orgPatch(ev({ method: 'PATCH', session: adminA(), params: { id: b.id }, body: { displayName: 'renamed by region A' } })),
+      // 404, not 403 (PR #204 review): a 403 here beside a 404 for an unknown id
+      // lets a region admin enumerate which ids exist in other regions.
+    ).rejects.toMatchObject({ statusCode: 404 })
+    const rows = await t.client<{ display_name: string }[]>`SELECT display_name FROM provider_org WHERE id = ${b.id}::uuid`
+    expect(rows[0]!.display_name).toBe('Src B') // denial rolled back, nothing written
+    // The owning region's admin is unaffected.
+    await orgPatch(ev({ method: 'PATCH', session: adminB(), params: { id: b.id }, body: { displayName: 'renamed by region B' } }))
+    const after = await t.client<{ display_name: string }[]>`SELECT display_name FROM provider_org WHERE id = ${b.id}::uuid`
+    expect(after[0]!.display_name).toBe('renamed by region B')
+  })
+
+  it('moving an org to another region with ONLY regionId in the body is refused while its CoU stays behind', async () => {
+    // The CoU-consistency check only fired when the body supplied costOwningUnitId,
+    // so a pure region move slipped past it and left pooled Copilot chargeback homing
+    // to a CoU in the region the org just left. Nothing at the DB level prevents that.
+    const created = (await orgsPost(ev({
+      method: 'POST', session: finops(),
+      body: {
+        provider: 'github', externalOrgId: 'xr-region-move', displayName: 'Move', reconciliationMode: 'indicative',
+        regionId, costOwningUnitId: couAId,
+      },
+    }))) as { id: string }
+    await expect(
+      orgPatch(ev({ method: 'PATCH', session: finops(), params: { id: created.id }, body: { regionId: regionBId } })),
+    ).rejects.toMatchObject({ statusCode: 422 })
+    const rows = await t.client<{ region_id: string }[]>`SELECT region_id::text AS region_id FROM provider_org WHERE id = ${created.id}::uuid`
+    expect(rows[0]!.region_id).toBe(regionId) // refused and rolled back, still in region A
+
+    // Re-pointing the CoU in the SAME request is the supported path and still works.
+    await orgPatch(ev({
+      method: 'PATCH', session: finops(), params: { id: created.id },
+      body: { regionId: regionBId, costOwningUnitId: couBId },
+    }))
+    const after = await t.client<{ region_id: string; cost_owning_unit_id: string }[]>`
+      SELECT region_id::text AS region_id, cost_owning_unit_id::text AS cost_owning_unit_id
+      FROM provider_org WHERE id = ${created.id}::uuid`
+    expect(after[0]!.region_id).toBe(regionBId)
+    expect(after[0]!.cost_owning_unit_id).toBe(couBId)
+  })
+
+  it('an UNMAPPED org stays patchable by any region admin (onboarding surface preserved)', async () => {
+    const unmapped = (await orgsPost(ev({
+      method: 'POST', session: adminA(),
+      body: { provider: 'github', externalOrgId: 'xr-src-clamp-unmapped', displayName: 'Unmapped', reconciliationMode: 'indicative' },
+    }))) as { id: string }
+    await orgPatch(ev({ method: 'PATCH', session: adminB(), params: { id: unmapped.id }, body: { displayName: 'claimed by B' } }))
+    const rows = await t.client<{ display_name: string }[]>`SELECT display_name FROM provider_org WHERE id = ${unmapped.id}::uuid`
+    expect(rows[0]!.display_name).toBe('claimed by B')
+  })
+
+  it('region-A admin patching costOwningUnitId to a region-B unit (regionId=A) → rejected', async () => {
+    const created = (await orgsPost(ev({
+      method: 'POST', session: adminA(),
+      body: { provider: 'github', externalOrgId: 'xr-patch-cou', displayName: 'X', reconciliationMode: 'indicative', regionId },
+    }))) as { id: string }
+    await expect(
+      orgPatch(ev({ method: 'PATCH', session: adminA(), params: { id: created.id }, body: { costOwningUnitId: couBId } })),
+    ).rejects.toMatchObject({ statusCode: 422 })
+  })
+
+  it('global-finops creates/patches across regions without restriction', async () => {
+    const res = (await orgsPost(ev({
+      method: 'POST', session: finops(),
+      body: { provider: 'github', externalOrgId: 'xr-finops-b', displayName: 'Finops B', reconciliationMode: 'indicative', regionId: regionBId },
+    }))) as { id: string }
+    const patched = (await orgPatch(ev({
+      method: 'PATCH', session: finops(), params: { id: res.id }, body: { regionId, costOwningUnitId: couAId },
+    }))) as { updated: boolean }
+    expect(patched.updated).toBe(true)
+  })
+})
+
+describe('provider_org DELETE cross-region clamp + rollback', () => {
+  beforeAll(clearProviders)
+  let orgAId = ''
+  let orgBId = ''
+  let orgUnmappedId = ''
+
+  beforeAll(async () => {
+    const a = (await orgsPost(ev({ method: 'POST', session: finops(), body: { provider: 'github', externalOrgId: 'del-a', displayName: 'Del A', reconciliationMode: 'indicative', regionId } }))) as { id: string }
+    orgAId = a.id
+    const b = (await orgsPost(ev({ method: 'POST', session: finops(), body: { provider: 'github', externalOrgId: 'del-b', displayName: 'Del B', reconciliationMode: 'indicative', regionId: regionBId } }))) as { id: string }
+    orgBId = b.id
+    const u = (await orgsPost(ev({ method: 'POST', session: finops(), body: { provider: 'github', externalOrgId: 'del-u', displayName: 'Del U', reconciliationMode: 'indicative' } }))) as { id: string }
+    orgUnmappedId = u.id
+  })
+
+  it('region-A admin DELETEs a region-B org → the SAME 404 an unknown id gets, and the row survives (rollback)', async () => {
+    // PARITY IS THE CONTROL (PR #204 review): a 403 here beside a 404 for an
+    // unknown id lets a region admin enumerate which provider_org ids exist in
+    // other regions purely from the status code. Assert the two responses are
+    // indistinguishable, not merely that both are 4xx.
+    const foreign = await orgDelete(ev({ method: 'DELETE', session: adminA(), params: { id: orgBId } })).catch((e) => e)
+    const unknown = await orgDelete(ev({ method: 'DELETE', session: adminA(), params: { id: '00000000-0000-0000-0000-000000000000' } })).catch((e) => e)
+    expect(foreign.statusCode).toBe(404)
+    expect(foreign.statusCode).toBe(unknown.statusCode)
+    expect(foreign.statusMessage).toBe(unknown.statusMessage)
+    expect(JSON.stringify(foreign.data)).toBe(JSON.stringify(unknown.data))
+    // ...and the DELETE rolled back: the row is still there.
+    const rows = await t.client<{ n: string }[]>`SELECT COUNT(*)::text AS n FROM provider_org WHERE id = ${orgBId}::uuid`
+    expect(Number(rows[0]!.n)).toBe(1)
+  })
+
+  it('region-A admin deletes a region-A org → 200', async () => {
+    const res = (await orgDelete(ev({ method: 'DELETE', session: adminA(), params: { id: orgAId } }))) as { deleted: boolean }
+    expect(res.deleted).toBe(true)
+  })
+
+  it('region-A admin deletes an unmapped (region_id IS NULL) org → 200 (onboarding surface)', async () => {
+    const res = (await orgDelete(ev({ method: 'DELETE', session: adminA(), params: { id: orgUnmappedId } }))) as { deleted: boolean }
+    expect(res.deleted).toBe(true)
+  })
+
+  it('an unknown UUID → 404 for both region admins, identical body (no existence oracle)', async () => {
+    const unknown = '00000000-0000-0000-0000-00000000dead'
+    let errA: { statusCode?: number; data?: unknown } | undefined
+    let errB: { statusCode?: number; data?: unknown } | undefined
+    try {
+      await orgDelete(ev({ method: 'DELETE', session: adminA(), params: { id: unknown } }))
+    } catch (e) {
+      errA = e as typeof errA
+    }
+    try {
+      await orgDelete(ev({ method: 'DELETE', session: adminB(), params: { id: unknown } }))
+    } catch (e) {
+      errB = e as typeof errB
+    }
+    expect(errA?.statusCode).toBe(404)
+    expect(errB?.statusCode).toBe(404)
+    expect(JSON.stringify(errA?.data)).toBe(JSON.stringify(errB?.data))
+  })
+
+  it('global-finops deletes a region-B org → 200', async () => {
+    const b2 = (await orgsPost(ev({ method: 'POST', session: finops(), body: { provider: 'github', externalOrgId: 'del-b2', displayName: 'Del B2', reconciliationMode: 'indicative', regionId: regionBId } }))) as { id: string }
+    const res = (await orgDelete(ev({ method: 'DELETE', session: finops(), params: { id: b2.id } }))) as { deleted: boolean }
+    expect(res.deleted).toBe(true)
+  })
+})
+
+describe('provider_org LIST region clamp (orgs.get / report:theme-5-map-post)', () => {
+  beforeAll(clearProviders)
+  let orgAId = ''
+  let orgBId = ''
+  let orgUnmappedId = ''
+
+  beforeAll(async () => {
+    const a = (await orgsPost(ev({ method: 'POST', session: finops(), body: { provider: 'github', externalOrgId: 'list-a', displayName: 'List A', reconciliationMode: 'indicative', regionId } }))) as { id: string }
+    orgAId = a.id
+    const b = (await orgsPost(ev({ method: 'POST', session: finops(), body: { provider: 'github', externalOrgId: 'list-b', displayName: 'List B', reconciliationMode: 'indicative', regionId: regionBId } }))) as { id: string }
+    orgBId = b.id
+    const u = (await orgsPost(ev({ method: 'POST', session: finops(), body: { provider: 'github', externalOrgId: 'list-u', displayName: 'List U', reconciliationMode: 'indicative' } }))) as { id: string }
+    orgUnmappedId = u.id
+  })
+
+  it('region-A admin sees region-A + unmapped orgs, NOT region-B', async () => {
+    const got = (await orgsGet(ev({ method: 'GET', session: adminA() }))) as { orgs: { id: string }[] }
+    const ids = got.orgs.map((o) => o.id)
+    expect(ids).toContain(orgAId)
+    expect(ids).toContain(orgUnmappedId)
+    expect(ids).not.toContain(orgBId)
+  })
+
+  it('global-finops sees every region', async () => {
+    const got = (await orgsGet(ev({ method: 'GET', session: finops() }))) as { orgs: { id: string }[] }
+    const ids = got.orgs.map((o) => o.id)
+    expect(ids).toContain(orgAId)
+    expect(ids).toContain(orgBId)
+    expect(ids).toContain(orgUnmappedId)
   })
 })
 

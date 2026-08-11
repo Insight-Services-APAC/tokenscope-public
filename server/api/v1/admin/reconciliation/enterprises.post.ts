@@ -23,14 +23,17 @@ import { withRequestRls } from '../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../db/audit'
 import { translatePgConstraintError } from '../../../../utils/pg-constraint-error'
 import { providerEnterprise } from '../../../../../drizzle/schema'
+import { resweepProviderEnterpriseReferences } from '../../../../workers/governance-key-backfill'
 import {
   providerSchema,
   reconciliationModeSchema,
   billingSchema,
+  overageAllocationPolicySchema,
   credentialSecretNameSchema,
   githubAppIdSchema,
   canonicaliseExternalId,
 } from '../../../../reconciliation/provider-validation'
+import { seedInitialCopilotRatePlan } from '../../../../governance/copilot-rate-plan'
 
 const Body = z.object({
   provider: providerSchema,
@@ -40,8 +43,11 @@ const Body = z.object({
   billing: billingSchema.optional().default('tracked'),
   credentialSecretName: credentialSecretNameSchema.nullish(),
   // ADR-0010 D1/D2 (Copilot/GitHub): whole-month flat seat price + per-user allowance, USD.
+  // FORECAST/SHOWBACK reference only — see server/governance/copilot-rate-plan.ts.
   flatSeatPriceUsd: z.number().min(0).max(1_000_000).nullish(),
   includedAllowanceUsd: z.number().min(0).max(1_000_000).nullish(),
+  // ADR-0011 D10 — configurable per-enterprise pooled-overage allocation policy.
+  overageAllocationPolicy: overageAllocationPolicySchema.optional().default('consumption-share'),
   // Optional GitHub App id (mig 0078) — opts a github enterprise into the App
   // credential path. Validated ^\d+$. anthropic must not carry one (rejected below).
   githubAppId: githubAppIdSchema.nullish(),
@@ -113,6 +119,7 @@ export default defineEventHandler(async (event) => {
           credentialSecretName,
           flatSeatPriceUsd: body.flatSeatPriceUsd != null ? body.flatSeatPriceUsd.toFixed(6) : null,
           includedAllowanceUsd: body.includedAllowanceUsd != null ? body.includedAllowanceUsd.toFixed(6) : null,
+          overageAllocationPolicy: body.overageAllocationPolicy,
           githubAppId,
           notes: body.notes ?? null,
         })
@@ -125,6 +132,19 @@ export default defineEventHandler(async (event) => {
         },
       })
     }
+
+    // Workstream C: seed the enterprise's FIRST effective-dated rate plan (open-ended, from
+    // the values supplied at creation) in the SAME audited write — keeps every enterprise
+    // covered from day one, matching migration 0106's backfill for pre-existing rows. A no-op
+    // (returns null) when neither scalar value was supplied.
+    const seededRatePlan = await seedInitialCopilotRatePlan(tx, {
+      providerEnterpriseId: created!.id,
+      flatSeatPriceUsd: body.flatSeatPriceUsd ?? null,
+      includedAllowanceUsd: body.includedAllowanceUsd ?? null,
+      actorTeammateId: caller.teammateId,
+      ipAddress: ip,
+      userAgent: ua,
+    })
 
     await recordAuditEvent(tx, {
       eventType: 'provider-enterprise-created',
@@ -140,8 +160,10 @@ export default defineEventHandler(async (event) => {
         credential_secret_name: credentialSecretName,
         flat_seat_price_usd: body.flatSeatPriceUsd ?? null,
         included_allowance_usd: body.includedAllowanceUsd ?? null,
+        overage_allocation_policy: body.overageAllocationPolicy,
         github_app_id: githubAppId,
         notes: body.notes ?? null,
+        seeded_rate_plan_id: seededRatePlan?.id ?? null,
       },
       ipAddress: ip,
       userAgent: ua,
@@ -156,7 +178,16 @@ export default defineEventHandler(async (event) => {
       billing: body.billing,
       flatSeatPriceUsd: body.flatSeatPriceUsd ?? null,
       includedAllowanceUsd: body.includedAllowanceUsd ?? null,
+      overageAllocationPolicy: body.overageAllocationPolicy,
       githubAppId,
+      // Targeted governance-key resweep (design §8.4) — github only (anthropic
+      // enterprises are grouping parents; the org itself is the governance
+      // unit there, so reconciliation_record's enterprise_ref match is
+      // github-specific — see resweepProviderEnterpriseReferences).
+      governanceResweep:
+        body.provider === 'github'
+          ? await resweepProviderEnterpriseReferences(tx, { providerEnterpriseId: created!.id, externalId })
+          : null,
     }
   })
 })

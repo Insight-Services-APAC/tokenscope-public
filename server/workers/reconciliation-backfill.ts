@@ -142,7 +142,10 @@ export async function runReconciliationBackfill(
       // unaccounted / over-emission, then mark succeeded.
       const window = { startDate: req.start_date, endDate: req.end_date }
       await reconcileUnaccountedUsage(db, window)
-      await detectOverEmission(db, window)
+      // Historical backfills still compute integrity signals, but must not
+      // flood a teammate's current inbox with one personal-subscription prompt
+      // for every old month traversed by an administrative replay.
+      await detectOverEmission(db, { ...window, dispatchPersonalPrompts: false })
       await db.execute(sql`UPDATE reconciliation_backfill_request SET status = 'succeeded', finished_at = now() WHERE id = ${req.id}::uuid`)
       return { claimed: 1, requestId: req.id, status: 'succeeded', rowsWritten: rowsThisRun }
     }

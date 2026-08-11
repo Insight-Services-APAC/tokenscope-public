@@ -21,6 +21,7 @@ import DrawerBodyOverBudget from './DrawerBodyOverBudget.vue'
 import DrawerBodyVelocity from './DrawerBodyVelocity.vue'
 import DrawerBodySyncConflict from './DrawerBodySyncConflict.vue'
 import DrawerBodyUntagged from './DrawerBodyUntagged.vue'
+import DrawerBodyPersonalSubscription from './DrawerBodyPersonalSubscription.vue'
 import { variantForCategory, type InboxItem } from './types'
 
 const props = defineProps<{
@@ -98,6 +99,7 @@ const severityBadgeKind = computed<
       <DrawerBodyVelocity v-else-if="variant === 'velocity'" :body="item.body" />
       <DrawerBodySyncConflict v-else-if="variant === 'sync-conflict'" :body="item.body" />
       <DrawerBodyUntagged v-else-if="variant === 'untagged'" :body="item.body" />
+      <DrawerBodyPersonalSubscription v-else-if="variant === 'personal-subscription'" :body="item.body" />
       <div v-else class="text-sm text-carbon-2 leading-relaxed">
         Details for this category aren't laid out yet. Use the
         actions below to acknowledge, resolve, or dismiss.

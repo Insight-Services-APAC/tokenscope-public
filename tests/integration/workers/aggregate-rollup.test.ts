@@ -297,6 +297,24 @@ describe('runAggregateRollup', () => {
     expect(stranger.proj).toBe(0) // non-member sees no project cells
   })
 
+  // S11 (a): the case above connects as a NON-OWNER role specifically so the
+  // policies execute — production has no such role. The app connects as the
+  // table OWNER (infra/modules/keyvault-secrets.bicep administratorLogin), which
+  // bypasses RLS entirely unless FORCE ROW LEVEL SECURITY is set (deliberately
+  // not set this sprint — see drizzle/migrations/0098_rls_policy_convergence.sql).
+  // Without this case, this file would certify a control production does not
+  // have: the "stranger denied" assertion above could pass while the real
+  // deployed app enforces nothing at all.
+  it('the OWNER connection bypasses RLS entirely — matches production topology', async () => {
+    // Same query the "stranger" sub-case above ran and was DENIED for, run as
+    // the owner (t.client, not scopedClient/scopedDb) — it must see it.
+    const own = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM attribution_aggregate
+      WHERE scope_type = 'teammate' AND scope_id = ${devId}::uuid
+    `
+    expect(Number(own[0]!.n)).toBeGreaterThan(0)
+  })
+
   it('partial-backfill recovery: a non-empty table with NO completion marker re-backfills (no permanent gap)', async () => {
     // Reproduce the crash: wipe the completion marker and delete a swathe of
     // already-materialised days, leaving the table non-empty but incomplete.

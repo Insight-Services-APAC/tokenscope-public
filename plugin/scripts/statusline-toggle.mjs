@@ -10,7 +10,15 @@
  *   off  — remove TokenScope's status line (a non-TokenScope one is left untouched)
  *   (no arg) — report current state
  */
-import { readFileSync, writeFileSync, existsSync, chmodSync, renameSync, rmSync, mkdirSync } from 'node:fs'
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  chmodSync,
+  renameSync,
+  rmSync,
+  mkdirSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -32,7 +40,9 @@ if (existsSync(settingsPath)) {
     // {statusLine}, wiping the env block (the durable emit credential, OTel
     // endpoints), otelHeadersHelper, and permissions: silent de-enrolment.
     // Same refuse-on-unparseable contract as claude-redeem's writeClaudeSettings.
-    console.error(`[tokenscope] Existing ${settingsPath} is not valid JSON — refusing to touch it. Fix or move it, then re-run.`)
+    console.error(
+      `[tokenscope] Existing ${settingsPath} is not valid JSON — refusing to touch it. Fix or move it, then re-run.`,
+    )
     process.exit(1)
   }
 }
@@ -56,7 +66,11 @@ function save(next) {
     }
     renameSync(tmp, settingsPath) // atomic on the same filesystem
   } catch (err) {
-    try { rmSync(tmp, { force: true }) } catch { /* best-effort cleanup */ }
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      /* best-effort cleanup */
+    }
     throw err
   }
 }
@@ -68,13 +82,35 @@ function emit(obj) {
 if (arg === 'off') {
   const { settings: next, removed } = removeStatusLine(settings)
   if (removed) save(next)
-  emit({ action: 'off', changed: removed, message: removed ? 'TokenScope status line turned OFF.' : 'No TokenScope status line was set (left any custom one untouched).' })
+  emit({
+    action: 'off',
+    changed: removed,
+    message: removed
+      ? 'TokenScope status line turned OFF.'
+      : 'No TokenScope status line was set (left any custom one untouched).',
+  })
 } else if (arg === 'on') {
   // Explicit opt-in: force-install, replacing a custom status line if present.
   const replacedCustom = Boolean(settings.statusLine) && !hasOurs
   const { settings: next } = installStatusLine(settings, statuslinePath, { force: true })
   save(next)
-  emit({ action: 'on', changed: true, replacedCustom, message: replacedCustom ? 'TokenScope status line turned ON (replaced your previous custom status line).' : 'TokenScope status line turned ON (emission health + session id).' })
+  emit({
+    action: 'on',
+    changed: true,
+    replacedCustom,
+    message: replacedCustom
+      ? 'TokenScope status line turned ON (replaced your previous custom status line).'
+      : 'TokenScope status line turned ON (emission health + session id).',
+  })
 } else {
-  emit({ action: 'status', enabled: Boolean(hasOurs), hasCustom: Boolean(settings.statusLine) && !hasOurs, message: hasOurs ? 'TokenScope status line is ON.' : (settings.statusLine ? 'A custom (non-TokenScope) status line is set. Run `/tokenscope:statusline on` to replace it.' : 'TokenScope status line is OFF. Run `/tokenscope:statusline on` to enable it.') })
+  emit({
+    action: 'status',
+    enabled: Boolean(hasOurs),
+    hasCustom: Boolean(settings.statusLine) && !hasOurs,
+    message: hasOurs
+      ? 'TokenScope status line is ON.'
+      : settings.statusLine
+        ? 'A custom (non-TokenScope) status line is set. Run `/tokenscope:statusline on` to replace it.'
+        : 'TokenScope status line is OFF. Run `/tokenscope:statusline on` to enable it.',
+  })
 }

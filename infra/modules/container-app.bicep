@@ -45,6 +45,9 @@ param entraRedirectUri string = ''
 @description('Optional pinned PUBLIC origin (scheme://host) when an upstream WAF/proxy fronts the app under a fixed hostname (e.g. the IT dev zone https://tokenscope.example.com). Empty = derive the public origin from Front Door / the request Host. See server/utils/public-url.ts.')
 param appPublicOrigin string = ''
 
+@description('Break-glass EXTRA hostnames the MCP transport answers to, comma-separated. The app already derives its public origin and its Container Apps app/revision FQDNs; this covers a topology that derivation does not model (custom backend domain, private DNS alias, traffic-label FQDN) WITHOUT a code change and release. Empty is the normal state. See server/utils/public-url.ts platformSelfHosts().')
+param mcpAllowedHosts string = ''
+
 @description('Whether admin users can override their session into a demo persona via /api/v1/auth/dev-login. Production MUST be false.')
 param allowPersonaOverride bool = false
 
@@ -362,6 +365,7 @@ var baseEnvVars = [
   // Pinned public origin for a proxy-fronted custom hostname (IT dev zone).
   // Empty everywhere else → public origin derives from AFD / the request Host.
   { name: 'APP_PUBLIC_ORIGIN', value: appPublicOrigin }
+  { name: 'MCP_ALLOWED_HOSTS', value: mcpAllowedHosts }
   // ── Rate-limiter trustworthy IP source (CORE-4) ──
   // nuxt-security's limiter defaults to the first X-Forwarded-For hop, which
   // AFD only APPENDS to (so it is client-controlled → spoofable). When AFD

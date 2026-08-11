@@ -1,5 +1,5 @@
 #!/usr/bin/env node
- 
+
 /**
  * check-copilot-plugin-sync.mjs
  *
@@ -7,11 +7,13 @@
  * ignoring the SYNC NOTE header line added by sync-copilot-plugin.mjs.
  *
  * Also verifies (PLG-9) that the baked TokenScope API host is CONSISTENT across
- * the three uncoordinated places it lives: plugin/scripts/api-base.mjs
+ * the four uncoordinated places it lives: plugin/scripts/api-base.mjs
  * (DEFAULT_API_BASE), plugin/.mcp.json (the ${TOKENSCOPE_API_BASE:-…} default),
- * and copilot-plugin/.mcp.json (a literal URL — Copilot CLI does not expand
- * ${VAR}). A partial host update silently splits the plugin: MCP talks to one
- * server while redeem/emit talk to another.
+ * copilot-plugin/.mcp.json (a literal URL — Copilot CLI does not expand
+ * ${VAR}), and copilot-plugin/scripts/enroll.mjs (its own DEFAULT_API_BASE — an
+ * un-vendored file the parity check above cannot see). A partial host update
+ * silently splits the plugin: MCP talks to one server while redeem/emit talk to
+ * another.
  *
  * Exits 1 if any file pair differs (drift detected) or the API hosts diverge.
  * Run: npm run check:copilot-plugin-sync
@@ -33,12 +35,31 @@ const FILES = [
   // differently = split attribution).
   'tokenscope-project.mjs',
   'otel-headers-helper.sh',
+  // endpoint-guard.mjs (S1) — the ONE endpoint validator. Gated the same way:
+  // a second, un-gated (and therefore driftable) guard defeats the whole
+  // point of having promoted it into one dependency-free file.
+  'endpoint-guard.mjs',
+  // mcp-origin.mjs — the shared "where is the MCP server registered" resolver.
+  // Gated so the vendored copy cannot drift: divergence means one client
+  // redeems its handoff against a different host than the other.
+  'mcp-origin.mjs',
+  // real-home.mjs — the shared passwd-home resolver. Gated most sharply of all:
+  // a drifted copy that fell back to os.homedir() would silently restore the
+  // $HOME trust boundary this module exists to remove, on one client only.
+  'real-home.mjs',
+  // managed-telemetry.mjs (Workstream D §10.1) — the shared GitHub Copilot CLI
+  // managed-`telemetry` detector. Gated so Copilot's vendored copy can never
+  // drift from the canonical plugin/scripts/ source — a drift here means the
+  // two clients disagree about whether a credential-valid probe is actually
+  // emission-healthy.
+  'managed-telemetry.mjs',
 ]
 
 // Match the FULL auto-generated signature (not a bare `// SYNC NOTE:` prefix), so a
 // legitimate body comment that happens to start with the prefix can't mask real drift
 // by being stripped from both sides. Keep in sync with sync-copilot-plugin.mjs.
-const SYNC_NOTE_SIGNATURE = 'SYNC NOTE: Auto-generated copy for standalone copilot-plugin distribution.'
+const SYNC_NOTE_SIGNATURE =
+  'SYNC NOTE: Auto-generated copy for standalone copilot-plugin distribution.'
 
 /** Strip the single auto-generated SYNC NOTE line (matched by its full signature). */
 function stripSyncNote(content) {
@@ -52,7 +73,7 @@ let failed = false
 
 for (const name of FILES) {
   const canonical = resolve(root, 'plugin/scripts', name)
-  const vendored  = resolve(root, 'copilot-plugin/scripts', name)
+  const vendored = resolve(root, 'copilot-plugin/scripts', name)
 
   if (!existsSync(canonical)) {
     console.error(`ERROR: canonical source missing: plugin/scripts/${name}`)
@@ -67,10 +88,12 @@ for (const name of FILES) {
   }
 
   const canonicalNorm = stripSyncNote(readFileSync(canonical, 'utf8'))
-  const vendoredNorm  = stripSyncNote(readFileSync(vendored,  'utf8'))
+  const vendoredNorm = stripSyncNote(readFileSync(vendored, 'utf8'))
 
   if (canonicalNorm !== vendoredNorm) {
-    console.error(`DRIFT: copilot-plugin/scripts/${name} is out of sync with plugin/scripts/${name}`)
+    console.error(
+      `DRIFT: copilot-plugin/scripts/${name} is out of sync with plugin/scripts/${name}`,
+    )
     console.error(`  Run: npm run sync:copilot-plugin`)
     failed = true
   }
@@ -112,10 +135,27 @@ function copilotMcpHost() {
   return originOf(cfg?.mcpServers?.tokenscope?.url ?? '')
 }
 
+/**
+ * copilot-plugin/scripts/enroll.mjs — its OWN DEFAULT_API_BASE literal.
+ *
+ * A FOURTH copy, and the one this check used to miss. That file is not vendored
+ * from plugin/scripts/ (Copilot's enrol writes a different on-disk contract), so
+ * the parity check above cannot see it, and it is the enrol door: the call that
+ * ships the bundled enrollment secret and stores whatever endpoints come back.
+ * A drifted default there would point the enrol at a stale deployment while
+ * every other surface agreed with itself.
+ */
+function copilotEnrollHost() {
+  const src = readFileSync(resolve(root, 'copilot-plugin/scripts/enroll.mjs'), 'utf8')
+  const m = src.match(/DEFAULT_API_BASE\s*=\s*'([^']+)'/)
+  return m ? originOf(m[1]) : null
+}
+
 const hosts = [
   { where: 'plugin/scripts/api-base.mjs (DEFAULT_API_BASE)', host: apiBaseHost() },
   { where: 'plugin/.mcp.json (mcpServers.tokenscope.url default)', host: claudeMcpHost() },
   { where: 'copilot-plugin/.mcp.json (mcpServers.tokenscope.url)', host: copilotMcpHost() },
+  { where: 'copilot-plugin/scripts/enroll.mjs (DEFAULT_API_BASE)', host: copilotEnrollHost() },
 ]
 
 let hostFailed = false
@@ -128,13 +168,17 @@ for (const { where, host } of hosts) {
 if (!hostFailed && new Set(hosts.map((h) => h.host)).size !== 1) {
   console.error('DRIFT: the baked TokenScope API host differs between:')
   for (const { where, host } of hosts) console.error(`  ${host}  ←  ${where}`)
-  console.error('  A partial update silently splits the plugin (MCP at one server, redeem at another). Update all three together.')
+  console.error(
+    '  A partial update silently splits the plugin (MCP at one server, redeem at another). Update all four together.',
+  )
   hostFailed = true
 }
 if (hostFailed) {
   failed = true
 } else {
-  console.log(`✓  API host consistent across api-base.mjs + both .mcp.json (${hosts[0].host})`)
+  console.log(
+    `✓  API host consistent across api-base.mjs, both .mcp.json + copilot enroll (${hosts[0].host})`,
+  )
 }
 
 process.exit(failed ? 1 : 0)

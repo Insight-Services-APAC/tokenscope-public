@@ -23,6 +23,7 @@ import type * as schema from '../../drizzle/schema'
 import { acquireWorkerDispatchLock } from './dispatch-lock'
 import type { WorkerEntry, WorkerRunContext } from './registry'
 import { reapStaleWorkerRuns, recordWorkerRunStart, recordWorkerRunOutcome } from './run-health'
+import { isWorkerEnabled } from './enablement'
 
 // The dispatch lock reserves a raw connection off `$client`, so this needs the same
 // intersection type dispatch-lock.ts uses (the bare PostgresJsDatabase omits it).
@@ -32,6 +33,8 @@ export interface WorkerDispatchResult {
   worker: string
   duration_ms: number
   result: unknown
+  /** True when an admin has this worker disabled — it did NOT run (mig 0090). */
+  skipped?: boolean
 }
 
 /*
@@ -64,6 +67,23 @@ export async function dispatchWorker(
   }
 
   try {
+    // ADMIN KILL-SWITCH (mig 0090). Checked INSIDE the lock so a disable takes
+    // effect on the very next tick without a deploy. The cron still fires; we
+    // record a SKIPPED run so the ledger shows WHY nothing happened — a silent
+    // gap would look identical to the never-scheduled trap this epic closed.
+    // Fail-OPEN by construction (isWorkerEnabled returns true on any error).
+    if (!(await isWorkerEnabled(db, entry.name))) {
+      const skippedRunId = await recordWorkerRunStart(db, entry.name)
+      if (skippedRunId) {
+        await recordWorkerRunOutcome(db, skippedRunId, {
+          status: 'skipped',
+          durationMs: 0,
+          result: { skipped: true, reason: 'disabled-by-admin' },
+        })
+      }
+      return { worker: entry.name, duration_ms: 0, result: { skipped: true, reason: 'disabled-by-admin' }, skipped: true }
+    }
+
     // ING-7: fail any worker_run stuck in 'running' (a wedged HTTP call or a
     // container killed mid-run) so diagnostics shows a failure. Best-effort.
     await reapStaleWorkerRuns(db)

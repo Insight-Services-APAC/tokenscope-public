@@ -29,7 +29,7 @@ import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { readValidated } from '../../../../utils/validated-body'
 import { sql } from 'drizzle-orm'
 import { z } from 'zod'
-import { requireRole } from '../../../../auth/rbac'
+import { requireRole, requireRegionScope } from '../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../auth/csrf'
 import { withRequestRls } from '../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../db/audit'
@@ -37,6 +37,8 @@ import { translatePgConstraintError } from '../../../../utils/pg-constraint-erro
 import { providerOrg } from '../../../../../drizzle/schema'
 import { readSecret } from '../../../../reconciliation/credentials'
 import { validateKeyFormat } from '../../../../anthropic/health'
+import { assertOrgUnitInRegion } from '../../../../db/org-units'
+import { resweepProviderOrgReferences } from '../../../../workers/governance-key-backfill'
 import {
   providerSchema,
   reconciliationModeSchema,
@@ -86,6 +88,12 @@ export default defineEventHandler(async (event) => {
   const body = await readValidated(event, Body)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
   const ua = getHeader(event, 'user-agent') ?? null
+
+  // Region-scope: a region admin may only map a provider_org (ADR-0010 D4's
+  // Copilot license-org billing home) into their OWN region. Unmapped
+  // (regionId null) orgs skip this — that is the onboarding surface every
+  // region admin must keep access to (see the DELETE/LIST siblings).
+  if (body.regionId) await requireRegionScope(event, body.regionId)
 
   const apiKind = body.apiKind ?? null
   const credentialSecretName = body.credentialSecretName ?? null
@@ -154,7 +162,26 @@ export default defineEventHandler(async (event) => {
     }
 
     // Mapped cost-owning unit (when set) must exist AND be a cost-owning unit.
+    // When the org itself is region-mapped, the CoU must also live in THAT
+    // region (the defect this closes: costOwningUnitId was never checked
+    // against the org's region) — routed through the shared
+    // assertOrgUnitInRegion helper, not a hand-rolled variant. Unmapped
+    // (regionId null) orgs skip the region leg; nothing to check it against.
     if (costOwningUnitId) {
+      if (regionId) {
+        await assertOrgUnitInRegion(tx, {
+          orgUnitId: costOwningUnitId,
+          regionId,
+          mustBeActive: true,
+          statusMessage: 'costOwningUnitId is not an active org unit in the org\'s mapped region',
+          data: {
+            type: 'https://tokenscope.example.com/errors/unprocessable',
+            title: 'Unprocessable',
+            status: 422,
+            detail: 'costOwningUnitId must reference an active org unit in the org\'s mapped region.',
+          },
+        })
+      }
       const ouRows = await tx.execute<{ is_cost_owning_unit: boolean }>(sql`
         SELECT is_cost_owning_unit FROM org_unit
         WHERE id = ${costOwningUnitId}::uuid AND retired_at IS NULL LIMIT 1
@@ -252,6 +279,18 @@ export default defineEventHandler(async (event) => {
       userAgent: ua,
     })
 
+    // Targeted governance-key resweep (design §8.4: "creating or linking an org
+    // triggers a targeted re-sweep") — un-parks any actual_spend /
+    // reconciliation_record rows that were sitting governance-unresolved ONLY
+    // because this org did not exist yet. Bounded to this one org's backlog;
+    // safe to run inline.
+    const resweep = await resweepProviderOrgReferences(tx, {
+      providerOrgId: created!.id,
+      provider: body.provider,
+      externalOrgId,
+      providerEnterpriseId,
+    })
+
     return {
       id: created!.id,
       provider: body.provider,
@@ -261,6 +300,7 @@ export default defineEventHandler(async (event) => {
       billing: body.billing,
       apiKind,
       providerEnterpriseId,
+      governanceResweep: resweep,
     }
   })
 })

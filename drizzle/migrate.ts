@@ -11,7 +11,7 @@
 import { readFile, readdir } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import postgres from 'postgres'
+import { createDbClient } from './connect'
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'migrations')
 
@@ -22,7 +22,7 @@ async function main() {
     process.exit(1)
   }
 
-  const sql = postgres(url, { max: 1, idle_timeout: 5 })
+  const sql = createDbClient(url, { max: 1, idle_timeout: 5 })
   try {
     await sql.unsafe(`
       CREATE TABLE IF NOT EXISTS _drizzle_migrations (

@@ -107,11 +107,37 @@ export function mondayOf(day: string): string {
   return new Date(t - back * DAY_MS).toISOString().slice(0, 10)
 }
 
-/** Zero-filled Monday axis covering `[from, to]` (both inclusive `YYYY-MM-DD`). */
-function weekAxis(from: string, to: string): string[] {
+/**
+ * Zero-filled Monday axis covering `[from, to]` (both inclusive `YYYY-MM-DD`),
+ * CLAMPED so it never runs past a week that has not begun.
+ *
+ * WHY THE CLAMP. Every series on this axis is zero-filled across it, so a week
+ * beyond today renders as a measured $0 — the chart asserting "nobody spent that
+ * week" about a week that has not happened. That is the same false claim the KPI
+ * sparklines carried at day grain (fixed in the reporting engine's
+ * `fetchDailyMetrics` / `fetchChargebackTrend`), and leaving it here would make
+ * the daily and weekly views of one dataset disagree about where the data ends.
+ *
+ * It is NOT live at today's call sites — in month mode the trend window is
+ * `[today-59, today]`, so `to` IS today. It becomes reachable through the custom
+ * date range, whose `to` input carries no upper bound: pick a `to` next month and
+ * the hero currently draws flat zero weeks out to it.
+ *
+ * `lastCellWeek` is the same escape hatch the server-side clamp has: if a cell
+ * genuinely carries a week beyond today, the axis extends to include it rather
+ * than dropping money the totals still count. Weeks strictly inside `[from, to]`
+ * that are merely EMPTY are untouched — a past week with no spend is a real zero.
+ */
+function weekAxis(from: string, to: string, opts?: { today?: string; lastCellWeek?: string }): string[] {
+  const at = (d: string) => Date.parse(`${mondayOf(d)}T00:00:00.000Z`)
+  const start = at(from)
+  let last = at(to)
+  if (opts?.today) {
+    const frontier = Math.max(at(opts.today), opts.lastCellWeek ? at(opts.lastCellWeek) : -Infinity)
+    last = Math.min(last, frontier)
+  }
   const weeks: string[] = []
-  const last = Date.parse(`${mondayOf(to)}T00:00:00.000Z`)
-  for (let t = Date.parse(`${mondayOf(from)}T00:00:00.000Z`); t <= last; t += 7 * DAY_MS) {
+  for (let t = start; t <= last; t += 7 * DAY_MS) {
     weeks.push(new Date(t).toISOString().slice(0, 10))
   }
   return weeks
@@ -197,7 +223,20 @@ export function buildWeeklyLanes(
   cells: readonly WeeklyLaneCell[],
   opts: { from: string; to: string; today: string; remainderLabel?: string },
 ): BuiltWeeklyLanes {
-  const weeks = opts.from && opts.to ? weekAxis(opts.from, opts.to) : []
+  /*
+   * The latest week any CELL carries, so the axis can extend past today when
+   * real data does — clamping to today alone would drop money the totals still
+   * count. Computed before the axis, over the raw cells (the axis does not exist
+   * yet to clip against).
+   */
+  const lastCellWeek = cells.reduce<string | undefined>(
+    (max, c) => (max === undefined || c.weekStart > max ? c.weekStart : max),
+    undefined,
+  )
+  const weeks =
+    opts.from && opts.to
+      ? weekAxis(opts.from, opts.to, { today: opts.today, lastCellWeek })
+      : []
   const currentWeek = mondayOf(opts.today)
   const inProgressWeek = weeks.includes(currentWeek) ? currentWeek : null
   const completeWeeks = weeks.filter((w) => w !== inProgressWeek)

@@ -6,8 +6,8 @@
  * This is the Azure-native realisation of the external-cron contract in
  * docs/build/worker-scheduler.md. It runs as an Azure Container Apps *Cron Job*
  * (one job per worker, each with its own schedule), reusing the app image
- * (node 22 → node:crypto + global fetch; no extra deps). Plain .mjs so it runs
- * without tsx (which is pruned from the production image).
+ * (whose Node supplies node:crypto + global fetch, so no extra deps). Plain
+ * .mjs so it runs without tsx (which is pruned from the production image).
  *
  * Why HTTP and not a direct DB call: the run-worker endpoint is the documented,
  * multi-instance-safe, observable trigger surface. /api/v1/internal/* is NOT
@@ -18,17 +18,28 @@
  *   WORKER_NAME                   registry worker name (e.g. azure-monitor-read)
  *   TOKENSCOPE_BASE_URL           Front Door origin, e.g. https://<ep>.azurefd.net
  *   NUXT_INTERNAL_WORKER_HMAC_KEY shared HMAC key (same as the app's)
- *   CRON_TRIGGER_TIMEOUT_MS       optional, default 120000
+ *   CRON_TRIGGER_TIMEOUT_MS       optional, default 200000 (the bicep sets it; a
+ *                                 non-numeric or non-positive value is rejected
+ *                                 with a warning and the default is used)
  *   DEEP_RESCAN                   optional; 'true' forces azure-monitor-read to
  *                                 re-read the full window (read-path backlog
  *                                 recovery). Ignored by every other worker.
  */
 import { createHash, createHmac } from 'node:crypto'
+import { resolveTimeoutMs } from './lib/dispatch-timeout.mjs'
 
 const name = process.env.WORKER_NAME
 const base = (process.env.TOKENSCOPE_BASE_URL ?? '').replace(/\/+$/, '')
 const key = process.env.NUXT_INTERNAL_WORKER_HMAC_KEY
-const timeoutMs = Number(process.env.CRON_TRIGGER_TIMEOUT_MS ?? 120000)
+// Fallback only — the bicep sets CRON_TRIGGER_TIMEOUT_MS explicitly. It is kept in
+// lockstep with DISPATCH_TIMEOUT_MS in shared/workers/dispatch-budget.ts (this file
+// is plain .mjs and cannot import the TS constant, so a test asserts they agree).
+// This number used to be 120000 against a 240s replicaTimeout, which meant any
+// worker running >120s finished its work, logged `success`, and was still reported
+// as a FAILED execution and retried — 73 consecutive false failures on Dev.
+// Validated, not just parsed: see resolveTimeoutMs for why a bare Number() would
+// let a typo'd env var recreate that same false failure on the next tick.
+const timeoutMs = resolveTimeoutMs(process.env.CRON_TRIGGER_TIMEOUT_MS, 200000)
 
 if (!name || !base || !key) {
   console.error('cron-trigger: missing WORKER_NAME / TOKENSCOPE_BASE_URL / NUXT_INTERNAL_WORKER_HMAC_KEY')

@@ -9,7 +9,6 @@ import { mount } from '@vue/test-utils'
 import SettlingStateChip from '../../../app/components/reporting/SettlingStateChip.vue'
 import ProviderFreshnessBar from '../../../app/components/reporting/ProviderFreshnessBar.vue'
 import ForecastBanner from '../../../app/components/reporting/ForecastBanner.vue'
-import ConcentrationCard from '../../../app/components/reporting/ConcentrationCard.vue'
 import ExportCsvButton from '../../../app/components/reporting/ExportCsvButton.vue'
 import ReportEmpty from '../../../app/components/reporting/ReportEmpty.vue'
 import ReportSkeleton from '../../../app/components/reporting/ReportSkeleton.vue'
@@ -156,26 +155,6 @@ describe('ChartsRankedBars', () => {
     const w = mount(ChartsRankedBars, { props: { rows: [] } })
     expect(w.find('svg').exists()).toBe(false)
     expect(w.text()).toContain('No data to rank yet')
-  })
-})
-
-describe('ConcentrationCard', () => {
-  it('renders the top-1/5/10 cohort shares and segment bars', () => {
-    const w = mount(ConcentrationCard, {
-      props: {
-        stats: {
-          top1: 0.5,
-          top5: 0.7,
-          top10: 0.85,
-          segments: [{ label: 'P90+', sharePct: 0.3, count: 5 }],
-        },
-      },
-    })
-    expect(w.text()).toContain('50%')
-    expect(w.text()).toContain('70%')
-    expect(w.text()).toContain('85%')
-    expect(w.text()).toContain('Top 1%')
-    expect(w.findComponent(ChartsRankedBars).exists()).toBe(true)
   })
 })
 

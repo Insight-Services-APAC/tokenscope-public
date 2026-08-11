@@ -16,11 +16,24 @@ import { ref, watch } from 'vue'
 import UiButton from '../ui/Button.vue'
 import { apiErrorDetail } from '../../composables/useApiError'
 
+interface CouOwner {
+  teammate_id: string
+  display_name: string | null
+  email: string
+  /*
+   * C8b/C8c — whether the manager-chain walk can actually USE this owner, from
+   * the walk's own condition (server/api/v1/admin/org-units.get.ts). 'ambiguous'
+   * is the case that places NOBODY while looking identical to one that works.
+   */
+  placement_status?: 'resolves' | 'ambiguous' | 'inert'
+  owns_unit_count?: number
+  places_count?: number
+}
 interface CouRef {
   id: string
   code: string
   display_name: string
-  owners: Array<{ teammate_id: string; display_name: string | null; email: string }>
+  owners: CouOwner[]
 }
 interface DirectoryHit {
   oid: string
@@ -35,7 +48,7 @@ interface DirectoryHit {
 const props = defineProps<{ cou: CouRef | null; regionId: string }>()
 const emit = defineEmits<{ close: []; changed: [] }>()
 
-const owners = ref<CouRef['owners']>([])
+const owners = ref<CouOwner[]>([])
 const error = ref<string | null>(null)
 const busyId = ref<string | null>(null)
 
@@ -82,7 +95,7 @@ async function assign(t: DirectoryHit) {
   }
 }
 
-async function revoke(o: CouRef['owners'][number]) {
+async function revoke(o: CouOwner) {
   if (!props.cou) return
   busyId.value = o.teammate_id
   error.value = null
@@ -99,10 +112,19 @@ async function revoke(o: CouRef['owners'][number]) {
   }
 }
 
+// Re-seed on the OWNERS array too, not just the unit id: assign/revoke emit
+// `changed`, the parent refetches the tree, and the refreshed rows are the only
+// place the C8b/C8c diagnostics come from. Watching the id alone would leave an
+// owner just assigned showing no placement status until the modal was reopened.
+watch(
+  () => props.cou?.owners,
+  () => { owners.value = props.cou?.owners ? [...props.cou.owners] : [] },
+  { immediate: true },
+)
+// The search box is per-UNIT state, so it resets only when the unit changes.
 watch(
   () => props.cou?.id,
   () => {
-    owners.value = props.cou?.owners ? [...props.cou.owners] : []
     query.value = ''
     results.value = []
     error.value = null
@@ -140,8 +162,17 @@ watch(
           data-testid="cou-owners-search"
           @input="search"
         >
-        <p class="text-[11px] text-carbon-3 mt-1">
-          Owners get the P&L view of this centre's projects — their role is unchanged.
+        <!-- C8a: say what the role DOES, at the point of use. Without this,
+             configuring a Region leader looks like it should be sufficient for
+             placement, and it never is. -->
+        <p class="text-[11px] text-carbon-3 mt-1 leading-relaxed">
+          <span class="font-bold text-carbon-2">People whose manager chain reaches this
+          owner are placed into this cost centre.</span>
+          Owners also get the P&amp;L view of its projects — their role is unchanged.
+          <span class="block mt-1">
+            This is different from a <em>Region leader</em>, which sets the region only
+            and places nobody into a cost centre.
+          </span>
         </p>
         <ul v-if="results.length" class="mt-2 border border-calm-2 rounded-md divide-y divide-calm-2">
           <li v-for="t in results" :key="t.oid" class="flex items-center gap-3 px-3 py-2">
@@ -177,6 +208,47 @@ watch(
               <div class="min-w-0 flex-1">
                 <div class="text-sm text-carbon truncate">{{ o.display_name ?? o.email }}</div>
                 <div class="text-[11px] text-carbon-3 truncate">{{ o.email }}</div>
+                <!-- C8b: the owner the walk skips. Stated as the CONSEQUENCE
+                     ("places nobody"), not as a category, because the category
+                     is not what an admin needs to know. -->
+                <div
+                  v-if="o.placement_status === 'ambiguous'"
+                  class="text-[11px] text-rag-amber leading-relaxed mt-0.5"
+                  :data-testid="`cou-owner-ambiguous-${o.teammate_id}`"
+                >
+                  ⚠ Places nobody. This person owns {{ o.owns_unit_count }} active cost
+                  centres, so the manager-chain walk cannot tell which one a report
+                  belongs to — it skips them entirely, on every unit they own. Leave
+                  them on one cost centre only, or place their people directly.
+                </div>
+                <div
+                  v-else-if="o.placement_status === 'inert'"
+                  class="text-[11px] text-carbon-3 leading-relaxed mt-0.5"
+                  :data-testid="`cou-owner-inert-${o.teammate_id}`"
+                >
+                  Places nobody automatically — this owner has no directory identity the
+                  manager chain can match, so they hold the P&amp;L view only.
+                </div>
+                <!-- C8c: realised reach, and the label has to say which one it is.
+                     "Currently places N" reads as a live statement about today's
+                     manager chain. It is not: the number counts the placement
+                     PROVENANCE stored on each teammate, written by whichever walk
+                     placed them. Nothing re-derives it — a bill identity that never
+                     signs in is never re-walked — so an obsolete count persists
+                     indefinitely and looks current. Name the basis. -->
+                <div
+                  v-else-if="o.placement_status === 'resolves'"
+                  class="text-[11px] text-carbon-2 mt-0.5"
+                  :data-testid="`cou-owner-places-${o.teammate_id}`"
+                >
+                  {{ o.places_count ?? 0 }} recorded
+                  {{ (o.places_count ?? 0) === 1 ? 'placement' : 'placements' }} into this
+                  cost centre name this owner.
+                  <span class="block text-carbon-3">
+                    Placements already made, not a re-derivation against today's manager
+                    chain — if the chain has since changed, this count has not.
+                  </span>
+                </div>
               </div>
               <UiButton
                 kind="ghost"

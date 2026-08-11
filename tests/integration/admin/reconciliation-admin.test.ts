@@ -14,16 +14,23 @@ import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { recordWorkerRunStart, recordWorkerRunOutcome } from '../../../server/workers/run-health'
 import { runReconcileEngine } from '../../../server/reconciliation/engine'
 import type { ReconciledLine } from '../../../server/reconciliation/types'
+import { injectTestSession } from '../../helpers/auth'
+import type { Session } from '../../../server/utils/auth'
+import mapPost from '../../../server/api/v1/admin/reconciliation/github/map.post'
 
 let t: TestDb
 let regionA = ''
 let regionB = ''
 let teammateA = ''
 let teammateB = ''
+let adminAId = ''
+let finopsId = ''
+let ghEnterpriseId = ''
 const NOW = new Date('2026-06-08T12:00:00.000Z')
 
 beforeAll(async () => {
   t = await startTestDb()
+  process.env.DATABASE_URL = t.url
   await t.client`INSERT INTO region (id, code, display_name) VALUES (gen_random_uuid(),'ra','RA'),(gen_random_uuid(),'rb','RB')`
   const regions = await t.client<{ id: string; code: string }[]>`SELECT id::text AS id, code FROM region`
   regionA = regions.find((r) => r.code === 'ra')!.id
@@ -34,12 +41,21 @@ beforeAll(async () => {
   const ous = await t.client<{ id: string; code: string }[]>`SELECT id::text AS id, code FROM org_unit`
   const ouA = ous.find((o) => o.code === 'ra-bu')!.id
   const ouB = ous.find((o) => o.code === 'rb-bu')!.id
-  await t.client`INSERT INTO teammate (id, entra_oid, email, region_id, org_unit_id)
-    VALUES (gen_random_uuid(),'oid-a','a@x.com',${regionA},${ouA}),
-           (gen_random_uuid(),'oid-b','b@x.com',${regionB},${ouB})`
+  await t.client`INSERT INTO teammate (id, entra_oid, email, region_id, org_unit_id, role)
+    VALUES (gen_random_uuid(),'oid-a','a@x.com',${regionA},${ouA},'developer'),
+           (gen_random_uuid(),'oid-b','b@x.com',${regionB},${ouB},'developer'),
+           (gen_random_uuid(),'oid-ra-admin','ra-admin@x.com',${regionA},${ouA},'admin'),
+           (gen_random_uuid(),'oid-ra-finops','ra-finops@x.com',${regionA},${ouA},'global-finops')`
   const tms = await t.client<{ id: string; oid: string }[]>`SELECT id::text AS id, entra_oid AS oid FROM teammate`
   teammateA = tms.find((m) => m.oid === 'oid-a')!.id
   teammateB = tms.find((m) => m.oid === 'oid-b')!.id
+  adminAId = tms.find((m) => m.oid === 'oid-ra-admin')!.id
+  finopsId = tms.find((m) => m.oid === 'oid-ra-finops')!.id
+
+  const [ent] = await t.client<{ id: string }[]>`
+    INSERT INTO provider_enterprise (id, provider, external_id, display_name)
+    VALUES (gen_random_uuid(), 'github', 'ra-map-ent', 'RA Map Ent') RETURNING id::text AS id`
+  ghEnterpriseId = ent!.id
 }, 180_000)
 
 afterAll(async () => {
@@ -148,5 +164,77 @@ describe('records region clamp + summary', () => {
     expect(Number(a!.untagged_usd)).toBeCloseTo(5, 6) // A1 untagged only (not the org +2)
     expect(Number(a!.walk_back_usd)).toBeCloseTo(1, 6) // abs(-1)
     expect(Number(a!.net)).toBeCloseTo(4, 6) // 5-1
+  })
+})
+
+// github/map region clamp (server-api-app:idor:0004 / T3-xregion-05) — the real handler,
+// through the same ev()/injectTestSession shape used across the admin integration suite.
+function ev(opts: { session: Session; body: unknown }) {
+  const headers: Record<string, string> = { host: 'localhost:3450', origin: 'http://localhost:3450' }
+  const e = {
+    method: 'POST',
+    path: '/x',
+    context: { params: {} },
+    node: {
+      req: {
+        method: 'POST',
+        url: '/x',
+        body: opts.body,
+        socket: { remoteAddress: '127.0.0.1' },
+        get headers() {
+          return { ...headers, 'content-type': 'application/json' }
+        },
+      },
+      res: {
+        _headers: {} as Record<string, string | string[]>,
+        statusCode: 200,
+        getHeader(n: string) { return this._headers[n.toLowerCase()] },
+        setHeader(n: string, v: string | string[]) { this._headers[n.toLowerCase()] = v },
+        removeHeader(n: string) { this._headers[n.toLowerCase()] = '' },
+        appendHeader(n: string, v: string | string[]) { this._headers[n.toLowerCase()] = v },
+        get headersSent() { return false },
+      },
+    },
+  }
+  injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], opts.session)
+  return e as unknown as Parameters<typeof mapPost>[0]
+}
+
+const raAdmin = (): Session => ({ teammateId: adminAId, email: 'ra-admin@x.com', displayName: 'RA Admin', role: 'admin', regionId: regionA, orgPath: 'ra.b' })
+const raFinops = (): Session => ({ teammateId: finopsId, email: 'ra-finops@x.com', displayName: 'RA Finops', role: 'global-finops', regionId: regionA, orgPath: 'ra.b' })
+
+async function mapBoundTeammateId(login: string): Promise<string | null> {
+  const rows = await t.client<{ teammate_id: string }[]>`
+    SELECT teammate_id::text AS teammate_id FROM teammate_identity_map
+    WHERE system = 'github' AND COALESCE(enterprise_slug, '') = 'ra-map-ent' AND lower(identifier) = ${login}
+    LIMIT 1`
+  return rows[0]?.teammate_id ?? null
+}
+
+describe('github/map region clamp', () => {
+  it('region-A admin maps a login to a region-B teammate → 403, no teammate_identity_map row written', async () => {
+    await expect(
+      mapPost(ev({ session: raAdmin(), body: { enterpriseId: ghEnterpriseId, teammateId: teammateB, login: 'ra-map-to-b' } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    expect(await mapBoundTeammateId('ra-map-to-b')).toBeNull()
+  })
+
+  it('region-A admin re-maps a login currently bound to a region-B teammate → 403', async () => {
+    await mapPost(ev({ session: raFinops(), body: { enterpriseId: ghEnterpriseId, teammateId: teammateB, login: 'ra-map-bound-b' } }))
+    expect(await mapBoundTeammateId('ra-map-bound-b')).toBe(teammateB)
+    await expect(
+      mapPost(ev({ session: raAdmin(), body: { enterpriseId: ghEnterpriseId, teammateId: teammateA, login: 'ra-map-bound-b' } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    expect(await mapBoundTeammateId('ra-map-bound-b')).toBe(teammateB) // unchanged
+  })
+
+  it('same-region map → 200', async () => {
+    const res = (await mapPost(ev({ session: raAdmin(), body: { enterpriseId: ghEnterpriseId, teammateId: teammateA, login: 'ra-map-same' } }))) as { teammateId: string }
+    expect(res.teammateId).toBe(teammateA)
+  })
+
+  it('global-finops → succeeds', async () => {
+    const res = (await mapPost(ev({ session: raFinops(), body: { enterpriseId: ghEnterpriseId, teammateId: teammateB, login: 'ra-map-finops' } }))) as { teammateId: string }
+    expect(res.teammateId).toBe(teammateB)
   })
 })

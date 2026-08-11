@@ -1,0 +1,117 @@
+diff --git a/app/components/home/NeedsTaggingPanel.vue b/app/components/home/NeedsTaggingPanel.vue
+index c9ac9457..56f57d5e 100644
+--- a/app/components/home/NeedsTaggingPanel.vue
++++ b/app/components/home/NeedsTaggingPanel.vue
+@@ -170,6 +170,31 @@ const olderSessions = computed(() =>
+ const olderDays = computed(() =>
+   Math.max(0, props.unaccounted.length - props.summary.needs_tagging_days),
+ )
++/*
++ * The BACKLOG, named. `summary` is month-scoped; the lists below are not, so a
++ * developer could read "2 items this month need a decision" over 15 live
++ * Tag/Dismiss buttons worth $100.27 — the headline describing the queue's
++ * ARRIVAL RATE while the thing under it is its DEPTH.
++ *
++ * Derived, never a second source of truth: everything rendered below, minus the
++ * month the headline already states.
++ */
++const olderCount = computed(() => olderSessions.value + olderDays.value)
++/** Everything rendered below: the QUEUE, which is the question being asked. */
++const listedCount = computed(() => props.sessions.length + props.unaccounted.length)
++const monthCost = computed(() => Number(props.summary.untagged_cost_usd ?? 0))
++/** Share of the queue that is this month — drives the proportion bar. */
++const monthSharePct = computed(() =>
++  listedCost.value > 0 ? Math.min(100, (monthCost.value / listedCost.value) * 100) : 0,
++)
++const listedCost = computed(
++  () =>
++    props.sessions.reduce((a, s) => a + Number(s.cost_usd), 0) +
++    props.unaccounted.reduce((a, d) => a + Number(d.cost_usd), 0),
++)
++const olderCost = computed(() =>
++  Math.max(0, listedCost.value - Number(props.summary.untagged_cost_usd ?? 0)),
++)
+ 
+ // ── Bulk actions ─────────────────────────────────────────────────────────────
+ const busy = ref<'dismiss' | 'restore' | null>(null)
+@@ -252,11 +277,26 @@ const showDismissed = ref(false)
+            its explanation, tool marks, model chips, session ids, Tag and
+            Dismiss — is unchanged. -->
+       <UiEyebrow>Still undecided</UiEyebrow>
++      <!--
++        THE QUEUE, THEN ITS SPLIT — as figures, not a sentence.
++        This header used to be a month-scoped figure with an 11px "this month"
++        beside it and a 32-word byline carrying four numbers. The reader's two
++        questions are "how much is undecided" and "how much of it is old"; both
++        were answers they had to assemble from prose. The instruction that
++        followed ("Tag to a budget or an activity — or dismiss what isn't worth
++        it") described the Tag and Dismiss buttons on every row beneath it, and
++        the caveat about dismissed spend now lives on the Dismiss control, where
++        it is read at the moment it applies rather than as a standing disclaimer.
++      -->
+       <span
+-        v-if="summary.needs_tagging_count"
++        v-if="listedCount"
+         class="text-2xl font-bold text-brand-zeal"
+         style="font-variant-numeric: tabular-nums"
+-      >{{ fmtUsd(summary.untagged_cost_usd) }}</span>
++        data-testid="undecided-total"
++      >{{ fmtUsd(listedCost) }}</span>
++      <span v-if="listedCount" class="text-sm text-carbon-2">
++        · {{ listedCount }} {{ listedCount === 1 ? 'item' : 'items' }}
++      </span>
+       <!-- Decided-and-left. Muted by design: it is not work, but hiding it
+            entirely would make a dismissal irreversible in practice. -->
+       <button
+@@ -272,15 +312,27 @@ const showDismissed = ref(false)
+       </button>
+     </div>
+ 
+-    <p v-if="summary.needs_tagging_count" class="text-xs text-carbon-2 mt-2" data-testid="needs-tagging-summary">
+-      {{ summary.needs_tagging_count }}
+-      {{ summary.needs_tagging_count === 1 ? 'item' : 'items' }} this month need a decision.
+-      Tag to a budget or an activity — or dismiss what isn't worth it
+-      (dismissed spend stays unallocated on your cost centre).
+-    </p>
+-    <p v-else-if="sessions.length || unaccounted.length" class="text-xs text-carbon-2 mt-2">
+-      Untagged items from earlier — still taggable below.
+-    </p>
++    <div v-if="listedCount" class="mt-3 max-w-[420px]" data-testid="undecided-split">
++      <div
++class="flex h-1.5 rounded-full overflow-hidden bg-calm-2" role="img"
++           :aria-label="`${fmtUsd(monthCost)} this month, ${fmtUsd(olderCost)} from earlier months`">
++        <div class="h-full bg-brand-zeal" :style="{ width: `${monthSharePct}%` }" />
++      </div>
++      <div
++class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
++           style="font-variant-numeric: tabular-nums">
++        <span class="text-carbon-2">
++          <span class="inline-block w-2 h-2 rounded-full bg-brand-zeal align-middle mr-1.5" />
++          This month <b class="text-carbon">{{ fmtUsd(monthCost) }}</b>
++          · {{ summary.needs_tagging_count }}
++        </span>
++        <span v-if="olderCount" class="text-carbon-2" data-testid="undecided-older">
++          <span class="inline-block w-2 h-2 rounded-full bg-calm align-middle mr-1.5" />
++          Earlier months <b class="text-carbon">{{ fmtUsd(olderCost) }}</b>
++          · {{ olderCount }}
++        </span>
++      </div>
++    </div>
+ 
+     <p v-if="error" class="text-xs text-rag-red mt-2" role="alert" data-testid="worklist-error">{{ error }}</p>
+ 
+@@ -434,7 +486,13 @@ const showDismissed = ref(false)
+         <span v-if="olderDays">· incl. {{ olderDays }} from earlier months</span>
+       </div>
+       <p class="text-xs text-carbon-2 mb-2">
+-        Usage the provider's API counted that your OTel didn't — tag each day to a budget, same as a session.
++        <!--
++          WAS: "Usage the provider's API counted that your OTel didn't — tag each
++          day to a budget, same as a session." Two problems in one line — it
++          named the transport (OTel) to a reader who never chose it, and its
++          second half described the Tag button sitting on every row below.
++        -->
++        Days your provider billed for with nothing recorded on your machine.
+       </p>
+       <div class="grid md:grid-cols-2 gap-2">
+         <div

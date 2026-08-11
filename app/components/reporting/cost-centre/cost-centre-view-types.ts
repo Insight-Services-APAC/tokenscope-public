@@ -10,7 +10,8 @@
  * extra field here from the canonical `CostCentreSummary` in `#shared/reports/types`.
  * When the base type catches up this local extension collapses to a re-export.
  */
-import type { CostCentreSummary } from '#shared/reports/types'
+import type { CostCentreSummary, ActiveTrend, UsageSurfaceWeeklyCell } from '#shared/reports/types'
+import type { PerDeveloperSeries } from '#shared/reports/per-developer'
 import type { CostCentreReport as BaseCostCentreReport } from '../cost-centre-report-types'
 
 /** The Cost-Centre grid report as the endpoint actually returns it (base + summary). */
@@ -19,4 +20,26 @@ export interface CostCentreReport extends BaseCostCentreReport {
   summary: CostCentreSummary
 }
 
-export type { CostCentreCard, CostCentreDrill } from '../cost-centre-report-types'
+export type {
+  CostCentreCard,
+  CostCentreDrill,
+  CostCentreDriverList,
+} from '../cost-centre-report-types'
+
+/*
+ * BAND 2's payload — GET /reports/cost-centres/{ccId}/trend.
+ *
+ * Its `window` is the ROLLING band (~60 days to the settled edge), NOT the month
+ * the drill covers, and the cards label themselves from it so a reader is never
+ * left to assume the two frames agree. Deliberately a separate response from the
+ * drill: they answer over different windows, and one object carrying two frames
+ * is how a card ends up captioned with the other one's dates.
+ */
+export interface CostCentreTrend {
+  window: { from: string; to: string }
+  windowDays: number
+  series: { day: string; key: 'claude-code' | 'copilot-cli' | 'copilot-agent' | 'other'; value: number }[]
+  activeTrend: ActiveTrend
+  usageWeeklyLanes: UsageSurfaceWeeklyCell[]
+  perDeveloper: PerDeveloperSeries
+}

@@ -7,10 +7,15 @@
  *
  *   - If a teammate with entra_oid = claims.oid exists, reuse it.
  *   - Otherwise JIT-create with role 'admin' when the email matches the
- *     bootstrapAdminEmail env var; 'developer' otherwise. region_id +
- *     org_unit_id pick the first available region + bu in the env
- *     (sandbox has the seeded apac region; bare-empty DB throws a clear
- *     error so the operator sees the bootstrap step they missed).
+ *     bootstrapAdminEmail env var; 'developer' otherwise. region_id picks the
+ *     first available region in the env (sandbox has the seeded apac region;
+ *     bare-empty DB throws a clear error so the operator sees the bootstrap
+ *     step they missed). org_unit_id homes the new teammate on that region's
+ *     `__UNPLACED__` holding node (server/auth/placement-home.ts), NOT a real
+ *     BU — S3: a real org node's subtree is a least-privilege RLS boundary,
+ *     and the region ROOT's subtree is the whole region, so landing every
+ *     first-touch sign-in there degenerated org-subtree scoping to "everyone
+ *     in the region" until an admin or the manager-chain worker places them.
  *
  * The resulting teammate's identity is then minted into our HMAC'd
  * `ts_session` cookie via setSession(). This keeps app-level RBAC + RLS
@@ -24,6 +29,7 @@ import * as schema from '../../drizzle/schema'
 import { isRole, type Role } from '../../shared/auth/roles'
 import { recordAuditEvent } from '../db/audit'
 import { isExcludedUpn, loadDirectoryExclusionPatterns } from '../utils/directory-exclusions'
+import { resolveDefaultRegionId, unplacedOrgUnitIdForRegion } from './placement-home'
 
 // Read the bootstrap-admin email at function-call time rather than module
 // load (R1 F10 was a LOW finding; moving to module-scope const broke the
@@ -157,31 +163,23 @@ export async function resolveOrCreateTeammate(
     if (raced) return { ...raced, created: false }
   }
 
-  // JIT-create path. Region + bu defaults: pick lexicographically-first
-  // region (sandbox seed has the apac region) + its first bu, so the
-  // new teammate has a valid RLS scope even though they haven't been
-  // explicitly placed.
-  const [region] = await db
-    .select({ id: schema.region.id })
-    .from(schema.region)
-    .orderBy(schema.region.code)
-    .limit(1)
-  if (!region) {
+  // JIT-create path. Region default: the lexicographically-first region (sandbox
+  // seed has the apac region) — unchanged. S3: the org_unit is NO LONGER "the
+  // first bu ORDER BY path" — ltree sorts a region's ROOT before its children, so
+  // that query landed every JIT teammate on the region root, a bare label whose
+  // subtree IS THE WHOLE REGION (it degenerated the org-subtree scope clamp to
+  // "everyone in the region"). It is now the region's shared `__UNPLACED__`
+  // holding node (server/auth/placement-home.ts) — a real, least-privilege RLS
+  // scope that grants nothing until the teammate is actually placed (the
+  // manager-chain re-enrichment worker or an admin's region-PATCH).
+  const genericDb = db as unknown as PostgresJsDatabase<Record<string, unknown>>
+  const regionId = await resolveDefaultRegionId(genericDb)
+  if (!regionId) {
     throw new Error(
       'JIT teammate creation failed: no region rows. Seed the DB (npm run db:seed) before first Entra sign-in.',
     )
   }
-  const [bu] = await db
-    .select({ id: schema.orgUnit.id, path: schema.orgUnit.path })
-    .from(schema.orgUnit)
-    .where(eq(schema.orgUnit.regionId, region.id))
-    .orderBy(schema.orgUnit.path)
-    .limit(1)
-  if (!bu) {
-    throw new Error(
-      'JIT teammate creation failed: no org_unit rows for the default region. Seed the DB before first Entra sign-in.',
-    )
-  }
+  const orgUnitId = await unplacedOrgUnitIdForRegion(genericDb, regionId)
 
   // The bootstrap email is the platform super-admin (sets up regions + region
   // admins). Everyone else JIT-creates as 'developer' and is placed into a
@@ -206,8 +204,8 @@ export async function resolveOrCreateTeammate(
         email: claims.email,
         displayName: claims.name ?? claims.email,
         role: resolvedRole,
-        regionId: region.id,
-        orgUnitId: bu.id,
+        regionId,
+        orgUnitId,
       })
       .onConflictDoNothing({ target: schema.teammate.entraOid })
       .returning({ id: schema.teammate.id })

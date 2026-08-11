@@ -9,14 +9,20 @@ import { mount } from '@vue/test-utils'
 import ChartsStackedBars from '../../../app/components/charts/StackedBars.vue'
 import ChartsTrendArea from '../../../app/components/charts/TrendArea.vue'
 
-// padDays anchors the dense run on "today" (UTC); seed that day so a bar/point
-// with a known value renders.
-const today = new Date().toISOString().slice(0, 10)
+/*
+ * MIGRATED (clock-rot-audit.md §F-a). This was the only `StackedBars` tooltip
+ * test and it seeded its rows on `new Date()` so they would land inside the
+ * component's browser-anchored dense axis — a clock-derived fixture certifying a
+ * clock-derived axis, and it failed SILENTLY ("no <title> found") rather than as
+ * a date mismatch. Both charts now take an explicit `endDay`, so the fixture is
+ * a fixed day and the test can no longer pass or fail for calendar reasons.
+ */
+const today = '2026-08-04'
 
 describe('ChartsStackedBars format prop', () => {
   it('defaults to the original $X.XX tooltip (unchanged)', () => {
     const w = mount(ChartsStackedBars, {
-      props: { rows: [{ day: today, key: 'opus', value: 12.34 }], windowDays: 7 },
+      props: { rows: [{ day: today, key: 'opus', value: 12.34 }], windowDays: 7, endDay: today },
     })
     expect(w.find('title').text()).toContain('— $12.34')
   })
@@ -26,6 +32,7 @@ describe('ChartsStackedBars format prop', () => {
       props: {
         rows: [{ day: today, key: 'opus', value: 12.34 }],
         windowDays: 7,
+        endDay: today,
         format: (v: number) => `${v.toFixed(0)} cr`,
       },
     })
@@ -38,7 +45,7 @@ describe('ChartsStackedBars format prop', () => {
 describe('ChartsTrendArea format prop', () => {
   it('defaults to the original $-prefixed output (axis + tooltip unchanged)', () => {
     const w = mount(ChartsTrendArea, {
-      props: { series: [{ day: today, cost_usd: '12.34' }], windowDays: 7 },
+      props: { series: [{ day: today, cost_usd: '12.34' }], windowDays: 7, endDay: today },
     })
     expect(w.find('title').text()).toBe(`${today} — $12.34`)
     // Axis ticks keep the `$` prefix by default.
@@ -50,6 +57,7 @@ describe('ChartsTrendArea format prop', () => {
       props: {
         series: [{ day: today, cost_usd: '12.34' }],
         windowDays: 7,
+        endDay: today,
         format: (v: number) => `${v.toFixed(0)} cr`,
       },
     })

@@ -1,6 +1,6 @@
 ---
 description: Check whether your Claude sessions are emitting to TokenScope
-allowed-tools: Bash(node:*)
+allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/status.mjs":*)
 ---
 
 Tell the developer whether their Claude telemetry is reaching TokenScope

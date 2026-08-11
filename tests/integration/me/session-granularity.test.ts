@@ -6,6 +6,9 @@
  *   - fetchBreakdownCells: breakdown sums re-add EXACTLY to the ledger
  *     totals (acceptance invariant 2) and are teammate-scoped (the
  *     cross-teammate denial that backs the [sid] 404)
+ *   - fetchBreakdownCells: the pricing DENOMINATION comes off the ledger
+ *     (credit_qty), so a credit-priced session's lanes ship "not priced"
+ *     instead of fabricated zeros (fix sprint F3 / T14)
  *   - fetchQuerySourceSplit: NULL lane stays separate (never folded to main)
  *   - export SQL contract: token-type FILTER sums + granularity=model rows
  *   - [sid] header contract: span_count = DISTINCT (ts_event, source_run_id)
@@ -21,6 +24,8 @@ import {
   fetchQuerySourceSplit,
   pivotByModel,
   pivotByTokenType,
+  pricedPerLane,
+  sessionLaneView,
 } from '../../../server/usage/breakdowns'
 
 let t: TestDb
@@ -31,6 +36,16 @@ let orgUnitId: string
 let projectId: string
 const INSTANCE = randomUUID()
 const CONV = 'conv-gran-api-1'
+/*
+ * A CREDIT-PRICED session, owned by the second teammate so the whole-ledger
+ * assertions above it (the CSV export contracts, which scope only by teammate)
+ * keep their populations. Fix sprint F3 / T14: the ledger-side half of
+ * `priced_per_lane` — the SQL that reads the pricing DENOMINATION.
+ */
+const COPILOT_INSTANCE = randomUUID()
+const COPILOT_CONV = 'conv-gran-copilot-1'
+/** The same Copilot span as it sits on the ledger from BEFORE mig 0038 (r6-A2). */
+const LEGACY_COPILOT_CONV = 'conv-gran-copilot-legacy'
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -124,6 +139,84 @@ beforeAll(async () => {
       sourceRunId: r.run,
     })
   }
+
+  // ── The credit-priced session (F3) ──────────────────────────────────────
+  // One Copilot span, written exactly as the joiner writes it
+  // (azure-monitor-reader.ts:1510-1554): the whole span cost on the CARRIER
+  // token type, 0 on the rest, and credit_qty present on EVERY row because the
+  // provider's unit of price is the credit. rate_card_id stays NULL — there is
+  // no token rate card to pin.
+  await t.db.insert(schema.instanceAttestation).values({
+    instanceId: COPILOT_INSTANCE,
+    principalOid: 'oid-other-g',
+    teammateId: otherId,
+    projectCodeHash: 'h-grn-api',
+    rawProjectCode: 'GRN-API',
+    tool: 'copilot-cli',
+    sessionTokenHash: 'tok-gran-' + COPILOT_INSTANCE,
+    tsStart: new Date('2026-06-01T09:00:00Z'),
+    regionId,
+    orgUnitId,
+    costOwningUnitId: orgUnitId,
+  })
+  const copilotSpan = new Date('2026-06-01T10:00:00Z')
+  const copilotRows = [
+    { tokenType: 'input', tokens: 120_000n, costUsd: '53.540000', creditQty: '5354.000000' },
+    { tokenType: 'output', tokens: 8_000n, costUsd: '0.000000', creditQty: '0.000000' },
+    { tokenType: 'cache-read', tokens: 900_000n, costUsd: '0.000000', creditQty: '0.000000' },
+    { tokenType: 'cache-write', tokens: 40_000n, costUsd: '0.000000', creditQty: '0.000000' },
+  ]
+  for (const r of copilotRows) {
+    await t.db.insert(schema.attributionRecord).values({
+      instanceId: COPILOT_INSTANCE,
+      claudeSessionId: COPILOT_CONV,
+      teammateId: otherId,
+      projectId,
+      regionId,
+      orgUnitId,
+      costOwningUnitId: orgUnitId,
+      tool: 'copilot-cli',
+      model: 'gpt-5-codex',
+      tokenType: r.tokenType,
+      tokens: r.tokens,
+      costUsd: r.costUsd,
+      creditQty: r.creditQty,
+      fidelityTier: 'tier-2',
+      costBasis: 'telemetry-only',
+      tsEvent: copilotSpan,
+      sourceRunId: 'req_copilot_a',
+    })
+  }
+
+  // ── The PRE-0038 credit-priced session (r6-A2) ──────────────────────────
+  // The same Copilot span as written BEFORE migration 0038 existed: identical
+  // in every respect except that `credit_qty` is NULL, because the column had
+  // not been added yet and 0038 backfilled nothing
+  // (drizzle/migrations/0038_reconciliation_core.sql:108). This is the shape
+  // ALL historical Copilot money has on the ledger today. A derivation that
+  // reads credit_qty cannot tell it from a token-priced Claude row, and will
+  // render its three structural zeros as real $0.00 lane prices.
+  for (const r of copilotRows) {
+    await t.db.insert(schema.attributionRecord).values({
+      instanceId: COPILOT_INSTANCE,
+      claudeSessionId: LEGACY_COPILOT_CONV,
+      teammateId: otherId,
+      projectId,
+      regionId,
+      orgUnitId,
+      costOwningUnitId: orgUnitId,
+      tool: 'copilot-cli',
+      model: 'gpt-5-codex',
+      tokenType: r.tokenType,
+      tokens: r.tokens,
+      costUsd: r.costUsd,
+      creditQty: null,
+      fidelityTier: 'tier-2',
+      costBasis: 'telemetry-only',
+      tsEvent: new Date('2026-06-01T11:00:00Z'),
+      sourceRunId: 'req_copilot_legacy',
+    })
+  }
 }, 60_000)
 
 afterAll(async () => {
@@ -158,6 +251,66 @@ describe('usage read-model (DB layer)', () => {
   it('teammate scoping: another teammate gets NO cells for the same conversation id (the [sid] 404 backing)', async () => {
     const cells = await fetchBreakdownCells(t.db, otherId, [CONV])
     expect(cells).toEqual([])
+  })
+
+  /*
+   * T14, ledger half. `priced_per_lane` is derived from what the LEDGER records
+   * about whether WE priced the span from a rate card — `rate_card_id` — and
+   * never from the tool name. This is the read that carries it out of the
+   * database.
+   */
+  it('T14: the cell read carries the per-lane pricing fact off the ledger', async () => {
+    const credit = await fetchBreakdownCells(t.db, otherId, [COPILOT_CONV])
+    expect(credit).toHaveLength(4)
+    expect(credit.every((c) => c.lane_priced === false)).toBe(true)
+    // The carrier convention itself: all four lanes have real tokens, and the
+    // whole span cost sits on ONE of them. The data is right; only the display
+    // ever lied about it.
+    expect(credit.every((c) => c.tokens > 0)).toBe(true)
+    expect(credit.filter((c) => c.cost_usd > 0)).toHaveLength(1)
+    expect(credit.reduce((a, c) => a + c.cost_usd, 0)).toBeCloseTo(53.54, 6)
+
+    // The card-priced session on the same ledger answers the other way.
+    const token = await fetchBreakdownCells(t.db, devId, [CONV])
+    expect(token.every((c) => c.lane_priced === true)).toBe(true)
+
+    // …so the two sessions get opposite lane views, with no tool name anywhere
+    // in the derivation.
+    expect(pricedPerLane(credit)).toBe(false)
+    expect(pricedPerLane(token)).toBe(true)
+    const view = sessionLaneView(credit)
+    expect(view.by_token_type).toHaveLength(4)
+    expect(view.by_token_type.every((r) => r.cost_usd === null)).toBe(true)
+    expect(view.by_token_type.every((r) => r.tokens > 0)).toBe(true)
+  })
+
+  /*
+   * r6-A2 — THE HISTORICAL LEDGER, which is most of the Copilot money there is.
+   * `credit_qty` arrived in mig 0038 with no backfill, so every Copilot row
+   * written before it is NULL on that column and IDENTICAL, on that operand, to
+   * a token-priced Claude row. The old derivation answered "priced per lane" for
+   * all of it and shipped the carrier convention's structural zeros as real
+   * $0.00 lane prices — the exact defect F3 exists to remove, live on every
+   * historical session.
+   */
+  it('r6-A2: a PRE-0038 Copilot session (credit_qty NULL) still refuses the per-lane claim', async () => {
+    const legacy = await fetchBreakdownCells(t.db, otherId, [LEGACY_COPILOT_CONV])
+    expect(legacy).toHaveLength(4)
+    // The operand that used to decide is genuinely absent on these rows — the
+    // fixture is not asserting its own guess.
+    const [{ nulls }] = await t.client<{ nulls: string }[]>`
+      SELECT COUNT(*)::text AS nulls FROM attribution_record
+      WHERE claude_session_id = ${LEGACY_COPILOT_CONV} AND credit_qty IS NULL`
+    expect(Number(nulls)).toBe(4)
+
+    expect(legacy.every((c) => c.lane_priced === false)).toBe(true)
+    expect(pricedPerLane(legacy)).toBe(false)
+
+    // …and therefore no lane ships the zero that reads as "this lane was free".
+    const view = sessionLaneView(legacy)
+    const money = [...view.by_token_type, ...view.matrix].map((r) => r.cost_usd)
+    expect(money).not.toContain('0.00')
+    expect(money.every((m) => m === null)).toBe(true)
   })
 
   it('query-source split keeps the NULL lane separate from main', async () => {

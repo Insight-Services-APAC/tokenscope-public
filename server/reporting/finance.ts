@@ -60,7 +60,13 @@ import {
   GITHUB_USAGE_TOOLS,
 } from '../../shared/usage/github-surface'
 import type { UsageWindow } from './params'
+import {
+  TEAMMATE_DRILL_FACTS_AGG,
+  teammateDrillFacts,
+  teammateDrillDims,
+} from './teammate-drill-facts'
 import type { DriverRow, SpendClass } from '../../shared/reports/types'
+import { UNALLOCATED_KEY, UNALLOCATED_LABEL } from '../../shared/reports/unallocated'
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
 
@@ -325,7 +331,7 @@ export async function fetchFinanceCous(
       ({
         couId: r.cou_id,
         code: r.code,
-        displayName: r.display_name ?? 'Unallocated',
+        displayName: r.display_name ?? UNALLOCATED_LABEL,
         regionCode: r.region_code,
         byLane: new Map<Vendor, number>(),
       } satisfies Agg)
@@ -752,6 +758,14 @@ export interface OverageDrivers {
  * `indicative`, "informational — not a charge"), a §A display weight — it is NEVER
  * written as a charge (in-product per-user charging is canon-rejected; the CSV lets
  * finance distribute manually if they choose).
+ *
+ * NOT the same mechanism as the PERSISTED overage allocation (ADR-0011 D10,
+ * `server/governance/copilot-overage-allocation.ts`, Workstream C): that one is
+ * the real, audited, conservation-asserted redistribution
+ * `v_finance_copilot_pool_chargeback`'s `copilot-usage` lane actually charges
+ * from; this panel is a separate, in-memory, per-CoU, per-teammate display that
+ * never writes anything and must never be read as the charge. Keep the two
+ * clearly labelled and never merge them into one figure.
  */
 export async function fetchOverageDrivers(
   tx: Tx,
@@ -768,16 +782,35 @@ export async function fetchOverageDrivers(
   // interactive + copilot-agent coding agent, mig 0086) — the paid overage_net the shares
   // distribute is the AI-credit/agent SKU pool (mig 0085 copilot-usage lane), which the
   // coding agent draws from exactly like interactive use.
-  const rows = await tx.execute<{ key: string; label: string | null; usage: string }>(sql`
+  const rows = await tx.execute<{
+    key: string
+    label: string | null
+    usage: string
+    drill_is_active: boolean | null
+    drill_is_provisional: boolean | null
+  }>(sql`
     SELECT ud.teammate_id::text AS key, COALESCE(t.display_name, t.email) AS label,
-           COALESCE(SUM(ud.usage_usd), 0)::text AS usage
+           COALESCE(SUM(ud.usage_usd), 0)::text AS usage,
+           -- The drill facts, from the ONE shared producer (teammate-drill-facts.ts).
+           -- (No backticks inside this literal: one in a SQL comment CLOSES the sql
+           -- template and the parse error points at the wrong line.)
+           --
+           -- provisional is carried here even though the GitHub identity writer
+           -- resolves seats against NOT provisional only (adapters/github-identity.ts
+           -- resolveTeammateId) and bill-driven provisioning mints provisional = false
+           -- (placement-store.ts createBillTeammate) -- i.e. a provisional shadow
+           -- cannot currently reach v_teammate_usage_daily at all. That is an invariant
+           -- of a DIFFERENT module, three lanes away, which nothing here rechecks and
+           -- no test ties to this row. Carrying the fact makes the door closed BY
+           -- CONSTRUCTION instead of by a remote coincidence (r5-H1).
+           ${TEAMMATE_DRILL_FACTS_AGG}
     FROM v_teammate_usage_daily ud JOIN teammate t ON t.id = ud.teammate_id
-    JOIN LATERAL (
-      SELECT anc.id AS cost_owning_unit_id
-      FROM org_unit home JOIN org_unit anc ON home.path <@ anc.path
-      WHERE home.id = t.org_unit_id AND anc.is_cost_owning_unit = TRUE AND anc.retired_at IS NULL
-      ORDER BY nlevel(anc.path) DESC LIMIT 1
-    ) cc ON TRUE
+    -- ONE cost-owner resolution (v_org_unit_cost_owner, mig 0114), not a
+    -- correlated LATERAL per usage-daily row. INNER, deliberately: the clamp
+    -- below is cc.cost_owning_unit_id = couId, so a teammate with no
+    -- cost-owning ancestor is excluded either way — an outer join would only
+    -- add NULL rows for the predicate to discard.
+    JOIN v_org_unit_cost_owner cc ON cc.org_unit_id = t.org_unit_id
     WHERE ud.tool IN (${laneListSql(GITHUB_USAGE_TOOLS)}) AND cc.cost_owning_unit_id = ${couId}::uuid
       AND ud.day >= ${start}::date AND ud.day < ${end}::date
     GROUP BY ud.teammate_id, t.display_name, t.email
@@ -788,6 +821,9 @@ export async function fetchOverageDrivers(
     label: r.label ?? 'Unknown',
     usage: Number(r.usage),
     excess: Math.max(0, Number(r.usage) - perSeatShareUsd),
+    // The drill-admission conjuncts (D34) — see engine/drivers.ts's teammate axis.
+    // Read back through the shared helper, never re-derived per producer.
+    facts: teammateDrillFacts(r),
   }))
 
   const totalExcess = used.reduce((a, u) => a + u.excess, 0)
@@ -807,7 +843,11 @@ export async function fetchOverageDrivers(
         sharePct: opts.overageNetUsd > 0 ? shareUsd / opts.overageNetUsd : 0,
         // INFORMATIONAL — a proportional indicative share, never a charge (D-Q6).
         spendClass: 'indicative' as SpendClass,
-        dims: { usageUsd: u.usage.toFixed(6), excessUsd: u.excess.toFixed(6) },
+        dims: {
+          usageUsd: u.usage.toFixed(6),
+          excessUsd: u.excess.toFixed(6),
+          ...teammateDrillDims(u.facts),
+        },
       }
     })
     .filter((r) => r.usd > 0)
@@ -818,13 +858,14 @@ export async function fetchOverageDrivers(
   // informational surface. Emit ONE explicit unallocated-overage row so it still foots (L2).
   if (opts.overageNetUsd > 0 && totalWeight === 0) {
     driverRows.push({
-      key: '__unallocated',
-      label: 'Unallocated overage — no attributable usage',
+      key: UNALLOCATED_KEY,
+      label: `${UNALLOCATED_LABEL} overage — no attributable usage`,
       usd: opts.overageNetUsd,
       sharePct: 1,
       // INFORMATIONAL — indicative, never a charge (D-Q6); the paid overage is real but no §A
       // usage weight exists to distribute it, so it lands whole in an explicit unallocated row.
       spendClass: 'indicative' as SpendClass,
+      indicativeReason: 'no-attributable-usage',
       dims: { usageUsd: '0.000000', excessUsd: '0.000000' },
     })
   }

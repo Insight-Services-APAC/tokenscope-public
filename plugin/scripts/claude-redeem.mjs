@@ -41,25 +41,51 @@
  *
  * Restart `claude` after running — Claude reads its OTel config once at startup.
  */
-import { writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, renameSync, rmSync } from 'node:fs'
+import {
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  chmodSync,
+  renameSync,
+  rmSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveApiBase } from './api-base.mjs'
-import { resolveHelperPath, httpsPostJson } from './plugin-runtime.mjs'
+import { discoverMcpOrigin } from './mcp-origin.mjs'
+import { resolveHelperPath, httpsPostJson, stateDir, realHome } from './plugin-runtime.mjs'
 import { mergeClaudeSettings, applyOtlpProxyRepoint } from './env-builder.mjs'
 import { emitEnvLabel } from './statusline.mjs'
+import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
 function parseArgs(argv) {
-  const out = { handoffCode: null, redeemUrl: null, apiBase: null, instanceId: null, settingsPath: null }
+  const out = {
+    handoffCode: null,
+    redeemUrl: null,
+    apiBase: null,
+    instanceId: null,
+    settingsPath: null,
+  }
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
-      case '--handoff-code':  out.handoffCode = argv[++i]; break
-      case '--redeem-url':    out.redeemUrl = argv[++i]; break
-      case '--api-base':      out.apiBase = argv[++i]; break
-      case '--instance-id':   out.instanceId = argv[++i]; break
-      case '--settings-path': out.settingsPath = argv[++i]; break
+      case '--handoff-code':
+        out.handoffCode = argv[++i]
+        break
+      case '--redeem-url':
+        out.redeemUrl = argv[++i]
+        break
+      case '--api-base':
+        out.apiBase = argv[++i]
+        break
+      case '--instance-id':
+        out.instanceId = argv[++i]
+        break
+      case '--settings-path':
+        out.settingsPath = argv[++i]
+        break
       default:
         // Accept a bare positional argument as the handoff code (documented
         // fallback). The canonical invocation uses --handoff-code, which is
@@ -85,7 +111,11 @@ function parseArgs(argv) {
 // Single source of truth: stripped from the new block (buildClaudeDeviceEnv) AND
 // from the merged result (writeClaudeSettings) so they never survive a redeem —
 // including a SAME-environment additive merge where the old block is kept.
-const RETIRED_ENV_KEYS = ['TOKENSCOPE_SESSION_TOKEN', 'TOKENSCOPE_READ_REFRESH_TOKEN', 'TOKENSCOPE_READ_CLIENT_ID']
+const RETIRED_ENV_KEYS = [
+  'TOKENSCOPE_SESSION_TOKEN',
+  'TOKENSCOPE_READ_REFRESH_TOKEN',
+  'TOKENSCOPE_READ_CLIENT_ID',
+]
 
 function buildClaudeDeviceEnv(claude, oauth) {
   if (!claude) return {}
@@ -142,10 +172,34 @@ function assertClaudeRedeemResponse(resp) {
   }
   if (!claude || !claude.otel_headers_helper_url || !claude.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT) {
     throw new Error(
-      'Redeem did not return a usable Claude Code bundle (bundle=' + (!!claude) +
-        ' bearer_endpoint=' + (!!claude?.otel_headers_helper_url) +
-        ' logs_endpoint=' + (!!claude?.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT) + ').',
+      'Redeem did not return a usable Claude Code bundle (bundle=' +
+        !!claude +
+        ' bearer_endpoint=' +
+        !!claude?.otel_headers_helper_url +
+        ' logs_endpoint=' +
+        !!claude?.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT +
+        ').',
     )
+  }
+  // S1 fix 3 — validate BEFORE persisting a server-supplied bundle: a
+  // compromised/MITM'd redeem response could otherwise plant a plaintext or
+  // malformed endpoint into settings.json, and every SUBSEQUENT bearer mint
+  // (otel-headers-helper.sh, every ~29 min) would then send the real durable
+  // credential wherever that endpoint points. Loopback allowed — a
+  // locally-running dev server legitimately returns its own loopback address.
+  for (const [label, value] of [
+    ['otel_headers_helper_url', claude.otel_headers_helper_url],
+    ['OTEL_EXPORTER_OTLP_LOGS_ENDPOINT', claude.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT],
+  ]) {
+    try {
+      assertSafeEndpoint(value, { allowLoopback: true })
+    } catch (err) {
+      // REASON ONLY, never the value — this bundle is SERVER-supplied and the
+      // caller prints this message. unsafeEndpointError() enforces that
+      // structurally, including dropping the value-bearing `cause` that Node
+      // would otherwise print. See endpoint-guard.mjs.
+      throw unsafeEndpointError(`Redeem bundle's ${label}`, err)
+    }
   }
   // Attribution invariant: the device attrs MUST carry a NON-EMPTY instance id, or
   // every emitted record is unjoinable to the teammate. `tokenscope.instance_id=`
@@ -165,6 +219,13 @@ function assertClaudeRedeemResponse(resp) {
     if (!resp[field] || typeof resp[field] !== 'string') {
       throw new Error(`Redeem response missing ${field} — server may be out of date.`)
     }
+  }
+  // S1 fix 3 — same "before persisting" rule for the OAuth token endpoint: the
+  // helper POSTs the durable refresh token there every ~29 min.
+  try {
+    assertSafeEndpoint(resp.oauth_token_endpoint, { allowLoopback: true })
+  } catch (err) {
+    throw unsafeEndpointError("Redeem response's oauth_token_endpoint", err)
   }
   return {
     claude,
@@ -204,6 +265,53 @@ function detectEnvChange(existing, newEnvBlock) {
   }
 }
 
+/**
+ * S1 fix 4 — write the durable OAuth refresh token into the device's OWN
+ * shared credential store (`${STATE_DIR}/config.json` → `.oauth_refresh_token`).
+ * This is the SAME store copilot-redeem.mjs already writes+reads
+ * (`~/.tokenscope/config.json` by default on both lanes — a single physical
+ * file when both plugins are installed on one host), keyed by the SAME field
+ * name — one shared format, not a second one.
+ *
+ * WHY: tag-repo.mjs now strips TOKENSCOPE_OAUTH_REFRESH_TOKEN from every
+ * repo-local tag it writes (a hostile repo must not be able to exfiltrate the
+ * durable credential merely by being cloned). otel-headers-helper.sh falls
+ * back to this store when the repo-local env omits the key, so a TAGGED
+ * repo's session still finds a refresh token — from the device, never from
+ * the repo. Without this writer, removing the key from the repo tag would
+ * simply brick emission in every tagged repo.
+ *
+ * Best-effort: a failure here must NOT fail the whole redeem — the primary
+ * credential already landed in `settingsPath` (the untagged/global emit
+ * path), and this is a fallback for the tagged-repo case only. Read-merge-
+ * write so any other field an operator might have placed in config.json
+ * survives; atomic (0600) so a concurrent reader never sees a half-written
+ * file.
+ */
+function writeSharedCredentialStore(oauthRefreshToken, dir) {
+  if (!oauthRefreshToken) return
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const configPath = join(dir, 'config.json')
+    let existing = {}
+    if (existsSync(configPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(configPath, 'utf8'))
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed
+      } catch {
+        existing = {}
+      }
+    }
+    const next = { ...existing, oauth_refresh_token: oauthRefreshToken }
+    const tmp = `${configPath}.tmp.${process.pid}`
+    writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
+    chmodSync(tmp, 0o600)
+    renameSync(tmp, configPath)
+  } catch {
+    /* best-effort — settingsPath already carries the primary credential */
+  }
+}
+
 // ── ~/.claude/settings.json writer ─────────────────────────────────────────────
 // Read-merge-write so a developer's pre-existing top-level settings (permissions,
 // statusLine, otelHeadersHelper) survive. Never logs the env block (it carries the
@@ -226,14 +334,18 @@ function writeClaudeSettings(settingsPath, helperPath, envBlock) {
     try {
       existing = JSON.parse(raw)
     } catch {
-      throw new Error(`Existing ${settingsPath} is not valid JSON — refusing to overwrite. Fix or move it, then re-run.`)
+      throw new Error(
+        `Existing ${settingsPath} is not valid JSON — refusing to overwrite. Fix or move it, then re-run.`,
+      )
     }
   }
   const envChange = detectEnvChange(existing, envBlock)
   // Replace the env block ONLY on a detected environment change; an additive merge
   // would leave the old deployment's credentials/endpoints at rest. mergeClaudeSettings
   // preserves top-level non-env keys (permissions, statusLine) in both modes.
-  const merged = mergeClaudeSettings(existing, helperPath, envBlock, { replaceEnv: envChange.changed })
+  const merged = mergeClaudeSettings(existing, helperPath, envBlock, {
+    replaceEnv: envChange.changed,
+  })
   // Strip retired credentials from the MERGED result, not just the new block: on a
   // same-environment re-provision (replaceEnv=false) the additive merge keeps the
   // old env, so a legacy TOKENSCOPE_SESSION_TOKEN/READ_* would otherwise persist at
@@ -246,9 +358,18 @@ function writeClaudeSettings(settingsPath, helperPath, envBlock) {
     chmodSync(tmp, 0o600) // defeat umask so the file is 0600 even if writeFileSync's mode was masked
     renameSync(tmp, settingsPath) // atomic on the same filesystem
   } catch (err) {
-    try { rmSync(tmp, { force: true }) } catch { /* best-effort cleanup */ }
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      /* best-effort cleanup */
+    }
     throw err
   }
+  // Mirror the fresh refresh token into the shared device credential store —
+  // BOTH lanes (this redeem's own env AND any tagged repo relying on the
+  // state-dir fallback) must agree on the same value. Uses envBlock (the
+  // value THIS redeem just minted), not merged.env, though they agree.
+  writeSharedCredentialStore(envBlock.TOKENSCOPE_OAUTH_REFRESH_TOKEN, stateDir())
   return envChange
 }
 
@@ -257,17 +378,44 @@ async function main() {
   const args = parseArgs(process.argv.slice(2))
 
   if (!args.handoffCode) {
-    console.error('[tokenscope] handoff code is required (pass it as the first argument or via --handoff-code)')
+    console.error(
+      '[tokenscope] handoff code is required (pass it as the first argument or via --handoff-code)',
+    )
     process.exit(1)
   }
 
-  // Resolve the full redeem URL. The redeem path is server-relative; the base is
-  // env override > --api-base > the plugin's baked deployment default.
-  const apiBase = resolveApiBase(args.apiBase)
+  // Resolve the full redeem URL. A handoff can ONLY be redeemed at the server
+  // that minted it, so the base must track wherever the MCP server is actually
+  // registered — not the baked default. `setup.md` forbids passing --api-base
+  // (the allowed-tools grant is one fixed command, so a prompt-injected model
+  // cannot nominate the host a live single-use secret is posted to), which
+  // means the origin has to be discovered from local configuration rather than
+  // relayed through the conversation. discoverMcpOrigin reads only files a
+  // human wrote at registration time; it returns null on a stock install, where
+  // the baked default is right by construction.
+  //
+  // Nothing is passed to keep the environment out of this any more. setup.md
+  // forbids --api-base so the CONVERSATION cannot nominate the host, but the
+  // resolver used to rank TOKENSCOPE_API_BASE above discovery, and Claude Code
+  // merges a repository's .claude/settings.local.json env over the global one:
+  // a cloned repo could nominate the host the live handoff is posted to, which
+  // is the exact outcome the --api-base ban exists to prevent, reached through
+  // a different door. That was first patched here with `trustEnv: false`, and
+  // the flag is now gone — resolveApiBase only honours an OFF-BOX env value if
+  // there is no such thing, because it accepts the variable solely when it
+  // names loopback. A caller can no longer opt back into the hole, or forget to
+  // opt out of it.
+  const apiBase = resolveApiBase(args.apiBase, {
+    discovered: discoverMcpOrigin(fileURLToPath(new URL('.', import.meta.url)), {
+      client: 'claude',
+    }),
+  })
   const redeemPath = args.redeemUrl ?? '/api/v1/setup/redeem'
   const redeemUrl = redeemPath.startsWith('http') ? redeemPath : `${apiBase}${redeemPath}`
   if (!redeemUrl.startsWith('http')) {
-    console.error('[tokenscope] Cannot resolve redeem URL — the API base needs an http(s):// scheme (set --api-base or TOKENSCOPE_API_BASE).')
+    console.error(
+      '[tokenscope] Cannot resolve redeem URL — the API base needs an http(s):// scheme (set --api-base or TOKENSCOPE_API_BASE).',
+    )
     process.exit(1)
   }
 
@@ -300,7 +448,27 @@ async function main() {
   // and stash the real DCE URL for it. Kill-switch: TOKENSCOPE_OTLP_PROXY=0.
   applyOtlpProxyRepoint(envBlock)
   const helperPath = resolveHelperPath()
-  const settingsPath = args.settingsPath ?? join(homedir(), '.claude', 'settings.json')
+  // The durable emit credential lands in this file, which makes the path a
+  // trust sink and not merely a location. os.homedir() trusts $HOME, so a
+  // leaked or planted HOME writes a live refresh token into a directory
+  // somebody else chose. Anchor it on the passwd entry, which an env var
+  // cannot move.
+  //
+  // This does mean that under a moved HOME we write somewhere Claude Code --
+  // which resolves its own settings through HOME -- will not read, so setup
+  // succeeds and emission never starts. That is the right way round: the
+  // alternative hands the credential to whoever moved HOME. Say so loudly,
+  // because the failure is otherwise invisible, and name both paths so it is
+  // fixable rather than merely reported.
+  const trustedHome = realHome()
+  if (!args.settingsPath && trustedHome !== homedir()) {
+    console.error(
+      `[tokenscope] WARN: $HOME (${homedir()}) differs from your account's real home (${trustedHome}). ` +
+        'Writing the credential to the real home; Claude Code reads $HOME, so emission may not start ' +
+        'until HOME is corrected.',
+    )
+  }
+  const settingsPath = args.settingsPath ?? join(trustedHome, '.claude', 'settings.json')
   let envChange
   try {
     envChange = writeClaudeSettings(settingsPath, helperPath, envBlock)
@@ -316,13 +484,17 @@ async function main() {
   if (envChange?.changed) {
     const from = envChange.oldLabel ?? 'previous'
     const to = envChange.newLabel ?? 'new'
-    console.log(`[tokenscope] Environment changed: ${from} → ${to} — minting/writing fresh config for the new environment (old credentials and endpoints dropped).`)
+    console.log(
+      `[tokenscope] Environment changed: ${from} → ${to} — minting/writing fresh config for the new environment (old credentials and endpoints dropped).`,
+    )
   }
   console.log('[tokenscope] ✓ Claude Code device enrolled — emitting provisioned.')
   console.log(`[tokenscope]   Instance ID: ${resp.instance_id}`)
   console.log(`[tokenscope]   Wrote OTel plumbing to ${settingsPath} (mode 0600).`)
   console.log('[tokenscope]   Restart `claude` — the OTel config is read once at startup.')
-  console.log('[tokenscope]   Then tag this repo with the `project` prompt so its sessions attribute to a budget.')
+  console.log(
+    '[tokenscope]   Then tag this repo with the `project` prompt so its sessions attribute to a budget.',
+  )
 }
 
 // Only run main() when executed directly (not when imported as a module for testing).
@@ -334,4 +506,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 }
 
 // Named exports for unit testing only — not part of the public API.
-export { buildClaudeDeviceEnv, assertClaudeRedeemResponse, writeClaudeSettings, parseArgs }
+export {
+  buildClaudeDeviceEnv,
+  assertClaudeRedeemResponse,
+  writeClaudeSettings,
+  writeSharedCredentialStore,
+  parseArgs,
+}

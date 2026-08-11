@@ -30,34 +30,34 @@ const baseUrl = process.env.BASE_URL || 'http://localhost:3450'
 /*
  * Nav sets mirror NAV_BY_ROLE in app/components/nav/AppHeader.vue
  * (consumption sprint): Inbox moved out of the nav into the bell;
- * every role gets "My usage" first; Reporting replaced Rollups /
+ * every role gets "Home" first; Reporting replaced Rollups /
  * CoU rollup as the label.
  */
 const PERSONAS = [
   {
     key: 'developer',
-    expectedNav: ['My usage', 'My projects', 'My consumption'],
+    expectedNav: ['Home', 'My projects', 'My usage'],
     expectedLanding: '/',
     // Epic 11 (MVP-Final) — page-head greeting per design-notes §Screen 2.
     expectedHeading: 'Hello ',
   },
   {
     key: 'manager',
-    expectedNav: ['My usage', 'Reporting'],
+    expectedNav: ['Home', 'Reporting'],
     expectedLanding: '/rollups',
     // Epic 12 (MVP-Final) — practice-scoped header per design-notes §Screen 3.
     expectedHeading: 'Practice Delta rollup',
   },
   {
     key: 'admin',
-    expectedNav: ['My usage', 'Reporting', 'Admin'],
+    expectedNav: ['Home', 'Reporting', 'Admin'],
     expectedLanding: '/admin',
     expectedHeading: 'Admin',
   },
   {
     key: 'finance',
     // global-finops gets the Admin link in nav (cross-region governance).
-    expectedNav: ['My usage', 'Reporting', 'Admin'],
+    expectedNav: ['Home', 'Reporting', 'Admin'],
     expectedLanding: '/finance',
     // Epic 14 (MVP-Final) — header per design-notes §Screen 6.
     expectedHeading: 'Month-end cross-charge',
@@ -67,7 +67,7 @@ const PERSONAS = [
     // J3 (org-journey sprint): Owen has the developer ROLE; the extra
     // "My cost centres" entry flows from his cou_owner relationship rows
     // (appended after the personal views — no Reporting/Admin to slot before).
-    expectedNav: ['My usage', 'My projects', 'My consumption', 'My cost centres'],
+    expectedNav: ['Home', 'My projects', 'My usage', 'My cost centres'],
     expectedLanding: '/cost-centres',
     expectedHeading: 'My cost centres',
   },

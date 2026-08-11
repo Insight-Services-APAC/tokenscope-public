@@ -110,6 +110,8 @@ export function forecastForMonth(input: ForecastInput): Forecast | null {
   return {
     asOfDate: asOf ? asOf.toISOString().slice(0, 10) : null,
     daysElapsed,
+    // The CLOCK, not the data — see the field's note in shared/reports/types.ts.
+    dayOfMonth: utcDayOfMonth(now),
     daysInMonth,
     factor,
     meteredMtdUsd,

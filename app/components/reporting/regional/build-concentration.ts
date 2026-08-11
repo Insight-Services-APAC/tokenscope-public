@@ -1,68 +1,49 @@
 /*
- * build-concentration — derive teammate spend-concentration stats for the shared
- * ConcentrationCard from the Regional teammate drivers.
+ * build-concentration — the Region width's spend-concentration stats, from the
+ * `axis=teammate` driver rows.
  *
- * The Across-Regions drivers endpoint returns a server-computed `concentration`
- * block; the Regional drivers endpoint does not (it returns only the ranked rows).
- * Concentration is a pure function of the per-teammate spend, so we compute it
- * CLIENT-SIDE here from the `axis=teammate` driver rows — no new endpoint, and
- * axis-stable (the card is fed from a dedicated teammate fetch so switching the
- * table axis never blanks it).
+ * WHY CLIENT-SIDE. The whole-company drivers endpoint returns a server-computed
+ * `concentration` block; the Regional one returns only the ranked rows.
+ * Concentration is a pure function of per-teammate spend, so it is derived here
+ * from a dedicated teammate fetch — no new endpoint, and axis-stable (switching
+ * the drivers table's axis never blanks the card).
  *
- * Shapes match the shared ConcentrationCard contract: top-1/5/10% cohort shares
- * (fractions in [0,1]) plus non-overlapping rank segments (power → light) with a
- * count each. Pure: no Vue, no DOM — unit-testable.
+ * WHAT CHANGED, AND WHY IT MATTERED. This file used to carry its OWN cohort
+ * maths: `Math.ceil` cut points and four bespoke cohorts labelled "Power (top
+ * 10%)" / "Heavy (10–25%)" / "Typical (25–50%)" / "Light (bottom 50%)". Both
+ * halves of that were wrong.
+ *
+ *   - The ARITHMETIC diverged from the whole-company width, which cuts with
+ *     `Math.max(1, Math.round(n × p))`. Two widths answered "what share does the
+ *     top 10% hold" differently, and nothing could see it because the two cards
+ *     also had different shapes.
+ *   - The LABELS name PEOPLE ("Power users"), which the prototype calls out as
+ *     the defect — a spend distribution is not a taxonomy of humans.
+ *
+ * It now calls the ONE shared implementation, so both widths publish the same
+ * distribution cut the same way, and the Region width renders the same card.
  *
  * NOTE: the fair home for this is a server `concentration` block on the Regional
- * drivers endpoint (mirroring Across); computing it here is the interim path that
- * keeps the card honest without reaching outside this track's files.
+ * drivers endpoint (mirroring Across). Computing it here stays the interim path
+ * — but it is now the same FUNCTION the server would call, so the interim can no
+ * longer drift from the destination.
  */
+import { computeConcentration, type ConcentrationStats } from '#shared/reports/concentration'
 import type { DriverRow } from '#shared/reports/types'
-import type { ConcentrationStats, ConcentrationSegment } from '../ConcentrationCard.vue'
 
-interface CohortSpec {
-  label: string
-  /** Inclusive lower rank fraction, exclusive upper — e.g. [0, 0.10). */
-  lo: number
-  hi: number
-}
-
-const COHORTS: CohortSpec[] = [
-  { label: 'Power (top 10%)', lo: 0, hi: 0.1 },
-  { label: 'Heavy (10–25%)', lo: 0.1, hi: 0.25 },
-  { label: 'Typical (25–50%)', lo: 0.25, hi: 0.5 },
-  { label: 'Light (bottom 50%)', lo: 0.5, hi: 1 },
-]
+export type { ConcentrationStats }
 
 /**
- * Compute concentration stats from teammate driver rows. Returns null when there
- * is no positive spend (⇒ the card is hidden). Rows need not be pre-sorted.
+ * Concentration stats from teammate driver rows. Returns null when there is no
+ * positive spend (⇒ the card is hidden). Rows need not be pre-sorted — the
+ * shared implementation requires a DESCENDING cost array, which is built here.
  */
 export function buildConcentration(rows: DriverRow[]): ConcentrationStats | null {
-  const ranked = rows.filter((r) => r.usd > 0).sort((a, b) => b.usd - a.usd)
-  const n = ranked.length
-  const total = ranked.reduce((a, r) => a + r.usd, 0)
-  if (n === 0 || total <= 0) return null
-
-  // Share of total spend held by the top `frac` of teammates (≥ 1 person).
-  const topShare = (frac: number): number => {
-    const k = Math.max(1, Math.ceil(frac * n))
-    const sum = ranked.slice(0, k).reduce((a, r) => a + r.usd, 0)
-    return sum / total
-  }
-
-  // Non-overlapping rank cohorts. `cut` clamps a rank fraction to a whole index.
-  const cut = (frac: number): number => Math.min(n, Math.ceil(frac * n))
-  const segments: ConcentrationSegment[] = COHORTS.map((c) => {
-    const cohort = ranked.slice(cut(c.lo), cut(c.hi))
-    const sum = cohort.reduce((a, r) => a + r.usd, 0)
-    return { label: c.label, sharePct: sum / total, count: cohort.length }
-  }).filter((s) => s.count > 0)
-
-  return {
-    top1: topShare(0.01),
-    top5: topShare(0.05),
-    top10: topShare(0.1),
-    segments,
-  }
+  const costsDesc = rows
+    .filter((r) => r.usd > 0)
+    .map((r) => r.usd)
+    .sort((a, b) => b - a)
+  if (costsDesc.length === 0) return null
+  const stats = computeConcentration(costsDesc)
+  return stats.totalUsd > 0 ? stats : null
 }

@@ -91,12 +91,18 @@ export const ADMIN_NAV: AdminNavGroup[] = [
       { label: 'Project lifecycle', to: '/admin/policies/project-lifecycle', access: 'admin', icon: 'folder', testid: 'project-lifecycle' },
       { label: 'Directory exclusions', to: '/admin/policies/directory-exclusions', access: 'admin', icon: 'people', testid: 'directory-exclusions' },
       { label: 'Rate cards', to: '/admin/rate-cards', access: 'admin', icon: 'price', testid: 'rate-cards' },
+      { label: 'Provider governance', to: '/admin/policies/provider-governance', access: 'org-wide', icon: 'shield', testid: 'provider-governance' },
     ],
   },
   {
     label: 'Operations',
     items: [
       { label: 'Diagnostics', to: '/admin/diagnostics', access: 'admin', icon: 'pulse', testid: 'diagnostics' },
+      // Separate from Diagnostics on purpose: Diagnostics OBSERVES whether workers
+      // run correctly, this ACTS on which ones should run. A mutating control sat
+      // inside the read-only health page, which put a destructive affordance in the
+      // path of someone scanning for a fault.
+      { label: 'Worker controls', to: '/admin/workers', access: 'admin', icon: 'sliders', testid: 'worker-controls' },
       { label: 'Audit log', to: '/admin/audit', access: 'admin', icon: 'list', testid: 'audit' },
       { label: 'System info', to: '/admin/system', access: 'admin', icon: 'system', testid: 'system' },
     ],

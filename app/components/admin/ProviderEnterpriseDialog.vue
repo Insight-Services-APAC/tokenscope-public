@@ -34,9 +34,12 @@ export interface EnterpriseEditTarget {
   reconciliationMode: string
   billing: string
   credentialSecretName: string | null
-  /* ADR-0010 D1/D2 — Copilot billing structure (GitHub only). null = unset. */
+  /* ADR-0010 D1/D2 — Copilot billing structure (GitHub only). null = unset.
+   * FORECAST/SHOWBACK reference only — see the "Copilot billing" section copy below. */
   flatSeatPriceUsd: number | null
   includedAllowanceUsd: number | null
+  /* ADR-0011 D10 — configurable per-enterprise pooled-overage allocation policy. */
+  overageAllocationPolicy: string
   /** GitHub App id (mig 0078). Non-null = App credential path opted in. */
   githubAppId: string | null
 }
@@ -59,9 +62,13 @@ const reconciliationMode = ref<'reconciled' | 'indicative'>('indicative')
 const billing = ref<'billed' | 'tracked'>('tracked')
 const credentialSecretName = ref('')
 // ADR-0010 D1/D2 — Copilot billing structure (GitHub only). Strings so an empty
-// field cleanly means "unset / disabled" (vs 0, which means "free").
+// field cleanly means "unset / disabled" (vs 0, which means "free"). FORECAST/
+// SHOWBACK reference only (see the section copy below) — never the bill-net source.
 const flatSeatPriceUsd = ref('')
 const includedAllowanceUsd = ref('')
+// ADR-0011 D10 — configurable per-enterprise pooled-overage allocation policy.
+// consumption-share is Insight's default.
+const overageAllocationPolicy = ref<'consumption-share' | 'excess-share' | 'excess-equal' | 'seat-share'>('consumption-share')
 // GitHub App id (mig 0078) — opt into the App credential path. Empty = PAT mode (the
 // default). github-only (the field is hidden for anthropic).
 const githubAppId = ref('')
@@ -89,6 +96,8 @@ useModalA11y({
     credentialSecretName.value = t?.credentialSecretName ?? ''
     flatSeatPriceUsd.value = t?.flatSeatPriceUsd != null ? String(t.flatSeatPriceUsd) : ''
     includedAllowanceUsd.value = t?.includedAllowanceUsd != null ? String(t.includedAllowanceUsd) : ''
+    overageAllocationPolicy.value =
+      (t?.overageAllocationPolicy as 'consumption-share' | 'excess-share' | 'excess-equal' | 'seat-share') ?? 'consumption-share'
     githubAppId.value = t?.githubAppId ?? ''
     error.value = null
   },
@@ -150,6 +159,7 @@ watch(
     billing,
     flatSeatPriceUsd,
     includedAllowanceUsd,
+    overageAllocationPolicy,
   ],
   () => {
     if (error.value) error.value = null
@@ -181,6 +191,7 @@ async function save() {
           credentialSecretName: cred,
           flatSeatPriceUsd: flat,
           includedAllowanceUsd: allowance,
+          overageAllocationPolicy: showCopilotBilling.value ? overageAllocationPolicy.value : undefined,
           githubAppId: appId,
         },
       })
@@ -196,6 +207,7 @@ async function save() {
           credentialSecretName: cred,
           flatSeatPriceUsd: flat,
           includedAllowanceUsd: allowance,
+          overageAllocationPolicy: showCopilotBilling.value ? overageAllocationPolicy.value : undefined,
           githubAppId: appId,
         },
       })
@@ -312,6 +324,10 @@ async function save() {
               <option value="tracked">tracked</option>
               <option value="billed">billed</option>
             </select>
+            <p v-if="provider === 'github'" class="text-[11px] text-carbon-3 mt-1" data-testid="pe-billing-authoritative-note">
+              The authoritative chargeability setting for every org under this enterprise (ADR-0011 D11) — GitHub bills the
+              enterprise, not the org.
+            </p>
           </div>
         </div>
 
@@ -361,15 +377,24 @@ async function save() {
           </p>
         </div>
 
-        <!-- ADR-0010 D1/D2: GitHub Copilot billing structure. GitHub only — Claude/Anthropic
-             is pure metered (no flat seat, no allowance), so this section is hidden there. -->
+        <!-- ADR-0011 D6/D8/D9/D10: GitHub Copilot billing structure. GitHub only — Claude/
+             Anthropic is pure metered (no flat seat, no allowance), so this section is hidden
+             there. -->
         <div v-if="showCopilotBilling" class="mt-5 pt-4 border-t border-calm-2" data-testid="pe-copilot-billing">
           <p class="text-[12px] font-bold uppercase tracking-[1.2px] text-brand-harmony">Copilot billing</p>
           <p class="text-[12px] text-carbon-2 mt-1">
-            How GitHub charges for Copilot, so TokenScope can show each person's projected bill — not just
-            their usage. Copilot bills a <strong>flat monthly seat licence</strong> plus any usage
-            <strong>above each user's included AI-credit allowance</strong>. Leave a field blank to leave
-            that part of the bill out.
+            Copilot's AI-credit allowance <strong>pools at the ORG level</strong> — an individual exceeding
+            their own share costs nothing while the pool holds; overage only accrues once the whole org's
+            pool is exhausted (ADR-0011 D8). The figures below are a <strong>forecast / showback
+            reference only</strong> — they drive the projected per-seat display and never reconstruct a
+            charge. The <strong>actual bill net</strong> (read straight from the enterprise billing usage
+            report) is always the authoritative cost of record, for both the seat licence and any overage.
+          </p>
+          <p class="text-[12px] text-carbon-2 mt-2">
+            These are the <strong>current</strong> values. Rates are effective-dated (ADR-0011 D9): a change
+            here does not itself re-cost a closed month. Manage dated rate-plan history — including future
+            scheduled changes — from this enterprise's row action on
+            <strong>Policies → Provider governance</strong>.
           </p>
 
           <div class="grid grid-cols-2 gap-3 mt-3">
@@ -386,11 +411,11 @@ async function save() {
                 class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
                 data-testid="pe-flat"
               >
-              <p class="text-[11px] text-carbon-3 mt-1">Per seat, whole month — a seat active any day owes the full price.</p>
+              <p class="text-[11px] text-carbon-3 mt-1">Per seat, whole month — a seat active any day owes the full price. Forecast reference; the bill's own SKU net is what's actually charged.</p>
               <p v-if="flatInvalid" class="text-[11px] text-rag-red mt-1" data-testid="pe-flat-warn">Enter a number ≥ 0, or leave blank.</p>
             </div>
             <div>
-              <label for="pe-allowance" class="text-[12px] font-semibold text-carbon">Included allowance (USD / user)</label>
+              <label for="pe-allowance" class="text-[12px] font-semibold text-carbon">Included allowance (USD / org pool)</label>
               <input
                 id="pe-allowance"
                 v-model="includedAllowanceUsd"
@@ -402,9 +427,29 @@ async function save() {
                 class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
                 data-testid="pe-allowance"
               >
-              <p class="text-[11px] text-carbon-3 mt-1">AI-credit usage above this, per user, is billed as overage.</p>
+              <p class="text-[11px] text-carbon-3 mt-1">Per-seat contribution to the ORG pool — not a per-user cap. Overage accrues only once the pool (seats × allowance) is exhausted.</p>
               <p v-if="allowanceInvalid" class="text-[11px] text-rag-red mt-1" data-testid="pe-allowance-warn">Enter a number ≥ 0, or leave blank.</p>
             </div>
+          </div>
+
+          <div class="mt-3">
+            <label for="pe-overage-policy" class="text-[12px] font-semibold text-carbon">Overage allocation policy</label>
+            <select
+              id="pe-overage-policy"
+              v-model="overageAllocationPolicy"
+              class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+              data-testid="pe-overage-policy"
+            >
+              <option value="consumption-share">consumption-share (Insight default) — split by usage</option>
+              <option value="excess-share">excess-share — split by excess above the per-seat share</option>
+              <option value="excess-equal">excess-equal — equal split among everyone over</option>
+              <option value="seat-share">seat-share — equal split across every active seat</option>
+            </select>
+            <p class="text-[11px] text-carbon-3 mt-1">
+              How a PAID pooled overage (real money already on the bill) is DISTRIBUTED across cost-owning
+              units (ADR-0011 D10). Never derives or creates a charge — when the pool holds, this allocates
+              zero, no matter which policy is set.
+            </p>
           </div>
         </div>
 

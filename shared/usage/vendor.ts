@@ -43,6 +43,18 @@ export type Vendor =
  */
 export const VENDOR_LANES: readonly Vendor[] = [...REGISTRY.laneIds, 'other']
 
+/**
+ * Lane id → the PROVIDER whose adapter declared it. The 'other' catch-all
+ * belongs to NO provider (it absorbs unknown tools and NULLs), so it maps to
+ * null rather than being quietly attributed to one.
+ *
+ * Consumed by the teammate drill's staleness refusal (developer pages D36),
+ * which must decide WHICH provider clocks are relevant to a subject's rows.
+ */
+export function vendorProvider(lane: Vendor): string | null {
+  return lane === 'other' ? null : (REGISTRY.laneProvider[lane] ?? null)
+}
+
 /** Human-readable lane names (UI). The 'claude' lane means Claude CODE. */
 export const VENDOR_LABELS: Readonly<Record<Vendor, string>> = {
   ...REGISTRY.labels,

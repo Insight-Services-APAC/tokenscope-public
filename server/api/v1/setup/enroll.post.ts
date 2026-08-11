@@ -39,6 +39,7 @@ import {
   readValidatedBody,
   setResponseHeaders,
 } from 'h3'
+import { assertTrustedPublicOrigin } from '../../../utils/public-url'
 import { z } from 'zod'
 import { getDb } from '../../../db'
 import { issueEmitCredential } from '../../../auth/emit-credential'
@@ -48,7 +49,6 @@ import {
   locateOrCreateProvisionalInstance,
 } from '../../../auth/enroll-provision'
 import { recordAuditEvent } from '../../../db/audit'
-import { getPublicRequestURL } from '../../../utils/public-url'
 
 const Body = z.object({
   enrollment_secret: z.string().min(1).max(512),
@@ -66,6 +66,13 @@ const Body = z.object({
 
 export default defineEventHandler(async (event) => {
   setResponseHeaders(event, { 'Cache-Control': 'no-store', Pragma: 'no-cache' })
+  // BEFORE anything is consumed. This request commits its transaction before the
+  // bundle is built, and that transaction takes a PROVISIONAL-CAP SLOT (a new
+  // instance_attestation row) and mints an emit credential. There is no one-time
+  // code here -- the enrollment secret is reusable -- so the cost of a late
+  // refusal is a cap slot burned and a credential minted for a device that is
+  // then told no, for a purely server-side fault.
+  assertTrustedPublicOrigin(event)
   const { enrollment_secret, claimed_email, device_binding, tool } = await readValidatedBody(
     event,
     (d) => Body.parse(d),
@@ -94,7 +101,12 @@ export default defineEventHandler(async (event) => {
   // mid-sequence failure (incl. a throwing audit) rolls everything back. The emit
   // mint's per-instance advisory xact lock lives inside it.
   const result = await db.transaction(async (tx) => {
-    const located = await locateOrCreateProvisionalInstance(tx as never, claimedEmail, device_binding, tool)
+    const located = await locateOrCreateProvisionalInstance(
+      tx as never,
+      claimedEmail,
+      device_binding,
+      tool,
+    )
     if ('capExceeded' in located) {
       throw createError({ statusCode: 429, statusMessage: 'Enrollment capacity reached' })
     }
@@ -123,12 +135,10 @@ export default defineEventHandler(async (event) => {
     return { instanceId: located.instanceId, emit }
   })
 
-  // PUBLIC origin (pinned APP_PUBLIC_ORIGIN, else Front Door host, else Host) so
-  // the baked bearer/OTLP endpoints are reachable behind the WAF — same discipline
-  // as /setup/redeem. Provisional enroll mints UNASSIGNED (untagged): no project.
-  const origin = getPublicRequestURL(event).origin
+  // Provisional enroll mints UNASSIGNED (untagged): no project. buildOtelBundle
+  // owns the public-origin derivation and its trust check (durable endpoints).
   const { bearerEndpoint, oauthTokenEndpoint, bundle } = buildOtelBundle(
-    origin,
+    event,
     result.instanceId,
     null,
     tool,

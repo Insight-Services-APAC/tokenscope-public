@@ -35,6 +35,7 @@ import {
   revokePriorHandoffsForInstance,
   mintEmitHandoff,
   EMIT_HANDOFF_TTL_MS,
+  EMIT_TOOLS,
   type EmitTool,
 } from '../auth/emit-provision'
 import { recordAuditEvent } from '../db/audit'
@@ -80,8 +81,9 @@ async function rlsContextFor(db: Db, teammate: BearerTeammate): Promise<RlsConte
       `Teammate ${teammate.teammateId} has no org_unit path — refusing to build an RLS context`,
     )
   }
-  const role = (teammate.role === 'platform-admin' ? 'global-finops' : teammate.role) as
-    RlsContext['userRole']
+  const role = (
+    teammate.role === 'platform-admin' ? 'global-finops' : teammate.role
+  ) as RlsContext['userRole']
   return {
     userRegionId: teammate.regionId,
     userOrgPath: orgPath,
@@ -121,8 +123,15 @@ function getTeammate(authInfo: AuthInfo | undefined): BearerTeammate | undefined
  *
  * @param dbOverride test-only handle so the integration harness can drive tools
  *                   against its testcontainers DB without DATABASE_URL/getDb().
+ * @param publicOrigin the public origin THIS request arrived on, from
+ *                   getPublicRequestURL (Front-Door aware, the same source
+ *                   /setup/enroll uses to build the OTel bundle). Threaded in so
+ *                   provision_emit can tell the local helper which server issued
+ *                   the handoff instead of leaving it to guess. Optional: tests
+ *                   construct the server directly, and the redeem command falls
+ *                   back to client-side discovery when it is absent.
  */
-export function createMcpServer(dbOverride?: Db): McpServer {
+export function createMcpServer(dbOverride?: Db, publicOrigin?: string): McpServer {
   const db = dbOverride ?? (getDb() as unknown as Db)
 
   const server = new McpServer(
@@ -188,7 +197,7 @@ export function createMcpServer(dbOverride?: Db): McpServer {
   // ── my_usage ───────────────────────────────────────────────────────────
   server.tool(
     'my_usage',
-    'Show your current-month-to-date TokenScope usage: per-budget spend (USD), tokens, allocation/budget, and an additive-quota summary (base allowance + budget allocations). Same data as the /me/usage dashboard card.',
+    'Show your current-month-to-date TokenScope usage: per-budget spend (USD), tokens, allocation/budget, and an additive-quota summary (base allowance + budget allocations). Same data as the Home dashboard card (GET /api/v1/me/home). NOT the richer /me/usage patterns payload, which this tool does not return.',
     {},
     async (_args, extra) =>
       withTeammate(extra.authInfo, 'my_usage', async (tx, teammate) => {
@@ -206,13 +215,17 @@ export function createMcpServer(dbOverride?: Db): McpServer {
         .string()
         .min(1)
         .max(256)
-        .describe("The conversation id (Claude's session.id), as shown by my_usage / the dashboard."),
+        .describe(
+          "The conversation id (Claude's session.id), as shown by my_usage / the dashboard.",
+        ),
       project_id: z
         .string()
         .uuid()
         .nullable()
         .optional()
-        .describe('Budget (project) id to assign to; null = move off budget; omit = leave unchanged. Must be a budget you are a member of.'),
+        .describe(
+          'Budget (project) id to assign to; null = move off budget; omit = leave unchanged. Must be a budget you are a member of.',
+        ),
       activity: z
         .union([z.string().trim().min(1).max(64), z.null()])
         .optional()
@@ -226,7 +239,9 @@ export function createMcpServer(dbOverride?: Db): McpServer {
       if (!hasScope(teammate, MCP_TAG_SCOPE)) return scopeError(MCP_TAG_SCOPE)
       if (args.project_id === undefined && args.activity === undefined) {
         return {
-          content: [{ type: 'text' as const, text: 'Provide project_id and/or activity (null to clear).' }],
+          content: [
+            { type: 'text' as const, text: 'Provide project_id and/or activity (null to clear).' },
+          ],
           isError: true,
         }
       }
@@ -244,7 +259,7 @@ export function createMcpServer(dbOverride?: Db): McpServer {
               setActivity: args.activity !== undefined,
               activityVal: args.activity ?? null,
             },
-            { actorSystem: 'mcp-tag-session' },
+            { actorSystem: 'mcp-tag-session', clientId: teammate.clientId },
           ),
         )
         return jsonResult(result)
@@ -254,7 +269,9 @@ export function createMcpServer(dbOverride?: Db): McpServer {
         // ended-budget) to a clean tool error; never leak internals.
         if (e?.statusCode) {
           return {
-            content: [{ type: 'text' as const, text: e.data?.detail ?? e.statusMessage ?? 'Tag failed.' }],
+            content: [
+              { type: 'text' as const, text: e.data?.detail ?? e.statusMessage ?? 'Tag failed.' },
+            ],
             isError: true,
           }
         }
@@ -264,7 +281,9 @@ export function createMcpServer(dbOverride?: Db): McpServer {
           cause: (err as { cause?: { message?: string } })?.cause?.message,
         })
         return {
-          content: [{ type: 'text' as const, text: 'tag_session failed. Check server logs for details.' }],
+          content: [
+            { type: 'text' as const, text: 'tag_session failed. Check server logs for details.' },
+          ],
           isError: true,
         }
       }
@@ -334,10 +353,10 @@ export function createMcpServer(dbOverride?: Db): McpServer {
         .uuid()
         .optional()
         .describe(
-          "Your existing device id (tokenscope.instance_id from ~/.claude/settings.json), for idempotency; omit for a fresh device.",
+          'Your existing device id (tokenscope.instance_id from ~/.claude/settings.json), for idempotency; omit for a fresh device.',
         ),
       tool: z
-        .enum(['claude-code', 'copilot-cli'] satisfies [EmitTool, EmitTool])
+        .enum(EMIT_TOOLS)
         .default('claude-code')
         .describe(
           "The emit tool: 'claude-code' (default) or 'copilot-cli'. Determines the OTel bundle shape returned by the redeem endpoint.",
@@ -355,61 +374,168 @@ export function createMcpServer(dbOverride?: Db): McpServer {
           }
         }
         const emitTool: EmitTool = args.tool ?? 'claude-code'
-        // Locate-or-create the attestation (idempotent per instance), then rotate
-        // out any still-redeemable handoff for it and mint a fresh one — in ONE
-        // transaction serialized per instance via pg_advisory_xact_lock (AUTH-2,
-        // the exact pattern of issueInstanceEmitCredentialTx). Without the lock,
-        // two concurrent provisions interleave revoke→mint and leave TWO
-        // redeemable codes; without the transaction, an audit failure after the
-        // mint orphans a redeemable code never shown to the caller.
-        const { instanceId, reused } = await locateOrCreateInstance(db, tm, args.instance_id, emitTool)
-        const handoff = await db.transaction(async (tx) => {
-          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${instanceId}))`)
+        // ONE transaction for the WHOLE sequence — locate-or-create THROUGH the
+        // audit write. The advisory lock now lives at the TOP of
+        // locateOrCreateInstance itself (same key it used to take here
+        // separately: instanceId when re-provisioning, else the teammate id),
+        // serializing the reuse/cap-check/create decision AND, because
+        // everything downstream shares this one transaction, the handoff
+        // rotate+mint too — no second lock needed. This closes the "attestation
+        // created OUTSIDE its own transaction" defect: previously
+        // locateOrCreateInstance ran against the bare `db` handle and its
+        // create-branch INSERT autocommitted immediately, so a later failure in
+        // THIS transaction (e.g. the audit write) rolled back the handoff mint
+        // but left a committed orphan attestation with no handoff ever issued —
+        // and every cap-exceeded rejection below would otherwise have counted
+        // that leaked row toward the very cap it's meant to enforce.
+        const provisioned = await db.transaction(async (tx) => {
+          const located = await locateOrCreateInstance(
+            tx as unknown as Db,
+            tm,
+            args.instance_id,
+            emitTool,
+          )
+          if ('capExceeded' in located) return located
+          const { instanceId, reused } = located
           await revokePriorHandoffsForInstance(tx as unknown as Db, instanceId)
           const minted = await mintEmitHandoff(tx as unknown as Db, teammate.teammateId, instanceId)
           // Audit the crossing (ADR-0005 E1 — read→emit provisioning). No secret
-          // in the payload (only the instance id + whether it was reused). A
-          // throwing recordAuditEvent rolls the fresh handoff back (correct: no
-          // unaudited redeemable code may exist).
+          // in the payload (only the instance id, whether it was reused, and the
+          // driving OAuth client — previously unrecorded, so no audit row could
+          // name which registered client minted a device). A throwing
+          // recordAuditEvent rolls the fresh handoff (and the attestation, now
+          // that it's in-transaction) back: no unaudited redeemable code may exist.
           await recordAuditEvent(tx as never, {
             eventType: 'emit-handoff-minted',
             actorTeammateId: teammate.teammateId,
             actorSystem: 'mcp-provision-emit',
             subjectKind: 'instance',
             subjectId: instanceId,
-            payload: { instance_reused: reused, tool: emitTool },
+            payload: {
+              instance_reused: reused,
+              tool: emitTool,
+              ...(teammate.clientId ? { client_id: teammate.clientId } : {}),
+            },
           })
-          return minted
+          return { instanceId, reused, handoff: minted }
         })
+        if ('capExceeded' in provisioned) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: 'Device provisioning limit reached for your account. Revoke an unused device (Settings → Your devices, or ask an admin) before provisioning another.',
+              },
+            ],
+            isError: true,
+          }
+        }
+        const { instanceId, handoff } = provisioned
 
-        // Server-relative redeem path — the local helper composes it against its
-        // own configured API base (the same base it reaches the MCP server on), so
-        // there is no Front-Door host to bake/break here (cf. getPublicRequestURL).
-        const redeemUrl = '/api/v1/setup/redeem'
+        // Redeem endpoint. Absolute when we know the origin this request actually
+        // arrived on, server-relative otherwise.
+        //
+        // This used to be unconditionally relative, on the reasoning that the
+        // helper "composes it against its own configured API base (the same base
+        // it reaches the MCP server on), so there is no Front-Door host to
+        // bake/break here". The second half held; the first did not. The helper
+        // does not know the base this request came in on: it reads the api base
+        // from its own flags/env, falling back to the PACKAGED .mcp.json, which
+        // carries the shipped default host. An operator who registered TokenScope
+        // at a different MCP URL therefore gets a handoff minted by THIS server
+        // and redeemed against the packaged one, which both breaks setup and
+        // sends a one-time handoff code to a host that did not issue it.
+        //
+        // getPublicRequestURL is the Front-Door-aware origin (pinned
+        // APP_PUBLIC_ORIGIN, else a trusted forwarded host), and is already what
+        // /setup/enroll bakes into durable emit bundles, so using it here is
+        // consistent rather than a new trust assumption. Client-side discovery
+        // stays as the fallback for callers that construct the server without an
+        // origin.
+        const redeemUrl = publicOrigin
+          ? `${publicOrigin}/api/v1/setup/redeem`
+          : '/api/v1/setup/redeem'
 
         // The local redeem helper is tool-specific. Name a command the agent can
         // run AS-IS in an ad-hoc shell, so the durable emit credential is redeemed
         // process→server by the helper and written to disk directly (never the
         // chat). Traps this must avoid (all caught in review):
         //   - $CLAUDE_PLUGIN_ROOT is NOT set in an ordinary Bash tool call (only in
-        //     plugin hook/command execution), so we cannot bake it. Claude's plugin
-        //     lives under a versioned cache dir, so we locate it by glob and pick
-        //     the highest installed version (sort -V). Copilot installs to a fixed
-        //     versionless path, where a missing file makes `node` error loudly.
+        //     plugin hook/command execution), so we cannot bake it. NEITHER client
+        //     has a stable absolute path: Claude's plugin lives under a versioned
+        //     cache dir, and Copilot's lives under
+        //     ~/.copilot/installed-plugins/<marketplace>/<plugin>/ — the MARKETPLACE
+        //     segment varies by how the marketplace was added. The old Copilot branch
+        //     baked ~/.copilot/plugins/tokenscope/scripts/, a path that does not exist
+        //     on a real install; setup failed at the redeem step (reproduced live
+        //     2026-07-28). Both are now located by glob. That dead path was briefly
+        //     retained here as `~/.copilot/plugins/*/scripts/copilot-redeem.mjs`, a
+        //     "harmless" fallback which was neither: it has NO literal plugin
+        //     segment, so it matched ANY plugin shipping a file of that name and
+        //     would hand it the one-time handoff code as argv. Removed: a candidate
+        //     that cannot match a real install has no upside to weigh against that.
+        //   - only the VARYING segment is globbed. The Copilot plugin directory is
+        //     the marketplace entry name, 'tokenscope-copilot', so that segment is a
+        //     literal: a bare `*/*/scripts/copilot-redeem.mjs` would also match a
+        //     DIFFERENT installed plugin that happens to ship a file of that name,
+        //     and hand it the one-time handoff code as argv.
+        //   - `sort -V | tail -n1` is a deterministic tie-break, NOT a "newest"
+        //     selector. Only Claude's path has a version segment
+        //     (cache/<marketplace>/tokenscope/<version>/), where the ordering is
+        //     genuinely by version; Copilot's layout carries no version, so there the
+        //     sort just picks the last marketplace name in collation order. An
+        //     earlier comment here claimed both selected "newest by sort -V", which
+        //     was true of one branch and fiction for the other.
         //   - the handoff code is base64url and can begin with '-', so it is passed
         //     via --handoff-code (a bare positional would be mis-parsed as a flag),
         //     and as an sh positional ($1) so it is never re-split or re-globbed.
-        //   - the Claude locator runs inside `sh -c` (deterministic glob semantics
-        //     regardless of the agent's interactive shell) and FAILS LOUDLY if the
+        //     It is also interpolated into a SHELL STRING here, so its charset is
+        //     asserted below rather than trusted: base64url cannot contain a quote,
+        //     $ or backtick today, but that is a property of the minting function
+        //     several files away, and a future change to it must not silently become
+        //     a command injection.
+        //   - BOTH locators run inside `sh -c` (deterministic glob semantics
+        //     regardless of the agent's interactive shell) and FAIL LOUDLY if the
         //     script isn't found — otherwise an empty glob would make `node ""`
         //     exit 0 with no output, falsely reporting success while burning the
         //     one-time handoff.
+        //   - POSIX `sh` is required. On a native-Windows Copilot install without a
+        //     POSIX environment this command cannot run as-is; `redeem_url` +
+        //     `handoff_code` are returned alongside it so the client still has
+        //     everything needed to redeem by other means.
+        // Defence in depth for the shell interpolation above. randomBytes(32)
+        // .toString('base64url') yields only [A-Za-z0-9_-], so this never fires
+        // today; it exists so that a change to mintEmitHandoff's encoding fails
+        // loudly HERE instead of turning this string into a command injection.
+        if (!/^[A-Za-z0-9_-]+$/.test(handoff.code)) {
+          throw createError({
+            statusCode: 500,
+            statusMessage: 'Internal error: emit handoff code is not shell-safe.',
+          })
+        }
+        // Same defence for the origin, which is also interpolated into the shell
+        // string below. It is derived from a pinned env var or a Front-Door-
+        // trusted forwarded host rather than from raw client input, so this
+        // should never fire; it exists so that a future loosening of that
+        // derivation fails HERE rather than becoming a command injection.
+        if (publicOrigin && !/^https?:\/\/[A-Za-z0-9._:[\]-]+$/.test(publicOrigin)) {
+          throw createError({
+            statusCode: 500,
+            statusMessage: 'Internal error: public origin is not shell-safe.',
+          })
+        }
+        // Passed as an sh positional ($2), never re-split or re-globbed, for the
+        // same reason the handoff code is.
+        const apiBaseArgs = publicOrigin ? ' --api-base "$2"' : ''
+        const apiBaseArgv = publicOrigin ? ` "${publicOrigin}"` : ''
         const redeemCommand =
           emitTool === 'copilot-cli'
-            ? `node "$HOME/.copilot/plugins/tokenscope/scripts/copilot-redeem.mjs" --handoff-code "${handoff.code}"`
+            ? `sh -c 's=$(ls -d "$HOME"/.copilot/installed-plugins/*/tokenscope-copilot/scripts/copilot-redeem.mjs 2>/dev/null | sort -V | tail -n1); ` +
+              `[ -n "$s" ] || { echo "tokenscope: copilot-redeem.mjs not found under ~/.copilot - install/enable the tokenscope plugin, then retry." >&2; exit 1; }; ` +
+              `exec node "$s" --handoff-code "$1"${apiBaseArgs}' tokenscope-redeem "${handoff.code}"${apiBaseArgv}`
             : `sh -c 's=$(ls -d "$HOME"/.claude/plugins/cache/*/tokenscope/*/scripts/claude-redeem.mjs 2>/dev/null | sort -V | tail -n1); ` +
               `[ -n "$s" ] || { echo "tokenscope: claude-redeem.mjs not found under ~/.claude/plugins/cache - install/enable the tokenscope plugin, then retry." >&2; exit 1; }; ` +
-              `exec node "$s" --handoff-code "$1"' tokenscope-redeem "${handoff.code}"`
+              `exec node "$s" --handoff-code "$1"${apiBaseArgs}' tokenscope-redeem "${handoff.code}"${apiBaseArgv}`
         return jsonResult({
           instance_id: instanceId,
           handoff_code: handoff.code,
@@ -417,7 +543,11 @@ export function createMcpServer(dbOverride?: Db): McpServer {
           expires_in: Math.floor(EMIT_HANDOFF_TTL_MS / 1000),
           tool: emitTool,
           redeem_command: redeemCommand,
-          note: `Run the local emit-redeem helper to finish provisioning — execute redeem_command in a shell (process→server, NOT through this chat). It redeems the handoff and writes the credential to disk itself. The durable emit credential is NOT returned here and must never be requested through this chat.`,
+          // The POSIX-shell caveat is named HERE, not just in redeem_command's
+          // source comment: an agent on a native-Windows install would otherwise
+          // see `sh` fail and have no way to know the fallback is already in
+          // this same payload.
+          note: `Run the local emit-redeem helper to finish provisioning — execute redeem_command in a shell (process→server, NOT through this chat). It redeems the handoff and writes the credential to disk itself. redeem_command needs a POSIX shell; if none is available (e.g. native Windows), instead run the plugin's ${emitTool === 'copilot-cli' ? 'copilot-redeem.mjs' : 'claude-redeem.mjs'} directly with --handoff-code <handoff_code>, or POST {handoff_code} to redeem_url from the local machine. The durable emit credential is NOT returned here and must never be requested through this chat.`,
         })
       }),
   )
@@ -473,7 +603,7 @@ export function createMcpServer(dbOverride?: Db): McpServer {
     'project',
     {
       description:
-        "Bind the current repo to a budget by writing a committed .tokenscope file (pick from your memberships — no need to know the exact slug)",
+        'Bind the current repo to a budget by writing a committed .tokenscope file (pick from your memberships — no need to know the exact slug)',
       argsSchema: {
         project: z
           .string()
@@ -488,7 +618,8 @@ export function createMcpServer(dbOverride?: Db): McpServer {
   server.registerPrompt(
     'usage',
     {
-      description: 'Show your month-to-date usage split per budget, plus unallocated and tagged spend',
+      description:
+        'Show your month-to-date usage split per budget, plus unallocated and tagged spend',
     },
     async () => makePromptMessages(SKILL_USAGE),
   )

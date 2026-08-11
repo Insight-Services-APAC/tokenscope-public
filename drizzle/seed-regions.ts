@@ -23,7 +23,7 @@
  */
 import { drizzle } from 'drizzle-orm/postgres-js'
 import { eq, sql } from 'drizzle-orm'
-import postgres from 'postgres'
+import { createDbClient } from './connect'
 import * as schema from './schema'
 
 // Canonical real regions — kept in lockstep with seedRealRegions() in seed.ts.
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
     console.error('DATABASE_URL not set')
     process.exit(1)
   }
-  const client = postgres(url, { max: 1, idle_timeout: 5 })
+  const client = createDbClient(url, { max: 1, idle_timeout: 5 })
   const db = drizzle(client, { schema })
 
   try {

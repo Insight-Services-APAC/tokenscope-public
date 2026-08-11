@@ -28,6 +28,7 @@ import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
 import { resolveEnterpriseCredential } from '../../../../../reconciliation/credentials'
 import { GithubCopilotClient } from '../../../../../reconciliation/adapters/github-client'
+import { GithubAppAuth } from '../../../../../reconciliation/adapters/github-app-auth'
 import { seatLicenseOrg } from '../../../../../reconciliation/adapters/github'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -81,9 +82,16 @@ export default defineEventHandler(async (event) => {
     }
 
     // 3. Read the seat roster → distinct license-orgs (lowercased, canonical per mig 0064).
+    //    S9: branch on the resolved credential kind exactly as the five correct sibling
+    //    call sites do (copilot-pool-bill.ts:593-594 is the model) — this was the SECOND
+    //    unbranched site that flattened credential.value and fed the GitHub App private
+    //    key to withPat as a Bearer token whenever the enterprise was App-mode.
     let orgs: string[]
     try {
-      const client = GithubCopilotClient.withPat(ent.external_id, credential.value)
+      const client =
+        credential.kind === 'github-app'
+          ? GithubCopilotClient.withApp(ent.external_id, new GithubAppAuth(credential.appId!, credential.value))
+          : GithubCopilotClient.withPat(ent.external_id, credential.value)
       const seats = await client.listSeats()
       const set = new Set<string>()
       for (const seat of seats) {

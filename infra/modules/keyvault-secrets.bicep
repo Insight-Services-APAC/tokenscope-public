@@ -171,7 +171,17 @@ resource secretDatabaseUrl 'Microsoft.KeyVault/vaults/secrets@2024-11-01' = if (
     // uriComponent() escapes special chars in the admin login (e.g. `@`,
     // `:`) so the resulting URL parses cleanly. Password is escaped too
     // — common-passwords like `P@ssw0rd!` otherwise break the URL.
-    value: 'postgresql://${uriComponent(pgAdminLogin)}:${uriComponent(pgAdminPassword)}@${pgServerFqdn}:5432/tokenscope?sslmode=require'
+    //
+    // sslmode=verify-full (not require): postgres@3.4.9 (connection.js:283-284)
+    // sets rejectUnauthorized=false ONLY for the literal strings
+    // require/allow/prefer — verify-full matches neither branch and falls
+    // through to Node's default rejectUnauthorized=true + hostname
+    // verification (tls.connect({socket, servername})). That is the entire
+    // fix: every connection was previously encrypted but never
+    // authenticating the server. No CA certificate needs shipping — Node
+    // 24's bundled store already carries the Azure roots (DigiCert Global
+    // Root G2, Microsoft RSA Root CA 2017). See drizzle/connect.ts.
+    value: 'postgresql://${uriComponent(pgAdminLogin)}:${uriComponent(pgAdminPassword)}@${pgServerFqdn}:5432/tokenscope?sslmode=verify-full'
   }
 }
 

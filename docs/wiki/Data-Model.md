@@ -231,10 +231,18 @@ invariant that one identifier maps to at most one teammate. Drizzle can't expres
 
 ### cou_owner
 
-Explicit cost-owning-unit ownership (mig 0048). The P&L owner is typically 2-3
-levels removed from developers in the org chart, so ownership is an explicit
-assignment, never derived from `LTREE` adjacency. 1..n owners per CoU; soft-revoke
-keeps history.
+Explicit cost-owning-unit ownership (mig 0048) — a **Business Unit owner**.
+Ownership is an explicit assignment, never derived from `LTREE` adjacency.
+`1..n` owners per CoU; soft-revoke keeps history.
+
+**At most one active BU per person.** Enforced by
+`POST /admin/org-units/{id}/owners`, which returns **409** naming the BU the
+teammate already owns, and serialises on the teammate so two concurrent grants
+cannot both succeed. There is no database constraint yet: existing data holds
+violations, and `GET /admin/diagnostics/multi-bu-owners` must report `clean`
+before a partial-unique index can be added. The rule matters beyond tidiness —
+the manager-chain placement walk treats an owner of more than one active
+cost-owning unit as ambiguous and places nobody through them.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -424,7 +432,8 @@ Indexes: `(instance_id)`; `(status, detected_at)`.
 The attribution domain (`drizzle/schema/attribution.ts`, `governance.ts` for
 rate cards / provider_org / provider_enterprise, `spend.ts`, `copilot-pool-bill.ts`;
 migrations 0001, 0004, 0009, 0011, 0017, 0020, 0021, 0035, 0036, 0038, 0045, 0046,
-0050, 0053, 0055, 0056, 0063, 0071, 0079, 0080) is the financial heart of the
+0050, 0053, 0055, 0056, 0063, 0071, 0079, 0080, 0094, 0118, 0120, 0121, 0122,
+0123) is the financial heart of the
 system: the immutable record of what was spent, on what, priced by which card. Token
 usage from the Anthropic Analytics API is ingested in parallel into `actual_spend`
 as an independent truth source.
@@ -438,7 +447,7 @@ The core ledger — one row per attributed cost event. Rows are frozen on write
 |---|---|---|
 | `id` | UUID | part of the composite PK `(id, ts_event)` — see below; `gen_random_uuid()` keeps `id` effectively unique on its own |
 | `instance_id` | UUID NOT NULL → instance_attestation | the attested instance (renamed from `session_id`, mig 0016) |
-| `claude_session_id` | TEXT | Claude's own `session.id` — the per-session unit that "Recent sessions" groups on and `session_assignment` assigns; nullable; added mig 0016 |
+| `claude_session_id` | TEXT | Claude's own `session.id` — the per-session unit the Activity list's session rows group on and `session_assignment` assigns; nullable; added mig 0016 |
 | `teammate_id` | UUID NOT NULL → teammate | |
 | `project_id` | UUID → project | **nullable** (mig 0021): a project-less row is unallocated spend (untagged, or tagged-only with no project budget). `region_id` / `org_unit_id` still describe the emitting teammate and stay NOT NULL |
 | `region_id` | UUID NOT NULL → region | |
@@ -461,6 +470,9 @@ The core ledger — one row per attributed cost event. Rows are frozen on write
 | `activity` | TEXT | orthogonal activity axis (mig 0020), denormalised from `session_assignment` for within-project activity rollups; nullable |
 | `query_source` | TEXT | Claude's per-event `query_source` (mig 0045): `main` or an auxiliary lane like `generate_session_title`; NULL = attr absent / pre-0045 (render as unknown, never assume `main`) |
 | `identity_state` | TEXT | identity provenance (mig 0057) stamped from the emitting instance's `instance_attestation.identity_state` so surfaces can exclude/label provisional usage; display-only, never gates money; NULL = pre-0057 (treat as `confirmed`) |
+| `emitting_email` | TEXT | canonicalised (trim + lower) Claude per-event `user.email` (mig 0119) — which **account** was signed in, as distinct from which device emitted (`instance_id`); the evidence for `billing_lane`; NULL = the emitter did not report one; redacted in place on erasure (`billing_lane` survives, stamped at write) |
+| `emitting_org_id` | TEXT | Claude per-event `organization.id` (mig 0119); hint and diagnostics only — never decides `billing_lane` |
+| `billing_lane` | TEXT NOT NULL = `unknown` | `provider-billed` / `self-billed` / `unknown` (CHECK, mig 0119); stamped **once** at join time from `emitting_email` against the teammate enterprise address set and never updated — the only permitted write is a backfill filling an `unknown`; `unknown` nets against the provider API exactly as an un-laned row did |
 | `metadata` | JSONB | per-tool extension (agent/plugin names, etc.) |
 
 **Partitioning & primary key.** `attribution_record` is monthly `RANGE`-partitioned
@@ -478,6 +490,44 @@ FK-references `attribution_record.id`, so the composite key breaks nothing.
 - `estimated` — modelled where no actual was available.
 - `telemetry-only` — indicative / unknown-org lanes; **excluded from
   reconciliation** (set by the Azure Monitor reader path).
+
+**`priced_per_lane`** — a DERIVED read-model field, not a column. The session
+drill-down (`GET /api/v1/me/sessions/{sid}`) ships it so a surface can tell
+"this lane cost nothing" apart from "this provider never quoted a per-lane
+price".
+
+Some providers do not price per token lane at all. A credit-priced lane (GitHub
+Copilot today) bills AI credits for the whole request, so span costing conserves
+that one figure by placing it on a single deterministic **carrier** token type
+and leaves the other lanes at `0`. Σ(lanes) is still exactly the span total —
+the money is right — but those zeros were never prices.
+
+- **Derivation:** `bool_and(rate_card_id IS NOT NULL)` over the session's rows,
+  and the field is `true` only when EVERY cell answers `true`
+  (`server/usage/breakdowns.ts::pricedPerLane`). The operand is whether **we
+  priced the span from a rate card**, never the provider's name: the card's
+  per-type lines are the only mechanism that splits a span's cost across token
+  lanes at all, so any future credit-priced lane inherits the answer with no
+  code change.
+- **Positive evidence is required.** An unknown — a reader that never carried the
+  fact, or an empty scope — is not a per-lane price. This was corrected in the
+  r6 fix pass: the previous operand, `bool_or(credit_qty IS NOT NULL)` inverted,
+  answered `true` for **all historical Copilot money**, because `credit_qty` was
+  added by migration 0038 with no backfill and reads NULL on every row written
+  before it. Those sessions rendered the carrier convention's structural zeros as
+  real `$0.00` lane prices — the exact defect this field exists to remove.
+- **Effect on the wire:** when it is `false`, every `by_token_type[].cost_usd`
+  and `matrix[].cost_usd` is **NULL** — "not priced per lane", never `0.00`. The
+  session's money is stated once, in the top-level `cost_usd`. `cache.savings_usd`
+  is also NULL, because it is derived by repricing cached tokens at the model's
+  effective input rate, which does not exist here. Token counts are measured on
+  every provider and are unaffected.
+- **Residual bound:** a span that DID have a card, but whose card could not slice
+  it (an unknown token type, or a card pricing the span at <= 0), also lands on a
+  carrier (`server/usage/span-costing.ts`) while still carrying a `rate_card_id`,
+  and no per-row marker records that — so such a span still reports `true`.
+  Narrowing it needs a new column. This is strictly smaller than the hole it
+  replaced: "no rate card at all" used to fall into it too, and no longer does.
 
 **Idempotency** is the load-bearing constraint here:
 
@@ -500,9 +550,10 @@ the hot RLS read path.
 
 ### attribution_aggregate
 
-Denormalised rollups for fast dashboards, written by a BullMQ rollup job (and
-recomputed on rate-card re-costing). `total_tokens` / `total_cost_usd` are
-plain columns set by the job, not generated columns.
+Denormalised rollups for fast dashboards, written by the `aggregate-rollup`
+registry worker (see [Background Workers](Background-Workers.md)) and recomputed
+on rate-card re-costing. `total_tokens` / `total_cost_usd` are plain columns set
+by the worker, not generated columns.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -692,9 +743,16 @@ longer collapse into (and inflate) the `claude-code` figure.
 | `cost_usd` | NUMERIC(14,6) NOT NULL | Anthropic's computed cost |
 | `source` | TEXT NOT NULL = `anthropic-analytics-api` | **per-org form** `anthropic-analytics-api:<externalOrgId>` so a teammate active in multiple reconciled orgs gets one row per org; legacy single-org fallback is the bare value |
 | `category` | TEXT | cost-category on the adapter staging row (mig 0038); NULL = legacy (treated as `model_tokens`) |
-| `chargeback_exempt` | BOOL NOT NULL = false | excluded from the chargeback view (`v_finance_bill_chargeback`) but NOT from showback (mig 0072); TRUE for NFR/exempt license-orgs, always false for Anthropic rows |
+| `chargeback_exempt` | BOOL NOT NULL = false | the **computed governance verdict** (`server/governance/verdict.ts` — the one gateway deciding chargeability from `provider_org` / `provider_enterprise` billing, or the legacy heuristic pre-activation; kept current for open periods by the `governance-recompute` worker). TRUE = excluded from the chargeback view (`v_finance_bill_chargeback`) but NOT from showback (mig 0072) |
 | `pulled_at` | TIMESTAMPTZ NOT NULL = now() | |
-| `raw_payload` | JSONB | the row as returned, for audit/reprocess |
+| `raw_payload` | JSONB | the row as returned, for audit/reprocess (also the source the `provider-transform` worker derives `provider_usage_fact` from) |
+| `region_id` / `org_unit_id` / `cost_owning_unit_id` | UUID → region / org_unit | historical-homing dimension snapshot (mig 0101): stamped at write/replay time and never updated on a later re-poll, so a teammate reorg cannot move a historical day's homing |
+| `dimension_source` | TEXT | `ingest-snapshot` (stamped at write) / `legacy-current-placement` (mig 0101's one-time backfill label for pre-existing rows) |
+| `provider_org_id` | UUID → provider_org | governance key (mig 0103); NULL = governance-unresolved — showback-visible, never chargeable; `ON DELETE SET NULL` |
+| `provider_enterprise_id` | UUID → provider_enterprise | governance key — GitHub billing lives on the enterprise (ADR-0011 D11); `ON DELETE SET NULL` |
+| `governance_key_status` | TEXT | backfill bookkeeping only (`resolved` / `unresolved`); NULL = not yet attempted |
+| `governance_verdict_locked_at` | TIMESTAMPTZ | set when a finance-period close/restate freezes this row's verdict; NULL = open |
+| `governance_verdict_source` | TEXT | provenance of the current `chargeback_exempt` value: `legacy-heuristic` / `governance:billed` / `governance:tracked` / `unresolved` |
 
 Constraint: `UNIQUE (teammate_id, date, tool, source)`
 (`actual_spend_teammate_date_tool_source_unique`) — the per-org `source` is what
@@ -706,19 +764,90 @@ Indexes: `(teammate_id, date)`, `(source, pulled_at)`.
 Two views consume this table on the two sides of the §A/§B line
 (`docs/design/provider-billing-attribution-model.md`):
 
-- **`v_teammate_usage_daily`** (mig 0073, redefined migs 0084 and 0086) — the §A
-  per-(teammate, day, tool) usage truth feeding the needs-tagging
-  reconciliation (mig 0086 adds the Copilot agent lane). Migration 0084 **excludes the non-Code Claude lanes**
-  (`claude-ai` … `claude-other`): those surfaces are §B chargeback-only —
-  no OTel telemetry, no sessions, deliberately untaggable — so their dollars
-  must never surface as taggable "unaccounted usage" records. The view's SQL
-  literals are pinned to `NON_CODE_CLAUDE_TOOLS` in `shared/usage/surface.ts`
-  by a unit test, since a SQL view cannot import TS.
+- **`v_teammate_usage_daily`** (mig 0073; current definition mig 0101, which
+  reverted mig 0084's non-Code exclusion) — the **complete** §A
+  per-(teammate, day, tool) usage truth: `claude-code` **and** the non-Code
+  Claude lanes (`claude-ai` … `claude-other`) from `actual_spend`, plus the
+  Copilot lanes (`copilot-cli` / `copilot-agent`, mig 0086) from
+  `reconciliation_record`. Worklist safety no longer lives in this view: the
+  tools that can never become taggable "unaccounted usage" records — no
+  sessions, no OTel — are excluded by the §A reconciliation itself via
+  `INGEST_ONLY_USAGE_TOOLS` (`shared/usage/surface.ts`), while staying visible
+  here for showback and velocity. The view also carries the historical-homing
+  dimension snapshot (mig 0101) so `v_complete_usage`'s ingest-only arm homes
+  usage as at the usage date.
 - **`v_finance_bill_chargeback`** (mig 0059, redefined migs 0081 and 0085) — the §B
   chargeback lane (mig 0085 splits out the Copilot chargeback lane). It always
   carried `tool` in its grain, so the split flows through unchanged; its consumers
   (finance/practice rollups, CSV export, the reporting UI) now group by `tool` to
   render each Claude surface as its own chargeback lane.
+
+### reconciliation_record
+
+The signed-delta reconciliation ledger (mig 0038) and the **§A usage truth for
+Copilot**. Grain: provider · enterprise · day · category · scope ·
+teammate-or-org — at most one OPEN row per key, with terminal rows accumulating
+beside it as history (see the index below).
+`attribution_record` stays the immutable OTel truth;
+corrections and provider-sourced additions land here as a signed `delta_usd`,
+and `v_effective_spend` (mig 0039) = attribution + applied deltas. Copilot lines
+are always `indicative` — this table is never a chargeback figure (that is
+`copilot_pool_bill`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | |
+| `teammate_id` | UUID → teammate | NULL on `scope='org'` rows (org-grain lines with no user) |
+| `provider` | TEXT NOT NULL | `anthropic` / `github` |
+| `enterprise_ref` | TEXT NOT NULL | Anthropic org id or GitHub enterprise slug |
+| `license_org` | TEXT | GitHub `seat.organization`; NULL for Anthropic |
+| `period_date` | DATE NOT NULL | UTC day grain |
+| `category` / `scope` | TEXT NOT NULL | cost category; `teammate` (default) or `org` |
+| `region_id` / `org_unit_id` / `cost_owning_unit_id` | UUID → region / org_unit | denormalised dimensions filled from the teammate at write, so `v_effective_spend` stays a clean union with `attribution_record` and the region clamp keeps working |
+| `project_id` / `activity` | UUID → project / TEXT | margin overlay — set on allocation, never gates the charge |
+| `actual_qty` / `actual_unit_type` | NUMERIC(20,6) / TEXT | reconcile in the native unit: `tokens` or `ai-credits` |
+| `actual_usd` / `otel_attributed_usd` / `delta_usd` | NUMERIC(14,6) NOT NULL | `delta_usd = actual_usd − otel_attributed_usd` |
+| `spend_class` | TEXT NOT NULL | `billed` / `estimated` / `indicative` |
+| `indicative_reason` | TEXT | `personal-subscription` / `nfr-demo` / `unknown-org` / `copilot-pre-billing` |
+| `disposition` | TEXT NOT NULL | `untagged` / `walk_back` / `matched` / `no_install` / `ingest_only` |
+| `status` | TEXT NOT NULL = `proposed` | `proposed` / `applied` / `rejected` / `superseded` |
+| `lag_state` | TEXT | `within_buffer` / `settled`; CHECK-restricted to `walk_back` rows |
+| `raw` | JSONB | the provider record as returned (see below) |
+| `computed_at` / `applied_at` | TIMESTAMPTZ | write time; state-transition time |
+| `audit_event_id` / `run_id` | UUID | NULL on the hourly `proposed` upsert; the `worker_run` that wrote the row |
+| `provider_org_id` / `provider_enterprise_id` / `governance_key_status` | UUID / TEXT | governance keys (mig 0103), same contract as `actual_spend`'s twin columns |
+
+Constraints and indexes:
+
+- `reconciliation_record_open_unique` — a **partial** unique index
+  `WHERE status = 'proposed'` over (provider, enterprise_ref, period_date,
+  category, scope, `COALESCE(teammate_id, '000…0')`). The hourly re-pull is
+  therefore idempotent while **terminal rows accumulate as history**:
+  supersession writes a NEW row rather than overwriting one, so any read must
+  select the effective row per logical key or a revised day double-counts.
+- `reconciliation_record_lag_state_ck` — `lag_state` only on `walk_back`.
+- Indexes `(teammate_id, period_date)` and `(status)`.
+- **No finance-close trigger** — the close guard is attached to `actual_spend`
+  alone, and there is no pruning path anywhere: rows here are durable.
+
+**What `raw` holds, and what reads it.** The GitHub adapter's record schema is
+`.passthrough()` and the adapter stores the whole record, so every field the
+metrics report sends survives verbatim. Declared on the schema
+(`server/reconciliation/adapters/github-client.ts`) and therefore typed rather
+than cast: `user_login`, `user_id`, `day`, `ai_credits_used`,
+`totals_by_model_feature[]`, `totals_by_cli.token_usage`, and the **engagement
+set** — `loc_added_sum`, `loc_deleted_sum`, `loc_suggested_to_add_sum`,
+`loc_suggested_to_delete_sum`, `code_generation_activity_count`,
+`code_acceptance_activity_count`, `user_initiated_interaction_count`,
+`totals_by_language_model[]` and `totals_by_language_feature[]`. All are
+nullish with no defaults and a `.catch` guard, so a shape surprise degrades that
+one dimension to absent and can never cost the record its `ai_credits_used`.
+Declaring them changed nothing at rest.
+
+`server/usage/copilot-engagement.ts` reads the engagement set **by key at
+request time** — a derived read, not a second store — for the My-usage
+engagement card, selecting the effective row per (teammate, day) with the same
+DISTINCT ON the §A usage view uses. Absent fields render as absent, never zero.
 
 ### copilot_pool_bill
 
@@ -744,6 +873,166 @@ cost-owning unit via the `provider_org` → CoU map. See
 | `unclassified_net_usd` | NUMERIC(14,6) NOT NULL = 0 | net of Copilot lines matching neither classifier (mig 0085); never chargeable; > 0 raises an alert |
 | `pulled_at` | TIMESTAMPTZ NOT NULL = now() | |
 | `raw_payload` | JSONB | |
+
+### provider_usage_fact
+
+The normalised provider lane (migrations 0118, 0120, 0121, 0122, 0127):
+per-(teammate, day, tool, **model**, cost_type, **context_window**) facts
+derived from the provider APIs' own captured payloads — the Anthropic arm by the hourly `provider-transform` worker
+from `actual_spend.raw_payload`, the GitHub arm by `provider-transform-github`
+from `reconciliation_record`. Only a provider API adapter writes it. It is what
+the billed/chargeback reporting axes (`server/reporting/engine/billed-axis.ts`),
+the behavioural-exposure card, and the provider-day detail drawer read, and it
+supplies the API-side per-model operand for the `unaccounted_usage_model`
+subtraction.
+
+**The measure means different things per provider** (mig 0120): `anthropic` rows
+carry **billed** cost (conserved against `actual_spend`); `github` rows carry
+gross AI-credit **consumption** valued at the credit rate (conserved against
+`reconciliation_record`, never against the pooled `copilot_pool_bill`).
+Discriminate on `provider` before summing `cost_usd`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | |
+| `raw_batch_id` | UUID | lineage to the raw capture batch; plain nullable uuid, **deliberately unreferenced** until `raw_provider_batch` (mig 0117, unmerged branch) lands |
+| `source` | TEXT NOT NULL | the ownership domain the transform's advisory lock + guarded prune key on: `anthropic-analytics-api[:<orgId>]` (mirrors `actual_spend.source`) or `copilot-consumption:<enterpriseRef>` |
+| `provider` | TEXT NOT NULL | `anthropic` / `github` — the measure discriminator |
+| `provider_org_id` / `provider_enterprise_id` | UUID → provider_org / provider_enterprise | governance keys |
+| `teammate_id` | UUID → teammate | **nullable** — an unresolved actor is carried, never dropped |
+| `actor_ref` | TEXT | the provider's own actor id (email / login); the grain-key identity for unresolved rows |
+| `date` | DATE NOT NULL | day grain |
+| `tool` | TEXT NOT NULL | surface lane (`claude-code`, `claude-ai`…, `copilot-cli`, `copilot-agent`) |
+| `model` | TEXT | the provider-reported model; NULL on grains the provider reports without one (all github money rows) |
+| `cost_type` | TEXT | NULL = the **token** row (four token lanes + `requests` + `web_search_requests`, never cost); non-NULL = a **cost** row (`tokens` / `web_search` / `code_execution` / …, carries `cost_usd`, never tokens). Pre-#226 payloads are stamped `tokens` by the transform |
+| `context_window` | TEXT | the provider-reported context-window band, verbatim (`0-200k` / `200k+` today — the vocabulary is the provider's to extend: no enum, no CHECK on values, only a blank-shape CHECK). A **grain dimension** on both token and cost rows since mig 0127 (`group_by` on both Anthropic reports). NULL = the capture predates collection (history older than the trailing 30-day poll window can never heal — raw stores only what `group_by` asked) or the wire has no such dimension (all github rows). Read surfaces type NULL as a reason-typed un-banded remainder, never as a band |
+| `region_id` / `org_unit_id` / `cost_owning_unit_id` | UUID → region / org_unit | historical-homing snapshot, stamped at INSERT and never refreshed (omitted from the upsert `SET` list, same discipline as `actual_spend`); NULL on unresolved rows |
+| `dimension_source` | TEXT NOT NULL = `ingest-snapshot` | how the homing was derived; NOT NULL even when the three ids are NULL |
+| `cost_usd` | NUMERIC(14,6) | provider-scoped meaning (see above); NULL on token rows |
+| `currency` | TEXT NOT NULL = `USD` | |
+| `input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_creation_tokens` | BIGINT | the four token lanes; NULL on cost rows |
+| `requests` | BIGINT | anthropic: the usage report's `requests` (token row); github: `user_initiated_interaction_count` on its MODEL rows — single-homed per arm so `SUM(requests)` never double-counts |
+| `web_search_requests` | BIGINT | Anthropic `server_tool_use.web_search_requests` (mig 0122); rides the token row, outside the measure CHECK like `requests`; NULL = field not carried (always so on github rows) |
+| `pulled_at` | TIMESTAMPTZ NOT NULL = now() | |
+| `data_refreshed_at` | TIMESTAMPTZ | the provider's own settle marker |
+
+Constraints and indexes:
+
+- **Grain unique index** (`provider_usage_fact_grain_uidx`, mig 0118; replaced
+  by mig 0127 to admit the `context_window` member) — the NULL-safe expression
+  key the upsert conflicts on:
+
+  ```sql
+  UNIQUE (source,
+          COALESCE(teammate_id::text, 'actor:' || lower(actor_ref)),
+          date, tool, COALESCE(model, ''), COALESCE(cost_type, ''),
+          COALESCE(context_window, ''))
+  ```
+
+  Every nullable member is COALESCEd (Postgres treats NULLs as distinct, so a
+  plain index over them would dedupe nothing), and the identity member keys
+  resolved rows on the teammate uuid and unresolved rows on the lower-cased
+  `actor_ref`. Resolving an actor therefore *changes* the key — resolution is a
+  fresh INSERT and the stale unresolved row is removed by the transform's
+  guarded prune.
+- `provider_usage_fact_identity_chk` — `teammate_id` or a non-blank `actor_ref`,
+  always.
+- `provider_usage_fact_measure_chk` — cost and token rows are **disjoint**: a
+  `cost_type IS NULL` row carries no `cost_usd`; a non-NULL `cost_type` row
+  carries no token lanes. This is what makes a single
+  `GROUP BY model` over both measures correct with no filter. `requests` and
+  `web_search_requests` are deliberately outside it.
+- `provider_usage_fact_shape_chk` (+ `provider_usage_fact_web_search_chk`,
+  mig 0122; `provider_usage_fact_context_window_shape_chk`, mig 0127) — no
+  blank `tool`/`model`/`cost_type`/`context_window`, no negative measures.
+- `provider_usage_fact_github_money_grain_chk` (mig 0120) — a `github` row never
+  carries both a `model` and a `cost_usd`: Copilot money is **day grain**
+  (the wire sends no per-model dollars), so the arm writes the day's money on a
+  `model IS NULL` row and the model dimension on separate activity rows.
+- Indexes: the grain uidx (leads on `source`, serving the transform's prune),
+  plus the partial `provider_usage_fact_teammate_date_tool_idx`
+  `(teammate_id, date, tool) WHERE teammate_id IS NOT NULL` (mig 0121) — the
+  by-key read the provider-day drawer and the residual-subtraction writer use,
+  aggregating **across sources** for one key.
+- `REVOKE ALL FROM PUBLIC` (mig 0118). Retention is unresolved pending #41
+  (de-facto permanent); the table is derived and rebuildable only while its
+  source payloads survive.
+
+### unaccounted_usage
+
+The §A residual — one taggable **provider-recorded day** per
+(teammate, day, tool): `max(0, API daily total − Σ OTel captured)`, recomputed
+by `server/usage/unaccounted-reconciliation.ts` (the 2-hourly
+`usage-reconciliation` worker) from `v_teammate_usage_daily` minus the
+corroborated-OTel operand (`server/usage/corroborated-otel.ts` — quarantine- and
+self-billed-excluded). Ingest-only tools (`INGEST_ONLY_USAGE_TOOLS`) are never
+written here — they surface through `v_complete_usage`'s arm 3 instead. The row
+is the unit of the needs-tagging worklist: one row, one tagging decision.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | |
+| `teammate_id` | UUID NOT NULL → teammate | |
+| `region_id` / `org_unit_id` | UUID → region / org_unit | denormalised from the teammate for RLS/rollups; currently refreshed on recompute (issue #44 tracks freezing them) |
+| `day` | DATE NOT NULL | the API's finest grain |
+| `tool` | TEXT NOT NULL | |
+| `cost_usd` | NUMERIC(14,6) NOT NULL | the reconciled delta, ≥ 0; recomputed every run |
+| `tokens` | BIGINT NOT NULL = 0 | same subtraction over the token lane |
+| `project_id` | UUID → project | the tag; NULL = needs tagging (membership-gated, same rule as sessions) |
+| `activity` | TEXT | the activity-axis tag |
+| `source` | TEXT NOT NULL = `api-reconciled` | |
+| `computed_at` | TIMESTAMPTZ NOT NULL = now() | |
+| `tagged_at` / `tagged_by` | TIMESTAMPTZ / UUID → teammate | |
+| `dismissed_at` | TIMESTAMPTZ | worklist state (mig 0094): the teammate decided to leave the day unallocated; the spend stays in every total |
+| `dismissed_cost_usd` | NUMERIC(14,6) | the delta at the moment of dismissal; a materially-grown day is handed back to the queue (`sweepStaleDismissals`) |
+| `model_gap_reason` | TEXT | why the row has no `unaccounted_usage_model` children (mig 0123), stamped by the writer on every recompute: `provider-day-grain` = only github money backs the key (Copilot sends no per-model dollars, mig 0120); `awaiting-provider-detail` = no cost-bearing provider facts have landed yet (transient — the fact lane refreshes hourly against this writer's 2-hour cadence); NULL = children exist, or there is nothing to explain |
+
+Constraints: **`UNIQUE (teammate_id, day, tool)`**
+(`unaccounted_usage_teammate_day_tool_unique`) — the upsert key; recompute
+updates amounts only and never touches `project_id` / `activity` / `tagged_*`
+(tag-preserving). **Tagged XOR dismissed**
+(`unaccounted_usage_tagged_xor_dismissed`, mig 0094, validated 0095):
+
+```sql
+CHECK (dismissed_at IS NULL OR (project_id IS NULL AND activity IS NULL))
+```
+
+a row carries tags or a dismissal, never both; tagging clears the dismissal.
+Indexes: `(teammate_id, day)`; partial `(project_id) WHERE project_id IS NOT NULL`.
+RLS enabled (owner / region / org-scope policies, mirroring
+`attribution_record`).
+
+Read by `v_complete_usage` arm 2, which fans each row out into its
+`unaccounted_usage_model` children plus one reason-typed NULL-model remainder
+(mig 0124); the day's full provider detail (model mix, token lanes, requests) is
+served by key from `provider_usage_fact` via `GET /api/v1/me/unaccounted/{id}`.
+
+### unaccounted_usage_model
+
+The per-model split of one `unaccounted_usage` fill row (mig 0123) — the stored
+residual subtraction `cap(GREATEST(0, API_model − OTel_model))`, computed per
+model from `provider_usage_fact` cost/token rows (across all sources for the
+key) against the per-model corroborated-OTel operand, then capped so a key's
+children never exceed its parent.
+
+| Column | Type | Notes |
+|---|---|---|
+| `unaccounted_usage_id` | UUID NOT NULL → unaccounted_usage **ON DELETE CASCADE** | |
+| `model` | TEXT NOT NULL | trimmed, case-preserved provider model string |
+| `cost_usd` | NUMERIC(14,6) NOT NULL, CHECK ≥ 0 | the capped per-model residual |
+| `tokens` | BIGINT NOT NULL = 0, CHECK ≥ 0 | the identical pipeline over the token lane, capped against `parent.tokens` |
+
+Primary key **`(unaccounted_usage_id, model)`**. Written **wholesale with the
+parent**: `unaccounted-reconciliation.ts` replaces every in-scope parent's
+children in the **same transaction** as the parent upsert, so
+`Σ children ≤ parent` holds at every read; the orphan paths clean children in
+the same transaction too (the undecided-orphan DELETE cascades through the FK,
+the decided-orphan zero-out deletes its parents' children in the same statement
+set). Children carry **no tagging columns** — the parent stays the one tagging
+decision, and they inherit its `project_id` through the view, so a tagged day's
+models flow to its project. The shortfall `parent − Σ children` is exposed by
+`v_complete_usage` (mig 0124) as one reason-typed NULL-model remainder row per
+key.
 
 ### spill_record
 
@@ -996,6 +1285,64 @@ means `standard` (fail-closed on upgrade). Enforcement lives in
 | `mode` | TEXT NOT NULL | one of the report-visibility modes (`mode IN (...)` CHECK in mig 0087) |
 | `updated_by` | UUID → teammate | |
 | `updated_at` | TIMESTAMPTZ NOT NULL = now() | |
+
+### model_catalog — and where a model's TIER is read
+
+`model_catalog` (mig 0046) is the one place a model is banded. `tier` is
+`NOT NULL CHECK (tier IN ('frontier','workhorse','lightweight','specialised'))`
+and the migration seeds it.
+
+**Resolution is a SUBSTRING match ordered by `sort_order ASC`, first match
+wins, and it happens in TypeScript — never as a SQL join.** `gpt-5-mini` matches
+both the `gpt-5-mini` pattern (lightweight) and the `gpt-5` pattern (frontier);
+an equijoin fans out and returns the same dollar once per matching pattern, so
+every band total — and the card headline above it — overstates the money.
+`resolveTier` (`server/usage/insights.ts`) resolves each model to exactly one
+tier before a dollar is added anywhere, so a fan-out is structurally impossible.
+
+**A model the catalogue does not know is `unclassified` — a band in its own
+right, never folded into the cheapest one.** Folding it would understate
+frontier exposure by exactly the spend nobody has classified yet, which is the
+spend most likely to be new and dear. The reader-facing words are Frontier /
+Mid / Economy / Specialised / Unclassified (`MODEL_TIER_LABELS`); the catalogue
+speaks capability, a cost-centre owner reads cost.
+
+**A NULL model is NOT `unclassified`.** "A model we have not classified" and
+"spend that never carried a model at all" are different facts. Surfaces that
+band per row omit NULL-model spend from the mix rather than assigning it a band
+it does not have, so such a mix describes the BANDED part of a row and nothing
+foots a total to it.
+
+Consumers: `reporting/engine/tier-exposure.ts` (the §B behavioural-exposure
+card), `usage/insights.ts` (the frontier-share detector) and the cost-centre
+drill's People hero (`fetchCostCentreTeammateTierMix` →
+`DriverRow.tierBreakdown`). All three read the same column through the same
+resolver, so they can never publish different frontier shares.
+
+### CostCentreSummary — the cost-centre KPI rollup
+
+`shared/reports/types.ts`, computed purely from the visible cards
+(`summariseCostCentres`) so it can never drift from the grid. The counts
+PARTITION the cards exactly, via the one shared classifier
+`costCentreBudgetState`:
+
+| Field | Meaning |
+|---|---|
+| `totalBurnUsd` / `totalAllocationUsd` | Σ over the visible cards |
+| `countOverBudget` | utilisation ≥ 1 |
+| `countNearBudget` | ≥ `CC_NEAR_BUDGET_THRESHOLD` (0.8) and < 1 |
+| `countOnTrack` | > 0 and < 0.8 |
+| `countNotStarted` | an allocation, and **nothing spent against it yet** |
+| `countNoAllocation` | no allocation at all (utilisation `null`) |
+| `asOfDate` | MAX(`ts_event`) across the visible cards |
+
+`countNotStarted` was split out of `countOnTrack`: "$0.00 of $500.00 · 0% ·
+On track" reads as a data failure to the one person who can act on it, when the
+truth is "nobody homed here emitted this period". The word is **`not-started`**
+everywhere — `useRagState.ts` and both prototypes already use it, and a second
+name for one fact is the divergence this model exists to prevent. Renderers key
+`Record<CostCentreBudgetState, …>` maps off the union, so adding a state is a
+compile error until every surface answers for it.
 
 ## Cross-cutting invariants
 

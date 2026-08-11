@@ -1,6 +1,6 @@
 ---
 description: Set up TokenScope on this device — connect + provision emitting (one OAuth consent; the durable credential is redeemed locally, never via chat)
-allowed-tools: mcp__tokenscope__provision_emit, mcp__tokenscope__my_usage, Bash(node:*)
+allowed-tools: mcp__tokenscope__provision_emit, mcp__tokenscope__my_usage, Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/claude-redeem.mjs":*)
 ---
 
 Connect Claude Code to TokenScope and turn on token attribution for this device.
@@ -23,7 +23,7 @@ Call the `my_usage` tool. If it returns data (or an empty-but-valid usage
 summary), auth is good. If it reports "Not authenticated", let the client
 complete the browser OAuth consent and retry.
 
-### 2. Read any existing device id (idempotency — SAME ENVIRONMENT ONLY)
+### 2. Read any existing device id (idempotency — SAME ENVIRONMENT **AND SAME TOOL** ONLY)
 
 Read the current `tokenscope.instance_id` if one exists, so re-running against the
 **same deployment** rotates the existing credential instead of minting a new one.
@@ -31,11 +31,20 @@ It lives in the `OTEL_RESOURCE_ATTRIBUTES` entry inside `~/.claude/settings.json
 (look for `tokenscope.instance_id=...`). No settings file or no instance id → treat
 as a fresh device.
 
+> **Only reuse this id when the attributes also say `tool=claude-code`, and only
+> for a `claude-code` provision.** Instances are per-**HOST** but bound to ONE emit
+> tool. On a machine also running Copilot CLI, never pass this id to a
+> `copilot-cli` provision, and never source a Claude id from
+> `~/.tokenscope/config.json` (that is Copilot's credential store). A cross-tool
+> re-provision revokes the other CLI's credential and **breaks its emitting** —
+> silently, since the affected CLI keeps running while emitting nothing. The server
+> refuses this with HTTP 409 before any rotation, but pass the right id, or none.
+
 **Re-provisioning against a DIFFERENT deployment? Do NOT reuse the old id.** When
 you are moving this device from one TokenScope deployment to another (Sandbox→Dev,
 later Dev→Production), **omit** the existing `instance_id` so a fresh instance is
 minted under the new environment — passing the old id would try to rotate an
-instance that belongs to the *other* deployment. Tell which environment you're on
+instance that belongs to the _other_ deployment. Tell which environment you're on
 two ways:
 
 - The **`(Env)` label** in the TokenScope status line (e.g. `… (Sandbox)` vs
@@ -51,17 +60,23 @@ old environment's credentials and endpoints are dropped rather than left at rest
 ### 3. Provision emitting
 
 Call the `provision_emit` tool, passing the existing `instance_id` from step 2
-**only for a same-environment re-run** (omit it for a fresh device *or* a
+**only for a same-environment re-run** (omit it for a fresh device _or_ a
 cross-environment move — see step 2). It does **not** return the durable emit
 secret. It returns a short-TTL (~5 minute) one-time **handoff code**, a
 per-instance **redeem URL**, and a short local-redeem instruction.
 
 ### 4. Redeem locally (process → process, NOT through this chat)
 
-Run the local redeem helper exactly as `provision_emit` instructs — the tool
-response is the authoritative command. It redeems the handoff code and writes
-`~/.claude/settings.json` itself. **Do not** ask for, print, or store the durable
-credential in this conversation.
+Run the local redeem helper, passing **only the handoff code** `provision_emit`
+returned — never `--redeem-url` or `--api-base` (the plugin's allowed-tools grant
+is scoped to this exact command; do not construct any other invocation):
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/claude-redeem.mjs" --handoff-code <code>
+```
+
+It redeems the handoff code and writes `~/.claude/settings.json` itself. **Do
+not** ask for, print, or store the durable credential in this conversation.
 
 ### 5. Confirm + restart
 
@@ -74,8 +89,8 @@ user:
 - **Restart `claude`** — telemetry config is read at startup, so relaunch for
   emission to begin.
 - **`/tokenscope:status` checks emit-AUTH health, not delivery.** It confirms the
-  emit credential can mint an ingest bearer (the emission path is *configured and
-  authorised*) — it does **not** prove any record physically landed. Ingest is
+  emit credential can mint an ingest bearer (the emission path is _configured and
+  authorised_) — it does **not** prove any record physically landed. Ingest is
   ~4–5 min downstream through Azure Monitor OTLP and is **not observable
   client-side**, so do not read a green status as "telemetry arrived".
 - **Confirm actual landing out-of-band.** After a few minutes of real usage, run
@@ -86,9 +101,9 @@ user:
 
 ## Troubleshooting
 
-| Problem | Solution |
-| --- | --- |
-| `my_usage` says "Not authenticated" | Let the MCP client finish the browser OAuth consent, then retry. |
-| `provision_emit` handoff expired before redeem | Handoff codes are ~5 min single-use — re-run `provision_emit` for a fresh one. |
+| Problem                                           | Solution                                                                                |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `my_usage` says "Not authenticated"               | Let the MCP client finish the browser OAuth consent, then retry.                        |
+| `provision_emit` handoff expired before redeem    | Handoff codes are ~5 min single-use — re-run `provision_emit` for a fresh one.          |
 | Redeem helper reports a network error (not a 401) | The local helper couldn't reach the server; check the plugin's API base / connectivity. |
-| Sessions still not emitting after redeem | Restart `claude` — the OTel env is read once at process start. |
+| Sessions still not emitting after redeem          | Restart `claude` — the OTel env is read once at process start.                          |

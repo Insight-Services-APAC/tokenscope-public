@@ -125,22 +125,32 @@ const consumptionTotalUsd = computed(() => {
 // projects they aren't personally assigned to). Lazy-loaded only when
 // the focused row has a project_id.
 const projectIdForConsumption = computed(() => data.value?.focused?.project_id ?? null)
-const { data: consumption } = await useFetch<{ total_cost_usd: string }>(
+// ONE LANE: this endpoint now returns the SAME figure the project page shows
+// (server/usage/complete-spend.ts). It used to be its own SUM over the raw
+// ledger, so "Manage budget →" walked a PM from one number to a different one
+// at the exact moment they decided whether to extend.
+const { data: consumption } = await useFetch<{
+  total_cost_usd: string
+  reconciled_cost_usd: string
+}>(
   () =>
     projectIdForConsumption.value
       ? `/api/v1/projects/${projectIdForConsumption.value}/consumption`
       : '',
   {
-    default: () => ({ total_cost_usd: '0.00' }),
+    default: () => ({ total_cost_usd: '0.00', reconciled_cost_usd: '0.00' }),
     immediate: !!projectIdForConsumption.value,
   },
 )
 const consumptionUsedUsd = computed(() => Number(consumption.value?.total_cost_usd ?? 0))
+const consumptionReconciledUsd = computed(() =>
+  Number(consumption.value?.reconciled_cost_usd ?? 0),
+)
 
 const crumbs = computed<Crumb[]>(() => {
   const focused = data.value?.focused
   const list: Crumb[] = [
-    { label: 'Reporting', to: '/reporting?scope=regional' },
+    { label: 'Reporting', to: '/reporting?scope=region' },
     { label: 'Allocations', to: '/allocations' },
   ]
   if (focused?.project_display_name) {
@@ -615,7 +625,11 @@ function humaniseEventType(eventType: string): string {
 
       <!-- RIGHT: context column (sticky) -->
       <div class="space-y-5 lg:sticky lg:top-6 self-start">
-        <ConsumptionCard :used-usd="consumptionUsedUsd" :total-usd="consumptionTotalUsd" />
+        <ConsumptionCard
+          :used-usd="consumptionUsedUsd"
+          :total-usd="consumptionTotalUsd"
+          :reconciled-usd="consumptionReconciledUsd"
+        />
 
         <UiCard data-testid="project-metadata">
           <div class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-3">

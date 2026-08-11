@@ -11,6 +11,7 @@ import {
   upnGlobToSqlLike,
   validateExclusionPattern,
 } from '../../server/utils/directory-exclusions'
+import { escapeLikeLiteral } from '../../server/utils/sql-like'
 
 describe('isExcludedUpn', () => {
   it('FAIL-OPEN: empty pattern list matches nothing', () => {
@@ -62,6 +63,29 @@ describe('upnGlobToSqlLike (DB-side match count)', () => {
     expect(upnGlobToSqlLike('*@contoso.onmicrosoft.com')).toBe('%@contoso.onmicrosoft.com')
     expect(upnGlobToSqlLike('svc_*@app.example.com')).toBe('svc\\_%@app.example.com') // _ escaped
     expect(upnGlobToSqlLike('a*b*c@x.io')).toBe('a%b%c@x.io')
+  })
+})
+
+describe('escapeLikeLiteral — the ILIKE search-term escaper the admin typeaheads bind (server/utils/sql-like.ts)', () => {
+  it('escapes a literal underscore so ILIKE cannot read it as a single-character wildcard', () => {
+    // Unescaped, `_` is a LIKE/ILIKE single-char wildcard: an ILIKE search for
+    // 'a_b' would ALSO match 'axb'. Escaped, the term is a literal — pair with
+    // `ESCAPE ${LIKE_ESCAPE}` bound as a parameter (never `ESCAPE '\'` written
+    // into the template — see sql-like.ts's header for that trap).
+    expect(escapeLikeLiteral('a_b')).toBe('a\\_b')
+    expect(escapeLikeLiteral('a_b')).not.toBe('axb')
+  })
+
+  it('escapes a literal percent so ILIKE cannot read it as a multi-character wildcard', () => {
+    expect(escapeLikeLiteral('100%done')).toBe('100\\%done')
+  })
+
+  it('escapes a literal backslash (the escape character itself)', () => {
+    expect(escapeLikeLiteral('a\\b')).toBe('a\\\\b')
+  })
+
+  it('leaves an ordinary search term untouched', () => {
+    expect(escapeLikeLiteral('jane.doe')).toBe('jane.doe')
   })
 })
 

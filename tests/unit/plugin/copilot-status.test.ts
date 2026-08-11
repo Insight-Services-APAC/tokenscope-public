@@ -17,7 +17,7 @@ import { describe, it, expect } from 'vitest'
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — mjs import resolved by Vitest
-const { interpretEmissionProbe, interpretLanded, parseNeedsTaggingCount, interpretAttribution, composeStatus } =
+const { interpretEmissionProbe, interpretLanded, parseNeedsTaggingCount, interpretAttribution, interpretManagedTelemetry, composeStatus } =
   await import('../../../copilot-plugin/scripts/status.mjs')
 
 describe('interpretEmissionProbe', () => {
@@ -260,5 +260,71 @@ describe('composeStatus', () => {
     expect(out.attributed).toBeNull()
     expect(out.attribution.state).toBe('unknown')
     expect(out.attribution.message).toMatch(/my_usage/)
+  })
+})
+
+describe('interpretManagedTelemetry (Workstream D §10.1)', () => {
+  it('hostile classification → hostile:true, names the source, never echoes a raw value', () => {
+    const v = interpretManagedTelemetry({ classification: 'hostile', source: 'file-based', checkedPaths: ['/etc/x'], serverManagedNote: 'note' })
+    expect(v.hostile).toBe(true)
+    expect(v.state).toBe('hostile')
+    expect(v.message).toMatch(/POLICY block, not a credential problem/)
+  })
+
+  it('benign classification → hostile:false', () => {
+    const v = interpretManagedTelemetry({ classification: 'benign', source: 'native-mdm', checkedPaths: [], serverManagedNote: 'note' })
+    expect(v.hostile).toBe(false)
+    expect(v.state).toBe('benign')
+  })
+
+  it('none classification → hostile:false, authoritative "no setting found"', () => {
+    const v = interpretManagedTelemetry({ classification: 'none', source: 'none', checkedPaths: ['/etc/x'], serverManagedNote: 'note' })
+    expect(v.hostile).toBe(false)
+    expect(v.state).toBe('none')
+  })
+
+  it('unknown classification → hostile:null (never true, never false — an honest "cannot confirm")', () => {
+    const v = interpretManagedTelemetry({ classification: 'unknown', source: 'unknown', checkedPaths: [], serverManagedNote: 'server-managed cannot be read here' })
+    expect(v.hostile).toBeNull()
+    expect(v.state).toBe('unknown')
+    expect(v.message).toMatch(/server-managed cannot be read here/)
+  })
+})
+
+describe('composeStatus — emission_healthy (credential-valid is NEVER emission-healthy when hostile)', () => {
+  const landed = { landed: true, state: 'landed', last_emission: '2026-06-22T08:14:03Z', message: 'landed' }
+
+  it('credential valid + no managed telemetry → emission_healthy true', () => {
+    const managedTelemetry = interpretManagedTelemetry({ classification: 'none', source: 'none', checkedPaths: [], serverManagedNote: '' })
+    const out = composeStatus({ probe: { emitting: true, probe_status: 200, message: 'ok' }, landed, sentinel: null, managedTelemetry })
+    expect(out.emitting).toBe(true)
+    expect(out.emission_healthy).toBe(true)
+  })
+
+  it('credential valid + HOSTILE managed telemetry → emission_healthy FALSE despite emitting:true (the core contract)', () => {
+    const managedTelemetry = interpretManagedTelemetry({ classification: 'hostile', source: 'file-based', checkedPaths: ['/etc/x'], serverManagedNote: '' })
+    const out = composeStatus({ probe: { emitting: true, probe_status: 200, message: 'ok' }, landed, sentinel: null, managedTelemetry })
+    expect(out.emitting).toBe(true) // the credential probe itself is unaffected
+    expect(out.emission_healthy).toBe(false) // but emission_healthy is NOT fooled
+    expect(out.managed_telemetry.state).toBe('hostile')
+  })
+
+  it('credential invalid → emission_healthy false regardless of managed telemetry', () => {
+    const managedTelemetry = interpretManagedTelemetry({ classification: 'none', source: 'none', checkedPaths: [], serverManagedNote: '' })
+    const out = composeStatus({ probe: { emitting: false, probe_status: 401, message: 'fail' }, landed, sentinel: null, managedTelemetry })
+    expect(out.emission_healthy).toBe(false)
+  })
+
+  it('managed telemetry UNKNOWN → emission_healthy still reflects the credential (unknown is not treated as hostile)', () => {
+    const managedTelemetry = interpretManagedTelemetry({ classification: 'unknown', source: 'unknown', checkedPaths: [], serverManagedNote: '' })
+    const out = composeStatus({ probe: { emitting: true, probe_status: 200, message: 'ok' }, landed, sentinel: null, managedTelemetry })
+    expect(out.emission_healthy).toBe(true)
+    expect(out.managed_telemetry.state).toBe('unknown')
+  })
+
+  it('omitting managedTelemetry entirely defaults to unknown — never silently "none"', () => {
+    const out = composeStatus({ probe: { emitting: true, probe_status: 200, message: 'ok' }, landed, sentinel: null })
+    expect(out.managed_telemetry.state).toBe('unknown')
+    expect(out.emission_healthy).toBe(true) // unknown ≠ hostile, so the credential signal still stands
   })
 })

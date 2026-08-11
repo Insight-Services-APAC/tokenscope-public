@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
-import { runAggregateRollup } from '../../../server/workers/aggregate-rollup'
+import { runAggregateRollup, DEFAULT_BACKFILL_DAYS } from '../../../server/workers/aggregate-rollup'
 import * as schema from '../../../drizzle/schema'
 
 let t: TestDb
@@ -17,7 +17,41 @@ let p1 = ''
 let t1 = ''
 let t2 = ''
 
-const DAY = '2026-05-10T12:00:00.000Z' // fixed past day, all rows here
+/*
+ * RELATIVE, and DERIVED — for the same reason in both halves.
+ *
+ * This was a fixed `2026-05-10` measured against a relative window: the
+ * worker's backfill horizon. On 2026-08-08 the seeded day aged out of that
+ * horizon, the worker correctly wrote nothing for it, and seven assertions here
+ * began reading "expected 29, got 0" — on every branch, for a reason none of
+ * them had changed. An absolute date measured against a relative window is a
+ * test with an expiry date on it.
+ *
+ * The seed day has to satisfy BOTH ends at once:
+ *   · OLDER than the freeze floor — the freeze-floor case below needs it
+ *     beneath the floor to prove such a day is not recomputed
+ *   · NEWER than the backfill horizon — or the default backfill never reaches it
+ *
+ * So it is the MIDPOINT of that band, computed from the worker's own exported
+ * constant rather than a copy of it. The first version of this fix hard-coded
+ * `90` here beside `DAY_AGE_DAYS = 45`; had the worker moved to 40, that guard
+ * would still have passed and this suite would still have failed with seven
+ * zeroes — a guard whose message claimed to watch the worker's defaults while
+ * watching two literals of its own. Import the horizon and the day re-centres
+ * itself; the guard below then genuinely fails when the band closes.
+ */
+const FREEZE_FLOOR_DAYS = 30
+const DAY_AGE_DAYS = Math.round((FREEZE_FLOOR_DAYS + DEFAULT_BACKFILL_DAYS) / 2)
+const DAY = new Date(Date.now() - DAY_AGE_DAYS * 86_400_000).toISOString()
+
+if (DAY_AGE_DAYS <= FREEZE_FLOOR_DAYS || DAY_AGE_DAYS >= DEFAULT_BACKFILL_DAYS) {
+  throw new Error(
+    `DAY_AGE_DAYS=${DAY_AGE_DAYS} must sit strictly between the ${FREEZE_FLOOR_DAYS}-day ` +
+      `freeze floor and the ${DEFAULT_BACKFILL_DAYS}-day backfill horizon ` +
+      `(aggregate-rollup.ts DEFAULT_BACKFILL_DAYS) — outside that band this suite fails ` +
+      `with zeroes for a reason that has nothing to do with the code under test.`,
+  )
+}
 
 interface Row {
   tm: string
@@ -174,14 +208,14 @@ describe('spend_rollup_daily — reconstructable persona views from the rollup a
   })
 
   it('freeze-floor — a day below the floor is NOT recomputed or erased (C2)', async () => {
-    // The seed day (DAY, ~38 days ago) is below a 30-day freeze floor. Add raw
-    // to it, then roll up WITH the floor: the cold cells must stay untouched —
-    // raw grows, the rollup does not (and is not wiped to empty).
+    // The seed day (DAY) sits mid-band, so it is below the freeze floor by
+    // construction. Add raw to it, then roll up WITH the floor: the cold cells
+    // must stay untouched — raw grows, the rollup does not (and is not wiped).
     await emit({ tm: t1, project: p1, tool: 'claude-code', model: 'opus', tokenType: 'output', cost: '7', basis: 'estimated', session: 's9', activity: 'coding' })
     const rawAfter = await t.client<{ v: string }[]>`SELECT round(sum(cost_usd),2)::text AS v FROM attribution_record`
     expect(num(rawAfter)).toBe(36) // 29 + 7
 
-    await runAggregateRollup(t.db, { freezeFloorDays: 30 })
+    await runAggregateRollup(t.db, { freezeFloorDays: FREEZE_FLOOR_DAYS })
 
     const roll = await t.client<{ v: string }[]>`SELECT round(sum(total_cost_usd),2)::text AS v FROM spend_rollup_daily`
     expect(num(roll)).toBe(29) // unchanged — the $7 below the floor was NOT folded in

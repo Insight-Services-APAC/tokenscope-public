@@ -14,10 +14,20 @@ import UiBadge from '../ui/Badge.vue'
 import { ragOf, ragLabel } from '../../composables/useRagState'
 import { fmtUsd } from '../../composables/useFormat'
 
-const props = defineProps<{
-  usedUsd: number
-  totalUsd: number
-}>()
+const props = withDefaults(
+  defineProps<{
+    usedUsd: number
+    totalUsd: number
+    /**
+     * The share of `usedUsd` that arrived through provider reconciliation
+     * rather than emitted telemetry. Same figure, same lane and same window as
+     * the project page's headline — shown so a PM deciding on a top-up can see
+     * where the number came from instead of assuming it is all telemetry.
+     */
+    reconciledUsd?: number
+  }>(),
+  { reconciledUsd: 0 },
+)
 
 const pct = computed(() => (props.totalUsd > 0 ? props.usedUsd / props.totalUsd : 0))
 const sev = computed(() => ragOf(pct.value))
@@ -51,6 +61,14 @@ const overByUsd = computed(() => Math.max(0, props.usedUsd - props.totalUsd))
     </div>
     <div class="text-xs text-carbon-2 mt-1" style="font-variant-numeric: tabular-nums">
       of {{ fmtUsd(totalUsd) }} ({{ Math.round(pct * 100) }}%)
+    </div>
+    <div
+      v-if="reconciledUsd > 0"
+      class="text-[11px] text-carbon-3 mt-1"
+      data-testid="consumption-reconciled-share"
+      title="Reconciled from provider usage rather than emitted telemetry — counted in full, and the same figure the project page shows."
+    >
+      incl. {{ fmtUsd(reconciledUsd) }} reconciled from provider usage
     </div>
     <UiPbar :pct="pct" size="lg" class="mt-4" />
     <div

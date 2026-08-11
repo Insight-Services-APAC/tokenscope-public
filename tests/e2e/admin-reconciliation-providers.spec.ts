@@ -34,6 +34,24 @@ test.describe('Admin reconciliation — providers onboarding', () => {
     // Header Add actions.
     await expect(page.locator('[data-testid="admin-recon-add-enterprise"]')).toBeVisible()
     await expect(page.locator('[data-testid="admin-recon-add-org"]')).toBeVisible()
+
+    // Coverage (Workstream D) — structural only, matching this spec's scope: the seed
+    // fixture DOES include github provider enterprises with no coverage observation
+    // persisted yet, so the banner renders in its "unknown" state. The contract under
+    // test is NOT "the banner is hidden" but "no false N-of-M completeness claim is
+    // ever printed" — assert the banner shows prose ("no completeness claim possible")
+    // and never a bare ratio like "0 of 0" / "0/0". Deeper coverage-state rendering
+    // (per-state badges, Recheck, live recompute) is pinned in the backend integration
+    // suite (tests/integration/admin/github-coverage-routes.test.ts) against real
+    // persisted data; this spec only proves the page wires the banner/columns without
+    // erroring and without ever fabricating a denominator.
+    const banner = page.locator('[data-testid="admin-recon-coverage-banner"]')
+    await expect(banner).toBeVisible()
+    await expect(banner).toContainText('no completeness claim possible')
+    const bannerText = await banner.innerText()
+    expect(bannerText).not.toMatch(/\b0\s*(of|\/)\s*0\b/i)
+    // The Coverage column cell renders the same "no denominator" contract per-row.
+    await expect(page.getByText('coverage unknown').first()).toBeVisible()
   })
 
   test('Add Org dialog: anthropic Discover affordance, github enterprise picker', async ({ page }) => {

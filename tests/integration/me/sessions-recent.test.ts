@@ -1,6 +1,11 @@
 // @vitest-environment node
 /*
- * Epic 11 /api/v1/me/sessions/recent — SQL-contract integration test.
+ * Session-grouping SQL contracts (Epic 11, migrations 0016/0017).
+ *
+ * The route these were written against (/me/sessions/recent) retired at §F4; the
+ * CONTRACTS did not — the conversation key, the per-conversation dedup and the
+ * per-conversation (not per-instance) untagged lane all still hold, and are now
+ * exercised through /me/activity. This file pins them at the SQL level.
  *
  * Validates the query the handler runs:
  *   - Most-recent instance_attestation rows for this user, capped by limit
@@ -108,7 +113,7 @@ afterAll(async () => {
   await stopTestDb(t)
 }, 30_000)
 
-describe('Epic 11 /me/sessions/recent SQL contract', () => {
+describe('per-teammate session listing SQL contract', () => {
   it('returns the user`s sessions ordered most-recent-first up to limit', async () => {
     const rows = await t.db.execute<{
       instance_id: string

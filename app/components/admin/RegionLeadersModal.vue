@@ -153,8 +153,19 @@ watch(
         <p v-if="error" class="text-xs text-rag-red mb-3" data-testid="region-leaders-error">{{ error }}</p>
 
         <label class="text-[12px] font-semibold text-carbon">Add a leader</label>
-        <p class="text-[11px] text-carbon-3 mt-1 mb-2">
-          Unplaced users whose manager chain reaches a leader are homed in that leader's region.
+        <!-- C8a: what this role does AND, just as importantly, what it does not.
+             A region leader looks like it should be enough to place people; it
+             never is, and an admin who does not know that concludes placement is
+             broken rather than unconfigured. -->
+        <p class="text-[11px] text-carbon-3 mt-1 mb-2 leading-relaxed">
+          Unplaced users whose manager chain reaches a leader are homed in that
+          leader's <strong>region</strong>.
+          <span class="block mt-1 text-carbon-2">
+            <span class="font-bold">Sets the region only. Does not place anyone into a
+            cost centre</span> — their spend still reaches the region and stops there. To
+            place people, assign a <em>cost-centre owner</em> on the Cost centres tab, or
+            place them directly from Teammates.
+          </span>
         </p>
         <div class="flex gap-2">
           <input

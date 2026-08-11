@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { generateKeyPairSync, createVerify, createPublicKey, type KeyObject } from 'node:crypto'
+import { consola } from 'consola'
 import { GithubAppAuth, decodePem, type FetchLike } from '../../../server/reconciliation/adapters/github-app-auth'
 
 const APP_ID = '1234567'
@@ -160,7 +161,7 @@ describe('GithubAppAuth installation-id resolution (DB-enumerated, not /app/inst
   })
 
   it('returns null for a 404 (App not installed) and for a suspended install', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const warn = vi.spyOn(consola, 'warn').mockImplementation(() => {})
     const notInstalled = new GithubAppAuth(APP_ID, base64Pem, (async () => jsonRes(404, {})) as FetchLike)
     expect(await notInstalled.orgInstallationId('no-install')).toBeNull()
 
@@ -189,6 +190,123 @@ describe('GithubAppAuth installation-id resolution (DB-enumerated, not /app/inst
     await auth.orgInstallationId('acme-corp')
     expect(fetchImpl).toHaveBeenCalledTimes(1)
     await auth.orgInstallationId('beta-team') // distinct cache key → one more lookup
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('GithubAppAuth.orgInstallationDetail / enterpriseInstallationDetail (Workstream D, rich detail)', () => {
+  it('not-found: a 404 detail, and the thin wrapper returns null', async () => {
+    const auth = new GithubAppAuth(APP_ID, base64Pem, (async () => jsonRes(404, {})) as FetchLike)
+    expect(await auth.orgInstallationDetail('gone-org')).toEqual({ status: 'not-found' })
+    expect(await auth.orgInstallationId('gone-org')).toBeNull()
+  })
+
+  it('suspended: detail carries the installationId + appId, and the thin wrapper returns null', async () => {
+    const auth = new GithubAppAuth(
+      APP_ID,
+      base64Pem,
+      (async () => jsonRes(200, { id: 7, app_id: Number(APP_ID), suspended_at: '2026-06-01T00:00:00Z' })) as FetchLike,
+    )
+    expect(await auth.orgInstallationDetail('susp-org')).toEqual({ status: 'suspended', installationId: 7, appId: Number(APP_ID) })
+    expect(await auth.orgInstallationId('susp-org')).toBeNull()
+  })
+
+  it('active: detail carries the installationId + appId, and the thin wrapper returns the id', async () => {
+    const auth = new GithubAppAuth(APP_ID, base64Pem, (async () => jsonRes(200, { id: 42, app_id: Number(APP_ID), suspended_at: null })) as FetchLike)
+    expect(await auth.orgInstallationDetail('ok-org')).toEqual({ status: 'active', installationId: 42, appId: Number(APP_ID) })
+    expect(await auth.orgInstallationId('ok-org')).toBe(42)
+  })
+
+  it('different-app: an installation exists but app_id differs from ours — detail says so, thin wrapper returns null (never mints against the wrong App)', async () => {
+    const warn = vi.spyOn(consola, 'warn').mockImplementation(() => {})
+    const otherAppId = Number(APP_ID) + 1
+    const auth = new GithubAppAuth(APP_ID, base64Pem, (async () => jsonRes(200, { id: 99, app_id: otherAppId, suspended_at: null })) as FetchLike)
+    expect(await auth.orgInstallationDetail('other-app-org')).toEqual({ status: 'different-app', installationId: 99, appId: otherAppId })
+    expect(await auth.orgInstallationId('other-app-org')).toBeNull()
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('an ABSENT app_id field is treated as active/trusting the endpoint scoping (defensive, never fabricates different-app)', async () => {
+    const auth = new GithubAppAuth(APP_ID, base64Pem, (async () => jsonRes(200, { id: 5, suspended_at: null })) as FetchLike)
+    expect(await auth.orgInstallationDetail('no-app-id-org')).toEqual({ status: 'active', installationId: 5, appId: null })
+  })
+
+  it('enterpriseInstallationDetail mirrors the same four-outcome discrimination', async () => {
+    const otherAppId = Number(APP_ID) + 1
+    const auth = new GithubAppAuth(APP_ID, base64Pem, (async () => jsonRes(200, { id: 3, app_id: otherAppId, suspended_at: null })) as FetchLike)
+    expect(await auth.enterpriseInstallationDetail('some-ent')).toEqual({ status: 'different-app', installationId: 3, appId: otherAppId })
+    expect(await auth.enterpriseInstallationId('some-ent')).toBeNull()
+  })
+
+  it('a genuine transport/upstream failure still THROWS from the rich method too (never folded into a discriminated state)', async () => {
+    const auth = new GithubAppAuth(APP_ID, base64Pem, (async () => jsonRes(500, {})) as FetchLike)
+    await expect(auth.orgInstallationDetail('boom-org')).rejects.toMatchObject({ statusCode: 502 })
+  })
+})
+
+describe('GithubAppAuth installation-detail cache — BOUNDED TTL, never indefinite (Workstream D)', () => {
+  it('caches a resolved detail for the configured TTL, then re-fetches', async () => {
+    let clock = 1_700_000_000_000
+    const fetchImpl = vi.fn(async () => jsonRes(200, { id: 1, app_id: Number(APP_ID), suspended_at: null }))
+    // 5th positional ctor arg is the TTL (ms) — 60_000 here for a deterministic boundary.
+    const auth = new GithubAppAuth(APP_ID, base64Pem, fetchImpl as unknown as FetchLike, () => clock, 60_000)
+    await auth.orgInstallationDetail('ttl-org')
+    await auth.orgInstallationDetail('ttl-org')
+    expect(fetchImpl).toHaveBeenCalledTimes(1) // within TTL — cached
+
+    clock += 61_000 // past the 60s TTL
+    await auth.orgInstallationDetail('ttl-org')
+    expect(fetchImpl).toHaveBeenCalledTimes(2) // TTL expired — re-fetched, never cached forever
+  })
+
+  it('a transient failure NEVER caches as success, and SUPPRESSES any prior cached success for the same key', async () => {
+    let clock = 1_700_000_000_000
+    let shouldFail = false
+    const fetchImpl = vi.fn(async () => {
+      if (shouldFail) throw Object.assign(new Error('network blip'), { code: 'ECONNRESET' })
+      return jsonRes(200, { id: 1, app_id: Number(APP_ID), suspended_at: null })
+    })
+    // A short TTL so the SECOND call's fetch attempt genuinely happens (a cache hit
+    // would never even call fetchImpl, which is the whole point of the bound — see
+    // the "default TTL is bounded" test below for the complementary "not forever" case).
+    const auth = new GithubAppAuth(APP_ID, base64Pem, fetchImpl as unknown as FetchLike, () => clock, 1_000)
+    const first = await auth.orgInstallationDetail('flaky-org')
+    expect(first).toEqual({ status: 'active', installationId: 1, appId: Number(APP_ID) })
+
+    clock += 1_001 // past the 1s TTL — the next call genuinely re-fetches
+    shouldFail = true
+    await expect(auth.orgInstallationDetail('flaky-org')).rejects.toThrow(/network blip|ECONNRESET|Bad Gateway/i)
+
+    // The NEXT call must NOT silently reuse the stale success from BEFORE the
+    // failure — a current failure suppresses it, even though the failed attempt's
+    // own TTL window has not elapsed. Recovering the fetch proves the cache was
+    // actually cleared by the failure, not merely coincidentally re-fetched.
+    shouldFail = false
+    const third = await auth.orgInstallationDetail('flaky-org')
+    expect(third).toEqual({ status: 'active', installationId: 1, appId: Number(APP_ID) })
+    expect(fetchImpl).toHaveBeenCalledTimes(3) // 1 (success) + 1 (failure) + 1 (recovered) — never served stale
+  })
+
+  it('clearInstallationDetailCache() forces a fresh probe on the next call regardless of TTL', async () => {
+    const fetchImpl = vi.fn(async () => jsonRes(200, { id: 1, app_id: Number(APP_ID), suspended_at: null }))
+    const auth = new GithubAppAuth(APP_ID, base64Pem, fetchImpl as unknown as FetchLike, () => Date.now(), 60 * 60_000)
+    await auth.orgInstallationDetail('cleared-org')
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    auth.clearInstallationDetailCache()
+    await auth.orgInstallationDetail('cleared-org')
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  it('the default TTL is bounded (short), not "forever" — a fresh instance with the real default re-fetches once the real clock advances far enough', async () => {
+    // Uses the REAL default TTL (no override) with an injected clock to prove it is a
+    // FINITE bound, not accidentally Infinity/unbounded.
+    let clock = 1_700_000_000_000
+    const fetchImpl = vi.fn(async () => jsonRes(200, { id: 1, app_id: Number(APP_ID), suspended_at: null }))
+    const auth = new GithubAppAuth(APP_ID, base64Pem, fetchImpl as unknown as FetchLike, () => clock)
+    await auth.orgInstallationDetail('default-ttl-org')
+    clock += 24 * 60 * 60_000 // +24h — comfortably past any sane "short bounded TTL"
+    await auth.orgInstallationDetail('default-ttl-org')
     expect(fetchImpl).toHaveBeenCalledTimes(2)
   })
 })

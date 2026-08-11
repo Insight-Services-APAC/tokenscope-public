@@ -42,7 +42,7 @@ test.describe('Persona menu', () => {
     // Admin lands on the Overview launcher (h1 "Overview").
     await expect(page.locator('h1')).toContainText('Overview')
     await switchPersonaViaMenu(page, 'finance')
-    await expect(page.locator('h1')).toContainText('Month-end cross-charge')
+    await expect(page.locator('h1')).toContainText('Reporting')
   })
 
   test('sign out clears the session and redirects to /login', async ({ page }) => {

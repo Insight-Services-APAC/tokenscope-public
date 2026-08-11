@@ -13,7 +13,7 @@ import listHandler from '../../../server/api/v1/admin/directory-exclusions/index
 import addHandler from '../../../server/api/v1/admin/directory-exclusions/index.post'
 import delHandler from '../../../server/api/v1/admin/directory-exclusions/[id].delete'
 import searchHandler from '../../../server/api/v1/admin/directory/search.get'
-import { loadDirectoryExclusionPatterns } from '../../../server/utils/directory-exclusions'
+import { isExcludedUpn, loadDirectoryExclusionPatterns } from '../../../server/utils/directory-exclusions'
 
 let t: TestDb
 let regionId = ''
@@ -89,6 +89,45 @@ describe('admin directory-exclusions CRUD', () => {
       VALUES ('cld-1', 'someone-cld@contoso.onmicrosoft.com', 'X', ${regionId}::uuid, ${unitId}::uuid, 'developer', 'directory')`
     const added = (await addHandler(ev({ session: finops(), body: { pattern: '*@contoso.onmicrosoft.com' } }))) as { matched_existing_count: number }
     expect(added.matched_existing_count).toBe(1)
+  })
+
+  it('the ESCAPE-as-template-literal bug: an underscore pattern still matches its literal target (matched_existing_count agrees with isExcludedUpn over the same roster)', async () => {
+    /*
+     * Regression pin for the `ESCAPE '\'`-as-a-template-literal collapse
+     * (server/utils/sql-like.ts): written as a literal inside the SQL template,
+     * `ESCAPE '\'` becomes `ESCAPE ''` before Postgres ever sees it, which
+     * DISABLES escape processing entirely — a backslash in the LIKE body then
+     * means a literal backslash character, not "the next character is
+     * literal". upnGlobToSqlLike('*_svc@example.com') produces the body
+     * `%\_svc@example.com`: with escaping enabled that reads "ends with a
+     * literal underscore, svc@example.com"; with it disabled it reads "ends
+     * with an actual backslash character, underscore, svc@example.com" — which
+     * NO real email contains, so the broken form silently reports 0 instead
+     * of 1. This is the SAME "preview reports 0, admin approves blind"
+     * failure the story's Must-not-break section warns about, reached via a
+     * different route (an inert escape instead of a double escape).
+     */
+    await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, role, source)
+      VALUES
+        ('svc-underscore', 'build_svc@example.com', 'Build Svc', ${regionId}::uuid, ${unitId}::uuid, 'developer', 'directory'),
+        ('svc-x-not-underscore', 'buildXsvc@example.com', 'Build X Svc', ${regionId}::uuid, ${unitId}::uuid, 'developer', 'directory')`
+    const pattern = '*_svc@example.com'
+    const added = (await addHandler(ev({ session: finops(), body: { pattern } }))) as { matched_existing_count: number }
+
+    // The literal underscore must match ONLY build_svc@example.com. A broken
+    // ESCAPE clause reports 0 (see above) — buildXsvc@example.com never
+    // matches either way, so this assertion alone pins the regression.
+    expect(added.matched_existing_count).toBe(1)
+
+    // Preview (DB-side LIKE) and enforcement (isExcludedUpn / upnGlobToRegExp,
+    // in-process) must AGREE over the identical roster — the "Must not break"
+    // invariant: the retro-cleanup worker consumes isExcludedUpn, not the LIKE
+    // path, so a desync here means the preview lied about what the worker will
+    // actually do.
+    const roster = ['build_svc@example.com', 'buildXsvc@example.com']
+    const enforcementCount = roster.filter((upn) => isExcludedUpn(upn, [pattern])).length
+    expect(enforcementCount).toBe(1)
+    expect(added.matched_existing_count).toBe(enforcementCount)
   })
 })
 

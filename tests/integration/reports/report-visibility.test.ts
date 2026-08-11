@@ -27,16 +27,19 @@ import {
 } from '../../../shared/auth/report-visibility'
 import type { Session } from '../../../server/utils/auth'
 
-import acrossIndex from '../../../server/api/v1/reports/across-regions/index.get'
-import acrossDrivers from '../../../server/api/v1/reports/across-regions/drivers.get'
-import acrossTrend from '../../../server/api/v1/reports/across-regions/trend.get'
-import acrossActiveTrend from '../../../server/api/v1/reports/across-regions/active-trend.get'
-import acrossSeasonality from '../../../server/api/v1/reports/across-regions/seasonality.get'
+import regionIndex from '../../../server/api/v1/reports/region/index.get'
+import acrossDrivers from '../../../server/api/v1/reports/region/drivers.get'
+import acrossTrend from '../../../server/api/v1/reports/region/trend.get'
+import acrossActiveTrend from '../../../server/api/v1/reports/region/active-trend.get'
+import acrossSeasonality from '../../../server/api/v1/reports/region/seasonality.get'
 import financeIndex from '../../../server/api/v1/reports/finance/index.get'
 import financeCou from '../../../server/api/v1/reports/finance/[couId].get'
 import reportsExport from '../../../server/api/v1/reports/export.get'
 import velocity from '../../../server/api/v1/rollups/practice/[ouId]/velocity.get'
-import regionalIndex from '../../../server/api/v1/reports/regional/index.get'
+import costCentresIndex from '../../../server/api/v1/reports/cost-centres/index.get'
+import teammateDrill from '../../../server/api/v1/reports/teammate/[id]/index.get'
+import teammateDrillExport from '../../../server/api/v1/reports/teammate/[id]/export.get'
+import projectDepth from '../../../server/api/v1/reports/project/[code].get'
 
 let t: TestDb
 let regionA = ''
@@ -45,6 +48,8 @@ let couA = '' // cost-owning unit, region A
 let couB = '' // cost-owning unit, region B
 let adminId = ''
 let ownerId = '' // developer WITH an active cou_owner row on couA
+let plainDevId = '' // developer with NO cou_owner row (S3 part d)
+let subjectId = '' // a teammate with in-scope spend — the drill's SUBJECT
 
 const ev = (session: Session, query = '', params: Record<string, string> = {}) => {
   const url = '/x' + (query ? `?${query}` : '')
@@ -59,13 +64,24 @@ const ev = (session: Session, query = '', params: Record<string, string> = {}) =
     },
   }
   injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], session)
-  return e as unknown as Parameters<typeof acrossIndex>[0]
+  return e as unknown as Parameters<typeof regionIndex>[0]
 }
+/*
+ * The WHOLE-COMPANY width of the merged `/reports/region*` family (was the
+ * separate `/reports/across-regions*` routes). `region=all` is not an optional
+ * extra here - it is what selects the unclamped engine scope, so every call that
+ * used to reach an across route reaches it through this.
+ */
+const evAll = (session: Session, query = '', params: Record<string, string> = {}) =>
+  ev(session, query ? `${query}&region=all` : 'region=all', params)
+
 
 const adminSess = (): Session =>
   ({ teammateId: adminId, email: 'admin@a.test', displayName: 'A', role: 'admin', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
 const ownerSess = (): Session =>
   ({ teammateId: ownerId, email: 'owner@a.test', displayName: 'O', role: 'developer', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
+const plainDevSess = (): Session =>
+  ({ teammateId: plainDevId, email: 'plaindev@a.test', displayName: 'PD', role: 'developer', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
 
 async function setMode(mode: ReportVisibilityMode | null): Promise<void> {
   await t.client`DELETE FROM report_visibility_setting`
@@ -104,11 +120,29 @@ beforeAll(async () => {
   }
   adminId = await mkTeammate(regionA, couA, 'admin@a.test', 'admin')
   ownerId = await mkTeammate(regionA, couA, 'owner@a.test', 'developer')
+  plainDevId = await mkTeammate(regionA, couA, 'plaindev@a.test', 'developer') // S3 part (d): no cou_owner row
   const billerA = await mkTeammate(regionA, couA, 'billa@a.test', 'developer')
   const billerB = await mkTeammate(regionB, couB, 'billb@b.test', 'developer')
 
   // Active ownership → the developer 'owner' is a cost-centre owner of couA.
   await t.client`INSERT INTO cou_owner (org_unit_id, teammate_id) VALUES (${couA}::uuid, ${ownerId}::uuid)`
+
+  // A SUBJECT with in-scope spend, so the teammate drill's emit-time gate has
+  // something real to admit (its OTHER conjuncts are pinned in teammate-drill.test.ts;
+  // here the question is only per-endpoint ADMISSION).
+  subjectId = await mkTeammate(regionA, couA, 'subject@a.test', 'developer')
+  await t.client`INSERT INTO project (code, code_hash, display_name, type, region_id, cost_owning_unit_id)
+    VALUES ('RV-PROJ', 'hash-rv', 'RV Project', 'billable', ${regionA}::uuid, ${couA}::uuid)`
+  const [proj] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM project WHERE code='RV-PROJ'`
+  await t.client`INSERT INTO project_assignment (project_id, teammate_id, role, effective)
+    VALUES (${proj!.id}::uuid, ${subjectId}::uuid, 'member', tstzrange('2020-01-01', NULL, '[)'))`
+  await t.client`INSERT INTO instance_attestation (instance_id, principal_oid, teammate_id, tool, region_id, org_unit_id, project_code_hash, raw_project_code)
+    VALUES (gen_random_uuid(), 'p', ${subjectId}::uuid, 'claude-code', ${regionA}::uuid, ${couA}::uuid, 'h', 'P')`
+  const [inst] = await t.client<{ id: string }[]>`SELECT instance_id::text AS id FROM instance_attestation WHERE teammate_id=${subjectId}::uuid LIMIT 1`
+  await t.client`INSERT INTO attribution_record
+      (instance_id, teammate_id, region_id, org_unit_id, cost_owning_unit_id, project_id, tool, model, token_type, tokens, cost_usd, fidelity_tier, cost_basis, ts_event, claude_session_id)
+    VALUES (${inst!.id}::uuid, ${subjectId}::uuid, ${regionA}::uuid, ${couA}::uuid, ${couA}::uuid, ${proj!.id}::uuid,
+            'claude-code', 'claude-sonnet-4-6', 'input', 1000, 42, 'tier-1', 'estimated', '2026-07-05T00:00:00Z'::timestamptz, 'conv-rv')`
 
   // A July bill per region so the finance surfaces have real bill rows to read
   // (billerA → couA/region A; billerB → couB/region B).
@@ -149,11 +183,11 @@ describe('across-regions ×5 + /reports/finance ×3 — 200/403 vs reportGrants'
         await setMode(mode === 'standard' ? null : mode)
         const q = 'month=2026-07'
         const calls = [
-          () => acrossIndex(ev(sess(), q)),
-          () => acrossDrivers(ev(sess(), q)),
-          () => acrossTrend(ev(sess(), q)),
-          () => acrossActiveTrend(ev(sess(), q)),
-          () => acrossSeasonality(ev(sess(), q)),
+          () => regionIndex(evAll(sess(), q)),
+          () => acrossDrivers(evAll(sess(), q)),
+          () => acrossTrend(evAll(sess(), q)),
+          () => acrossActiveTrend(evAll(sess(), q)),
+          () => acrossSeasonality(evAll(sess(), q)),
         ]
         for (const call of calls) await (exp.across ? ok(call()) : forbidden(call()))
       })
@@ -171,24 +205,112 @@ describe('across-regions ×5 + /reports/finance ×3 — 200/403 vs reportGrants'
   }
 })
 
-describe('sg-M4: every deny on across + /reports/finance is audited', () => {
+/*
+ * ── T30: the TWO W4 endpoints join the per-literal 200/403 suite ────────────
+ *
+ * The teammate drill and the project reports depth are the first surfaces that
+ * name an INDIVIDUAL and admit a NON-MEMBER, so "which endpoints does the grants
+ * model reach" has to include them by literal route — that is the enforcement
+ * proof the import-boundary claim actually rests on (report-scope.ts:6-8).
+ *
+ * The expectation is derived from the SAME grant columns the admin preview
+ * renders: `teammate: 'people-scope'` and `project` ≠ 'membership'. A plain
+ * developer holds neither in ANY mode; an owner and an admin hold both.
+ */
+describe('T30 — /reports/teammate/{id} + /reports/project/{code} × mode × persona', () => {
+  for (const mode of REPORT_VISIBILITY_MODES) {
+    it(`${mode}: a cost-centre OWNER is admitted to both new depths`, async () => {
+      await setMode(mode === 'standard' ? null : mode)
+      await ok(teammateDrill(ev(ownerSess(), `src=cc:${couA}&month=2026-07`, { id: subjectId })))
+      await ok(teammateDrillExport(ev(ownerSess(), `src=cc:${couA}&month=2026-07`, { id: subjectId })))
+      await ok(projectDepth(ev(ownerSess(), 'month=2026-07', { code: 'RV-PROJ' })))
+    })
+
+    it(`${mode}: a REGION ADMIN is admitted to both new depths`, async () => {
+      await setMode(mode === 'standard' ? null : mode)
+      await ok(teammateDrill(ev(adminSess(), `src=cc:${couA}&month=2026-07`, { id: subjectId })))
+      await ok(projectDepth(ev(adminSess(), 'month=2026-07', { code: 'RV-PROJ' })))
+    })
+
+    it(`${mode}: a PLAIN DEVELOPER is 403 on both — in every mode`, async () => {
+      await setMode(mode === 'standard' ? null : mode)
+      await forbidden(teammateDrill(ev(plainDevSess(), `src=cc:${couA}&month=2026-07`, { id: subjectId })))
+      await forbidden(teammateDrillExport(ev(plainDevSess(), `src=cc:${couA}&month=2026-07`, { id: subjectId })))
+      await forbidden(projectDepth(ev(plainDevSess(), 'month=2026-07', { code: 'RV-PROJ' })))
+    })
+  }
+
+  it('the drill is 403 for a subject in ANOTHER region’s cost centre, in every mode', async () => {
+    for (const mode of REPORT_VISIBILITY_MODES) {
+      await setMode(mode === 'standard' ? null : mode)
+      // couB is region B: the owner's frame does not resolve, so the 403 comes
+      // from the FRAME (D33) before the subject is ever read.
+      await forbidden(teammateDrill(ev(ownerSess(), `src=cc:${couB}&month=2026-07`, { id: subjectId })))
+    }
+  })
+})
+
+/*
+ * sg-M4 survives the merge, restated on the WIDTH.
+ *
+ * The rule was never "audit the across scope" — it was "audit every deny of an
+ * answer that has no in-query clamp behind it, because the audit row is the only
+ * record such an attempt ever leaves". `across` was one such answer; after the merge
+ * it is the `all-regions` WIDTH of `region`. Auditing on the scope name alone would
+ * now either audit every Region deny (noise that buries the real ones) or none of
+ * them (the escalation attempt goes unrecorded).
+ */
+describe('sg-M4: every deny of an UNCLAMPED answer (region=all + /reports/finance) is audited', () => {
   it('a real-teammate deny writes a report-scope-denied audit (survives the 403 rollback)', async () => {
-    await setMode(null) // standard → owner (developer) is denied across + finance
-    await forbidden(acrossIndex(ev(ownerSess(), 'month=2026-07')))
+    await setMode(null) // standard → owner (developer) is denied region=all + finance
+    await forbidden(regionIndex(evAll(ownerSess(), 'month=2026-07')))
     await forbidden(financeIndex(ev(ownerSess(), 'month=2026-06')))
     // audit_event is append-only, so we assert existence (never clear). The deny is
     // written on a SEPARATE connection, so it survives the 403's request-tx rollback.
-    const rows = await t.client<{ actor_teammate_id: string; payload: { scope: string } }[]>`
+    const rows = await t.client<
+      { actor_teammate_id: string; payload: { scope: string; width?: string } }[]
+    >`
       SELECT actor_teammate_id::text AS actor_teammate_id, payload
       FROM audit_event
       WHERE event_type = 'report-scope-denied' AND actor_teammate_id = ${ownerId}::uuid`
-    const scopes = rows.map((r) => r.payload.scope)
-    expect(scopes).toContain('across')
-    expect(scopes).toContain('finance')
+    // The whole-company Region deny is recorded WITH its width.
+    expect(rows.some((r) => r.payload.scope === 'region' && r.payload.width === 'all-regions')).toBe(
+      true,
+    )
+    expect(rows.map((r) => r.payload.scope)).toContain('finance')
+  })
+
+  it('the SAME caller denied region=all is still SERVED one region — never stranded', async () => {
+    /*
+     * The acceptance criterion the merge exists to protect, in integration form.
+     * Deleting the Across tab is only safe if `across: false` still resolves to a
+     * width. Gating the whole Region scope on `across` — the easy mistake, since one
+     * scope name now covers both answers — would 403 this call and write a
+     * `width=region` deny row, and both halves of that go red here.
+     */
+    await setMode(null) // standard → this developer holds `regional`, not `across`
+    const before = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM audit_event
+      WHERE event_type = 'report-scope-denied' AND payload->>'width' = 'region'`
+
+    const served = (await regionIndex(ev(ownerSess(), 'month=2026-07'))) as unknown as {
+      width: string
+      region: { id: string } | null
+      allRegionsAvailable: boolean
+    }
+    expect(served.width).toBe('region')
+    expect(served.region).not.toBeNull()
+    // …and the selector honestly reports that the wider width is NOT theirs.
+    expect(served.allRegionsAvailable).toBe(false)
+
+    const after = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM audit_event
+      WHERE event_type = 'report-scope-denied' AND payload->>'width' = 'region'`
+    expect(Number(after[0]!.n)).toBe(Number(before[0]!.n))
   })
 
   it('an audit-write failure still returns 403 AND emits the [SECURITY-AUDIT-WRITE-FAILED] alertable marker', async () => {
-    await setMode(null) // standard → owner (developer) is denied across
+    await setMode(null) // standard → owner (developer) is denied the all-regions width
     // For across/finance the audit IS the only record, so a write failure is itself a
     // security-critical event ops must alert on. Force the write to throw (spy, not a
     // module-wide vi.mock, so the real-audit test above is unaffected).
@@ -196,19 +318,33 @@ describe('sg-M4: every deny on across + /reports/finance is audited', () => {
     const errSpy = vi.spyOn(consola, 'error').mockImplementation(() => {})
     try {
       // The deny must STILL return 403 — audit is best-effort by nature.
-      await forbidden(acrossIndex(ev(ownerSess(), 'month=2026-07')))
+      await forbidden(regionIndex(evAll(ownerSess(), 'month=2026-07')))
       expect(auditSpy).toHaveBeenCalled()
       const marked = errSpy.mock.calls.find(
         (c) => typeof c[0] === 'string' && c[0].includes('[SECURITY-AUDIT-WRITE-FAILED]'),
       )
       expect(marked, 'expected the [SECURITY-AUDIT-WRITE-FAILED] marker line').toBeTruthy()
       // Ids-only structured fields (no PII) ride the marker for alert routing.
-      expect(marked?.[1]).toMatchObject({ scope: 'across', actorTeammateId: ownerId })
+      expect(marked?.[1]).toMatchObject({ scope: 'region', actorTeammateId: ownerId })
     } finally {
       auditSpy.mockRestore()
       errSpy.mockRestore()
     }
   })
+})
+
+describe('S3 part (d): a plain developer (no cou_owner row) is denied the cost-centre scope in EVERY mode', () => {
+  // reportGrants gives `developer` costCentre: false in ALL THREE modes (only an
+  // ACTIVE cou_owner row escalates it) — before the missing deny arm, GET
+  // /reports/cost-centres called fetchVisibleCostCentres unconditionally and this
+  // persona fell through to its owner/subtree predicate: no ownership + a bare
+  // top-level orgPath ('a', no genuine placement) = a silent EMPTY 200, not a 403.
+  for (const mode of REPORT_VISIBILITY_MODES) {
+    it(`${mode}: GET /reports/cost-centres → 403 (never a silent empty list)`, async () => {
+      await setMode(mode === 'standard' ? null : mode)
+      await forbidden(costCentresIndex(ev(plainDevSess(), 'month=2026-07')))
+    })
+  }
 })
 
 describe('sg-H3 leak fix: velocity foreign-ouId 403 under ALL modes (mode never threads in)', () => {
@@ -235,8 +371,8 @@ describe('sg-L11 + default: absent row / dropped table degrade to standard (no t
   it('dropping the table still lets /reports render as standard (200)', async () => {
     await t.client`DROP TABLE report_visibility_setting`
     // A region admin still gets their own-region regional report (standard behaviour).
-    await ok(regionalIndex(ev(adminSess(), 'month=2026-07')))
+    await ok(regionIndex(ev(adminSess(), 'month=2026-07')))
     // …and is still denied the whole-company across scope (fail-closed to standard).
-    await forbidden(acrossIndex(ev(adminSess(), 'month=2026-07')))
+    await forbidden(regionIndex(evAll(adminSess(), 'month=2026-07')))
   })
 })

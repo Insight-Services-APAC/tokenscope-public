@@ -246,6 +246,23 @@ export async function runReadPathHealth(
            (result->>'errors') AS errors
       FROM worker_run
      WHERE worker_name = ${READER_WORKER}
+       -- SCOPED runs (an operator recovery batch over explicit instance ids) are
+       -- NOT evidence about the scheduled read path. They are successful and
+       -- row-writing by construction, so counting them would (a) break the
+       -- zero-write STALL streak and (b) satisfy the recent-success check —
+       -- silently AUTO-RESOLVING an open read-path-stale alert in the middle of
+       -- an outage, which is the one thing this worker must never do. A recovery
+       -- campaign runs many such batches back to back, exactly when the
+       -- scheduled reader is most likely to be struggling.
+       AND (result->>'scoped') IS DISTINCT FROM 'true'
+       -- An IN-FLIGHT run carries no outcome yet: dispatchWorker inserts the row
+       -- at START ('running', result NULL) and only writes the result column —
+       -- including the scoped flag — at completion. So a running scoped batch slips
+       -- past the filter above, and its NULL rows_affected breaks the zero-write STALL
+       -- streak → the open alert auto-resolves mid-outage. No decision leg wants
+       -- an unfinished run: NO-SUCCESS looks only for status='success', and the
+       -- runs.length guard is satisfied by completed failures.
+       AND status <> 'running'
      ORDER BY started_at DESC, id DESC
      LIMIT ${RUN_LOAD_LIMIT}
   `)

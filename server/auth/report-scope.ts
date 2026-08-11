@@ -25,6 +25,7 @@ import { getDb } from '../db'
 import { recordAuditEvent } from '../db/audit'
 import {
   reportGrants,
+  regionScopeGrant,
   isReportVisibilityMode,
   DEFAULT_REPORT_VISIBILITY_MODE,
   type ReportVisibilityMode,
@@ -33,8 +34,28 @@ import {
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
 
-/** The four report scopes a caller can be gated on. */
-export type ReportScopeName = 'across' | 'regional' | 'cost-centre' | 'finance'
+/** The three report scopes a caller can be gated on (shared/reports/types.ts). */
+export type ReportScopeName = 'region' | 'cost-centre' | 'finance'
+
+/**
+ * Which WIDTH of the Region scope is being requested. `all-regions` is the
+ * unclamped, whole-company answer — the old `across` scope, now an option of the
+ * region selector rather than a tab — and it is gated separately because it is the
+ * only Region width with no in-query clamp behind it.
+ */
+export interface ReportScopeOpts {
+  width?: 'all-regions' | 'region'
+}
+
+/**
+ * True iff this request is asking for an answer that NO query predicate narrows —
+ * the whole-company Region width, or the whole-company finance pack. These are the
+ * denies that get audited: with no clamp underneath, the audit row is the only
+ * record that the attempt happened (sg-M4).
+ */
+function isUnclampedRequest(scope: ReportScopeName, opts?: ReportScopeOpts): boolean {
+  return scope === 'finance' || (scope === 'region' && opts?.width === 'all-regions')
+}
 
 const MODE_CTX_KEY = '__tokenscope_report_visibility_mode'
 
@@ -96,43 +117,56 @@ export async function resolveReportGrants(
   return reportGrants(mode, { role: session.role, ownsCostCentre })
 }
 
-function scopePermitted(scope: ReportScopeName, grants: ReportScopeGrants): boolean {
+function scopePermitted(
+  scope: ReportScopeName,
+  grants: ReportScopeGrants,
+  opts?: ReportScopeOpts,
+): boolean {
   switch (scope) {
-    case 'across':
-      return grants.across === true
     case 'finance':
       // The whole-company /reports/finance pack — a simple boolean grant.
       return grants.finance === true
-    case 'regional':
-      return grants.regional !== false
+    case 'region': {
+      /*
+       * The SAME function that builds the caller's region selector decides what the
+       * endpoint will serve — that is the whole point of "the selector's options ARE
+       * the grant". A width the caller cannot pick in the UI is a width the endpoint
+       * 403s, and neither can drift from the other, because there is only one of them.
+       */
+      const rg = regionScopeGrant(grants)
+      return opts?.width === 'all-regions' ? rg.allRegions : rg.tab
+    }
     case 'cost-centre':
       return grants.costCentre !== false
   }
 }
 
 /**
- * The hard 403 gate for a report scope. Used by the across-regions endpoints and the
- * /reports/finance index + drill + export (the all-regions-required scopes). Returns
- * the resolved session + grants so the caller can proceed without recomputing.
+ * The hard 403 gate for a report scope. Used by the `/reports/region*` endpoints
+ * (which pass `width` so the whole-company answer is gated on `across` and a single
+ * region on `regional`) and the /reports/finance index + drill + export. Returns the
+ * resolved session + grants so the caller can proceed without recomputing.
  *
- * Denies on `across` / `finance` are ALWAYS audited (`report-scope-denied`, sg-M4):
- * these scopes have no in-query clamp behind them, so the audit is the only record.
- * The write goes on a SEPARATE connection (getDb) so the deny survives the 403's
- * request-transaction rollback. When impersonating (sandbox persona override), the
- * impersonator fields ride along for forensics (sg-H2).
+ * Denies on an UNCLAMPED request — the whole-company Region width, or `finance` —
+ * are ALWAYS audited (`report-scope-denied`, sg-M4): those answers have no in-query
+ * clamp behind them, so the audit is the only record. The write goes on a SEPARATE
+ * connection (getDb) so the deny survives the 403's request-transaction rollback.
+ * When impersonating (sandbox persona override), the impersonator fields ride along
+ * for forensics (sg-H2).
  */
 export async function requireReportScope(
   event: H3Event,
   tx: Tx,
   scope: ReportScopeName,
+  opts?: ReportScopeOpts,
 ): Promise<{ session: Session; grants: ReportScopeGrants }> {
   const session = await requireAuth(event)
   const mode = await getReportVisibilityMode(event, tx)
   const ownsCostCentre = await computeOwnsCostCentre(tx, session.teammateId)
   const grants = reportGrants(mode, { role: session.role, ownsCostCentre })
 
-  if (!scopePermitted(scope, grants)) {
-    if (scope === 'across' || scope === 'finance') {
+  if (!scopePermitted(scope, grants, opts)) {
+    if (isUnclampedRequest(scope, opts)) {
       try {
         await recordAuditEvent(getDb() as unknown as Tx, {
           eventType: 'report-scope-denied',
@@ -141,6 +175,10 @@ export async function requireReportScope(
           subjectId: null,
           payload: {
             scope,
+            // The WIDTH the deny was for. `scope` alone stopped being enough when
+            // across/regional merged: both widths of `region` now arrive under one
+            // scope name, and only the unclamped one is the escalation attempt.
+            ...(opts?.width ? { width: opts.width } : {}),
             mode,
             role: session.role,
             ownsCostCentre,
@@ -159,6 +197,9 @@ export async function requireReportScope(
         // DISTINCTIVE, stable marker with ids-only structured fields (no PII).
         consola.error('[SECURITY-AUDIT-WRITE-FAILED] report-scope deny-audit write failed', {
           scope,
+          // The width rides the marker too: `scope: 'region'` alone no longer says
+          // whether the denied answer was the unclamped one.
+          ...(opts?.width ? { width: opts.width } : {}),
           actorTeammateId: session.teammateId,
           ...(session.impersonatorOid ? { impersonatorOid: session.impersonatorOid } : {}),
           error: err instanceof Error ? err.message : String(err),
@@ -172,7 +213,10 @@ export async function requireReportScope(
         type: 'https://tokenscope.example.com/errors/forbidden',
         title: 'Forbidden',
         status: 403,
-        detail: `Your role does not grant the '${scope}' report scope under the current report-visibility policy.`,
+        detail:
+          scope === 'region' && opts?.width === 'all-regions'
+            ? "Your role does not grant the whole-company ('All regions') width of the 'region' report scope under the current report-visibility policy."
+            : `Your role does not grant the '${scope}' report scope under the current report-visibility policy.`,
       },
     })
   }

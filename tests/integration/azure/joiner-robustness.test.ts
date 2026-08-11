@@ -173,6 +173,38 @@ describe('ING-1 — shouldDeepRescan (worker_run-backed daily cadence)', () => {
       WHERE worker_name = 'azure-monitor-read'`
     expect(await shouldDeepRescan(t.db)).toBe(true)
   })
+
+  it('a SCOPED recovery batch does NOT satisfy the fleet-wide cadence', async () => {
+    // A scoped run deep-rescans only its own instances. Letting it count would
+    // suppress the real fleet-wide deep pass for 24h — and a recovery campaign
+    // runs many such batches back to back, silently disarming the mechanism that
+    // recovers late-arriving telemetry for everyone else.
+    await t.client`DELETE FROM worker_run WHERE worker_name = 'azure-monitor-read'`
+    await t.client`
+      INSERT INTO worker_run (worker_name, status, started_at, finished_at, result)
+      VALUES ('azure-monitor-read', 'success', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour',
+              '{"deepRescan": true, "scoped": true}'::jsonb)`
+    expect(await shouldDeepRescan(t.db)).toBe(true) // still owed a fleet-wide pass
+
+    // The same row unscoped DOES satisfy it — proving the scoped flag is what
+    // makes the difference, not some other property of the row.
+    await t.client`
+      UPDATE worker_run SET result = '{"deepRescan": true, "scoped": false}'::jsonb
+      WHERE worker_name = 'azure-monitor-read'`
+    expect(await shouldDeepRescan(t.db)).toBe(false)
+  })
+
+  it('a PRE-CHANGE row with no "scoped" key still counts (no deep-rescan storm on deploy)', async () => {
+    // Rows written before the scoped flag existed have no key at all; SQL NULL
+    // IS DISTINCT FROM 'true' is TRUE, so they keep counting. If they stopped,
+    // every environment would fire a fleet-wide deep pass the moment this deploys.
+    await t.client`DELETE FROM worker_run WHERE worker_name = 'azure-monitor-read'`
+    await t.client`
+      INSERT INTO worker_run (worker_name, status, started_at, finished_at, result)
+      VALUES ('azure-monitor-read', 'success', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour',
+              '{"deepRescan": true}'::jsonb)`
+    expect(await shouldDeepRescan(t.db)).toBe(false)
+  })
 })
 
 describe('ING-6 — per-session fault isolation', () => {

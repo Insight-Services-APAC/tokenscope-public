@@ -23,29 +23,48 @@ import { computed, ref, watch } from 'vue'
 import ScopeFinanceView from './ScopeFinanceView.vue'
 import FinancePeriodControl from './FinancePeriodControl.vue'
 import SettlingStateChip from './SettlingStateChip.vue'
+import CoverageMarker from './CoverageMarker.vue'
 import { useReportState } from '../../composables/useReportState'
+import { useDrillGrants } from '../../composables/useDrillContract'
+import type { DrillFrame } from './drill-contract'
 import type { FinanceReport, FinanceDrill } from './finance-report-types'
 import type { SettlingState } from '#shared/reports/types'
+import { monthLabel, quarterLabel } from './window-labels'
+import { lastCompleteMonth } from './period-presets'
 
-/** Last COMPLETE calendar month, `YYYY-MM` (day 0 of this month = last of prior). */
-function lastCompleteMonth(now = new Date()): string {
-  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0))
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`
-}
 
-function monthLabel(m: string): string {
-  const d = new Date(`${m}-01T00:00:00.000Z`)
-  return Number.isNaN(d.getTime())
-    ? m
-    : d.toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })
-}
 
 const rs = useReportState()
+
+/*
+ * "Last complete month" — the finance default — comes from the SERVER's clock
+ * (F1/D3). This file held a BYTE-IDENTICAL copy of FinancePeriodControl's own
+ * `lastCompleteMonth(now = new Date())`: the control and the scope that consumes
+ * it each computed the default month separately and agreed by luck. One
+ * definition now, shared, and pure (`period-presets.ts`).
+ */
+const { today } = useServerClock()
+const financeDefaultMonth = computed(() =>
+  today.value ? lastCompleteMonth(today.value) : null,
+)
+
+/*
+ * THE DRILL CONTRACT's two container-level reads (D29/D30). They live HERE, with
+ * every other fetch and URL read on this scope, and travel down as props — the
+ * presentational view stays mountable without a Nuxt context, which is the same
+ * split every other prop on it already follows.
+ */
+const drillGrants = useDrillGrants()
 
 // Active window: a custom range wins when BOTH bounds are set; else the finance
 // month default (last complete month — an in-progress month cannot be charged back).
 const isRange = computed(() => Boolean(rs.from.value && rs.to.value))
-const effectiveMonth = computed(() => rs.month.value ?? lastCompleteMonth())
+/**
+  * The month the figures are actually for. `null` until the clock lands AND no
+  * explicit `?month` is set — the fetches below hold rather than requesting a
+  * month nobody resolved.
+  */
+const effectiveMonth = computed<string | null>(() => rs.month.value ?? financeDefaultMonth.value)
 
 // The window params both the index AND the drill bind on — a custom `[from, to]` range
 // in quarter mode, else the finance month default (region is index-only, added below).
@@ -54,11 +73,30 @@ const windowQuery = computed<Record<string, string>>(() => {
   if (isRange.value) {
     q.from = rs.from.value as string
     q.to = rs.to.value as string
-  } else {
+  } else if (effectiveMonth.value) {
     q.month = effectiveMonth.value
   }
   return q
 })
+
+/*
+ * THE DRILL WINDOW IS THE EFFECTIVE WINDOW, not the raw URL keys (r3-M6).
+ *
+ * `useDrillWindow()` reads `useReportState` verbatim, which is right on every
+ * scope whose default window IS the current month. Finance is the ONE surface
+ * with a different default (last complete month), so a bare `/reporting?scope=
+ * finance` has `rs.month === null` while its figures are July's: a teammate link
+ * built from the raw keys carried no `month` at all, and the drill opened on
+ * AUGUST — different data than the row that was clicked, or a 403 when the
+ * subject has no August row in the frame. The window is therefore derived from
+ * the SAME `windowQuery` the two fetches bind on, so a link can never carry a
+ * window different from the figures beside it.
+ */
+const drillWindow = computed<Omit<DrillFrame, 'src'>>(() =>
+  isRange.value
+    ? { month: null, from: rs.from.value as string, to: rs.to.value as string }
+    : { month: effectiveMonth.value ?? null, from: null, to: null },
+)
 
 const indexQuery = computed<Record<string, string>>(() => {
   const q: Record<string, string> = { ...windowQuery.value }
@@ -66,16 +104,43 @@ const indexQuery = computed<Record<string, string>>(() => {
   return q
 })
 
+/*
+ * ── THE FETCH ACTUALLY HOLDS NOW (external review) ───────────────────────────
+ *
+ * `effectiveMonth` is null until the clock lands, and the comment on it said the
+ * fetches "hold rather than requesting a month nobody resolved". They did not:
+ * `useFetch` fired immediately with an EMPTY query, so the first paint of a cold
+ * `/reporting?scope=finance` asked the server to pick its own window — which is
+ * a second clock, the exact thing F1/D3 removes — and then replaced it a moment
+ * later once the real month arrived. Two windows, one screen, and the header
+ * label belonged to only one of them.
+ *
+ * `immediate: false` plus the guard below is what honours the claim. Once the
+ * window resolves, `useFetch`'s own watch on the reactive `query` keeps every
+ * later change refetching exactly as before.
+ */
+const windowResolved = computed(() => isRange.value || effectiveMonth.value != null)
 const {
   data: report,
   pending,
   error,
+  execute: executeReport,
 } = useFetch<FinanceReport>('/api/v1/reports/finance', {
   query: indexQuery,
   key: 'reports-finance',
   lazy: true,
   server: false,
+  immediate: false,
+  // No auto-retry on 5xx (plan D9) — every report fetch on this page opts out.
+  retry: false,
 })
+watch(
+  windowResolved,
+  (resolved) => {
+    if (resolved) void executeReport()
+  },
+  { immediate: true },
+)
 
 // The drill is a per-`cc` (CoU) resource — fetch imperatively so a null `cc` never
 // fires a request, and a missing CoU surfaces its 404 here.
@@ -83,10 +148,12 @@ const drill = ref<FinanceDrill | null>(null)
 const drillPending = ref(false)
 const drillError = ref<unknown>(null)
 watch(
-  [() => rs.cc.value, windowQuery],
+  [() => rs.cc.value, windowQuery, windowResolved],
   async () => {
     const cc = rs.cc.value
-    if (!cc) {
+    // The drill holds for the SAME reason the index does: a drill fetched on an
+    // unresolved window is a different period than the row that was clicked.
+    if (!cc || !windowResolved.value) {
       drill.value = null
       drillError.value = null
       drillPending.value = false
@@ -97,6 +164,7 @@ watch(
     try {
       drill.value = await $fetch<FinanceDrill>(`/api/v1/reports/finance/${cc}`, {
         query: windowQuery.value,
+        retry: false,
       })
     } catch (e) {
       drillError.value = e
@@ -111,19 +179,24 @@ watch(
 // ── Header meta ──────────────────────────────────────────────────────────────
 // A range produced by the period control is always a whole quarter — label it as
 // such ("Q2 2026"); fall back to the raw span for any hand-crafted URL range.
-function quarterLabel(from: string): string | null {
-  const m = Number(from.slice(5, 7))
-  if (!from.endsWith('-01') || ![1, 4, 7, 10].includes(m)) return null
-  return `Q${(m - 1) / 3 + 1} ${from.slice(0, 4)}`
-}
+// quarterLabel checks BOTH bounds (window-labels.ts): naming a period from its
+// start alone labelled a three-quarter span "Q2 2026".
 const windowLabel = computed(() => {
   if (isRange.value) {
-    return quarterLabel(rs.from.value as string) ?? `${rs.from.value} → ${rs.to.value}`
+    return (
+      quarterLabel(rs.from.value as string, rs.to.value as string) ??
+      `${rs.from.value} → ${rs.to.value}`
+    )
   }
-  return monthLabel(effectiveMonth.value)
+  return effectiveMonth.value ? monthLabel(effectiveMonth.value) : ''
 })
 // Show the "defaults to last complete month" note only in that default state.
-const isDefaultMonth = computed(() => !isRange.value && effectiveMonth.value === lastCompleteMonth())
+const isDefaultMonth = computed(
+  () =>
+    !isRange.value &&
+    financeDefaultMonth.value != null &&
+    effectiveMonth.value === financeDefaultMonth.value,
+)
 
 // ONE consolidated settling chip: the honest whole-lane state is the LEAST settled of
 // the month's provider states (never overclaim). estimated < settling < settled.
@@ -134,14 +207,16 @@ const consolidatedState = computed(() => {
   if (!first) return null
   return ps.reduce((min, p) => (RANK[p.state] < RANK[min.state] ? p : min), first)
 })
+const coverage = computed(() => report.value?.meta.coverage ?? null)
 
 // Export (ledger CSV) is month-grained (D-Q8 grain cost-centre × provider × month) —
 // anchor to the window's representative (start) month in range mode.
-const exportMonth = computed(() =>
+const exportMonth = computed<string | null>(() =>
   isRange.value ? (rs.from.value as string).slice(0, 7) : effectiveMonth.value,
 )
 const exportParams = computed(() => {
-  const p: Record<string, string> = { scope: 'finance', report: 'ledger', month: exportMonth.value }
+  const p: Record<string, string> = { scope: 'finance', report: 'ledger' }
+  if (exportMonth.value) p.month = exportMonth.value
   if (rs.region.value) p.region = rs.region.value
   return p
 })
@@ -167,6 +242,7 @@ const exportFilename = computed(() => `tokenscope-finance-ledger-${exportMonth.v
             :horizon-date="consolidatedState.settlesAt"
             data-testid="finance-settling"
           />
+          <CoverageMarker :coverage="coverage" />
           <span
             v-if="isDefaultMonth"
             class="text-[11px] text-carbon-3 italic"
@@ -188,6 +264,8 @@ const exportFilename = computed(() => `tokenscope-finance-ledger-${exportMonth.v
       :export-params="exportParams"
       :export-filename="exportFilename"
       :ledger-month-only="isRange"
+      :drill-grants="drillGrants"
+      :drill-window="drillWindow"
       @drill="rs.patch({ cc: $event })"
       @clear-drill="rs.patch({ cc: null })"
     />

@@ -10,6 +10,8 @@
  */
 import UiCard from '../../ui/Card.vue'
 import UiBadge from '../../ui/Badge.vue'
+import DrillName from '../DrillName.vue'
+import { teammateDrillTarget, NO_DRILL_GRANTS, type DrillFrame, type DrillGrants } from '../drill-contract'
 import { fmtUsd, signedPct } from '../../../composables/useFormat'
 
 interface Exception {
@@ -18,12 +20,51 @@ interface Exception {
   currentWeekUsd: number
   baselineMeanUsd: number
   deltaPct: number
+  /*
+   * THE TWO DRILL FACTS (D34), server-carried by `fetchRegionalExceptions` via
+   * `server/reporting/teammate-drill-facts.ts`. Both OPTIONAL only so a test
+   * fixture or an older payload degrades to PLAIN TEXT — the `=== true` reads
+   * below are what make an absent fact fail CLOSED, and they are the whole
+   * reason the fields are not read as booleans directly.
+   */
+  isActive?: boolean
+  /**
+   * `teammate.provisional` — the conjunct this strip was missing (r5-H1). A
+   * shadow identity is ACTIVE, so it satisfied every other conjunct and rendered
+   * as a live link onto a page that 403s, under an unauthenticated email claim.
+   */
+  isProvisional?: boolean
 }
 
-const props = defineProps<{
-  exceptions: Exception[]
-  velocityThreshold: number
-}>()
+const props = withDefaults(
+  defineProps<{
+    exceptions: Exception[]
+    velocityThreshold: number
+    /*
+     * THE DRILL CONTRACT (D29, fix 7). A signals row names a person, so it is a
+     * link or plain text BY GRANT — never a live-looking dead name. Both are
+     * passed by the container rather than fetched here so a strip rendered in a
+     * test, or on a surface with no frame, is plain text by default.
+     */
+    drillGrants?: DrillGrants
+    drillFrame?: DrillFrame
+  }>(),
+  { drillGrants: () => NO_DRILL_GRANTS, drillFrame: () => ({ src: null }) },
+)
+
+function targetFor(e: Exception) {
+  return teammateDrillTarget(
+    props.drillGrants,
+    {
+      id: e.teammateId,
+      // Passed through as-is: `teammateDrillTarget` fails closed on an absent
+      // fact for every call site at once (r6-H1).
+      isActive: e.isActive,
+      isProvisional: e.isProvisional,
+    },
+    props.drillFrame,
+  )
+}
 
 // ≥ 2× the dial → `over` (red); otherwise `warn` (amber). Both are already over.
 function isOver(deltaPct: number): boolean {
@@ -46,7 +87,9 @@ function isOver(deltaPct: number): boolean {
         data-testid="regional-signal-row"
       >
         <div class="min-w-0">
-          <div class="text-sm text-carbon-1 truncate">{{ e.name }}</div>
+          <div class="text-sm truncate">
+            <DrillName :target="targetFor(e)" :label="e.name" />
+          </div>
           <div class="text-[11px] text-carbon-3 tabular-nums">
             {{ fmtUsd(e.currentWeekUsd) }} this week · {{ fmtUsd(e.baselineMeanUsd) }} baseline
           </div>

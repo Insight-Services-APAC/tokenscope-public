@@ -15,13 +15,24 @@ import UiButton from '../ui/Button.vue'
 import { fmtUsd, fmtTokens, fmtTimeAgo, clientMeta } from '../../composables/useFormat'
 import { apiErrorDetail } from '../../composables/useApiError'
 import { useModalA11y } from '../../composables/useModalA11y'
+// The product's word for the object the wire keys as `'project'`. This dialog is
+// where it was already right; the reporting layer now reads the SAME constant
+// rather than a second copy of the string.
+import { BUDGET_LABEL } from '#shared/reports/vocabulary'
 
 export interface TagTarget {
   session_id: string
   instance_id: string | null
   tool: string
   cost_usd: string | number
-  tokens: number
+  /*
+   * NULL = the provider reported no token quantity, which is EVERY Copilot
+   * provider-day: GitHub's `ai_credit/usage` meters in ai-credits and reports no
+   * tokens at all (`shared/schemas/activity.ts`). It renders as absence, never
+   * as `0` — a measured-looking zero beside a real cost is a measurement nobody
+   * made. Sessions are OTel-observed and always carry a number.
+   */
+  tokens: number | null
   last_event: string
   project_id: string | null
   activity: string | null
@@ -34,10 +45,17 @@ export interface TagTarget {
   // { project_id, activity } body, different subject (a day, not a conversation).
   assign_url?: string
   // Display variant. 'session' (default) renders the Session/Instance rows;
-  // 'day' renders a single "Day" row (unaccounted records have no session id).
-  subject_kind?: 'session' | 'day'
+  // 'day' renders a single "Day" row (unaccounted records have no session id);
+  // 'bulk' renders the selection's counts + total.
+  subject_kind?: 'session' | 'day' | 'bulk'
   // The label shown in the subject row when subject_kind === 'day' (e.g. the date).
   subject_label?: string
+  // BULK mode: the worklist ids this ONE save applies to. Present = the save
+  // goes to /me/worklist/bulk (action 'tag') instead of a per-item assign, so a
+  // month's backlog is cleared in a single atomic call. Because every item in
+  // the queue is untagged by definition, bulk mode requires the developer to SET
+  // something — saving with both axes empty would be a no-op reporting success.
+  bulk?: { sessions: string[]; unaccounted: string[] }
 }
 
 const props = defineProps<{
@@ -77,6 +95,22 @@ const budgetGroups = computed(() => {
 // the input so they don't have to retype (or hunt the datalist) for a tag they
 // already use. The full vocabulary still lives in the datalist below.
 const myActivities = computed(() => props.activityTypes.filter((a) => a.is_mine).map((a) => a.label))
+
+// Bulk subject: how many, of which kinds. The two kinds are named because they
+// behave differently downstream (a day carries no session id), so "12 items"
+// alone would hide what is about to be tagged.
+const bulkCount = computed(() => {
+  const b = props.target?.bulk
+  return b ? b.sessions.length + b.unaccounted.length : 0
+})
+const bulkBreakdown = computed(() => {
+  const b = props.target?.bulk
+  if (!b) return ''
+  const parts: string[] = []
+  if (b.sessions.length) parts.push(`${b.sessions.length} session${b.sessions.length === 1 ? '' : 's'}`)
+  if (b.unaccounted.length) parts.push(`${b.unaccounted.length} provider-recorded day${b.unaccounted.length === 1 ? '' : 's'}`)
+  return parts.join(' · ')
+})
 const emit = defineEmits<{ close: []; saved: [] }>()
 
 const projectId = ref('')
@@ -103,15 +137,36 @@ useModalA11y({
   },
 })
 
+// Bulk needs at least one axis SET (see TagTarget.bulk); the single-item paths
+// keep accepting "no budget + no activity" as the clear-everything correction.
+const canSave = computed(
+  () => !props.target?.bulk || !!projectId.value || activity.value.trim().length > 0,
+)
+
 async function save() {
   // FE-9: the Save button is disabled while saving, but the activity input's
   // @keyup.enter is not — guard here so Enter cannot double-fire the assign.
   if (saving.value) return
   const t = props.target
   if (!t) return
+  if (!canSave.value) return
   saving.value = true
   error.value = null
   try {
+    if (t.bulk) {
+      await $fetch('/api/v1/me/worklist/bulk', {
+        method: 'POST',
+        body: {
+          action: 'tag',
+          sessions: t.bulk.sessions,
+          unaccounted: t.bulk.unaccounted,
+          project_id: projectId.value || null,
+          activity: activity.value.trim() || null,
+        },
+      })
+      emit('saved')
+      return
+    }
     await $fetch(t.assign_url ?? `/api/v1/me/sessions/${t.session_id}/assign`, {
       method: 'POST',
       body: { project_id: projectId.value || null, activity: activity.value.trim() || null },
@@ -142,10 +197,14 @@ async function save() {
       <div class="px-6 py-4 border-b border-calm-2 flex items-start justify-between gap-4">
         <div>
           <p class="text-xs font-bold uppercase tracking-[1.4px] text-brand-harmony">
-            <template v-if="target.subject_kind === 'day'">{{ target.project_id || target.activity ? 'Re-tag usage' : 'Tag unaccounted usage' }}</template>
+            <template v-if="target.bulk">Tag selected items</template>
+            <template v-else-if="target.subject_kind === 'day'">{{ target.project_id || target.activity ? 'Re-tag usage' : 'Tag unaccounted usage' }}</template>
             <template v-else>{{ target.project_id || target.activity ? 'Re-tag session' : 'Tag session' }}</template>
           </p>
-          <h2 :id="titleId" class="inline-flex items-center gap-1.5 text-lg font-bold text-carbon mt-0.5">
+          <h2 v-if="target.bulk" :id="titleId" class="text-lg font-bold text-carbon mt-0.5">
+            {{ bulkCount }} {{ bulkCount === 1 ? 'item' : 'items' }}
+          </h2>
+          <h2 v-else :id="titleId" class="inline-flex items-center gap-1.5 text-lg font-bold text-carbon mt-0.5">
             <Icon :name="clientMeta(target.tool).icon" class="text-base" aria-hidden="true" />
             {{ clientMeta(target.tool).name }}
             <UsageModelBadge v-if="target.subject_kind !== 'day'" :by-model="target.by_model" />
@@ -155,11 +214,21 @@ async function save() {
       </div>
       <div class="px-6 py-4">
         <dl class="grid grid-cols-[5rem_1fr] gap-x-2 gap-y-1 text-xs mb-4 items-baseline">
-          <template v-if="target.subject_kind === 'day'">
+          <template v-if="target.bulk">
+            <dt class="text-carbon-3">Items</dt>
+            <dd class="text-carbon" data-testid="tag-bulk-items">{{ bulkBreakdown }}</dd>
+            <dt class="text-carbon-3">Spend</dt>
+            <dd class="text-carbon">{{ fmtUsd(target.cost_usd) }}</dd>
+          </template>
+          <template v-else-if="target.subject_kind === 'day'">
             <dt class="text-carbon-3">Day</dt>
             <dd class="text-carbon">{{ target.subject_label ?? target.session_id }}</dd>
             <dt class="text-carbon-3">Usage</dt>
-            <dd class="text-carbon">{{ fmtUsd(target.cost_usd) }} · {{ fmtTokens(target.tokens) }}</dd>
+            <dd class="text-carbon" data-testid="tag-day-usage">
+              {{ fmtUsd(target.cost_usd) }} ·
+              <span v-if="target.tokens == null" class="italic text-carbon-3" title="This provider reports no token quantity for a recorded day — the cost is real, the token count was never measured.">tokens not reported</span>
+              <template v-else>{{ fmtTokens(target.tokens) }}</template>
+            </dd>
           </template>
           <template v-else>
             <dt class="text-carbon-3">Session</dt>
@@ -167,17 +236,26 @@ async function save() {
             <dt class="text-carbon-3">Instance</dt>
             <dd class="font-mono text-carbon-2 truncate" :title="target.instance_id ?? ''">{{ target.instance_id ?? '—' }}</dd>
             <dt class="text-carbon-3">Spend</dt>
-            <dd class="text-carbon">{{ fmtUsd(target.cost_usd) }} · {{ fmtTokens(target.tokens) }} · {{ fmtTimeAgo(target.last_event) }}</dd>
+            <dd class="text-carbon">
+              {{ fmtUsd(target.cost_usd) }} ·
+              <span v-if="target.tokens == null" class="italic text-carbon-3">tokens not reported</span>
+              <template v-else>{{ fmtTokens(target.tokens) }}</template>
+              · {{ fmtTimeAgo(target.last_event) }}
+            </dd>
           </template>
         </dl>
-        <p v-if="target.subject_kind === 'day'" class="text-[12px] text-carbon-2 mb-3">
+        <p v-if="target.bulk" class="text-[12px] text-carbon-2 mb-3">
+          One save for every selected item. Pick a <strong>budget</strong> and/or an
+          <strong>activity</strong> — it applies to all of them, or to none if any item fails.
+        </p>
+        <p v-else-if="target.subject_kind === 'day'" class="text-[12px] text-carbon-2 mb-3">
           This day's usage was counted by the provider but never captured by OTel (e.g. an un-enrolled container). Assign a <strong>budget</strong> and/or an <strong>activity</strong>, same as a session.
         </p>
         <p v-else class="text-[12px] text-carbon-2 mb-3">
           Assign a <strong>budget</strong> and/or an <strong>activity</strong>. Budgets are billable, pursuit or internal — choose “No budget” to leave it unallocated; clear the activity to untag it.
         </p>
 
-        <label for="tag-budget" class="text-[12px] font-semibold text-carbon">Budget</label>
+        <label for="tag-budget" class="text-[12px] font-semibold text-carbon">{{ BUDGET_LABEL }}</label>
         <select
           id="tag-budget"
           ref="firstField"
@@ -221,7 +299,7 @@ async function save() {
 
         <div class="flex justify-end gap-2 mt-5">
           <UiButton kind="ghost" data-testid="tag-cancel" @click="emit('close')">Cancel</UiButton>
-          <UiButton kind="primary" :disabled="saving" data-testid="tag-submit" @click="save">
+          <UiButton kind="primary" :disabled="saving || !canSave" data-testid="tag-submit" @click="save">
             {{ saving ? 'Saving…' : 'Save' }}
           </UiButton>
         </div>

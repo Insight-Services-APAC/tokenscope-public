@@ -12,15 +12,45 @@
  * Each consumer supplies its own open-trigger (`isOpen`) and the dialog/first-
  * field refs. `onOpen` runs the per-dialog prefill/seed before focus is moved.
  */
-import { watch, nextTick, onBeforeUnmount, type Ref } from 'vue'
+import { watch, nextTick, onBeforeUnmount, type ComponentPublicInstance, type Ref } from 'vue'
+
+/**
+ * Resolve a template ref to something focusable: an element is itself, a
+ * component instance is its root element. Returns null when neither can focus,
+ * so a missing target is a no-op rather than a TypeError.
+ *
+ * EXPORTED FOR TEST. The watch body below is guarded by `import.meta.client`,
+ * which is a Nuxt-injected per-module constant and is undefined under plain
+ * Vitest — so no unit test can drive the focus call itself, and one that
+ * appeared to would be asserting on a branch that never ran. This function is
+ * the whole of the logic that was wrong, so it is tested directly and the
+ * end-to-end behaviour is verified in a browser.
+ */
+export function focusTarget(v: HTMLElement | ComponentPublicInstance | null | undefined): HTMLElement | null {
+  if (!v) return null
+  if (v instanceof HTMLElement) return v
+  const el = (v as ComponentPublicInstance).$el
+  return el instanceof HTMLElement ? el : null
+}
 
 export interface UseModalA11yOpts {
   /* Reactive open-state predicate (e.g. () => props.open, () => !!props.target). */
   isOpen: () => boolean
   /* The dialog container — the focus-trap boundary. */
   dialogEl: Ref<HTMLElement | null>
-  /* The element to focus on open (optional). */
-  firstField?: Ref<HTMLElement | null>
+  /*
+   * What to focus on open (optional).
+   *
+   * A template `ref` on a plain element gives an HTMLElement; a template `ref`
+   * on a COMPONENT gives that component's instance, which has no `.focus()`.
+   * Both are accepted here and resolved by `focusTarget` below, because the
+   * alternative is what the drawers actually shipped: `closeBtn as Ref<HTMLElement | null>`,
+   * a cast that satisfies the typechecker and then throws
+   * "opts.firstField?.value?.focus is not a function" at runtime — silently
+   * losing focus-on-open AND focus-restore-on-close for keyboard users, since
+   * the throw aborts the watch before `lastFocused` is ever used.
+   */
+  firstField?: Ref<HTMLElement | ComponentPublicInstance | null>
   /* Called when the dialog closes (typically emit('close')). */
   onClose: () => void
   /* Called on open, before focus is moved — per-dialog prefill/seed goes here. */
@@ -67,7 +97,7 @@ export function useModalA11y(opts: UseModalA11yOpts): void {
         lastFocused = (document.activeElement as HTMLElement) ?? null // restore on close
         document.addEventListener('keydown', onKeydown)
         await nextTick()
-        opts.firstField?.value?.focus()
+        focusTarget(opts.firstField?.value)?.focus()
       } else {
         document.removeEventListener('keydown', onKeydown)
         lastFocused?.focus()

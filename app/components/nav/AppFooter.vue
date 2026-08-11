@@ -1,4 +1,13 @@
 <script setup lang="ts">
+/*
+ * The signed-in footer, on every page via both layouts.
+ *
+ * It carries the build stamp (env · version · commit) because "did my deploy
+ * actually land?" is otherwise unanswerable from inside the product: a rolling
+ * Container Apps revision does not sign you out, so an unchanged screen is
+ * indistinguishable from a failed deploy. The same UiBuildStamp already
+ * answered it on the login page; signed-in users just could not see it.
+ */
 // Project slogan — italic small-caps per docs/build/mvp-lite-epic.md §Deliverables.
 const slogan = 'Trust the developer. Track every token. Let the budget do the teaching.'
 const year = new Date().getFullYear()
@@ -17,6 +26,7 @@ const year = new Date().getFullYear()
         {{ slogan }}
       </p>
       <div class="text-[11px] text-carbon-3 flex items-center gap-3">
+        <UiBuildStamp />
         <span>&copy; {{ year }} TokenScope</span>
       </div>
     </div>

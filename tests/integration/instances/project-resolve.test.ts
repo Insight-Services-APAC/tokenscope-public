@@ -141,10 +141,25 @@ describe('GET /instances/{id}/project-resolve', () => {
     await expect(call(evt(instanceId, 'totally-not-a-token', MEMBER_HASH))).rejects.toMatchObject({ statusCode: 401 })
   })
 
-  it('stranger token (does not own the instance) → 403', async () => {
+  it('stranger token (does not own the instance) → 404, byte-identical to an unknown instance (S5 — no ownership oracle)', async () => {
     const instanceId = await enrolInstance(ownerId)
     const strangerToken = await emitTokenFor(strangerId)
-    await expect(call(evt(instanceId, strangerToken, MEMBER_HASH))).rejects.toMatchObject({ statusCode: 403 })
+    const notOwned = (await call(evt(instanceId, strangerToken, MEMBER_HASH)).catch((e) => e)) as {
+      statusCode?: number
+      statusMessage?: string
+      data?: unknown
+    }
+    const unknown = (await call(evt(randomUUID(), strangerToken, MEMBER_HASH)).catch((e) => e)) as {
+      statusCode?: number
+      statusMessage?: string
+      data?: unknown
+    }
+    expect(notOwned.statusCode).toBe(404)
+    // Byte-identical to an unknown instance — a 403 (or any body difference)
+    // here would re-open the ownership oracle S5 deliberately closed (de1c74d).
+    expect(
+      { statusCode: notOwned.statusCode, statusMessage: notOwned.statusMessage, data: notOwned.data },
+    ).toEqual({ statusCode: unknown.statusCode, statusMessage: unknown.statusMessage, data: unknown.data })
   })
 
   it('unknown instance → 404', async () => {

@@ -75,12 +75,7 @@ export function parseTokenscope(filePath) {
       }
     } else if (indent.length === 0) {
       inProject = false
-      if (
-        key === 'client' ||
-        key === 'practice' ||
-        key === 'engagement_type' ||
-        key === 'pm'
-      ) {
+      if (key === 'client' || key === 'practice' || key === 'engagement_type' || key === 'pm') {
         out.optional[key] = value
       }
     }
@@ -91,9 +86,32 @@ export function parseTokenscope(filePath) {
 
 /** sha256(code) plain hex — matches the server's project.code_hash exactly
  * (server: createHash('sha256').update(code).digest('hex')). The SINGLE shared
- * derivation is the only way Claude + Copilot agree on a repo's hash server-side. */
+ * derivation is the only way Claude + Copilot agree on a repo's hash server-side.
+ * MUST NOT CHANGE (S1 fix 5) — determinism across client and server is a hard
+ * requirement; salting would silently split attribution against every stored
+ * code_hash. */
 export function computeCodeHash(code) {
   return createHash('sha256').update(code).digest('hex')
+}
+
+/**
+ * S1 fix 5 — the strict charset/length a `.tokenscope`-sourced project code
+ * must match. `.tokenscope` is a REPO-CONTROLLED file — in a hostile repo,
+ * `project.code` is chosen by the repo's author, not the developer who
+ * cloned it — so validate it at the PARSE boundary (here) rather than
+ * trusting it downstream into a hash, a server request, or (session-start.mjs)
+ * a developer-facing warning message that used to also reach the MODEL's
+ * context via additionalContext. Admits `/` deliberately: real project codes
+ * look like "6010011856/450127097" (see plugin/README.md's `.tokenscope`
+ * example) — but excludes whitespace, quotes, backticks, and shell/markdown-
+ * special characters that would be unsafe to interpolate into a message, a
+ * URL query param, or a rendered warning.
+ */
+const SAFE_PROJECT_CODE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$/
+
+/** True if `code` is a `.tokenscope`-safe project code (see SAFE_PROJECT_CODE). */
+export function isSafeProjectCode(code) {
+  return typeof code === 'string' && SAFE_PROJECT_CODE.test(code)
 }
 
 /**
@@ -101,6 +119,13 @@ export function computeCodeHash(code) {
  * `.tokenscope` (walked up from cwd). Returns { code, source, tokenscopePath }.
  * Throws if no code can be resolved. No server call — the code is taken at face
  * value (the project is a membership-gated claim, validated server-side later).
+ *
+ * A `.tokenscope`-sourced code failing the SAFE_PROJECT_CODE charset (S1 fix 5)
+ * is treated IDENTICALLY to having no project.code at all — the existing
+ * silent no-tag path — never carried forward. `arg` is NOT charset-constrained:
+ * it is never repo-controlled (the project MCP prompt passes a server-
+ * validated code the user picked from their own membership list; every
+ * hook-context caller passes `arg: ''`).
  */
 export function resolveRepoProjectCode({ arg, cwd }) {
   if (arg && arg.trim()) {
@@ -109,10 +134,23 @@ export function resolveRepoProjectCode({ arg, cwd }) {
   const tsPath = findTokenscopeFile(cwd)
   if (tsPath) {
     const fileData = parseTokenscope(tsPath)
-    if (fileData?.project?.code) {
+    if (fileData?.project?.code && isSafeProjectCode(fileData.project.code)) {
       return { code: fileData.project.code, source: 'tokenscope', tokenscopePath: tsPath }
     }
-    throw new Error(`.tokenscope at ${tsPath} has no project.code — add one (the canonical project code).`)
+    // MISSING and PRESENT-BUT-UNSAFE are different problems and need different
+    // instructions: "add one" is useless advice to someone who already added
+    // one. The rejected value is NOT echoed — a .tokenscope is repo-controlled
+    // and this message reaches a log, so the charset rule is stated instead.
+    if (fileData?.project?.code) {
+      throw new Error(
+        `.tokenscope at ${tsPath} has a project.code that is not usable as a project code — ` +
+          'it must start alphanumeric and contain only letters, digits, dot, underscore, hyphen or ' +
+          'slash (max 64 chars). Fix the value; the repo stays untagged until then.',
+      )
+    }
+    throw new Error(
+      `.tokenscope at ${tsPath} has no project.code — add one (the canonical project code).`,
+    )
   }
   throw new Error(
     'Could not resolve a project code — bind the repo via the project MCP prompt, or add a committed .tokenscope with project.code at the repo root.',

@@ -50,7 +50,11 @@ export async function tagSessionTx(
   teammateId: string,
   conversationId: string,
   axes: TagAxes,
-  opts: { actorSystem: string },
+  opts: {
+    actorSystem: string
+    /** The driving OAuth client (BearerTeammate.clientId) — MCP callers only; the web Re-tag dialog has no OAuth client to name. */
+    clientId?: string | null
+  },
 ): Promise<TagResult> {
   const { setProject, projectVal, setActivity, activityVal } = axes
 
@@ -111,28 +115,14 @@ export async function tagSessionTx(
   let cou: string | null = null
   let projCode: string | null = null
   if (setProject && projectVal !== null) {
-    // FOR UPDATE: lock the target so a concurrent end_date PATCH can't slip the
-    // project into "ended" between this check and the UPDATE below.
-    const [p] = await tx.execute<{ code: string; cost_owning_unit_id: string; end_date: string | null }>(sql`
-      SELECT code, cost_owning_unit_id::text AS cost_owning_unit_id, end_date::text AS end_date
-      FROM project WHERE id = ${projectVal}::uuid LIMIT 1
-      FOR UPDATE
-    `)
-    if (!p) throw createError({ statusCode: 404, statusMessage: 'Budget not found' })
-    if (p.end_date !== null && new Date(p.end_date).getTime() <= Date.now()) {
-      throw createError({
-        statusCode: 409,
-        statusMessage: 'Budget has ended',
-        data: {
-          type: 'https://tokenscope.example.com/errors/conflict',
-          title: 'Budget has ended',
-          status: 409,
-          detail: `Budget '${p.code}' has ended and can't receive new tags. Re-tag to its successor instead.`,
-        },
-      })
-    }
-    projCode = p.code
-    cou = p.cost_owning_unit_id
+    // MEMBERSHIP FIRST (server-api-app:idor:0005): checking project_assignment
+    // before ever reading the project row means an UNKNOWN project_id and a
+    // REAL project_id the caller isn't a member of hit the IDENTICAL 403 —
+    // neither the project's existence, its code, nor its ended-state is ever
+    // disclosed to a non-member. (project_assignment.project_id is a FK onto
+    // project, so "a live assignment exists" ⇒ "the project exists" — this one
+    // check also stands in for a not-found check; there is no separate
+    // "Budget not found" branch left to reach.)
     const member = await tx.execute(sql`
       SELECT 1 FROM project_assignment
       WHERE project_id = ${projectVal}::uuid AND teammate_id = ${teammateId}::uuid AND effective @> now()
@@ -150,6 +140,39 @@ export async function tagSessionTx(
         },
       })
     }
+
+    // FOR UPDATE: lock the target so a concurrent end_date PATCH can't slip the
+    // project into "ended" between this check and the ledger UPDATE below —
+    // still reached (and the lock still taken) before that UPDATE, just after
+    // membership is confirmed rather than before. ended is computed via the
+    // SAME endedProjectExpr the rest of the codebase uses for "is this
+    // project ended", not a second JS-clock definition that could disagree
+    // with it inside one transaction.
+    const [p] = await tx.execute<{ code: string; cost_owning_unit_id: string; ended: boolean }>(sql`
+      SELECT code, cost_owning_unit_id::text AS cost_owning_unit_id, ${endedProjectExpr('project')} AS ended
+      FROM project WHERE id = ${projectVal}::uuid LIMIT 1
+      FOR UPDATE
+    `)
+    // Membership implies existence (the FK above) — defensive, not a
+    // reachable path in practice.
+    if (!p) throw createError({ statusCode: 404, statusMessage: 'Budget not found' })
+    if (p.ended) {
+      // Only reached for a CONFIRMED member (the membership check above ran
+      // first), so naming the budget's code here is a real affordance, not a
+      // leak — a non-member never gets this far.
+      throw createError({
+        statusCode: 409,
+        statusMessage: 'Budget has ended',
+        data: {
+          type: 'https://tokenscope.example.com/errors/conflict',
+          title: 'Budget has ended',
+          status: 409,
+          detail: `Budget '${p.code}' has ended and can't receive new tags. Re-tag to its successor instead.`,
+        },
+      })
+    }
+    projCode = p.code
+    cou = p.cost_owning_unit_id
   }
 
   // Apply to the ledger. BOUNDARY PRESERVATION (D2a): do NOT move rows already
@@ -181,7 +204,14 @@ export async function tagSessionTx(
 
   // Record the decision in session_assignment, preserving the untouched axis from
   // the LEDGER's current state. If BOTH axes end up null, delete the row rather
-  // than violate the project-or-activity CHECK.
+  // than violate the project-or-activity-or-dismissed CHECK.
+  //
+  // DISMISSAL (mig 0094) interacts with both branches, deliberately:
+  //   - tagging supersedes a dismissal → the upsert clears dismissed_at, so a
+  //     tagged item is never also "dismissed";
+  //   - clearing BOTH axes deletes the row, which also lifts any dismissal —
+  //     "clear this session" means "put it back in the queue", not "leave it
+  //     dismissed with no tags".
   const finalProject = setProject ? projectVal : currentProject
   const finalActivity = setActivity ? activityVal : currentActivity
   if (finalProject === null && finalActivity === null) {
@@ -194,7 +224,8 @@ export async function tagSessionTx(
       INSERT INTO session_assignment (claude_session_id, teammate_id, project_id, activity, source)
       VALUES (${conversationId}, ${teammateId}::uuid, ${finalProject}::uuid, ${finalActivity}, 'manual')
       ON CONFLICT (claude_session_id, teammate_id) DO UPDATE SET
-        project_id = ${finalProject}::uuid, activity = ${finalActivity}, source = 'manual', created_at = now()
+        project_id = ${finalProject}::uuid, activity = ${finalActivity}, source = 'manual',
+        created_at = now(), dismissed_at = NULL, dismissed_cost_usd = NULL
     `)
   }
 
@@ -210,7 +241,13 @@ export async function tagSessionTx(
     actorSystem: opts.actorSystem,
     subjectKind: 'session',
     subjectId: isUuid ? conversationId : null,
-    payload: { claude_session_id: conversationId, project_id: finalProject, project_code: projCode, activity: finalActivity },
+    payload: {
+      claude_session_id: conversationId,
+      project_id: finalProject,
+      project_code: projCode,
+      activity: finalActivity,
+      ...(opts.clientId ? { client_id: opts.clientId } : {}),
+    },
   })
 
   return {

@@ -43,7 +43,7 @@ const route = useRoute()
 const ouId = computed(() => String(route.params.ouId))
 const { data, pending, error } = await useFetch<Resp>(() => `/api/v1/rollups/practice/${ouId.value}`)
 
-const crumbs = computed(() => [{ label: 'Home', to: '/' }, { label: 'Reporting', to: '/reporting?scope=regional' }, { label: data.value?.practice.displayName ?? 'Practice' }])
+const crumbs = computed(() => [{ label: 'Home', to: '/' }, { label: 'Reporting', to: '/reporting?scope=region' }, { label: data.value?.practice.displayName ?? 'Practice' }])
 
 const laneUsageUsd = (lane: Vendor) => data.value?.vendorSplit.find((l) => l.lane === lane)?.usageUsd ?? 0
 

@@ -15,15 +15,22 @@
  */
 import { computed } from 'vue'
 import { useReportState } from '../../composables/useReportState'
+import { lastCompleteMonth } from './period-presets'
 
 const rs = useReportState()
 
-/** Last COMPLETE calendar month `YYYY-MM` (day 0 of this month = last of prior). */
-function lastCompleteMonth(now = new Date()): string {
-  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0))
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`
-}
-const lastComplete = computed(() => lastCompleteMonth())
+/*
+ * "Last complete month" comes from the SERVER's clock (F1/D3). This file used to
+ * hold its own `lastCompleteMonth(now = new Date())` — with an injectable seam
+ * that no caller ever used — and ScopeFinance held a BYTE-IDENTICAL copy, plus
+ * two admin pages. Four definitions of the same month, agreeing by luck. Finance
+ * defaults are the last place a period should be a browser opinion.
+ *
+ * Empty until the clock lands: the selector renders, the option list does not
+ * name months nobody has vouched for.
+ */
+const { today } = useServerClock()
+const lastComplete = computed(() => (today.value ? lastCompleteMonth(today.value) : null))
 
 function monthLong(m: string): string {
   const d = new Date(`${m}-01T00:00:00.000Z`)
@@ -35,6 +42,7 @@ function monthShort(m1: number): string {
 
 // ── Complete months: last 12, newest first ───────────────────────────────────
 const months = computed(() => {
+  if (!lastComplete.value) return []
   const y0 = Number(lastComplete.value.slice(0, 4))
   const m0 = Number(lastComplete.value.slice(5, 7))
   return Array.from({ length: 12 }, (_, i) => {
@@ -46,6 +54,7 @@ const months = computed(() => {
 
 // ── Complete quarters: the last 4 whose END month ≤ last complete month ───────
 const quarters = computed(() => {
+  if (!lastComplete.value) return []
   const y0 = Number(lastComplete.value.slice(0, 4))
   const m0 = Number(lastComplete.value.slice(5, 7))
   let endAbs = y0 * 12 + (m0 - 1) // 0-based absolute month index of the last complete month
@@ -73,7 +82,8 @@ const selected = computed(() => {
     const q = quarters.value.find((x) => x.from === rs.from.value && x.to === rs.to.value)
     if (q) return q.value
   }
-  return `m:${rs.month.value ?? lastComplete.value}`
+  const m = rs.month.value ?? lastComplete.value
+  return m ? `m:${m}` : ''
 })
 
 function onChange(e: Event) {

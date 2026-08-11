@@ -112,3 +112,34 @@ describe('checkRepoProjectBillable — fail-open firewall (all silent)', () => {
     expect(calledUrl).not.toContain('/bearer')
   })
 })
+
+describe('checkRepoProjectBillable — S1 fixes 2+3: state dir + endpoint safety', () => {
+  it('a non-https, off-loopback bearer endpoint is rejected before any fetch (unverifiable, silent)', async () => {
+    const spy = vi.fn()
+    mockFetch(spy)
+    const r = await checkRepoProjectBillable({
+      env: { ...baseEnv(), TOKENSCOPE_BEARER_ENDPOINT: 'http://evil.example/api/v1/instances/x/bearer' },
+      cwd: emptyCwd,
+      stateDir,
+    })
+    expect(r.status).toBe('unverifiable')
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('resolves the state dir through stateDir(), NOT a repo-supplied process.env.TOKENSCOPE_STATE_DIR', async () => {
+    // No explicit `stateDir` opt passed and no env.TOKENSCOPE_STATE_DIR — must
+    // resolve via the shared stateDir() helper's process-env fallback, proving
+    // the read goes through ONE resolution order rather than a second,
+    // independent `env.TOKENSCOPE_STATE_DIR || process.env...` read.
+    const saved = process.env.TOKENSCOPE_STATE_DIR
+    process.env.TOKENSCOPE_STATE_DIR = stateDir
+    try {
+      mockFetch(() => ({ ok: true, json: async () => ({ billable: true }) }))
+      const r = await checkRepoProjectBillable({ env: baseEnv(), cwd: emptyCwd })
+      expect(r.status).toBe('ok')
+    } finally {
+      if (saved === undefined) delete process.env.TOKENSCOPE_STATE_DIR
+      else process.env.TOKENSCOPE_STATE_DIR = saved
+    }
+  })
+})

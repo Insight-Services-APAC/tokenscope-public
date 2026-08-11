@@ -10,10 +10,23 @@
  *
  * RBAC: requireRole(admin, global-finops) + assertSameOrigin. Audited. Unknown
  * id → 404; malformed id → 400 (requireUuidParam).
+ *
+ * Region-scope: DELETE … RETURNING stays the atomic exists-check (no TOCTOU
+ * between a SELECT and the delete) — region_id rides along in the RETURNING
+ * list and requireRegionScope runs AFTER the row is known (mirrors
+ * admin/grants/index.get.ts's resolve → 404-on-unknown → requireRegionScope
+ * shape), so an unknown id still 404s and this never becomes an existence
+ * oracle for other regions' org ids. Because the delete has already executed
+ * by the time the scope check runs, a denial's throw is left UNCAUGHT: it
+ * propagates out of withRequestRls's callback, and withRequestRls runs inside
+ * db.transaction, so the uncaught throw rolls the delete back — the row
+ * survives a denied delete. An unmapped org (region_id IS NULL) is
+ * estate-level and skips the check entirely, matching orgs.post's `if
+ * (regionId)` guard, or every legacy unmapped org becomes undeletable.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { sql } from 'drizzle-orm'
-import { requireRole } from '../../../../../auth/rbac'
+import { requireRole, requireRegionScopeOrNotFound } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
@@ -23,6 +36,7 @@ interface DeletedRow extends Record<string, unknown> {
   provider: string
   external_org_id: string
   display_name: string
+  region_id: string | null
 }
 
 export default defineEventHandler(async (event) => {
@@ -37,11 +51,14 @@ export default defineEventHandler(async (event) => {
     // and the delete); zero rows → 404.
     const deleted = await tx.execute<DeletedRow>(sql`
       DELETE FROM provider_org WHERE id = ${id}::uuid
-      RETURNING provider, external_org_id, display_name
+      RETURNING provider, external_org_id, display_name, region_id::text AS region_id
     `)
     const row = [...deleted][0]
-    if (!row) {
-      throw createError({
+    // ONE factory, thrown by both the unknown-id path and the region-denied path
+    // below, so the two are byte-identical rather than merely both-404. Two
+    // similar-looking literals would drift and re-open the oracle.
+    const notFound = () =>
+      createError({
         statusCode: 404,
         statusMessage: 'Provider org not found',
         data: {
@@ -51,7 +68,18 @@ export default defineEventHandler(async (event) => {
           detail: 'No provider_org matches the supplied id.',
         },
       })
-    }
+    if (!row) throw notFound()
+
+    // Region-scope AFTER the row is known: an unmapped org (region_id NULL)
+    // is estate-level and stays deletable by any region admin (the
+    // onboarding-teardown surface). A DENY here throws uncaught — the
+    // transaction this callback runs in rolls back the DELETE above.
+    //
+    // The denial is the SAME 404 an unknown id gets (PR #204 review): a
+    // 403-for-foreign-region beside a 404-for-unknown is an existence oracle,
+    // and this handler's own header promises it is not one. Resolving first and
+    // scoping second removes the oracle only if BOTH outcomes look identical.
+    if (row.region_id) await requireRegionScopeOrNotFound(event, row.region_id, notFound())
 
     await recordAuditEvent(tx, {
       eventType: 'provider-org-deleted',

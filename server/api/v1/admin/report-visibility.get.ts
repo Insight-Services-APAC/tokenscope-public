@@ -26,8 +26,8 @@ import {
   REPORT_VISIBILITY_DESCRIPTIONS,
   REPORT_VISIBILITY_PERSONAS,
   reportGrants,
+  grantsToScopes,
   type ReportVisibilityMode,
-  type ReportScopeGrants,
 } from '../../../../shared/auth/report-visibility'
 
 interface Row extends Record<string, unknown> {
@@ -45,19 +45,9 @@ function normaliseMode(value: string | null | undefined): ReportVisibilityMode {
     : 'standard'
 }
 
-// Render the per-scope grant object (the enforcement type) as the human scope
-// list the admin pane shows. Same object enforcement reads → the preview can't
-// drift from the gate.
-function grantsToScopes(g: ReportScopeGrants): string[] {
-  const out: string[] = []
-  if (g.across) out.push('Across regions')
-  if (g.regional === 'all-regions') out.push('Regional (all regions)')
-  else if (g.regional === 'own-region') out.push('Regional (own region)')
-  if (g.costCentre === 'all') out.push('Cost centres (all)')
-  else if (g.costCentre === 'owned-or-subtree') out.push('Cost centres (owned)')
-  if (g.finance) out.push('Finance (whole company)')
-  return out
-}
+// `grantsToScopes` now lives in shared/auth/report-visibility.ts beside the
+// grants it renders, so this pane and the diagnostics unhomed probe use ONE
+// vocabulary rather than two that drift.
 
 export default defineEventHandler(async (event) => {
   await requireRole(event, 'admin', 'global-finops')

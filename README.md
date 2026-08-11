@@ -28,8 +28,8 @@ with burn-down, projected cost, and deliberate top-ups.
 It is built on one idea: **a token is a unit of engineering effort.** If a
 developer's time bills to a project, so should a developer's tokens. TokenScope
 gives every token an owner (a teammate), a claim (a project), and a home (a
-cost-owning unit) — and shows both the person's *usage* and the organisation's
-*cost* without ever letting the two be confused.
+cost-owning unit) — and shows both the person's _usage_ and the organisation's
+_cost_ without ever letting the two be confused.
 
 ## The two lenses (why this isn't just a cost dashboard)
 
@@ -37,13 +37,13 @@ TokenScope keeps two concerns rigorously separate — a discipline baked into th
 schema, not a reporting toggle:
 
 - **§A — Usage completeness ("My usage").** What a person actually consumed,
-  whether or not their tools were instrumented. This is *attribution*, not
+  whether or not their tools were instrumented. This is _attribution_, not
   chargeback, and it must never read below the provider's own truth.
 - **§B — Billing / chargeback.** The cost-of-record, charged at the grain the
   provider actually bills (per-user for some, pooled-per-cost-centre for others)
   and displayed at the grain people care about.
 
-*Showing usage is not the same as charging for it.* Keeping that line clean is
+_Showing usage is not the same as charging for it._ Keeping that line clean is
 the difference between a tool people trust and a tool people game.
 
 ## What works today
@@ -57,7 +57,10 @@ the difference between a tool people trust and a tool people game.
   unspoofable server-minted instance identity.
 - **Reconciliation.** A batch truth-poller (the provider's usage API) runs
   alongside the streaming OTel signal, so usage completeness holds even for
-  people who never enrolled.
+  people who never enrolled — for the lanes that are metered today. Some
+  surfaces are not yet covered; `docs/wiki/Reporting.md` §6 lists them. Reporting
+  the coverage denominator alongside those totals, rather than leaving a gap
+  silent, is designed and not yet built.
 - **Project budgets with financial gravity.** A base allowance for exploration
   vs a real project budget for budgeted work, with **volume** and **velocity**
   limits — budgets that teach, not gates that block.

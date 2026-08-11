@@ -9,6 +9,7 @@
  */
 export type {
   AcrossReport,
+  AcrossPerPerson,
   AcrossRegionCard,
   AcrossChargebackRegion,
   AcrossDriversResp,

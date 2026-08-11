@@ -50,6 +50,35 @@ export async function requireRole(event: H3Event, ...allowed: Role[]): Promise<S
  * DENIED rather than silently granted unbounded region scope — this
  * helper must not depend on every caller remembering requireRole.
  */
+/**
+ * requireRegionScope, but a region DENIAL is indistinguishable from the row not
+ * existing at all.
+ *
+ * WHY: on a handler that has ALREADY resolved a row by id, a 403-for-foreign-region
+ * beside a 404-for-unknown-id is an existence oracle — a region admin can enumerate
+ * which ids exist in other regions purely from the status code, which is exactly what
+ * the "resolve first, then scope" ordering was meant to avoid. Collapsing the two is
+ * the same rule the /instances/* handlers apply to not-found vs not-owned.
+ *
+ * Pass the SAME `notFound` error the caller throws for an unknown id, so the two
+ * paths are byte-identical rather than merely both-404. Throwing inside the caller's
+ * transaction still rolls back any write already issued.
+ *
+ * `platform-admin` / `global-finops` pass through unchanged.
+ */
+export async function requireRegionScopeOrNotFound(
+  event: H3Event,
+  regionId: string,
+  notFound: unknown,
+): Promise<void> {
+  try {
+    await requireRegionScope(event, regionId)
+  } catch (err) {
+    if ((err as { statusCode?: number })?.statusCode === 403) throw notFound
+    throw err
+  }
+}
+
 export async function requireRegionScope(event: H3Event, regionId: string): Promise<Session> {
   const session = await utilsRequireAuth(event)
   if (isPlatformAdmin(session.role) || session.role === 'global-finops') return session

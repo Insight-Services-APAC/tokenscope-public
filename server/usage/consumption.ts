@@ -1,7 +1,13 @@
 /*
  * Consumption read-model — series, window pivots, run-rate and velocity
- * over attribution_aggregate (brief §6.4). The /me/consumption and
+ * over attribution_aggregate (brief §6.4). The /me/usage and
  * /me/projects endpoints are thin consumers; NO dashboard SQL in handlers.
+ *
+ * NAMING. This module is the read-model behind the page now called MY USAGE
+ * (`/usage`, served by `server/api/v1/me/usage.get.ts`). The module keeps the
+ * name `consumption` deliberately: it is internal, no user reads it, and
+ * renaming it would churn ~28 importers for no reader's benefit. "Consumption"
+ * is not a word the product says out loud any more — one word, one meaning.
  *
  * Perf contract (brief §6.5): list/series/mix queries read the AGGREGATE
  * only. The single sanctioned raw-ledger exception is the per-project
@@ -71,7 +77,13 @@ interface ModelSeriesRow extends Record<string, unknown> {
   cost_usd: string
 }
 
-/** Daily per-model spend (the stacked-by-model toggle). */
+/**
+ * Daily per-model spend (the stacked-by-model toggle). Teammate scope only in
+ * practice since 07-model-axis D7: the PROJECT page's model series moved to
+ * the §A lane (`completeProjectModelSeries`, server/usage/complete-spend.ts)
+ * because this aggregate is OTel-only and a tagged fill day's models never
+ * reached it.
+ */
 export async function fetchModelSeries(
   tx: Tx,
   scope: AggScope,
@@ -169,6 +181,9 @@ export async function fetchWindowTotals(
       tokens: t,
       cost_usd: c,
       tier2_cost_usd: Number(r.advisory_cost_usd),
+      // attribution_aggregate carries no per-lane pricing fact, and nothing on
+      // this path asks for one — null, never a fabricated `false`.
+      lane_priced: null,
     })
   }
   // Pivots collapse the query_source axis by re-grouping in the shared helpers.
@@ -219,6 +234,82 @@ export async function fetchInsightCellsFromWindow(
   }))
 }
 
+/**
+ * Advisory spend, WITH the days the rollup actually holds for the scope.
+ * `usd` alone is a window total only if `materialisedDays` covers the window's
+ * spending days — see {@link fetchAdvisorySpend}.
+ */
+export interface AdvisorySpend {
+  usd: number
+  /** UTC `YYYY-MM-DD` days in the window carrying at least one aggregate row. */
+  materialisedDays: Set<string>
+}
+
+/**
+ * Σ advisory (tier-2 / telemetry-only) spend for a scope over an EXPLICIT
+ * half-open `[startIso, endIso)` window.
+ *
+ * Restores the project page's advisory disclosure (fix sprint D27). Two things
+ * about the signature are deliberate:
+ *
+ *  - **Explicit bounds, not `windowDays`.** Every other read in this module says
+ *    `period_start >= now() - N days`, which is the DATABASE's clock — a second
+ *    definition of today (`clock-and-day-boundary.md`, and the static gate).
+ *    The caller resolves the window from the request clock and passes it, so the
+ *    footer's window is provably the one the chart above it drew.
+ *  - **A number, not a formatted string.** Zero advisory must render NOTHING —
+ *    never "$0.00", which would assert a measurement we have not made. The
+ *    caller decides that, and it needs the number to decide it.
+ *  - **The COVERED DAYS ride with the figure** (external review r2). Returning a
+ *    bare number said "here is the window's advisory spend" whether the rollup
+ *    had materialised thirty days of it or three: total absence answered `null`,
+ *    but a window missing SOME days came back as a confident window total, which
+ *    is the same unknown one step in. The days the aggregate actually holds a
+ *    row for are returned alongside the sum so the caller can test them against
+ *    the days it KNOWS carry spend and stop claiming the window when they
+ *    disagree. This is a fact, not a completeness estimate: the aggregate cannot
+ *    tell "the rollup has not run for this day" from "nothing was spent that
+ *    day", and this function does not guess which — it reports what it holds.
+ *  - **`null`, not `0`, when the aggregate has nothing to say.** `SUM` over an
+ *    empty set is NULL, and the `COALESCE(…, 0)` that used to sit here spent
+ *    that distinction: a scope whose rollup has not been materialised for this
+ *    window (the aggregate is the ONE cron-fed lane on the project page) came
+ *    back indistinguishable from a scope the rollup HAS covered and measured at
+ *    zero advisory. NULL IS NOT 0 — this project's recurring defect class. The
+ *    caller ships the absence through to the wire so the client can stay silent
+ *    for the honest reason rather than for a fabricated one.
+ *
+ * POPULATION — read this before putting the number beside another figure.
+ * `attribution_aggregate` carries NO identity dimension (drizzle/schema/
+ * attribution.ts) and `aggregate-rollup.ts` applies no identity filter, so this
+ * sum spans PROVISIONAL identities too. It is also the OTel rollup lane alone:
+ * no arm-2 reconciliation, no arm-3 ingest-only, and none of `v_complete_usage`
+ * arm 1's exclusions (quarantined sessions, the non-Claude-Code tool list). A
+ * §A-lane figure drawn with `excludeProvisional` — which is every manager-facing
+ * project figure — is therefore a DIFFERENT population, and no filter argument
+ * here can close the gap: the dimension is not in the table. Callers must
+ * disclose the basis rather than imply the two agree.
+ */
+export async function fetchAdvisorySpend(
+  tx: Tx,
+  scope: AggScope,
+  scopeId: string,
+  window: { startIso: string; endIso: string },
+): Promise<AdvisorySpend | null> {
+  const rows = await tx.execute<{ advisory_cost_usd: string | null; days: string[] | null }>(sql`
+    SELECT SUM(advisory_cost_usd)::text AS advisory_cost_usd,
+           ARRAY_AGG(DISTINCT (period_start AT TIME ZONE 'UTC')::date::text) AS days
+    FROM attribution_aggregate
+    WHERE scope_type = ${scope} AND scope_id = ${scopeId}::uuid
+      AND period_kind = 'day'
+      AND period_start >= ${window.startIso}::timestamptz
+      AND period_start <  ${window.endIso}::timestamptz
+  `)
+  const row = [...rows][0]
+  if (row?.advisory_cost_usd == null) return null
+  return { usd: Number(row.advisory_cost_usd), materialisedDays: new Set(row.days ?? []) }
+}
+
 // ── Velocity (project scope; the inbox velocity-watch convention) ───────
 
 export interface VelocityState {
@@ -250,16 +341,52 @@ export async function fetchProjectVelocity(
   projectId: string,
   flagThreshold: number,
 ): Promise<VelocityState> {
-  const rows = await tx.execute<{ week: string; cost_usd: string }>(sql`
-    SELECT date_trunc('week', period_start AT TIME ZONE 'UTC')::date::text AS week,
+  const byProject = await fetchProjectVelocities(tx, [projectId], () => flagThreshold)
+  return byProject.get(projectId) ?? velocityFromWeeks(new Map(), flagThreshold)
+}
+
+/**
+ * {@link fetchProjectVelocity} for MANY projects in ONE round trip. The
+ * threshold stays PER PROJECT (`thresholdFor` is resolved on the project's own
+ * region — R1 F2, the subject's region decides the bar), so batching the query
+ * must not batch the dial.
+ */
+export async function fetchProjectVelocities(
+  tx: Tx,
+  projectIds: readonly string[],
+  thresholdFor: (projectId: string) => number,
+): Promise<Map<string, VelocityState>> {
+  if (projectIds.length === 0) return new Map()
+  const rows = await tx.execute<{ project_id: string; week: string; cost_usd: string }>(sql`
+    SELECT scope_id::text AS project_id,
+           date_trunc('week', period_start AT TIME ZONE 'UTC')::date::text AS week,
            SUM(total_cost_usd)::text AS cost_usd
     FROM attribution_aggregate
-    WHERE scope_type = 'project' AND scope_id = ${projectId}::uuid
+    WHERE scope_type = 'project'
+      AND scope_id = ANY(ARRAY[${sql.join(
+        projectIds.map((id) => sql`${id}::uuid`),
+        sql`, `,
+      )}])
       AND period_kind = 'day'
       AND period_start >= date_trunc('week', now() AT TIME ZONE 'UTC') - interval '28 days'
-    GROUP BY 1 ORDER BY 1
+    GROUP BY 1, 2 ORDER BY 1, 2
   `)
-  const byWeek = new Map([...rows].map((r) => [r.week, Number(r.cost_usd)]))
+  const byProject = new Map<string, Map<string, number>>()
+  for (const r of [...rows]) {
+    let weeks = byProject.get(r.project_id)
+    if (!weeks) byProject.set(r.project_id, (weeks = new Map()))
+    weeks.set(r.week, Number(r.cost_usd))
+  }
+  return new Map(
+    projectIds.map((id) => [
+      id,
+      velocityFromWeeks(byProject.get(id) ?? new Map(), thresholdFor(id)),
+    ]),
+  )
+}
+
+/** The velocity verdict from a project's week→spend map. One definition. */
+function velocityFromWeeks(byWeek: Map<string, number>, flagThreshold: number): VelocityState {
   const now = new Date()
   const current = byWeek.get(isoWeekStartUtc(now)) ?? 0
   // The 4 prior week keys, zero-filled. A project with NO prior-week rows at
@@ -346,24 +473,45 @@ export async function requireProjectMembership(
 
 /** MTD project allocation (baseline + top-up), matching the quota model. */
 export async function fetchProjectAllocation(tx: Tx, projectId: string): Promise<number> {
-  const rows = await tx.execute<{ total: string }>(sql`
-    SELECT COALESCE(SUM(budget_usd), 0)::text AS total
-    FROM allocation
-    WHERE scope_type = 'project' AND scope_id = ${projectId}::uuid
-      AND allocation_kind IN ('baseline', 'top-up')
-      AND effective @> now()
-  `)
-  return Number([...rows][0]?.total ?? 0)
+  const byProject = await fetchProjectAllocations(tx, [projectId])
+  return byProject.get(projectId) ?? 0
 }
 
-/** MTD spend for a scope, from the aggregate. */
-export async function fetchMtdSpend(tx: Tx, scope: AggScope, scopeId: string): Promise<number> {
-  const rows = await tx.execute<{ total: string }>(sql`
-    SELECT COALESCE(SUM(total_cost_usd), 0)::text AS total
-    FROM attribution_aggregate
-    WHERE scope_type = ${scope} AND scope_id = ${scopeId}::uuid
-      AND period_kind = 'day'
-      AND period_start >= date_trunc('month', now() AT TIME ZONE 'UTC')
+/**
+ * {@link fetchProjectAllocation} for MANY projects in ONE round trip. Same
+ * predicate, same kinds — a GROUP BY over a set of ids, not N questions.
+ * Absent from the map = no effective allocation; callers default to 0.
+ */
+export async function fetchProjectAllocations(
+  tx: Tx,
+  projectIds: readonly string[],
+): Promise<Map<string, number>> {
+  if (projectIds.length === 0) return new Map()
+  const rows = await tx.execute<{ project_id: string; total: string }>(sql`
+    SELECT scope_id::text AS project_id, COALESCE(SUM(budget_usd), 0)::text AS total
+    FROM allocation
+    WHERE scope_type = 'project'
+      AND scope_id = ANY(ARRAY[${sql.join(
+        projectIds.map((id) => sql`${id}::uuid`),
+        sql`, `,
+      )}])
+      AND allocation_kind IN ('baseline', 'top-up')
+      AND effective @> now()
+    GROUP BY scope_id
   `)
-  return Number([...rows][0]?.total ?? 0)
+  return new Map([...rows].map((r) => [r.project_id, Number(r.total)]))
 }
+
+/*
+ * `fetchMtdSpend` used to live here — MTD spend for a scope, from
+ * `attribution_aggregate`. It is DELETED, not deprecated, on purpose.
+ *
+ * Every one of its callers asked it for PROJECT spend, and the aggregate is
+ * OTel-emitted spend only: it has neither arm 2 (the API−OTel reconciliation
+ * gap) nor arm 3, and it is refreshed by cron so it also lagged the live tables
+ * rendered beside it. That made the project manager's headline structurally the
+ * smallest number in the product. `completeProjectSpend`
+ * (server/usage/complete-spend.ts) is the one definition now; keeping a
+ * plausible-looking aggregate MTD helper in the dashboard read-model is exactly
+ * how the second implementation would grow back.
+ */

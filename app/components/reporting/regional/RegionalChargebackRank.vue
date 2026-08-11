@@ -6,12 +6,15 @@
  * `v_finance_chargeback_month` — the bill lane, NEVER usage). The §B analogue of
  * RegionalPracticeRank: same magnitude ranked-bar treatment, but no drill target
  * (a cost-centre's per-teammate chargeback lives in the Finance scope, not here) and
- * the explicit "Unallocated" NULL-CoU bucket kept for sum-back honesty.
+ * the explicit "Unallocated" NULL-CoU bucket kept for sum-back honesty — with a
+ * quiet remediation link to the reconciliation admin surface (requirement 6).
  */
 import { computed } from 'vue'
 import UiCard from '../../ui/Card.vue'
 import ChartRankedBar from '../charts/ChartRankedBar.client.vue'
+import UnallocatedRemediationLink from '../UnallocatedRemediationLink.vue'
 import { fmtUsd } from '../../../composables/useFormat'
+import { UNALLOCATED_KEY } from '#shared/reports/unallocated'
 
 const props = defineProps<{
   rows: { key: string; label: string; value: number }[]
@@ -20,6 +23,7 @@ const props = defineProps<{
 const barRows = computed(() =>
   props.rows.map((r) => ({ label: r.label, value: r.value, meta: r.key })),
 )
+const hasUnallocated = computed(() => props.rows.some((r) => r.key === UNALLOCATED_KEY && r.value !== 0))
 </script>
 
 <template>
@@ -28,8 +32,9 @@ const barRows = computed(() =>
       <div class="text-sm font-semibold text-carbon-1">Chargeback by cost-centre</div>
       <div class="text-[11px] text-carbon-3">Ranked by chargeback · sums to chargeable</div>
     </div>
-    <div class="text-[11px] text-carbon-3 mb-3">
-      The real cross-charge homed to each cost-owning unit (bill lane). Per-teammate detail lives in Finance.
+    <div class="text-[11px] text-carbon-3 mb-3 flex items-center gap-2 flex-wrap">
+      <span>The real cross-charge homed to each cost-owning unit (bill lane). Per-teammate detail lives in Finance.</span>
+      <UnallocatedRemediationLink v-if="hasUnallocated" />
     </div>
 
     <ChartRankedBar

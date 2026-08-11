@@ -6,7 +6,7 @@
  * no-scope-clause whole-company query is what's tested). Covers:
  *   - providerSplit: per-vendor spend + distinct active users, SUMMING BACK to the
  *     genuine headline (claude-code / copilot-cli / other buckets over v_complete_usage);
- *   - GET /reports/across-regions/trend: day-grain vendor-stacked series shape + RBAC;
+ *   - GET /reports/region/trend (region=all): day-grain vendor-stacked series shape + RBAC;
  *   - custom from/to range: range aggregates with forecast:null + momDeltaPct:null,
  *     and the trend windowed to the range (month path left untouched).
  */
@@ -14,8 +14,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
 import type { Session } from '../../../server/utils/auth'
-import acrossHandler from '../../../server/api/v1/reports/across-regions/index.get'
-import trendHandler from '../../../server/api/v1/reports/across-regions/trend.get'
+import acrossHandler from '../../../server/api/v1/reports/region/index.get'
+import trendHandler from '../../../server/api/v1/reports/region/trend.get'
 
 let t: TestDb
 let regionA = ''
@@ -38,6 +38,15 @@ const ev = (session: Session, query = '') => {
   injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], session)
   return e as unknown as Parameters<typeof acrossHandler>[0]
 }
+/*
+ * The WHOLE-COMPANY width of the merged `/reports/region*` family (was the
+ * separate `/reports/across-regions*` routes). `region=all` is not an optional
+ * extra here — it is what selects the unclamped engine scope, so every call that
+ * used to reach an across route reaches it through this.
+ */
+const evAll = (session: Session, query = '') =>
+  ev(session, query ? `${query}&region=all` : 'region=all')
+
 const sess = (role: string, regionId: string): Session =>
   ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role, regionId, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
 const gfo = () => sess('global-finops', regionA)
@@ -106,9 +115,9 @@ interface TrendResp {
   series: { day: string; key: string; value: number }[]
 }
 
-describe('GET /reports/across-regions — providerSplit', () => {
+describe('GET /reports/region (region=all) — providerSplit', () => {
   it('splits genuine into the three named §A lanes + other, summing back to the headline', async () => {
-    const r = (await acrossHandler(ev(gfo(), 'month=2026-07'))) as unknown as AcrossResp
+    const r = (await acrossHandler(evAll(gfo(), 'month=2026-07'))) as unknown as AcrossResp
     expect(r.kpis.genuineUsd).toBe(65) // claude 30 + copilot 35
     const ps = r.providerSplit
     expect(ps.claudeCode.spendUsd).toBe(30)
@@ -124,7 +133,7 @@ describe('GET /reports/across-regions — providerSplit', () => {
   })
 
   it('per-vendor activeUsers = COUNT(DISTINCT teammate) in that vendor', async () => {
-    const r = (await acrossHandler(ev(gfo(), 'month=2026-07'))) as unknown as AcrossResp
+    const r = (await acrossHandler(evAll(gfo(), 'month=2026-07'))) as unknown as AcrossResp
     expect(r.providerSplit.claudeCode.activeUsers).toBe(1) // alice
     expect(r.providerSplit.copilotCli.activeUsers).toBe(1) // dave
     expect(r.providerSplit.copilotAgent.activeUsers).toBe(0)
@@ -133,15 +142,15 @@ describe('GET /reports/across-regions — providerSplit', () => {
   })
 })
 
-describe('GET /reports/across-regions/trend — RBAC + day-grain vendor-stacked shape', () => {
+describe('GET /reports/region/trend (region=all) — RBAC + day-grain vendor-stacked shape', () => {
   for (const role of ['admin', 'manager', 'developer'] as const) {
     it(`a ${role} is FORBIDDEN (403) — same gate as the across index`, async () => {
-      await expect(trendHandler(ev(sess(role, regionA), 'month=2026-07'))).rejects.toMatchObject({ statusCode: 403 })
+      await expect(trendHandler(evAll(sess(role, regionA), 'month=2026-07'))).rejects.toMatchObject({ statusCode: 403 })
     })
   }
 
   it('global-finops sees one point per (day, vendor) with positive cost; values sum to genuine', async () => {
-    const r = (await trendHandler(ev(gfo(), 'month=2026-07'))) as unknown as TrendResp
+    const r = (await trendHandler(evAll(gfo(), 'month=2026-07'))) as unknown as TrendResp
     expect(r.window).toEqual({ from: '2026-07-01', to: '2026-07-31' })
     // 2026-07-02 (claude 20 + copilot 5), 2026-07-05 (claude 10), 2026-07-10 (copilot 30) → 4 points.
     expect(r.series).toHaveLength(4)
@@ -165,7 +174,7 @@ describe('GET /reports/across-regions/trend — RBAC + day-grain vendor-stacked 
 describe('custom from/to range — range aggregates, month-anchored figures nulled', () => {
   it('the KPIs/providerSplit window on [from, to] and forecast + momDeltaPct are null', async () => {
     // [2026-07-03, 2026-07-08] → only alice July-05 (claude 10); July-02 + July-10 excluded.
-    const r = (await acrossHandler(ev(gfo(), 'from=2026-07-03&to=2026-07-08'))) as unknown as AcrossResp
+    const r = (await acrossHandler(evAll(gfo(), 'from=2026-07-03&to=2026-07-08'))) as unknown as AcrossResp
     expect(r.kpis.genuineUsd).toBe(10)
     expect(r.providerSplit.claudeCode.spendUsd).toBe(10)
     expect(r.providerSplit.copilotCli.spendUsd).toBe(0)
@@ -175,19 +184,19 @@ describe('custom from/to range — range aggregates, month-anchored figures null
   })
 
   it('the trend is windowed to the range and echoes the from/to bounds', async () => {
-    const r = (await trendHandler(ev(gfo(), 'from=2026-07-03&to=2026-07-08'))) as unknown as TrendResp
+    const r = (await trendHandler(evAll(gfo(), 'from=2026-07-03&to=2026-07-08'))) as unknown as TrendResp
     expect(r.window).toEqual({ from: '2026-07-03', to: '2026-07-08' })
     expect(r.series).toEqual([{ day: '2026-07-05', key: 'claude-code', value: 10 }])
   })
 
   it('a partial range (only from) is a 400', async () => {
-    await expect(trendHandler(ev(gfo(), 'from=2026-07-03'))).rejects.toMatchObject({ statusCode: 400 })
+    await expect(trendHandler(evAll(gfo(), 'from=2026-07-03'))).rejects.toMatchObject({ statusCode: 400 })
   })
 
   it('the month path is untouched — month=2026-07 still carries a non-null MoM (July 65 vs June 15)', async () => {
     // MoM is LIKE-FOR-LIKE: the June operand (dated June-01) sits inside the
     // day-of-month PACE window, so July MTD (65) is compared to June's matching pace (15).
-    const r = (await acrossHandler(ev(gfo(), 'month=2026-07'))) as unknown as AcrossResp
+    const r = (await acrossHandler(evAll(gfo(), 'month=2026-07'))) as unknown as AcrossResp
     expect(r.meta.range).toBeUndefined()
     expect(r.kpis.momDeltaPct).toBeCloseTo((65 - 15) / 15, 6)
   })

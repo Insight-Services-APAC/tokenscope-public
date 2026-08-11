@@ -26,6 +26,7 @@ import AddTeammateDialog from '../../components/admin/AddTeammateDialog.vue'
 // Relative paths from app/pages/* don't resolve at server-bundle time
 // (Rollup runs from `.nuxt/dist/server/_nuxt/`, not the source path).
 import { SELECTABLE_ROLES, roleLabel, type Role } from '#shared/auth/roles'
+import { BU_LABEL } from '#shared/reports/vocabulary'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface UserRow extends Record<string, unknown> {
@@ -35,6 +36,10 @@ interface UserRow extends Record<string, unknown> {
   role: Role
   regionId: string
   orgUnitPath: string
+  /** The BU's display name — what a human reads. `orgUnitPath` stays for the ltree. */
+  orgUnitName: string
+  /** Identity. The selector keys on THIS, never on a display name. */
+  orgUnitId: string
   isActive: boolean
   joinedAt: string
   lastSyncAt: string | null
@@ -188,16 +193,17 @@ async function reassignRegion(row: UserRow, newRegionId: string) {
 
 /*
  * Cost-centre placement — PATCH /api/v1/admin/users/:id/org-unit { org_unit_id }.
- * Optimistic: the row's orgUnitPath is replaced with the chosen unit's
+ * Optimistic: the row's orgUnitName is replaced with the chosen unit's
  * display_name immediately; on error roll back + toast. The server enforces the
  * unit being active in the region (422).
  */
 async function patchOrgUnit(row: UserRow, newUnitId: string) {
   if (!newUnitId) return
-  const previousPath = row.orgUnitPath
+  const previousName = row.orgUnitName
+  const previousId = row.orgUnitId
   const unit = orgUnitOptions.value.find((u) => u.id === newUnitId)
   const idx = rows.value.findIndex((r) => r.id === row.id)
-  if (idx >= 0 && unit) rows.value[idx] = { ...row, orgUnitPath: unit.display_name }
+  if (idx >= 0 && unit) rows.value[idx] = { ...row, orgUnitName: unit.display_name, orgUnitId: unit.id }
   try {
     await $fetch(`/api/v1/admin/users/${row.id}/org-unit`, {
       method: 'PATCH',
@@ -206,7 +212,7 @@ async function patchOrgUnit(row: UserRow, newUnitId: string) {
     flashToast('ok', `Moved ${row.email} to ${unit?.display_name ?? 'new unit'}`)
     await refresh()
   } catch (err) {
-    if (idx >= 0) rows.value[idx] = { ...row, orgUnitPath: previousPath }
+    if (idx >= 0) rows.value[idx] = { ...row, orgUnitName: previousName, orgUnitId: previousId }
     flashToast('err', apiErrorDetail(err, 'Cost-centre move refused.'))
     consola.warn('org-unit move failed', err)
   }
@@ -276,7 +282,7 @@ const columns = [
   { key: 'email', label: 'Email', cellClass: 'font-medium' },
   { key: 'displayName', label: 'Name' },
   { key: 'role', label: 'Role' },
-  { key: 'orgUnitPath', label: 'Org unit' },
+  { key: 'orgUnitName', label: BU_LABEL },
   { key: 'lastSyncAt', label: 'Last sync' },
   { key: 'actions', label: 'Actions' },
 ]
@@ -409,7 +415,7 @@ function roleOptionsFor(current: string): Role[] {
               >Last admin</UiBadge>
             </div>
           </td>
-          <td class="px-5 py-3 text-sm text-carbon-2">{{ asUserRow(row).orgUnitPath }}</td>
+          <td class="px-5 py-3 text-sm text-carbon-2">{{ asUserRow(row).orgUnitName }}</td>
           <td class="px-5 py-3 text-sm text-carbon-3">{{ fmtTs(asUserRow(row).lastSyncAt) }}</td>
           <td class="px-5 py-3 text-sm">
             <div class="flex items-center gap-2">
@@ -417,17 +423,21 @@ function roleOptionsFor(current: string): Role[] {
               v-if="orgUnitOptions.length"
               :data-testid="`user-orgunit-${asUserRow(row).id}`"
               class="px-2 py-1 text-sm border border-calm-2 rounded-md bg-white max-w-[180px]"
-              title="Move this teammate to another cost centre (org unit)"
+              :title="`Move this teammate to another ${BU_LABEL}`"
               @change="(e) => patchOrgUnit(asUserRow(row), (e.target as HTMLSelectElement).value)"
             >
-              <option value="" :selected="!orgUnitOptions.some((u) => u.display_name === asUserRow(row).orgUnitPath)">
-                {{ asUserRow(row).orgUnitPath || 'Unplaced' }}
+              <!-- Keyed on ID. Matching on display_name left the real option
+                   unselected (it was compared against the ltree PATH) and could
+                   not tell two BUs apart that share a name — several regions
+                   have a "CTO Office". -->
+              <option value="" :selected="!orgUnitOptions.some((u) => u.id === asUserRow(row).orgUnitId)">
+                {{ asUserRow(row).orgUnitName || 'Unplaced' }}
               </option>
               <option
                 v-for="u in orgUnitOptions"
                 :key="u.id"
                 :value="u.id"
-                :selected="u.display_name === asUserRow(row).orgUnitPath"
+                :selected="u.id === asUserRow(row).orgUnitId"
               >{{ u.display_name }}</option>
             </select>
             <select

@@ -24,6 +24,15 @@ import type { AnthropicApiKind } from './adapters/registry'
 export const PROVIDERS = ['anthropic', 'github'] as const
 export const RECONCILIATION_MODES = ['reconciled', 'indicative'] as const
 export const BILLING = ['billed', 'tracked'] as const
+// ADR-0011 D10 — the four ratified pooled-overage allocation policies.
+// consumption-share is Insight's default; every policy conserves the
+// distributed total exactly (server/governance/copilot-overage-allocation.ts).
+export const OVERAGE_ALLOCATION_POLICIES = [
+  'consumption-share',
+  'excess-share',
+  'excess-equal',
+  'seat-share',
+] as const
 export const ANTHROPIC_API_KINDS: readonly AnthropicApiKind[] = [
   'enterprise-analytics',
   'claude-code-admin',
@@ -50,6 +59,7 @@ export const apiKindSchema = z.enum(ANTHROPIC_API_KINDS as [AnthropicApiKind, ..
 export const providerSchema = z.enum(PROVIDERS)
 export const reconciliationModeSchema = z.enum(RECONCILIATION_MODES)
 export const billingSchema = z.enum(BILLING)
+export const overageAllocationPolicySchema = z.enum(OVERAGE_ALLOCATION_POLICIES)
 
 /*
  * provider_enterprise.github_app_id (mig 0078) — the App-id that opts a github
@@ -71,6 +81,7 @@ export const githubAppIdSchema = z.preprocess(
 export type Provider = (typeof PROVIDERS)[number]
 export type ReconciliationMode = (typeof RECONCILIATION_MODES)[number]
 export type Billing = (typeof BILLING)[number]
+export type OverageAllocationPolicy = (typeof OVERAGE_ALLOCATION_POLICIES)[number]
 
 /**
  * The provider_org.api_kind CHECK (mig 0063), as a pure predicate. Returns an

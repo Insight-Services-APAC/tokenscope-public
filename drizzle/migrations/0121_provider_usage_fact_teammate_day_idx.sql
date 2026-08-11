@@ -1,0 +1,34 @@
+-- 0121 — the index the provider-day detail read needs.
+--
+-- 0118 shipped exactly ONE index, the grain unique key, and said so
+-- deliberately (0118:198-205): it leads on `source` because the only access
+-- pattern that then existed was the transform's guarded prune
+-- (`source = ? AND date BETWEEN ? AND ?`). 0118 also said what would justify a
+-- second one — "if the prune later shows up as a seq scan at real volume,
+-- adding a covering index is its own change with its own evidence."
+--
+-- This is that change, for a different reader. The provider-day detail panel
+-- (docs/design/reporting-consolidation/05-api-sourced-usage-carries-its-
+-- dimensions.md work item 2) asks a question the grain uidx cannot serve at all:
+--
+--   WHERE teammate_id = ? AND date = ? AND tool = ?
+--
+-- `source` is ABSENT from that predicate on purpose, and that is the whole
+-- reason a new index is needed rather than a reordered one. `unaccounted_usage`
+-- keys on (teammate_id, day, tool) with no source component (0071:44), while the
+-- grain uidx LEADS with source — so a teammate holding licences in two provider
+-- orgs has ONE fill row standing against two orgs' fact rows, and the read must
+-- aggregate across sources for the key. With only the source-leading index that
+-- is a sequential scan of the whole table on every drawer open.
+--
+-- PARTIAL ON teammate_id IS NOT NULL. The read is always for one identified
+-- teammate. Unresolved rows (carried on actor_ref, 0118:49-52) can never match
+-- it, so indexing them would pay for entries no query can use.
+--
+-- NOT `INCLUDE`-covering, deliberately. An index-only scan here would have to
+-- carry model, cost_type and all six measure columns, which is most of the row —
+-- paid for on every transform write, to save one heap fetch per drawer open on a
+-- handful of rows. The three-column predicate is what the read is missing.
+CREATE INDEX provider_usage_fact_teammate_date_tool_idx
+  ON provider_usage_fact (teammate_id, date, tool)
+  WHERE teammate_id IS NOT NULL;

@@ -1,9 +1,15 @@
 /*
- * The wire shapes the Across-Regions reporting endpoints return, shared by the
- * ScopeAcrossRegions container (to type its useFetch generics) and the
+ * The wire shapes `/reports/region*` returns at its WHOLE-COMPANY width, shared by
+ * the ScopeAcrossRegions container (to type its useFetch generics) and the
  * ScopeAcrossRegionsView (its props). Pure types — no runtime.
  */
+import type { SpendLens } from '#shared/usage/lens'
+import type { RegionOption } from '../ui/RegionSelector.vue'
+import type { ScopePerPerson } from './scope-hero-types'
 import type {
+  BilledLaneMeta,
+  ChargebackCoverage,
+  MeasureLanes,
   DailyMetric,
   DriverRow,
   Forecast,
@@ -12,6 +18,7 @@ import type {
   ChargeDailyPoint,
   ChargebackLaneRow,
   ReportMeta,
+  UsageBudgetCoverage,
 } from '#shared/reports/types'
 
 export interface AcrossRegionCard {
@@ -40,8 +47,29 @@ export interface AcrossChargebackRegion {
   chargeableUsd: number
 }
 
+/**
+ * The §A per-person cohort the KPI row's "Median per person" tile publishes.
+ *
+ * BOTH widths publish it now, so the shape lives in scope-hero-types.ts beside the
+ * hero that reads it; this name is kept because the route and this scope's
+ * consumers already spell it that way.
+ */
+export type AcrossPerPerson = ScopePerPerson
+
 export interface AcrossReport {
   meta: ReportMeta
+  /**
+   * The WIDTH this payload was computed at — always `'all-regions'` here, because
+   * that is the only width this container requests. Carried so a reader never has to
+   * infer it from the absence of a region.
+   */
+  width: 'all-regions'
+  /** No effective region: this width answers for no single one. */
+  region: null
+  /** The regions this caller may narrow to — the selector's options (§6). */
+  regionOptions: RegionOption[]
+  /** Whether "All regions" is one of the caller's options at all. */
+  allRegionsAvailable: boolean
   kpis: {
     genuineUsd: number
     chargeableUsd: number
@@ -81,6 +109,13 @@ export interface AcrossReport {
   chargebackProviderSplit: ChargebackProviderSplit
   /** §A per-day usage series feeding the KPI-tile sparklines (usage / tokens / users). */
   dailyMetrics: DailyMetric[]
+  /**
+   * §A budget coverage of `kpis.genuineUsd` over the SAME scope and window — how
+   * much of that headline is on a budgeted project and how much is outside the
+   * budget lens. Σ its four parts IS `kpis.genuineUsd`. Pure §A: it qualifies the
+   * attributed-usage total and NEVER the chargeable one (contract C2).
+   */
+  budgetCoverage: UsageBudgetCoverage
   /** §B per-day Anthropic chargeback series (bill lane) — the Chargeable KPI-tile sparkline. */
   chargeDaily: ChargeDailyPoint[]
   /**
@@ -90,6 +125,13 @@ export interface AcrossReport {
    * (the KPI's gate). Σ(lanes minus copilot-unclassified) == kpis.chargeableUsd.
    */
   chargebackLanes: ChargebackLaneRow[]
+  /**
+   * §A per-person cohort over the SAME window as `kpis` — median, percentiles and
+   * the emitting split. Optional so a client bundle predating the field still
+   * type-checks; the KPI row hides the median tile when it is absent rather than
+   * rendering a zero it did not measure.
+   */
+  perPerson?: AcrossPerPerson
   regionCards: AcrossRegionCard[]
   /**
    * §B chargeback ranked by region (`v_finance_chargeback_month`) — the chargeback-lane
@@ -111,6 +153,25 @@ export interface ConcentrationSegmentStat {
   medianUsd: number
 }
 
+/**
+ * One band of the decile partition the Concentration card renders. Mirrors
+ * `ConcentrationCohortStat` in server/reporting/across-regions.ts.
+ */
+export interface ConcentrationCohortStat {
+  /**
+   * The stable machine name. Selectors and test ids bind to THIS, never to
+   * `label` — the label is copy, it has already been re-worded once, and
+   * "Top 1%" carries a space and a '%' that make an awkward selector besides.
+   */
+  key: 'top1' | 'next9' | 'next40' | 'bottom50'
+  /** "Top 1%" / "Next 9%" / "Next 40%" / "Bottom 50%" — display copy only. */
+  label: string
+  count: number
+  totalUsd: number
+  /** Fraction in [0,1] of the cohort total. */
+  sharePct: number
+}
+
 export interface ConcentrationStats {
   activeUsers: number
   totalUsd: number
@@ -119,11 +180,56 @@ export interface ConcentrationStats {
   top5: number
   top10: number
   segments: ConcentrationSegmentStat[]
+  /**
+   * The decile partition (Top 1% / Next 9% / Next 40% / Bottom 50%). Cut at the
+   * same indices as `top1`/`top10`, so cohort[0] IS the top-1% share and the
+   * first two cohorts sum to the top-10% share exactly — the card and the
+   * Median-per-person KPI publish ONE distribution.
+   *
+   * Optional so a client bundle predating the field still type-checks; the card
+   * renders nothing rather than a partition it did not receive.
+   */
+  cohorts?: ConcentrationCohortStat[]
 }
 
 export interface AcrossDriversResp {
   axis: string
+  /** The lens this cut was computed for, echoed back (`usage` | `chargeback`). */
+  lane?: SpendLens
   headlineUsd: number
   rows: DriverRow[]
+  /** ALWAYS attributed — a §A cohort statistic, in both lanes. See `measureLanes`. */
   concentration: ConcentrationStats
+  /**
+   * WHICH LANE each money measure above was computed on — the response's own
+   * statement, never inferred from `?lane=`. `rows`/`headlineUsd` follow the
+   * selected lane EXCEPT on the budget axis, which is `attributed` in both
+   * lanes because `provider_usage_fact` has no project column. Read this before
+   * comparing or combining any two figures here: the lanes measure different
+   * populations and do not reconcile (target-state-data-architecture.md §2).
+   *
+   * Optional so a cached client bundle predating the field still type-checks;
+   * every current route populates it.
+   */
+  measureLanes?: MeasureLanes
+  /** Present only when `rows` is the billed lane — see {@link BilledLaneMeta}. */
+  billedLane?: BilledLaneMeta
+  /**
+   * Present only under `?lane=chargeback`: WHOSE charge these rows are, and which
+   * provider's charge this axis structurally cannot carry
+   * ({@link ChargebackCoverage}).
+   *
+   * Read it before labelling ANY figure here "billed spend". Copilot's charge is
+   * one pooled invoice per cost centre, so on the teammate and model axes the
+   * headline is Anthropic's alone — and a label that does not say so is the
+   * defect this field exists to make unspellable. Never hard-code WHICH axes:
+   * `providers` and `gaps` are the answer, and the set has already moved once
+   * (the surface axis carries the Copilot charge, by the bill's own lane).
+   */
+  chargebackCoverage?: ChargebackCoverage
+  /**
+   * Present only on the budget axis: the part of `headlineUsd` carrying no
+   * budget claim. ATTRIBUTED money — see `measureLanes`.
+   */
+  unallocatedUsd?: number
 }

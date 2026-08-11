@@ -36,6 +36,12 @@ const MANAGER_ID = '00000000-0000-0000-0000-0000000000a2'
 // validated by z.string().uuid() (unlike the Session-only admin/manager ids).
 const EXISTING_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3'
 
+async function unplacedIdFor(rid: string): Promise<string> {
+  const [row] = await t.client<{ id: string }[]>`
+    SELECT id::text AS id FROM org_unit WHERE region_id = ${rid}::uuid AND code = '__UNPLACED__'`
+  return row!.id
+}
+
 function ev(opts: { session: Session; projectId: string; body: unknown }) {
   const headers: Record<string, string> = { host: 'localhost:3450', origin: 'http://localhost:3450' }
   const e = {
@@ -123,12 +129,15 @@ describe('project member assignment (directory-driven)', () => {
     )) as { teammate_id: string; email: string; provisioned: boolean }
     expect(res.provisioned).toBe(true)
     expect(res.email).toBe('sasha.kumar@example.com')
-    // Teammate created in THIS region, homed in the region default, source=directory.
+    // Teammate created in THIS region, homed on the region's __UNPLACED__
+    // holding node (S3, server/auth/placement-home.ts) — NOT the region-root
+    // 'default' BU, whose subtree is the whole region.
     const [tm] = await t.client<{ region_id: string; org_unit_id: string; source: string }[]>`
       SELECT region_id::text AS region_id, org_unit_id::text AS org_unit_id, source
       FROM teammate WHERE entra_oid = 'dir-oid-0001'`
     expect(tm!.region_id).toBe(regionId)
-    expect(tm!.org_unit_id).toBe(ids['default'])
+    expect(tm!.org_unit_id).toBe(await unplacedIdFor(regionId))
+    expect(tm!.org_unit_id).not.toBe(ids['default'])
     expect(tm!.source).toBe('directory')
     // An open assignment row now exists for this project.
     const [asg] = await t.client<{ n: string }[]>`

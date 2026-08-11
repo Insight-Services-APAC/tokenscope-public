@@ -39,6 +39,8 @@ import type { AdapterScope } from './registry'
 import { GithubCopilotClient, type GithubSeat, type GithubUsageItem } from './github-client'
 import { GithubAppAuth } from './github-app-auth'
 import { reconciledTeammateLine } from './teammate-line'
+import { createGovernanceKeyCache, resolveGithubGovernanceKey } from '../governance-keys'
+import { loadGovernanceResolutionContext, resolveGithubVerdict } from '../../governance/verdict'
 
 type Db = PostgresJsDatabase<typeof schema>
 
@@ -47,116 +49,6 @@ type Db = PostgresJsDatabase<typeof schema>
  * fixed rate (owner-confirmed). The PAT billing path keeps GitHub's authoritative
  * grossAmount/grossQuantity rate instead. */
 const AIC_USD_RATE = 0.01
-
-/*
- * §finance-exclusion — GENERAL finance/chargeback exclusion, keyed by GitHub ORG.
- *
- * The PRIMITIVE (owner decision 2026-06-22): track ALL spend, but exclude a
- * CONFIGURABLE SET OF GITHUB ORGS from the finance/chargeback report — because that
- * spend is already paid directly (e.g. credit card, or a genuine NFR/partner-demo
- * enterprise). "NFR" is a PARTNER-only LABEL, not the mechanism: a partner-NFR org is
- * simply one entry in the exempt set. Per-user exclusion is a later option — NOT now.
- *
- * Mechanism: an org in the exempt set reconciles as `indicative` (reason
- * 'chargeback-exempt') -> excluded from v_finance_reportable_spend (the cross-charge
- * gate is `spend_class <> 'indicative'`, mig 0039). An org NOT in the set is
- * chargeback-eligible (today still held `indicative` with reason 'copilot-pre-billing'
- * until the F2 billing worker promotes Copilot to finance-reportable; the moment F2
- * lands, only the exempt orgs stay excluded).
- *
- * Config: NUXT_GITHUB_CHARGEBACK_EXEMPT_ORGS (comma-separated org logins,
- * case-insensitive). BACKWARD-COMPAT: the legacy NUXT_GITHUB_NFR_DEMO_ORGS is read as a
- * fallback alias (union of both) so an existing deployment keeps working unchanged.
- *
- * Name heuristic (always on): a conservative demo/NFR name match classes obvious
- * demo/NFR orgs exempt so the seeded partner-demo enterprise (whose every org is an NFR
- * demo) is excluded out of the box. The explicit config is UNIONed with it, NOT a
- * replacement: an org is exempt if it is configured OR matches the heuristic. This means
- * (a) a demo/NFR org omitted from the list is still exempt (no silent mis-charge at F2),
- * and (b) there is NO negative override — a prod org legitimately named "*-demo"/"*-nfr"
- * cannot be made chargeable via config; rename the org or adjust the heuristic instead.
- * See docs/build/copilot-followups.md §"F2 keying + finance-exclusion primitive" and the
- * reconciliation-engine design §5.2, §14.
- */
-const CHARGEBACK_EXEMPT_HEURISTIC = /(?:^|[-_ ])(?:demo|nfr)(?:[-_ )]|$)/i
-
-/*
- * The configured set of finance/chargeback-exempt GitHub orgs (lowercased). Reads
- * NUXT_GITHUB_CHARGEBACK_EXEMPT_ORGS and unions in the legacy NUXT_GITHUB_NFR_DEMO_ORGS
- * (backward-compat alias) so neither var silently shadows the other.
- */
-export function chargebackExemptOrgSet(): Set<string> {
-  const out = new Set<string>()
-  for (const raw of [process.env.NUXT_GITHUB_CHARGEBACK_EXEMPT_ORGS, process.env.NUXT_GITHUB_NFR_DEMO_ORGS]) {
-    if (!raw) continue
-    for (const s of raw.split(',')) {
-      const v = s.trim().toLowerCase()
-      if (v) out.add(v)
-    }
-  }
-  return out
-}
-
-/**
- * True if a license org is exempt from the finance/chargeback report.
- *
- * UNION, not replace: an org is exempt if it is explicitly configured OR matches the
- * nfr/demo name heuristic. The earlier "config replaces heuristic once any org is set"
- * was a mis-charge footgun — at F2 activation, an NFR/demo org omitted from the env var
- * would silently become chargeback-eligible. Unioning keeps the safe default (don't
- * charge something that looks like NFR/demo) while the explicit set adds precision.
- */
-export function isChargebackExemptOrg(licenseOrg: string | null, configured: Set<string>): boolean {
-  if (!licenseOrg) return false
-  return configured.has(licenseOrg.toLowerCase()) || CHARGEBACK_EXEMPT_HEURISTIC.test(licenseOrg)
-}
-
-/**
- * @deprecated Use {@link chargebackExemptOrgSet}. Retained as a backward-compat alias
- * (the general primitive replaces the partner-specific "NFR/demo" naming).
- */
-export const nfrDemoOrgSet = chargebackExemptOrgSet
-
-/**
- * @deprecated Use {@link isChargebackExemptOrg}. Backward-compat alias.
- */
-export const isNfrDemoOrg = isChargebackExemptOrg
-
-/*
- * §finance-exclusion at the ENTERPRISE grain — for the App-mode metrics path, which has NO
- * per-user license org (the users-1-day record carries no org), so the chargeback verdict is
- * decided once for the whole enterprise. Reads NUXT_GITHUB_CHARGEBACK_EXEMPT_ENTERPRISES
- * (comma-separated enterprise slugs, case-insensitive). Kept SEPARATE from the org-keyed set
- * so the §A/§B keying is EXPLICIT — an operator never shoehorns an enterprise slug into an
- * org list (an overload the reviewers flagged).
- */
-export function chargebackExemptEnterpriseSet(): Set<string> {
-  const out = new Set<string>()
-  const raw = process.env.NUXT_GITHUB_CHARGEBACK_EXEMPT_ENTERPRISES
-  if (raw) {
-    for (const s of raw.split(',')) {
-      const v = s.trim().toLowerCase()
-      if (v) out.add(v)
-    }
-  }
-  return out
-}
-
-/**
- * True if a whole ENTERPRISE is finance/chargeback-exempt (App-mode metrics path). UNION of
- * the explicit config set and the demo/nfr name heuristic on the slug — the same safe default
- * the org path uses (a `*-demo` / `*-nfr` enterprise is exempt out of the box).
- *
- * LIMITATION (documented, not a bug): the metrics report carries no per-user license org, so
- * App mode applies ONE verdict to the ENTIRE enterprise. A MIXED enterprise (some orgs
- * exempt, some chargeable) cannot be split on this path — set the verdict explicitly via
- * NUXT_GITHUB_CHARGEBACK_EXEMPT_ENTERPRISES. Harmless pre-F2 (every Copilot line is held
- * `indicative`, out of v_finance_reportable_spend); becomes load-bearing once F2 promotes
- * Copilot to finance-reportable. The PAT path keeps per-org granularity via the seat roster.
- */
-export function isChargebackExemptEnterprise(enterpriseRef: string, configured: Set<string>): boolean {
-  return configured.has(enterpriseRef.toLowerCase()) || CHARGEBACK_EXEMPT_HEURISTIC.test(enterpriseRef)
-}
 
 /*
  * Map a billing SKU/product to a reconcile category. Only "Copilot AI Credits" is
@@ -485,8 +377,12 @@ class GithubAdapter implements Adapter {
    * ai_credit/usage and normalise the billing-grade usageItems[] into ReconciledLine[].
    */
   private async pullPatBilling(days: DayKey[]): Promise<ReconciledLine[]> {
-    const [seats, identityByLogin] = await Promise.all([this.patClient!.listSeats(), this.resolveRoster()])
-    const exemptConfigured = chargebackExemptOrgSet()
+    const [seats, identityByLogin, ctx] = await Promise.all([
+      this.patClient!.listSeats(),
+      this.resolveRoster(),
+      loadGovernanceResolutionContext(this.db),
+    ])
+    const govKeyCache = createGovernanceKeyCache()
     const lines: ReconciledLine[] = []
 
     // ai_credit/usage is PER-USER (keyed by login; returns the user's total regardless of
@@ -508,8 +404,18 @@ class GithubAdapter implements Adapter {
       if (!teammateId) continue
 
       const licenseOrg = seatLicenseOrg(seat)
-      // Finance/chargeback exclusion is keyed by the LICENSE org (the seat's billing org).
-      const chargebackExempt = isChargebackExemptOrg(licenseOrg, exemptConfigured)
+      // Chargeability is resolved by server/governance/verdict.ts — enterprise-level
+      // `billing` once governance is activated (ADR-0011 D11), the legacy per-org
+      // heuristic before then (the rollback seam). Never both.
+      const govKey = await resolveGithubGovernanceKey(this.db, govKeyCache, {
+        enterpriseSlug: this.enterpriseRef,
+        licenseOrg,
+      })
+      const chargebackExempt = resolveGithubVerdict(ctx, {
+        providerEnterpriseId: govKey.providerEnterpriseId,
+        enterpriseSlug: this.enterpriseRef,
+        licenseOrg,
+      }).exempt
 
       for (const day of days) {
         let usage
@@ -543,15 +449,21 @@ class GithubAdapter implements Adapter {
    * emit ONE copilot line per (teammate, day) priced at the flat $0.01/credit. No seats, no
    * org-grain calls → Enterprise-only read permissions (the IT-acceptable least privilege).
    *
-   * chargeback-exemption is decided at the ENTERPRISE grain (isChargebackExemptEnterprise):
-   * the metrics record carries no per-user license org, so ONE verdict applies to the whole
-   * enterprise. An NFR/demo enterprise (e.g. partner-demo) is exempt via the slug heuristic;
-   * a MIXED enterprise must set the verdict explicitly via NUXT_GITHUB_CHARGEBACK_EXEMPT_
-   * ENTERPRISES (per-org granularity is a PAT-path-only property — see the function doc).
+   * Chargeability is resolved at the ENTERPRISE grain (server/governance/verdict.ts,
+   * resolveGithubVerdict with licenseOrg=null): the metrics record carries no per-user
+   * license org, so ONE verdict applies to the whole enterprise, exactly as it always has
+   * (pre-activation via the legacy per-enterprise heuristic; post-activation via
+   * `provider_enterprise.billing`, which is enterprise-grain by construction — D11).
    */
   private async pullAppMetrics(days: DayKey[]): Promise<ReconciledLine[]> {
-    const identityByLogin = await this.resolveRoster()
-    const chargebackExempt = isChargebackExemptEnterprise(this.enterpriseRef, chargebackExemptEnterpriseSet())
+    const [identityByLogin, ctx] = await Promise.all([this.resolveRoster(), loadGovernanceResolutionContext(this.db)])
+    const govKeyCache = createGovernanceKeyCache()
+    const govKey = await resolveGithubGovernanceKey(this.db, govKeyCache, { enterpriseSlug: this.enterpriseRef })
+    const chargebackExempt = resolveGithubVerdict(ctx, {
+      providerEnterpriseId: govKey.providerEnterpriseId,
+      enterpriseSlug: this.enterpriseRef,
+      licenseOrg: null,
+    }).exempt
     const lines: ReconciledLine[] = []
 
     for (const day of days) {

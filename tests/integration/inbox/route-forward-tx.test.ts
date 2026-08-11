@@ -10,6 +10,11 @@
  * handler's transaction shape with a realistically failing audit write (FK
  * violation on actor_teammate_id) — per the endpoints.test.ts SQL-contract
  * convention.
+ *
+ * Cross-region (server-api-app:idor:0004 / T3-xregion-03) — RLS is inert at
+ * runtime (no FORCE, owner connection), so requireRegionScope on BOTH the
+ * source item's recipient AND the forward target is the live gate. Clamping
+ * only one end leaves the mirror-image leak.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { randomUUID } from 'node:crypto'
@@ -24,9 +29,14 @@ import routePost from '../../../server/api/v1/me/inbox/[id]/route.post'
 let t: TestDb
 let regionId: string
 let ouId: string
-let lenaId: string // admin (forwarder)
-let priyaId: string // original recipient
-let anilId: string // forward target
+let regionBId: string
+let ouBId: string
+let lenaId: string // admin (forwarder), region A
+let priyaId: string // original recipient, region A
+let anilId: string // forward target, region A
+let priyaBId: string // original recipient, region B
+let anilBId: string // forward target, region B
+let finopsId: string // global-finops (region-unbounded)
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -39,27 +49,43 @@ beforeAll(async () => {
     .values({ regionId, path: 'fw.svc', code: 'fw-svc', displayName: 'Svc', unitType: 'bu' })
     .returning()
   ouId = o!.id
-  const mk = async (oid: string, email: string, role?: string) => {
+  const [rb] = await t.db.insert(schema.region).values({ code: 'fw-rb', displayName: 'FW RB' }).returning()
+  regionBId = rb!.id
+  const [ob] = await t.db
+    .insert(schema.orgUnit)
+    .values({ regionId: regionBId, path: 'fwb.svc', code: 'fwb-svc', displayName: 'Svc B', unitType: 'bu' })
+    .returning()
+  ouBId = ob!.id
+  const mk = async (oid: string, email: string, opts?: { role?: string; regionId?: string; orgUnitId?: string }) => {
     const [row] = await t.db
       .insert(schema.teammate)
-      .values({ entraOid: oid, email, regionId, orgUnitId: ouId, ...(role ? { role } : {}) })
+      .values({
+        entraOid: oid,
+        email,
+        regionId: opts?.regionId ?? regionId,
+        orgUnitId: opts?.orgUnitId ?? ouId,
+        ...(opts?.role ? { role: opts.role } : {}),
+      })
       .returning()
     return row!.id
   }
-  lenaId = await mk('oid-fw-lena', 'fw-lena@x.test', 'admin')
+  lenaId = await mk('oid-fw-lena', 'fw-lena@x.test', { role: 'admin' })
   priyaId = await mk('oid-fw-priya', 'fw-priya@x.test')
   anilId = await mk('oid-fw-anil', 'fw-anil@x.test')
+  priyaBId = await mk('oid-fw-priya-b', 'fw-priya-b@x.test', { regionId: regionBId, orgUnitId: ouBId })
+  anilBId = await mk('oid-fw-anil-b', 'fw-anil-b@x.test', { regionId: regionBId, orgUnitId: ouBId })
+  finopsId = await mk('oid-fw-finops', 'fw-finops@x.test', { role: 'global-finops' })
 }, 120_000)
 
 afterAll(async () => {
   await stopTestDb(t)
 }, 30_000)
 
-async function seedItem(): Promise<string> {
+async function seedItem(recipientTeammateId: string = priyaId): Promise<string> {
   const [item] = await t.db
     .insert(schema.inboxItem)
     .values({
-      recipientTeammateId: priyaId,
+      recipientTeammateId,
       category: 'budget-alert',
       severity: 'warning',
       subject: 'Project over budget',
@@ -69,8 +95,8 @@ async function seedItem(): Promise<string> {
   return item!.id
 }
 
-function ev(opts: { id: string; body: unknown }) {
-  const session: Session = {
+function ev(opts: { id: string; body: unknown; session?: Session }) {
+  const session: Session = opts.session ?? {
     teammateId: lenaId,
     email: 'fw-lena@x.test',
     displayName: 'Lena',
@@ -181,5 +207,67 @@ describe('inbox forward (API-2)', () => {
       WHERE body->>'forwarded_from_inbox_item_id' = ${sourceId}
     `)
     expect(Number(copies!.n)).toBe(0)
+  })
+})
+
+// Lazy: finopsId/regionId are only populated once beforeAll has run, which is
+// guaranteed by the time any `it()` body calls this (a plain const object here
+// would capture undefined — evaluated at module load, before beforeAll runs).
+const finopsSession = (): Session => ({
+  teammateId: finopsId,
+  email: 'fw-finops@x.test',
+  displayName: 'Finops',
+  role: 'global-finops',
+  regionId,
+  orgPath: 'fw.svc',
+})
+
+describe('inbox forward — cross-region clamp (both ends)', () => {
+  it('region-A admin forwarding a region-B recipient\'s item is denied, source unchanged (SOURCE clamp)', async () => {
+    const sourceId = await seedItem(priyaBId) // recipient is in region B
+    await expect(
+      routePost(ev({ id: sourceId, body: { recipient_teammate_id: anilId } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+
+    const [source] = await t.db.execute<{ ack_state: string }>(sql`
+      SELECT ack_state FROM inbox_item WHERE id = ${sourceId}::uuid
+    `)
+    expect(source!.ack_state).toBe('unread')
+  })
+
+  it('region-A admin forwarding to a region-B target is denied, source unchanged (TARGET clamp)', async () => {
+    const sourceId = await seedItem(priyaId) // recipient is in region A (lena's own region)
+    await expect(
+      routePost(ev({ id: sourceId, body: { recipient_teammate_id: anilBId } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+
+    const [source] = await t.db.execute<{ ack_state: string }>(sql`
+      SELECT ack_state FROM inbox_item WHERE id = ${sourceId}::uuid
+    `)
+    expect(source!.ack_state).toBe('unread')
+  })
+
+  it('global-finops forwards a region-B item to a region-A target — succeeds (region-unbounded)', async () => {
+    const sourceId = await seedItem(priyaBId)
+    const res = (await routePost(
+      ev({ id: sourceId, body: { recipient_teammate_id: anilId }, session: finopsSession() }),
+    )) as { source_id: string; forwarded_id: string | null }
+    expect(res.forwarded_id).toBeTruthy()
+    const [source] = await t.db.execute<{ ack_state: string }>(sql`
+      SELECT ack_state FROM inbox_item WHERE id = ${sourceId}::uuid
+    `)
+    expect(source!.ack_state).toBe('resolved')
+  })
+
+  it('global-finops forwards a region-A item to a region-B target — succeeds (region-unbounded)', async () => {
+    const sourceId = await seedItem(priyaId)
+    const res = (await routePost(
+      ev({ id: sourceId, body: { recipient_teammate_id: anilBId }, session: finopsSession() }),
+    )) as { source_id: string; forwarded_id: string | null }
+    expect(res.forwarded_id).toBeTruthy()
+    const [source] = await t.db.execute<{ ack_state: string }>(sql`
+      SELECT ack_state FROM inbox_item WHERE id = ${sourceId}::uuid
+    `)
+    expect(source!.ack_state).toBe('resolved')
   })
 })

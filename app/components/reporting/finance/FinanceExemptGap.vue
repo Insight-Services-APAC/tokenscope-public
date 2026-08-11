@@ -27,9 +27,10 @@ defineProps<{
       <div class="text-sm font-semibold text-carbon-1">Exempt / non-chargeable gap</div>
       <div class="text-[11px] text-carbon-3">Indicative usage the bill does not charge · not showback</div>
     </div>
+    <!-- The §A-lane mechanism went to the comment; what remains is what the Gap
+         tile below IS, which a reader cannot deduce from the word "Gap". -->
     <p class="text-[11px] text-carbon-3 leading-snug mb-4 max-w-2xl">
-      Exempt orgs never land on a bill surface, so their spend appears only in the §A usage lane.
-      This is that indicative usage minus what actually charges back.
+      Indicative usage minus what actually charges back.
     </p>
 
     <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">

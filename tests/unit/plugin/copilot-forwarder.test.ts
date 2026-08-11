@@ -10,8 +10,9 @@
  * All tests use temp files; no network, no Azure, no daemon spawning.
  * The forwarder exports these functions specifically to make this suite possible.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, rmSync, writeSync, openSync, closeSync } from 'node:fs'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import fs, { mkdtempSync, writeFileSync, rmSync, writeSync, openSync, closeSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -25,9 +26,10 @@ process.env.TOKENSCOPE_FWD_OFFSET_FILE = offsetFile
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — mjs import resolved by Vitest
-const { readNewSpans, loadPersistedOffset, persistOffset, _resetStateForTest, clampForwardIntervalMs } = await import(
-  '../../../plugin/scripts/copilot-forwarder.mjs'
-)
+const {
+  readNewSpans, loadPersistedOffset, persistOffset, _resetStateForTest, clampForwardIntervalMs,
+  isForeignOwned, isGitTracked, readAndForward,
+} = await import('../../../plugin/scripts/copilot-forwarder.mjs')
 
 // ── Shared span line builders ─────────────────────────────────────────────────
 function chatSpanLine(overrides: Record<string, unknown> = {}) {
@@ -61,6 +63,11 @@ function invokeAgentSpanLine() {
   })
 }
 
+/** Initialise `root` as a real git work tree (no identity config needed for `git add`). */
+function initGitRepo(root: string) {
+  execFileSync('git', ['init', '-q'], { cwd: root })
+}
+
 // ── Test setup ────────────────────────────────────────────────────────────────
 let dir: string
 let spanFile: string
@@ -73,6 +80,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   rmSync(dir, { recursive: true, force: true })
 })
 
@@ -255,5 +263,104 @@ describe('offset persistence — M3 + L2 guards', () => {
     const spans = readNewSpans(recreated)
     expect(spans).toHaveLength(1)
     expect(spans[0].spanId).toBe('recreated')
+  })
+})
+
+// ── S2: span-file provenance (the committed-file vector) ──────────────────────
+// Root cause: on the FIRST run in a fresh clone the offset starts at 0, so a span
+// file COMMITTED INTO THE REPOSITORY is read from byte 0 and POSTed to ingest
+// under the developer's own emit bearer. readNewSpans now refuses (1) a file not
+// owned by this process's uid and (2) a file git tracks, BEFORE doing any read.
+describe('isForeignOwned — pure uid check', () => {
+  it('false when the stat uid matches this process', () => {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 0
+    expect(isForeignOwned({ uid })).toBe(false)
+  })
+
+  it('true when the stat uid differs from this process', () => {
+    if (typeof process.getuid !== 'function') return // no uid concept (Windows) — guard is a no-op there
+    expect(isForeignOwned({ uid: process.getuid() + 1 })).toBe(true)
+  })
+
+  it('false (fails open) when uid is missing/non-numeric — never refuses on a malformed stat', () => {
+    expect(isForeignOwned({})).toBe(false)
+    expect(isForeignOwned(null)).toBe(false)
+  })
+})
+
+describe('isGitTracked — pure git-tracked check', () => {
+  it('false for a path outside any git repository', () => {
+    expect(isGitTracked(spanFile)).toBe(false) // spanFile lives under a bare tmpdir, never a repo
+  })
+
+  it('false for a file that EXISTS in a repo but was never git add-ed (the healthy case)', () => {
+    initGitRepo(dir)
+    writeFileSync(spanFile, chatSpanLine() + '\n')
+    expect(isGitTracked(spanFile)).toBe(false)
+  })
+
+  it('true once the file is staged — git add is enough, no commit required', () => {
+    initGitRepo(dir)
+    writeFileSync(spanFile, chatSpanLine() + '\n')
+    execFileSync('git', ['add', 'copilot-otel.ndjson'], { cwd: dir })
+    expect(isGitTracked(spanFile)).toBe(true)
+  })
+})
+
+describe('readNewSpans / readAndForward — provenance guard integration', () => {
+  it('refuses a git-tracked span file (root-cause scenario): readNewSpans returns nothing', () => {
+    initGitRepo(dir)
+    // Simulate a span file planted/committed into the repo — the exact vector a
+    // fresh clone's offset-starts-at-0 behaviour exploits.
+    writeFileSync(spanFile, chatSpanLine({ spanId: 'planted-in-repo' }) + '\n')
+    execFileSync('git', ['add', 'copilot-otel.ndjson'], { cwd: dir })
+
+    expect(readNewSpans(spanFile)).toEqual([])
+  })
+
+  it('readAndForward emits NOTHING for a git-tracked span file — no forward call at all', async () => {
+    initGitRepo(dir)
+    writeFileSync(spanFile, chatSpanLine({ spanId: 'planted' }) + '\n')
+    execFileSync('git', ['add', 'copilot-otel.ndjson'], { cwd: dir })
+
+    const forwardFn = vi.fn().mockResolvedValue(1)
+    const n = await readAndForward(spanFile, 'catch-up', forwardFn)
+    expect(n).toBe(0)
+    expect(forwardFn).not.toHaveBeenCalled()
+  })
+
+  it('a legitimately-appended span in an UNTRACKED file inside a git repo still forwards (no over-refusal)', () => {
+    initGitRepo(dir)
+    // The file exists inside a git work tree but is never staged — the healthy
+    // steady state ensureGitignored maintains (.tokenscope.local/ stays ignored).
+    writeFileSync(spanFile, chatSpanLine({ spanId: 'span-1' }) + '\n')
+    const first = readNewSpans(spanFile)
+    expect(first).toHaveLength(1)
+
+    const fd = openSync(spanFile, 'a')
+    writeSync(fd, chatSpanLine({ spanId: 'span-2' }) + '\n')
+    closeSync(fd)
+
+    const second = readNewSpans(spanFile)
+    expect(second).toHaveLength(1)
+    expect(second[0].spanId).toBe('span-2')
+  })
+
+  it('refuses when the span file is not owned by this process (mocked statSync — uid mismatch)', () => {
+    writeFileSync(spanFile, chatSpanLine() + '\n')
+    const realStat = fs.statSync(spanFile)
+    const foreignUid = (typeof process.getuid === 'function' ? process.getuid() : 0) + 1
+    vi.spyOn(fs, 'statSync').mockReturnValue({ ...realStat, uid: foreignUid } as ReturnType<typeof fs.statSync>)
+
+    expect(readNewSpans(spanFile)).toEqual([])
+  })
+
+  it('a matching-uid stat (mocked statSync, real uid) does NOT refuse — the guard is precise, not a blanket mock-triggered refusal', () => {
+    if (typeof process.getuid !== 'function') return
+    writeFileSync(spanFile, chatSpanLine() + '\n')
+    const realStat = fs.statSync(spanFile)
+    vi.spyOn(fs, 'statSync').mockReturnValue({ ...realStat, uid: process.getuid() } as ReturnType<typeof fs.statSync>)
+
+    expect(readNewSpans(spanFile)).toHaveLength(1)
   })
 })

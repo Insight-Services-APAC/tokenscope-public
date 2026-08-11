@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 // synthetic-anthropic-api — mock /v1/organizations/usage_report/claude_code.
 //
 // Real API shape (per RN-15 + docs.anthropic.com):
@@ -39,8 +38,7 @@ function send(res, status, body) {
 
 function scaleFor(date, idx) {
   // tiny deterministic LCG so repeated calls return identical data.
-  const seedNum =
-    date.split('-').reduce((acc, p) => acc * 31 + Number(p), 0) * 17 + idx * 7
+  const seedNum = date.split('-').reduce((acc, p) => acc * 31 + Number(p), 0) * 17 + idx * 7
   const n = (seedNum * 9301 + 49297) % 233280
   return 0.6 + (n / 233280) * 0.8 // 0.6 .. 1.4
 }
@@ -80,10 +78,7 @@ const server = createServer((req, res) => {
     return send(res, 200, { service: 'synthetic-anthropic-api', status: 'ok' })
   }
 
-  if (
-    req.method === 'GET' &&
-    url.pathname === '/v1/organizations/usage_report/claude_code'
-  ) {
+  if (req.method === 'GET' && url.pathname === '/v1/organizations/usage_report/claude_code') {
     const start = url.searchParams.get('starting_at')
     const end = url.searchParams.get('ending_at')
     if (!start || !end) {

@@ -9,7 +9,7 @@
  * NOTE: no assertSameOrigin here — this is a programmatic (non-browser) OAuth
  * endpoint hit by a CLI, so the cookie-CSRF threat model doesn't apply.
  */
-import { defineEventHandler, readValidatedBody, setResponseHeaders, setResponseStatus } from 'h3'
+import { defineEventHandler, readValidatedBody, getRequestIP, setResponseHeaders, setResponseStatus } from 'h3'
 import { consola } from 'consola'
 import { registerClient, OAuthError } from '../../../auth/oauth'
 import { recordAuditEvent } from '../../../db/audit'
@@ -28,10 +28,19 @@ export default defineEventHandler(async (event) => {
   }
 
   const db = getDb()
+  // Source key for the per-source registration ceiling (S6 Ceiling fix) — same
+  // best-effort IP capture as setup/enroll.post.ts; never crashes registration.
+  let ip: string | null
+  try {
+    ip = getRequestIP(event, { xForwardedFor: true }) ?? null
+  } catch {
+    ip = null
+  }
   try {
     const client = await registerClient(db, {
       clientName: body.client_name,
       redirectUris: body.redirect_uris,
+      source: ip ?? 'unknown',
     })
 
     await recordAuditEvent(db, {
@@ -54,7 +63,9 @@ export default defineEventHandler(async (event) => {
       grant_types: ['authorization_code', 'refresh_token'],
       token_endpoint_auth_method: 'client_secret_post',
       client_id_issued_at: Math.floor(Date.now() / 1000),
-      client_secret_expires_at: 0, // never expires
+      // Bounded (S6) — see MAX_CLIENT_SECRET_AGE_MS; enforced in
+      // validateClientCredentials against the client row's own created_at.
+      client_secret_expires_at: client.clientSecretExpiresAt,
     }
   } catch (err) {
     if (err instanceof OAuthError) {

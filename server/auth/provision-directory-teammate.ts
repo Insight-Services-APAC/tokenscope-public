@@ -50,11 +50,14 @@
  *      rolls back to the savepoint and the ladder re-runs once — the racer's
  *      row is then found/adopted/resolved.
  *
- * Placement: the directory person is homed in their target region's `default`
- * BU (seed-ensured; falls back to the given `fallbackOrgUnitId`) with a
- * neutral `developer` role — the P&L / membership grant is independent of org
- * role, and the manager-chain re-enrichment worker refines the home later.
- * This mirrors the owners.post placement exactly.
+ * Placement: the directory person is homed on their target region's
+ * `__UNPLACED__` holding node (server/auth/placement-home.ts) with a neutral
+ * `developer` role — the P&L / membership grant is independent of org role,
+ * and the manager-chain re-enrichment worker refines the home later. S3:
+ * previously homed on the region's `default` BU, which IS the region root —
+ * its subtree is the whole region, so this degenerated org-subtree scoping
+ * to "everyone in the region" for every directory-provisioned teammate until
+ * re-enrichment ran.
  */
 import { createError } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -62,6 +65,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type { DirectoryUser } from '../azure/directory'
 import { isExcludedUpn } from '../utils/directory-exclusions'
 import { recordAuditEvent } from '../db/audit'
+import { unplacedOrgUnitIdForRegion } from './placement-home'
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
 
@@ -77,11 +81,15 @@ export interface ProvisionedDirectoryTeammate {
 }
 
 export interface ProvisionDirectoryTeammateOpts {
-  /** The region to home the new teammate in (its `default` BU). */
+  /** The region to home the new teammate in (its `__UNPLACED__` holding node). */
   regionId: string
   /**
-   * Fallback org-unit id used only if the region has no `default` BU (shouldn't
-   * happen post-seed). Callers pass a unit they already resolved in-region.
+   * UNUSED as of S3 — the placement target is now the region's `__UNPLACED__`
+   * holding node (create-on-demand via unplacedOrgUnitIdForRegion, never absent),
+   * so there is no longer a "the default BU is missing" case to fall back from.
+   * Kept on the interface (required) purely so its existing callers
+   * (org-units/[id]/owners.post.ts, projects/[id]/assignments.post.ts) keep
+   * compiling unmodified.
    */
   fallbackOrgUnitId: string
   /** Audit surface label (e.g. 'project-assign', 'cou-owner-assign'). */
@@ -179,12 +187,16 @@ export async function provisionDirectoryTeammate(
   actorTeammateId: string,
   opts: ProvisionDirectoryTeammateOpts,
 ): Promise<ProvisionedDirectoryTeammate> {
-  const defRows = await tx.execute<{ id: string }>(sql`
-    SELECT id::text AS id FROM org_unit
-    WHERE region_id = ${opts.regionId}::uuid AND code = 'default' AND retired_at IS NULL
-    LIMIT 1
-  `)
-  const placementUnit = [...defRows][0]?.id ?? opts.fallbackOrgUnitId
+  // S3: home on the region's __UNPLACED__ holding node, NOT the `default` BU — a
+  // directory pick is a P&L / membership grant (the person may never explicitly
+  // choose an org home), and `default` is the region ROOT: its subtree is the
+  // WHOLE region, so landing a directory-provisioned teammate there degenerated
+  // org-subtree scoping to "everyone in the region" until the manager-chain
+  // re-enrichment worker (or an admin) placed them for real. unplacedOrgUnitIdForRegion
+  // create-on-demands the holding node, so opts.fallbackOrgUnitId is no longer
+  // consulted here — kept on the interface only because owners.post.ts /
+  // assignments.post.ts (unowned by this change) still pass it.
+  const placementUnit = await unplacedOrgUnitIdForRegion(tx, opts.regionId)
 
   // Two passes: the second only runs after a savepoint-absorbed race (a
   // concurrent JIT sign-in / bill-placement worker landed the identity between

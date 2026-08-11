@@ -153,11 +153,53 @@ Per-resource scope helpers (the *live* boundary while RLS is inert):
 
 | Helper | Effect |
 |---|---|
-| `allocationScopePredicate(tableRef)` | SQL predicate: `admin`/`global-finops` bypass; else project cost-owning unit must sit within caller's `app.user_org_path` ltree subtree. Used by every allocation read. |
+| `allocationScopePredicate(tableRef)` | SQL predicate: `global-finops` unbounded; otherwise the project must sit in the caller's region, and an `admin` is bound to that region while a `manager`/`developer` additionally needs the project's cost-owning unit inside their `app.user_org_path` subtree. The region clamp **wraps** the role split rather than sitting beside it. Used by every allocation read and the two allocation writes. |
 | `assertProjectScope(event, project)` | Write-side mirror: `admin` bound to project region; `manager` needs project cost-owning unit in org subtree; `global-finops` unbounded. |
+| `placedBelowRegionRootPredicate()` | The org-placement clamp, ANDed onto every subtree arm above. See below. |
 | `requireReportScope(event, tx, scope)` | The `/reports/*` read gate. Resolves caller + active cost-centre ownership, evaluates the admin-configurable **report-visibility policy** (`reportGrants`), and throws the same RFC-9457 `403` as `requireRole`. `requireAuth`-based (identity + an in-query/JS-computed scope) rather than a fixed-role gate — a documented exception to "every gate is `requireRole`". See [Report-visibility policy](#report-visibility-policy-report-scoping). |
 
 Admin mutations (`server/auth/admin-guards.ts`): `evaluateRoleChange` blocks self-role-change, same-role no-ops, and enforces last-admin-per-region protection; `evaluateRevokeSessions` is always positive (revoking just forces re-sign-in).
+
+### The org-placement clamp
+
+A `manager`'s and a `developer`'s only least-privilege boundary is
+`path <@ current_setting('app.user_org_path')` — their placement's ltree subtree.
+That boundary is worth exactly as much as the placement it is anchored on: a
+teammate homed on a region's **root** org unit sits at a bare label whose subtree
+is *every unit in the region*, so the `<@` test is true for all of them and the
+clamp degenerates into "the whole region".
+
+Two halves close that:
+
+- **Default placement no longer homes on the region root.** Every no-signal
+  placement path — first-SSO JIT, directory provisioning, emit-on-install
+  enrolment, and the admin region reassign — homes the teammate on the region's
+  **`__UNPLACED__` holding node** (`server/auth/placement-home.ts`,
+  create-on-demand and idempotent) rather than the region's `default` BU. A
+  holding node has no children, so the subtree it spans is that node alone — and
+  the predicate below refuses a holding-node placement outright, so an unplaced
+  teammate gets no subtree grant at all.
+- **The predicate refuses a region-root subtree grant.** `placedBelowRegionRootPredicate()`
+  (`server/auth/org-subtree-scope.ts`) is one exported clause, ANDed onto the
+  dev/manager arm of `orgSubtreeScopePredicate`, `managerScopePredicate`,
+  `allocationScopePredicate` and the project-consumption read. It asserts the
+  caller's own placement is a genuine, non-root unit: `unit_type <> 'holding'`
+  **and** `parent_id IS NOT NULL` **and** `code <> 'default'`. The **structural**
+  `parent_id` test is the load-bearing one — a region root is parentless whatever
+  it is named, and `code <> 'default'` alone fails open the moment a region's root
+  is not literally called `default`, which is the case for any region created at
+  runtime. The naming test is kept as defence-in-depth and made a real invariant
+  from the other side: `regions.post.ts` now plants a region's root org unit in the
+  same transaction as the region, and `org-units.post.ts` reserves the `default`
+  code.
+
+> **Product-visible.** A developer or manager who is *currently* placed on a region
+> root sees their Regional and Cost-Centre views collapse from region-wide to their
+> own placement. That is the intended least-privilege outcome and the pilot cohort
+> will notice it. `admin` (region-bounded), `global-finops` and `platform-admin` are
+> unaffected. Separately, the teammate-axis driver CSV export is capped at 100 rows
+> plus an explicit `(all other)` remainder row, so the totals still reconcile but a
+> finance user exporting for every name will not get every name.
 
 ### Report-visibility policy (report scoping)
 
@@ -177,6 +219,16 @@ Design: [`docs/design/report-visibility-policy.md`](../design/report-visibility-
 - **One source of truth.** `reportGrants(mode, caller)` returns the per-scope
   grant; a static **WHO-SEES-WHAT matrix** export drives both the admin-pane
   preview and the tests, so the preview can never drift from the gate.
+- **Two further grant columns — the DRILL contract.** `ReportScopeGrants` also
+  carries `teammate` (`'people-scope' | false`) and `project`
+  (`'membership' | 'member-in-scope' | 'region-wide' | false`), in the same
+  WHO-SEES-WHAT matrix and the same admin preview. `teammate: 'people-scope'`
+  is CC-subtree/self today — a plain `regional: 'own-region'` width does NOT
+  confer it, because a per-person governance view is not a reporting width, and
+  region-leader-sees-whole-region is not expressible until owner decision E1.
+  Both are LEVELS, never admissions: the per-teammate endpoint still requires
+  emit-time homing evidence inside the caller's own frame plus
+  `teammate.is_active`, resolved per request.
 - **Enforcement is `requireReportScope`** (the scope-helper row above), applied
   to the across-regions and finance report routes; the `regional` and
   `cost-centre` resolvers take a policy-computed `crossRegion` / `unbounded`
@@ -190,12 +242,52 @@ Design: [`docs/design/report-visibility-policy.md`](../design/report-visibility-
   is the *live* boundary; the GUC/RLS layer is untouched by this feature and
   inert at runtime (see caveat below). The loosened grants are threaded as
   explicit JS-computed scope arguments, not GUC changes.
-- **Read-only blast radius.** The policy module is imported **only** by
-  `/api/v1/reports/**` (+ `meta` + the admin-pane endpoints). It never touches
+- **Read-only blast radius.** On the server the policy module is imported **only**
+  by `/api/v1/reports/**` (+ `meta`, the reporting scope resolvers, and the
+  admin-pane endpoints), and enforcement is pinned per LITERAL endpoint by the
+  200/403 integration suite rather than by an import scan. It never touches
   write endpoints, `rollups` mutation paths, `me/*`, or provisioning. Every deny
   on an `all-regions`-required scope (across + `/reports/finance`) is audited
   (`report-scope-denied`) — those have no in-query backstop, so the audit *is*
-  the record.
+  the record. Opening a NAMED individual's reports-depth page is audited on
+  every request (`report-teammate-viewed`; its CSV export writes the distinct
+  `report-teammate-export`), disclosed on the page itself, and served
+  `Cache-Control: no-store` so a browser-cache hit can never absorb a view or a
+  download. The reporting **client** also imports the two drill rules, to decide
+  whether a name renders as a link or as plain text — a rendering decision only:
+  the server re-resolves the same rules per request, so a client that guessed
+  wrong gets a 403, never a door.
+- **The cost-centre scope block is the visibility gate's own output.** The
+  cost-centre report returns the centres a caller may look at, and it is exactly
+  the list `fetchVisibleCostCentres` produced: the org-subtree predicate OR an
+  active `cou_owner` row (or every centre under a loosened mode). Each option
+  reports `owned` — which arm admitted it — so the page can land the reader on
+  the centre they OWN rather than on whichever sorts first, without the browser
+  ever evaluating a grant.
+
+  **Two consequences worth stating.** The filter runs BEFORE the list is
+  returned, so a caller cannot distinguish "this centre does not exist" from
+  "you cannot see it" — deliberate, the same anti-IDOR posture as the drill's
+  single 403, and it means any client-side inference about an ABSENT centre is
+  unsound. And the selector cannot offer a width the endpoint would refuse,
+  because it is rendered from the grant's own list rather than from a role.
+
+- **Which projects a cost-centre owner sees, and against what.** These are two
+  different questions and the page answers both rather than picking:
+  - the **allocation denominator** is homing-derived — `project.cost_owning_unit_id`,
+    the centre that LEADS the project. That is what a budget roll-up must be
+    clamped on, and it stays that way;
+  - the **row** therefore carries BOTH operands: the project's own total (the
+    right figure against its own budget, wherever the spend came from) and
+    *this* centre's share of it (clamped on the usage row's
+    `cost_owning_unit_id`, like every other burn figure on the page).
+
+  **Not yet built, and named so it is not assumed:** the evidence annex's
+  membership-derived VISIBILITY rule — a cost-centre owner seeing every project
+  with ≥1 member in their centre, including projects another centre leads. The
+  shipped listing is homing-derived. Widening it is a denominator decision, not
+  a filter change, and it is open.
+
 - **Admin surface.** `GET/PUT /api/v1/admin/report-visibility` — GET is
   `admin | global-finops` (read); PUT re-narrows to `platform-admin |
   global-finops` (org-wide config, `assertSameOrigin`, before/after
@@ -210,6 +302,13 @@ Four session GUCs set per transaction via `withRlsContext` / `withRequestRls` us
 - `withRequestRls(event, fn)` resolves the session via `requireAuth`, maps `platform-admin` → unbounded `global-finops` at the RLS layer (every policy already treats `global-finops` as org-wide), runs `fn` in the scoped transaction.
 - Shipped policies (e.g. `allocation_admin_only`, `allocation_manager_scope`) read these GUCs.
 - **Inert today** under the owner connection (see caveat above) — app-level scope predicates are the live boundary until the non-owner role ships.
+
+**What the policies say** (correctness of the inert layer — none of this changes runtime behaviour):
+
+- **Role lists are converged.** `admin` is a **region-scoped** role, so it must never appear in an *unscoped* bypass disjunct — one that grants reach into every other region. About twenty such clauses, written across the `0002`-era migrations and their successors, read `('global-finops', 'admin')`; `0098_rls_policy_convergence.sql` `ALTER POLICY`s every one of them to `('global-finops', 'platform-admin')`. Two deliberate non-changes: `session_quarantine_self_scope` keeps `admin` in its own `region_id = … AND role IN (…)` arm (that arm was never unbounded — only its separate unconditional bypass was, and that one is converged), and `directory_exclusion_pattern_write` is untouched because that table has no `region_id` column at all, making it global config rather than a region bypass — a narrower question about who may write global exclusion policy, still open.
+- **New policies on three previously-uncovered tables** — `org_unit`, `teammate`, `oauth_token` — each mirroring the app-level predicate it backstops (`orgSubtreeScopePredicate`, `managerScopePredicate`'s teammate adaptation, and the `requireOAuthBearer` / region-scoped revoke-sessions pair respectively). 35 tables still have **no policy at all**; a policy-less table denies every row to a non-owner, so those are part of why `FORCE` cannot be flipped yet.
+- **One definition of the org boundary.** Five policies hard-coded the pre-clamp `path <@ current_setting('app.user_org_path')` test with no gate on whether the caller's own placement is a genuine subtree home rather than the region root. They now carry `placed_below_region_root()`, a `STABLE SECURITY DEFINER` function that mirrors `placedBelowRegionRootPredicate()` conjunct-for-conjunct (`SECURITY DEFINER` here is not a privilege grant — it is what breaks the self-referential recursion the predicate would otherwise cause inside `org_unit`'s own policy). Without it the two layers would encode different boundaries, which is exactly the drift the "cite the app predicate you mirror" convention exists to prevent.
+- **CI no longer certifies a control production lacks.** Both integration suites that create a non-owner role to exercise policies (`tests/integration/db/rls.test.ts`, `tests/integration/workers/aggregate-rollup.test.ts`) now *also* assert the **production topology** — that the owner connection bypasses RLS entirely and sees every row. Previously a green suite proved only that the policies would work under a role no deployed environment has.
 
 ## MCP/CLI auth + telemetry (OAuth 2.1)
 
@@ -253,6 +352,7 @@ The everyday self-service connect path (sequence above). The read-scoped `provis
 
 - `GET /api/v1/instances/[instanceId]/bearer` (`server/auth/obo.ts`) returns an Azure Entra token scoped to `https://monitor.azure.com/.default`. Despite the filename this is **not** a per-developer On-Behalf-Of flow — it is an **app-level Managed Identity token** (same token every session), from the container app's user-assigned MI holding *Monitoring Metrics Publisher* on the Data Collection Rule.
 - Gates issuance on the OAuth `tokenscope.emit` access token (the bound teammate must own the instance), then returns the MI-minted token; refreshed within Claude's ~29-min headers-helper window. Each mint doubles as an authenticated heartbeat for the heartbeat-coverage check. Cached app-wide with a 5-min refresh skew + single-flight guard (racing `/bearer` requests collapse onto one `getToken`).
+- **The emit credential is bound to its device at USE, not only at mint.** `oauth_token.instance_id` is written when the credential is minted, but the four instance-scoped routes (`/bearer`, `/health`, `/end`, `/project-resolve`) never *read* it — so any of a teammate's own emit credentials could drive any of that teammate's other instances. `requireOAuthBearer` now takes the target instance and rejects a **mismatched** binding with a `401 invalid_token`. A **NULL** binding stays permissive and logs: `oauth_token.instance_id` is `ON DELETE SET NULL`, so deleting an attestation silently de-binds a live credential, and read/tag grants are never instance-bound at all. This is what makes [ADR-0008](../decisions/0008-emission-spoof-detection-and-quarantine.md) §2's anti-spoof claim — *"a cross-instance spoofer cannot mint a bearer for a victim's instance"* — true; before the at-use check it was an assertion the code did not enforce.
 - Rationale (inline STRIDE note): token is **write-only, narrow-scope** — ingests to one DCR only, so leakage caps at ingest noise, not exfiltration; per-developer Azure RBAC is unnecessary for telemetry.
 - `NUXT_AZURE_MONITOR_AUTH` mode: `'mi'` (real `ManagedIdentityCredential`, optional `NUXT_AZURE_MI_CLIENT_ID`; needs Azure IMDS), `'static'` (`NUXT_AZURE_MONITOR_STATIC_BEARER` verbatim — local/test seam), else deterministic mock. **Static mode is guarded in production** — throws unless `NUXT_ALLOW_STATIC_BEARER=1`, so a copy-pasted non-production config can't ship a live operator credential.
 
@@ -304,7 +404,8 @@ A leaked emit token can therefore **spoof telemetry** (handled below) but can
 Each successful `/bearer` mint stamps `instance_attestation.last_bearer_at` — an
 **authenticated heartbeat**: unspoofable proof that the instance's **true owner**
 held a valid emit credential at time T. The mint requires the owner's OAuth
-`tokenscope.emit` token *bound to that instance*, so a **cross-instance spoofer
+`tokenscope.emit` token *bound to that instance* — checked at use, not merely
+recorded at mint (see the bearer section above) — so a **cross-instance spoofer
 cannot mint a bearer for a victim's instance.**
 
 A background worker (`server/workers/heartbeat-coverage.ts`, table
@@ -375,8 +476,9 @@ sequenceDiagram
 - Matters because the OIDC cookie is `sameSite=lax` (blocks cross-site XHR, not top-level form POSTs).
 - **Expected origin is the PUBLIC origin**, resolved through the single chokepoint `getPublicRequestURL` (`server/utils/public-url.ts`) — the same function CSRF, the bearer/OTLP endpoints, and the OAuth metadata all route through. Resolution order:
   1. **Pinned `appPublicOrigin`** (`APP_PUBLIC_ORIGIN`) — when an upstream WAF/proxy fronts the app under a fixed hostname, the app **pins its public origin from config**. This is deliberately independent of `Host`/`X-Forwarded-*`, so same-origin matching is correct **whether the proxy preserves or rewrites the `Host` header** — no reliance on the WAF forwarding the original Host.
-  2. **`X-Forwarded-Host`/`X-Forwarded-Proto`** — honoured **only when `AZURE_FRONT_DOOR_ID` is set** (the same gate as `require-front-door`, inside which every request already carries a matching `X-Azure-FDID`, so the forwarded headers are trustworthy). Trusting `X-Forwarded-*` otherwise would allow header-injection origin forgery.
+  2. **`X-Forwarded-Host`** — honoured **only when `AZURE_FRONT_DOOR_ID` is set** (the same gate as `require-front-door`, inside which every request already carries a matching `X-Azure-FDID`, so the forwarded header is trustworthy). Trusting it otherwise would allow header-injection origin forgery. Even inside that gate the **last** hop is taken, never the first: each proxy *appends* its own value, so hop 1 is whatever the client sent and hop N is what Front Door itself set. (h3's own `xForwardedHost` option takes hop 1, which is why this is resolved by hand.)
   3. Otherwise the request's own Host (local dev / no proxy).
+- **Scheme** is resolved from `X-Forwarded-Proto` **unconditionally**, Front Door or not: TLS always terminates upstream of this process, so `connection.encrypted` is structurally false inside the container and is never the right signal. Absent the header (genuine local dev) it falls through to the request's own scheme. The two cacheable discovery documents (`/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`) send `Vary: X-Forwarded-Host, X-Forwarded-Proto, Host` so a shared cache in front of them cannot serve one origin's issuer to another's client.
 - **WAF-fronted deployments** (no per-app AFD): set `appPublicOrigin` to the public hostname the WAF exposes. Same-origin validation then uses the user-facing origin, not the internal Container Apps FQDN — with no dependency on the WAF's Host-forwarding behaviour. (The Insight dev value is in your deployment's own configuration.)
 - Token-is-auth endpoints (`/setup/redeem`, `/bearer`) and the cookieless OAuth endpoints (`/oauth/token`, `/oauth/register`, `/oauth/revoke`) have **no** CSRF check — they carry no cookie. (The cookie-bearing `POST /oauth/authorize` consent grant **does** assert same-origin.)
 
@@ -395,6 +497,14 @@ an upstream WAF/edge** — is the edge control:
   therefore **inert**: `AZURE_FRONT_DOOR_ID` is unset, so it is a deliberate no-op
   and the app is reachable over the VNet. The network perimeter (internal ingress
   + WAF), not a header check, is the edge control here.
+- `AZURE_FRONT_DOOR_REQUIRED=true` overrides that no-op: with the flag set and no
+  FDID wired, the middleware **refuses every request** except `EXCLUDED_PATHS`
+  instead of falling through. It exists so an operator can close the phase-1/2
+  window explicitly ("no AFD id yet, but direct access must not be allowed")
+  without the middleware ever *inferring* "this looks like production" on its own.
+  Unset preserves the exact three-phase no-op, which initial provisioning depends
+  on. **This is the code half only — no environment's infra parameters set it, or
+  set a real `AZURE_FRONT_DOOR_ID`, so nothing enforces on it today.**
 
 **Front-Door-fronted mode.** The header-check mechanism still ships for
 environments that front the app with a per-app Azure Front Door:
@@ -414,5 +524,13 @@ environments that front the app with a per-app Azure Front Door:
 
 ## Known gaps
 
+Each of these has a disposition in the [Security Overview](Security-Overview.md)
+risk register; this is the mechanism-level view of the same list.
+
 - **CSP `style-src` allows `'unsafe-inline'`** (`nuxt.config.ts`) — baseline gap `@nuxt/ui` v4 requires for injected styles. Rest of CSP is tighter: `frame-ancestors 'none'` (clickjacking — never iframed by design), constrained `img-src`/`font-src`.
-- **RLS is inert at runtime** under the owner DB connection; app-level scope predicates are the live boundary until the non-owner role ships.
+- **RLS is inert at runtime** under the owner DB connection; app-level scope predicates are the live boundary until the non-owner role ships. The policies are converged and three more tables are covered, but flipping `FORCE` today would break the 47 API handlers and all 19 RLS-touching workers that set no GUCs — their reads would return empty and their writes would error. A CI check pins the handler count so the debt cannot grow.
+- **Origin enforcement is not running anywhere.** `AZURE_FRONT_DOOR_REQUIRED` ships in code; no environment sets it, and none supplies a real `AZURE_FRONT_DOOR_ID`. The same emptiness leaves nuxt-security's global rate limiter keyed on a spoofable forwarded hop.
+- **`appPublicOrigin` is pinned in dev only.** Sandbox, staging and production still derive their public origin from forwarded headers, and that origin is baked into every device's durable emit credential and the OAuth issuer.
+- **Postgres connections encrypt but do not authenticate the server.** The `verify-full` change and a single connection factory are in code and the pre-flight **warns**; it takes effect only on an `infra.yml` apply that rewrites the `DATABASE_URL` secret.
+- **The anonymous OAuth registration ceiling is per-process.** The per-source sliding window is an in-memory counter, so it is one ceiling per replica, not one per deployment. The global client cap and the 1-hour abandonment sweep are what actually bound it.
+- **A live emit handoff code appears in the agent transcript** for its ~5-minute, single-use, instance-bound life. That is the accepted cost of keeping the *durable* credential out of the LLM channel entirely.

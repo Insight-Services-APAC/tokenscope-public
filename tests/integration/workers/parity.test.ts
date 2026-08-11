@@ -10,7 +10,7 @@
  * This file pins the contract that closes that bug: the SAME inputs (one
  * teammate, one project, one allocation, N attribution_record rows)
  * routed through the BUDGET-ALERT producer MUST equal the SAME inputs
- * routed through the homepage SQL (server/api/v1/me/usage.get.ts).
+ * routed through the homepage SQL (server/api/v1/me/home.get.ts).
  *
  * If a future change drifts the producer SQL away from the read-API SQL,
  * this test fails — the only way to make it pass again is to re-converge
@@ -178,7 +178,7 @@ async function emit(
 
 /**
  * Mirrors the per-project SUM(cost_usd) shape from
- * server/api/v1/me/usage.get.ts, scoped to a single (teammate, project).
+ * server/api/v1/me/home.get.ts, scoped to a single (teammate, project).
  * The read API JOINs project_assignment first; for a single-teammate +
  * single-project fixture that's a SUM. We replicate the JOIN shape so
  * the test asserts shape-equivalence, not just numeric equivalence.

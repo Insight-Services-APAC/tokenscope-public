@@ -3,7 +3,9 @@
  * by TrendArea / StackedBars / DonutChart so axis math and the series
  * colour palette live in ONE place.
  */
+import { denseDays, padOnto } from '#shared/reports/day-axis'
 import type { Vendor } from '#shared/usage/vendor'
+import type { ModelTierBand } from '#shared/reports/types'
 
 /*
  * FIXED colour per billing vendor lane (#142) — colour follows the lane id,
@@ -31,6 +33,29 @@ export function vendorLaneColor(lane: Vendor): string {
   return VENDOR_LANE_COLORS[lane]
 }
 
+/*
+ * FIXED colour per MODEL COST TIER — the same rule as the vendor lanes above:
+ * colour follows the band id, never its position, so a person with no frontier
+ * usage does not repaint everyone else's mix bar.
+ *
+ * Ordered hottest-to-coolest across the three SEEDED bands (frontier / mid /
+ * economy) so the mix bar reads as a cost gradient rather than an arbitrary
+ * categorical set. `specialised` and `unclassified` take the neutral kit hue:
+ * neither is a point on that gradient, and colouring "we don't know" like a cost
+ * band would state a cost we do not have.
+ */
+export const MODEL_TIER_COLORS: Readonly<Record<ModelTierBand, string>> = {
+  frontier: 'var(--brand-hunger)',
+  workhorse: 'var(--brand-harmony)',
+  lightweight: 'var(--brand-vision)',
+  specialised: 'var(--carbon-3)',
+  unclassified: 'var(--carbon-3)',
+}
+
+export function modelTierColor(band: ModelTierBand): string {
+  return MODEL_TIER_COLORS[band]
+}
+
 /** Brand palette order for categorical series (CSS custom properties). */
 export const CHART_PALETTE = [
   'var(--brand-harmony)',
@@ -56,23 +81,29 @@ export function niceMax(max: number): number {
 }
 
 /**
- * Pad a sparse day-keyed series (gap days absent in the aggregate) into a
- * dense, ordered run covering the trailing `windowDays` ending today (UTC).
+ * Pad a sparse day-keyed series into a dense, ordered run of `windowDays` days
+ * ending at `endDay` INCLUSIVE.
+ *
+ * `endDay` IS REQUIRED, AND THAT IS THE FIX (F1/D4). This function used to
+ * anchor the run on the BROWSER's today, which meant it emitted a genuine `0`
+ * for the current day — a day the server deliberately refuses to claim anything
+ * about ("a FUTURE day is NOT emitted, because nothing has been measured
+ * there", `usage-series.ts`). The client was undoing the server's care, and the
+ * fabricated zero is what draws as the morning dip. NULL IS NOT 0.
+ *
+ * Callers pass the SETTLED edge (`clock.settledThrough`) or their own window's
+ * `to`. There is no default, because a default would be a second clock.
+ *
+ * Pure: the shaping lives in `shared/reports/day-axis.ts` so the two chart
+ * primitives cannot drift apart on what days an axis holds.
  */
 export function padDays<T>(
   rows: ReadonlyArray<T & { day: string }>,
   windowDays: number,
+  endDay: string,
   zero: (day: string) => T & { day: string },
 ): Array<T & { day: string }> {
-  const byDay = new Map(rows.map((r) => [r.day, r]))
-  const out: Array<T & { day: string }> = []
-  const today = new Date()
-  const start = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
-  for (let i = windowDays - 1; i >= 0; i--) {
-    const day = new Date(start - i * 86_400_000).toISOString().slice(0, 10)
-    out.push(byDay.get(day) ?? zero(day))
-  }
-  return out
+  return padOnto(rows, denseDays(endDay, windowDays), zero)
 }
 
 export function useChartScale() {

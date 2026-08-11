@@ -26,25 +26,48 @@
  * showback (rule 3) but excluded from chargeback (rule 5) — the flag lives on the row; the
  * exclusion lives in the chargeback view. (Copilot is now excluded from chargeback wholesale by
  * tool anyway; the flag remains meaningful for the showback lane.)
+ *
+ * SEAT CONVERGENCE (S9): earlier versions only ever upserted rows for seats present in THIS
+ * tick's roster and never deleted a row it did not re-assert — a seat removal, a login
+ * rebind, or an org moving off the enterprise left the OLD showback row live forever (double
+ * showback: the report/theme-5-duplicate-seat finding). runCopilotBillWriter now runs a
+ * guarded stale-row prune after the seat loop, in the SAME successful run, scoped to this
+ * enterprise's provider_org set (not just orgs seen this tick) — see the guard block below for
+ * the three preconditions. It is a DELETE on a money table; every precondition exists because
+ * an empty/short seats pull is NOT reliably an error signal (github-client.ts's
+ * listSeatsWithDiagnostics).
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
+import { consola } from 'consola'
 import type * as schema from '../../drizzle/schema'
 import { GithubCopilotClient, type GithubSeat } from '../reconciliation/adapters/github-client'
-import { seatLicenseOrg, isChargebackExemptOrg, chargebackExemptOrgSet } from '../reconciliation/adapters/github'
+import { GithubAppAuth } from '../reconciliation/adapters/github-app-auth'
+import type { ResolvedCredential } from '../reconciliation/credentials'
+import { seatLicenseOrg } from '../reconciliation/adapters/github'
+import { createGovernanceKeyCache, resolveGithubGovernanceKey, type GovernanceKeyRef } from '../reconciliation/governance-keys'
+import { loadGovernanceResolutionContext, resolveGithubVerdict } from '../governance/verdict'
+import {
+  teammateDimensionSnapshotSql,
+  DIMENSION_SOURCE_INGEST_SNAPSHOT,
+} from '../reconciliation/dimension-snapshot'
+import { recordAuditEvent } from '../db/audit'
 
 type Db = PostgresJsDatabase<typeof schema>
 
 export interface CopilotBillOptions {
   enterpriseSlug: string
-  /** manage_billing PAT for the enterprise. */
-  credential: string
+  /** The RESOLVED credential (PAT or App key) — branch on `.kind`, exactly as
+   *  copilot-pool-bill.ts does. S9: this used to be flattened to the raw string
+   *  (`credential.value`) by the caller and handed to withPat, which — in App mode —
+   *  fed the GitHub App PRIVATE KEY to withPat as if it were a PAT. */
+  credential: ResolvedCredential
   /** Run clock; the bill rows are dated the 1st of this month (D1/M2). */
   now: Date
   /** ADR-0010 D1: whole-month flat per-seat price (provider_enterprise config). NULL → no flat row. */
   flatSeatPriceUsd: number | null
-  /** Test seam: stub the seat list (no live GitHub call). */
-  clientOverride?: Pick<GithubCopilotClient, 'listSeats'>
+  /** Test seam: stub the seat pull (no live GitHub call). */
+  clientOverride?: Pick<GithubCopilotClient, 'listSeatsWithDiagnostics'>
 }
 
 export interface CopilotBillResult {
@@ -56,9 +79,23 @@ export interface CopilotBillResult {
   /** Always 0 — the per-user overage charge (WRONG model #1) was removed; the pooled overage
    *  is copilot_pool_bill.overage_net_usd. Kept for result-shape stability. */
   overageRowsWritten: number
+  /** S9 seat-convergence prune: actual_spend copilot-seat rows deleted this run because
+   *  the seat/org they were written for is no longer present for this enterprise (seat
+   *  removed, rebind, or org moved off this enterprise entirely) — see the guard block
+   *  in runCopilotBillWriter for the three preconditions that gate this DELETE. */
+  prunedRows: number
+  /** The seats pull hit the 100-page (10,000-seat) hard cap this run — the roster MAY
+   *  be truncated (github-client.ts's pullSeats). */
+  seatPagesCapped: boolean
+  /** The seats pull ended via a short page — the normal end-of-roster signal, but
+   *  indistinguishable at that layer from a partial/empty pull. Surfaced so a
+   *  suspiciously small seatsTotal can be cross-checked against this. */
+  seatPageShort: boolean
 }
 
-function monthStartIso(now: Date): string {
+/** Exported (Workstream C): reconciliation-sync.ts uses this to resolve the SAME
+ *  calendar month's effective-dated rate plan the showback row will be dated. */
+export function monthStartIso(now: Date): string {
   const y = now.getUTCFullYear()
   const m = String(now.getUTCMonth() + 1).padStart(2, '0')
   return `${y}-${m}-01`
@@ -91,7 +128,9 @@ async function resolveRoster(db: Db, enterpriseSlug: string): Promise<Map<string
 }
 
 /* Idempotent actual_spend upsert for a Copilot flat-seat showback row. Carries category +
- * chargeback_exempt (ADR-0010). Tokens are 0 — a flat license is a USD figure, not tokens. */
+ * chargeback_exempt (ADR-0010). Tokens are 0 — a flat license is a USD figure, not tokens.
+ * Dimension snapshot (mig 0101): stamped on INSERT only, omitted from the ON CONFLICT SET
+ * list — see the analogous note in analytics-poller.ts's upsertActualSpend. */
 async function upsertCopilotBillRow(
   db: Db,
   row: {
@@ -101,26 +140,71 @@ async function upsertCopilotBillRow(
     category: string
     costUsd: number
     chargebackExempt: boolean
+    governanceVerdictSource: string
+    governanceKey: GovernanceKeyRef
     raw: unknown
   },
 ): Promise<boolean> {
+  const teammateIdSql = sql`${row.teammateId}::uuid`
+  const dims = teammateDimensionSnapshotSql(teammateIdSql)
   const result = await db.execute<{ id: string }>(sql`
     INSERT INTO actual_spend
-      (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source, category, chargeback_exempt, raw_payload)
+      (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source, category, chargeback_exempt, raw_payload,
+       region_id, org_unit_id, cost_owning_unit_id, dimension_source,
+       provider_org_id, provider_enterprise_id, governance_key_status, governance_verdict_source)
     VALUES
       (${row.teammateId}::uuid, ${row.date}::date, 'copilot-cli', 0::bigint, 0::bigint,
        ${row.costUsd.toFixed(6)}::numeric, ${row.source}, ${row.category}, ${row.chargebackExempt},
-       ${JSON.stringify(row.raw)}::jsonb)
+       ${JSON.stringify(row.raw)}::jsonb,
+       ${dims.regionId}, ${dims.orgUnitId}, ${dims.costOwningUnitId}, ${DIMENSION_SOURCE_INGEST_SNAPSHOT},
+       ${row.governanceKey.providerOrgId}::uuid, ${row.governanceKey.providerEnterpriseId}::uuid,
+       ${row.governanceKey.providerEnterpriseId ? 'resolved' : 'unresolved'}, ${row.governanceVerdictSource})
     ON CONFLICT (teammate_id, date, tool, source)
     DO UPDATE SET
       cost_usd = EXCLUDED.cost_usd,
       category = EXCLUDED.category,
-      chargeback_exempt = EXCLUDED.chargeback_exempt,
       raw_payload = EXCLUDED.raw_payload,
-      pulled_at = NOW()
+      pulled_at = NOW(),
+      provider_org_id = EXCLUDED.provider_org_id,
+      provider_enterprise_id = EXCLUDED.provider_enterprise_id,
+      governance_key_status = EXCLUDED.governance_key_status,
+      -- The chargeback verdict must never move once a finance_period close/restate
+      -- has FROZEN it (governance_verdict_locked_at IS NOT NULL) — a re-poll of an
+      -- already-closed month (a late seat correction) refreshes cost/metadata above
+      -- but leaves the frozen verdict exactly as it was. server/governance/finance-period.ts
+      -- is the ONLY path that may change a locked row's verdict (reopen/restate).
+      chargeback_exempt = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
+        THEN EXCLUDED.chargeback_exempt ELSE actual_spend.chargeback_exempt END,
+      governance_verdict_source = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
+        THEN EXCLUDED.governance_verdict_source ELSE actual_spend.governance_verdict_source END
     RETURNING id::text AS id
   `)
   return result.length > 0
+}
+
+
+/*
+ * The seat-convergence prune's org-scope guard skips the DELETE when an outsized share
+ * of this run's roster failed to bind a teammate (mirrors PRUNE_MAX_SKIP_RATIO in
+ * analytics-poller.ts) — a broken identity-resolution run must never be read as "the
+ * seats are gone".
+ */
+const PRUNE_MAX_SKIP_RATIO = 0.5
+
+/*
+ * The enterprise's github license-org set, from provider_org (NOT just the orgs seen
+ * in THIS run's roster) — so an org that vanished from the roster ENTIRELY (not merely
+ * rebound or moved within it) is still covered by the prune scope. Lowercased (canonical
+ * per mig 0064, matches orgKey's `.toLowerCase()`).
+ */
+async function enterpriseOrgSet(db: Db, enterpriseSlug: string): Promise<string[]> {
+  const rows = await db.execute<{ org: string }>(sql`
+    SELECT DISTINCT lower(po.external_org_id) AS org
+    FROM provider_org po
+    JOIN provider_enterprise pe ON pe.id = po.provider_enterprise_id
+    WHERE po.provider = 'github' AND pe.provider = 'github' AND lower(pe.external_id) = lower(${enterpriseSlug})
+  `)
+  return rows.map((r) => r.org)
 }
 
 export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Promise<CopilotBillResult> {
@@ -130,14 +214,38 @@ export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Pr
     seatsCarriedUnmapped: 0,
     flatRowsWritten: 0,
     overageRowsWritten: 0,
+    prunedRows: 0,
+    seatPagesCapped: false,
+    seatPageShort: false,
   }
 
   const monthStart = monthStartIso(opts.now)
 
-  const client = opts.clientOverride ?? GithubCopilotClient.withPat(opts.enterpriseSlug, opts.credential)
-  const [seats, roster] = await Promise.all([client.listSeats(), resolveRoster(db, opts.enterpriseSlug)])
+  // DB-CLOCK start marker for the seat-convergence prune below — mirrors
+  // analytics-poller.ts:353-359 verbatim. pulled_at is written by NOW() (below), so the
+  // "not re-asserted this run" marker must be DB time too: an app-clock runStarted
+  // running ahead of DB time would delete rows THIS run just wrote. Read BEFORE the
+  // seats pull so a slow/retried API call cannot widen the prune window. THROWS on
+  // failure — a run that cannot establish its own clock must not guess at one.
+  const [clock] = await db.execute<{ run_started: string }>(sql`SELECT now()::timestamptz AS run_started`)
+  if (!clock) throw new Error('copilot-bill: could not read DB clock for the prune marker')
+  const runStarted = clock.run_started
 
-  const exemptConfigured = chargebackExemptOrgSet()
+  // S9: branch on the RESOLVED credential kind exactly as copilot-pool-bill.ts does —
+  // never flatten to `.value` and hand it to withPat (that fed the App private key to
+  // withPat as a Bearer token at this call site and at discover-orgs.post.ts).
+  const client =
+    opts.clientOverride ??
+    (opts.credential.kind === 'github-app'
+      ? GithubCopilotClient.withApp(opts.enterpriseSlug, new GithubAppAuth(opts.credential.appId!, opts.credential.value))
+      : GithubCopilotClient.withPat(opts.enterpriseSlug, opts.credential.value))
+  const [seatPull, roster] = await Promise.all([client.listSeatsWithDiagnostics(), resolveRoster(db, opts.enterpriseSlug)])
+  const seats = seatPull.seats
+  result.seatPagesCapped = seatPull.pagesCapped
+  result.seatPageShort = seatPull.shortPageBreak
+
+  const govCtx = await loadGovernanceResolutionContext(db)
+  const govKeyCache = createGovernanceKeyCache()
 
   for (const seat of seats as GithubSeat[]) {
     result.seatsTotal += 1
@@ -153,7 +261,15 @@ export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Pr
 
     const licenseOrg = seatLicenseOrg(seat)
     const orgKey = licenseOrg?.toLowerCase() ?? 'unknown'
-    const chargebackExempt = isChargebackExemptOrg(licenseOrg, exemptConfigured)
+    const governanceKey = await resolveGithubGovernanceKey(db, govKeyCache, {
+      enterpriseSlug: opts.enterpriseSlug,
+      licenseOrg,
+    })
+    const verdict = resolveGithubVerdict(govCtx, {
+      providerEnterpriseId: governanceKey.providerEnterpriseId,
+      enterpriseSlug: opts.enterpriseSlug,
+      licenseOrg,
+    })
 
     // Flat seat (D1: whole-month, no proration) — PER SEAT, SHOWBACK/DISPLAY-ONLY. One row per
     // (teammate, org). NOT a chargeback figure (the pooled §B charge is copilot_pool_bill).
@@ -164,11 +280,119 @@ export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Pr
         source: `copilot-seat:${orgKey}`,
         category: 'seat-license',
         costUsd: opts.flatSeatPriceUsd,
-        chargebackExempt,
+        chargebackExempt: verdict.exempt,
+        governanceVerdictSource: verdict.source,
+        governanceKey,
         raw: { kind: 'flat-seat', login, licenseOrg, month: monthStart, priceUsd: opts.flatSeatPriceUsd, showbackOnly: true },
       })
       if (wrote) result.flatRowsWritten += 1
     }
+  }
+
+  /*
+   * SEAT-CONVERGENCE PRUNE (S9) — mirrors the Claude lane's stale-row prune
+   * (analytics-poller.ts:495-521), converging showback to seats that ACTUALLY still
+   * exist (seat removed, login rebound, or an org moved off this enterprise). THREE
+   * preconditions gate the DELETE — one more than the Claude lane needs, because
+   * `listSeats()`/`listSeatsWithDiagnostics()` can return a short OR EMPTY roster
+   * WITHOUT THROWING, three separate ways (the `seats` schema default([]) on a 200
+   * missing/renaming the key, a short-page break, the 100-page hard cap). An
+   * enterprise with genuinely zero seats is INDISTINGUISHABLE from an API-shape change
+   * or a partial outage at this layer, so "no seats came back" must NEVER be read as
+   * "no seats exist". A mechanical port of the Claude lane's guard alone
+   * (`skipRatio = total > 0 ? skipped / total : 0`, prune when `<= 0.5`) prunes on
+   * `total === 0` (ratio 0 <= 0.5) — deliberate there, WRONG here (see
+   * analytics-poller.ts:480-481 vs the empty-roster contract above):
+   *
+   *   1. seatsTotal > 0, EXPLICITLY — the guard the Claude lane does not need.
+   *   2. seatsCarriedUnmapped / seatsTotal <= PRUNE_MAX_SKIP_RATIO — an outsized share
+   *      of unmapped logins means identity resolution looks broken, not that the
+   *      seats are gone.
+   *   3. listSeats() throwing aborts BEFORE this point, unswallowed — a genuine pull
+   *      failure never reaches the prune (there is no try/catch around the pull above).
+   *
+   * Scope is the ENTERPRISE'S org set from provider_org, not merely the orgs seen in
+   * THIS run's roster — so an org that vanished from the roster ENTIRELY is still
+   * covered, not only a rebind or an org-move within a roster that still lists it.
+   *
+   * KNOWN UNDER-DELETE (documented, not "fixed" here — the safe direction): a seat with
+   * no resolvable license org writes source='copilot-seat:unknown' (see orgKey above),
+   * which this provider_org-keyed filter never matches, so those rows are never pruned
+   * by this pass. Widening the filter to a `LIKE 'copilot-seat:%'` was explicitly
+   * rejected — that would delete a DIFFERENT enterprise's org rows sharing the same
+   * `actual_spend` table. This lane does not fully converge; it converges everything
+   * except the unresolved-org fallback.
+   *
+   * This is a DELETE on a money table: if any precondition doesn't hold, skip the
+   * prune and log why — a stale showback row is recoverable, a deleted month is not.
+   */
+  const skipRatio = result.seatsTotal > 0 ? result.seatsCarriedUnmapped / result.seatsTotal : 1
+  // Precondition 4 (seatPagesCapped) is the one the diagnostics exist FOR. pullSeats
+  // hard-caps at page 100 and sets pagesCapped precisely so "a caller that DELETEs
+  // based on the roster can tell a truncated pull apart from a genuinely small one"
+  // (github-client.ts). Without it, an enterprise above the cap has every seat past
+  // page 100 absent from the roster through no fault of identity resolution — so the
+  // skip-ratio stays low, the other three preconditions hold, and the prune deletes
+  // real, still-valid showback rows as "stale". Shipping the signal and not consuming
+  // it is the exact control-versus-prose gap this sprint exists to close.
+  const prunePreconditionsMet =
+    result.seatsTotal > 0 && skipRatio <= PRUNE_MAX_SKIP_RATIO && !result.seatPagesCapped
+  if (prunePreconditionsMet) {
+    const orgSet = await enterpriseOrgSet(db, opts.enterpriseSlug)
+    if (orgSet.length > 0) {
+      const sourceList = sql.join(
+        orgSet.map((org) => sql`${`copilot-seat:${org}`}`),
+        sql.raw(', '),
+      )
+      // ATOMIC with its audit row. Previously the DELETE autocommitted and the audit
+      // write was a separate statement, so a throw in between left money rows gone
+      // with neither an audit trail nor a reported count — and a DB blip is exactly
+      // when an audit write is most likely to fail. Inside one transaction the audit
+      // failure now ROLLS THE DELETE BACK: a stale showback row is recoverable, an
+      // unaudited deletion is not.
+      await db.transaction(async (tx) => {
+        const pruned = await tx.execute<{ id: string }>(sql`
+          DELETE FROM actual_spend
+          WHERE tool = 'copilot-cli'
+            AND date = ${monthStart}::date
+            AND source IN (${sourceList})
+            AND pulled_at < ${runStarted}::timestamptz
+          RETURNING id::text AS id
+        `)
+        if (pruned.length > 0) {
+          // Money rows vanishing is consequential — leave an audit trail beyond worker
+          // logs (mirrors the Claude lane's 'actual-spend-surface-adjusted' event).
+          await recordAuditEvent(tx, {
+            eventType: 'actual-spend-surface-adjusted',
+            actorSystem: 'worker:copilot-bill',
+            subjectKind: 'provider_enterprise',
+            subjectId: null,
+            payload: {
+              enterpriseSlug: opts.enterpriseSlug,
+              monthStart,
+              prunedRows: pruned.length,
+              seatsTotal: result.seatsTotal,
+              seatsCarriedUnmapped: result.seatsCarriedUnmapped,
+              seatPagesCapped: result.seatPagesCapped,
+              seatPageShort: result.seatPageShort,
+            },
+          })
+        }
+        // Assigned INSIDE the transaction: if the audit write throws, the DELETE is
+        // rolled back and prunedRows correctly stays 0 rather than reporting a
+        // deletion that did not survive.
+        result.prunedRows = pruned.length
+      })
+    }
+  } else {
+    consola.warn(
+      `[copilot-bill] skipping seat-convergence prune for ${opts.enterpriseSlug}: ` +
+        (result.seatsTotal === 0
+          ? 'seatsTotal is 0 (a genuinely empty roster is indistinguishable from a truncated pull — never pruning on it)'
+          : result.seatPagesCapped
+            ? 'seat pull hit the pagination cap — the roster is TRUNCATED, so seats absent from it are unfetched, not removed'
+            : `${result.seatsCarriedUnmapped}/${result.seatsTotal} seats unmapped (ratio ${skipRatio.toFixed(2)} > ${PRUNE_MAX_SKIP_RATIO}) — identity resolution looks broken`),
+    )
   }
 
   return result

@@ -20,6 +20,7 @@
  */
 import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
+import { LIKE_ESCAPE } from './sql-like'
 
 type Db = PostgresJsDatabase<Record<string, unknown>>
 
@@ -70,10 +71,14 @@ export function upnGlobToRegExp(pattern: string): RegExp {
 }
 
 /**
- * Translate a `*`-glob to a SQL `LIKE` body (use with `ESCAPE '\'`), so a match
- * count can run in the DB instead of loading the roster into memory. `*` → `%`;
- * LIKE metacharacters (`% _ \`) in the literal parts are escaped. Agrees with
- * `upnGlobToRegExp` for these patterns (both treat `.` as literal).
+ * Translate a `*`-glob to a SQL `LIKE` body — bind `LIKE_ESCAPE` (from
+ * ./sql-like) as a PARAMETER at the call site (`ESCAPE ${LIKE_ESCAPE}`),
+ * never as a literal `ESCAPE '\'` in the template: that literal collapses to
+ * `ESCAPE ''` before Postgres ever sees it, silently disabling the escaping
+ * this function just did (see ./sql-like's header for the full trap). `*` →
+ * `%`; LIKE metacharacters (`% _ \`) in the literal parts are escaped.
+ * Agrees with `upnGlobToRegExp` for these patterns (both treat `.` as
+ * literal).
  */
 export function upnGlobToSqlLike(pattern: string): string {
   return pattern
@@ -81,7 +86,7 @@ export function upnGlobToSqlLike(pattern: string): string {
     .toLowerCase()
     .replace(/\*+/g, '*')
     .split('*')
-    .map((seg) => seg.replace(/[\\%_]/g, '\\$&'))
+    .map((seg) => seg.replace(/[\\%_]/g, `${LIKE_ESCAPE}$&`))
     .join('%')
 }
 

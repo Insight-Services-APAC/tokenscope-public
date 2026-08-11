@@ -23,6 +23,12 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+// endpoint-guard.mjs (S1/S2) — the ONE endpoint validator, vendored verbatim
+// (see scripts/sync-copilot-plugin.mjs). Do not write a second one; mirrors
+// plugin/scripts/landed-check.mjs's S1 fix 3 exactly (this file is a
+// DELIBERATELY separate, non-vendored implementation — see version-sync.test.ts's
+// DELIBERATELY_NOT_VENDORED — but the fix shape is the same).
+import { assertSafeEndpoint } from './endpoint-guard.mjs'
 
 const TIMEOUT_MS = 4000
 
@@ -42,12 +48,25 @@ export function stateDir() {
 /**
  * Derive the health URL from the per-instance bearer endpoint
  * (.../instances/{id}/bearer → .../instances/{id}/health). Returns null when the
- * endpoint isn't a recognisable /bearer URL (so we never GET somewhere unexpected).
+ * endpoint isn't a recognisable /bearer URL (so we never GET somewhere unexpected)
+ * OR when the derived URL fails assertSafeEndpoint (S2 fix — closes the Copilot
+ * leg of client-plugins:mitm:0003: refreshLanded's `fetch(healthUrl, ...)` picks
+ * whatever scheme the URL carries with no complaint, so an off-box http:// bearer
+ * endpoint — a poisoned config.json, or a MITM'd redeem/enroll response — would
+ * otherwise be GET'd in plaintext carrying the cached emit access token).
+ * allowLoopback:true — local-dev TOKENSCOPE_API_BASE (:3450) legitimately returns
+ * a loopback bearer endpoint.
  */
 export function healthUrlFromBearer(bearerEndpoint) {
   if (!bearerEndpoint || typeof bearerEndpoint !== 'string') return null
   const healthUrl = bearerEndpoint.replace(/\/bearer(\?.*)?$/, '/health')
-  return healthUrl === bearerEndpoint ? null : healthUrl
+  if (healthUrl === bearerEndpoint) return null
+  try {
+    assertSafeEndpoint(healthUrl, { allowLoopback: true })
+  } catch {
+    return null
+  }
+  return healthUrl
 }
 
 /**
@@ -76,7 +95,10 @@ export async function refreshLanded({ dir } = {}) {
   try {
     const ctrl = new AbortController()
     const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS)
-    res = await fetch(healthUrl, { headers: { Authorization: `Bearer ${token}` }, signal: ctrl.signal })
+    res = await fetch(healthUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: ctrl.signal,
+    })
     clearTimeout(t)
   } catch {
     return { ok: false, reason: 'fetch-failed' }

@@ -21,11 +21,16 @@
  * When Copilot chargeback is held back (pool-utilisation mode) the Copilot column
  * reads "(pending)" and never leaks into the Chargeable total — the header chip says
  * so. A month with no per-CoU chargeback shows a graceful empty state.
+ *
+ * REMEDIATION (requirement 6): the Unallocated row carries a quiet link to the
+ * reconciliation admin surface, where an admin homes the org to a cost-owning
+ * unit — the row's money stays in every total (estate + CSV) until then.
  */
 import { computed } from 'vue'
 import ChartRankedBar, { type RankedRow } from '../charts/ChartRankedBar.client.vue'
 import UiCard from '../../ui/Card.vue'
 import UiBadge from '../../ui/Badge.vue'
+import UnallocatedRemediationLink from '../UnallocatedRemediationLink.vue'
 import { fmtUsd, fmtSharePct } from '../../../composables/useFormat'
 import { allocateCents } from '#shared/usage/allocate-cents'
 import { vendorLaneColor } from '../../../composables/useChartScale'
@@ -186,6 +191,7 @@ const legendLanes = computed<LaneSeg[]>(() => {
                   class="font-medium text-carbon-2 italic"
                   title="No cost-owning unit mapped — visible unallocated bucket, never dropped."
                 >{{ c.displayName }}</span>
+                <UnallocatedRemediationLink v-if="!c.couId" class="ml-2 align-middle" />
                 <span v-if="c.regionCode" class="text-carbon-3 text-[11px]"> · {{ c.regionCode.toUpperCase() }}</span>
               </td>
               <!-- Per-CoU surface-mix bar (#142): stacked lanes, 2px gaps, rounded

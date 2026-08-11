@@ -41,6 +41,19 @@ const DEFAULT_TTL_MS = REFRESH_TOKEN_TTL_MS
 const ARTIFACT_GC_GRACE_HOURS = 24
 // Dead tokens / stale clients: keep 30 days (the grant-review / audit window).
 const CREDENTIAL_GC_GRACE_DAYS = 30
+/*
+ * Abandoned-registration grace (S6 Ceiling fix): RFC 7591 registration is
+ * unauthenticated, so a client row can exist with NO token and NO auth code
+ * ever having been issued for it at all — a browsed-away-from consent, or
+ * registration-flood noise. Waiting the full 30-day CREDENTIAL_GC_GRACE_DAYS
+ * to reclaim those rows lets a flood sit consuming MAX_OAUTH_CLIENTS headroom
+ * for a month. A real flow (register → authorize → token) completes in
+ * seconds; 1 hour is comfortably longer than any real flow, so this can never
+ * delete a client mid-flow (confirmed by the "with a live auth code →
+ * retained" test case). See the doc comment on the query below for how this
+ * differs from — and runs BEFORE — the 30-day CREDENTIAL_GC_GRACE_DAYS sweep.
+ */
+const ABANDONED_REGISTRATION_GRACE_HOURS = 1
 
 export interface SessionGcResult {
   closedSessionIds: string[]
@@ -49,6 +62,8 @@ export interface SessionGcResult {
   emitHandoffsDeleted: number
   oauthTokensDeleted: number
   oauthClientsDeleted: number
+  /** S6: registrations that NEVER had a token or code, reaped on the short grace. */
+  abandonedClientsDeleted: number
 }
 
 export async function runSessionGc(
@@ -99,6 +114,22 @@ export async function runSessionGc(
   }
 
   // ── AUTH-5: OAuth-lifecycle sweep ──────────────────────────────────────────
+  // Abandoned registrations (S6 Ceiling fix): a client that has NEVER had a
+  // token or auth code, past the short grace. Evaluated FIRST, before the
+  // deadCodes/deadTokens deletes below run — so "NOT EXISTS" here reflects
+  // whether the client EVER had an artifact, not merely whether one currently
+  // survives. This is what distinguishes it from the deadClients (30-day)
+  // sweep further down, which runs AFTER those deletes and therefore only
+  // catches clients that DID transact but are now fully cold (its own
+  // "keeping the 30-day sweep for clients that did transact" scope).
+  const abandonedClients = await db.execute<{ client_id: string }>(sql`
+    DELETE FROM oauth_client c
+     WHERE c.internal = false
+       AND c.created_at < ${nowIso}::timestamptz - (${ABANDONED_REGISTRATION_GRACE_HOURS} * INTERVAL '1 hour')
+       AND NOT EXISTS (SELECT 1 FROM oauth_token t WHERE t.client_id = c.client_id)
+       AND NOT EXISTS (SELECT 1 FROM oauth_auth_code ac WHERE ac.client_id = c.client_id)
+    RETURNING client_id::text AS client_id
+  `)
   // Single-use auth codes past expiry/consumption + the artifact grace. Consumed
   // codes must outlive the grace (not be dropped immediately) so replay attempts
   // inside the window still hit the consumed row's invalid_grant, not unknown-code.
@@ -119,9 +150,10 @@ export async function runSessionGc(
      WHERE COALESCE(revoked_at, refresh_expires_at) < ${nowIso}::timestamptz - (${CREDENTIAL_GC_GRACE_DAYS} * INTERVAL '1 day')
     RETURNING id::text AS id
   `)
-  // Abandoned dynamic registrations: never the internal emit client, old enough,
-  // and with NO remaining token or code rows at all (the sweeps above own the
-  // retention of dead ones — the client goes only once nothing references it).
+  // Clients that DID transact: had a token/code at some point, but everything
+  // referencing them has now aged out of the sweeps above, and the client row
+  // itself is old enough. (Clients that NEVER transacted at all were already
+  // reaped by the abandonedClients sweep above, on the much shorter grace.)
   const deadClients = await db.execute<{ client_id: string }>(sql`
     DELETE FROM oauth_client c
      WHERE c.internal = false
@@ -130,7 +162,13 @@ export async function runSessionGc(
        AND NOT EXISTS (SELECT 1 FROM oauth_auth_code ac WHERE ac.client_id = c.client_id)
     RETURNING client_id::text AS client_id
   `)
-  if (deadCodes.length || deadHandoffs.length || deadTokens.length || deadClients.length) {
+  if (
+    deadCodes.length ||
+    deadHandoffs.length ||
+    deadTokens.length ||
+    deadClients.length ||
+    abandonedClients.length
+  ) {
     await recordAuditEvent(db, {
       eventType: 'oauth-gc-swept',
       actorTeammateId: null,
@@ -142,6 +180,7 @@ export async function runSessionGc(
         emitHandoffsDeleted: deadHandoffs.length,
         oauthTokensDeleted: deadTokens.length,
         oauthClientsDeleted: deadClients.length,
+        abandonedClientsDeleted: abandonedClients.length,
         sweptAt: now.toISOString(),
       },
     })
@@ -153,5 +192,6 @@ export async function runSessionGc(
     emitHandoffsDeleted: deadHandoffs.length,
     oauthTokensDeleted: deadTokens.length,
     oauthClientsDeleted: deadClients.length,
+    abandonedClientsDeleted: abandonedClients.length,
   }
 }

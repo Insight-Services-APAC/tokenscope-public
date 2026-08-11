@@ -186,12 +186,25 @@ export function createAnthropicAdapter(db: Db, scope: AdapterScope): Adapter {
       next.setUTCDate(next.getUTCDate() + 1)
       const endingAt = next.toISOString().replace(/\.\d{3}Z$/, 'Z')
 
-      const groupBy = ['product', 'model']
+      /*
+       * TWO arrays, not one. `group_by[]` applies to whichever report it is sent
+       * to, and `cost_type` exists only on CostRow -- UsageRow has no such field
+       * (enterprise-client.ts). Sending it to the usage report would fragment
+       * those rows by a dimension we cannot read back, multiplying rows against
+       * the 100-page ceiling for zero benefit.
+       *
+       * cost_type on the COST report is what makes the web_search /
+       * code_execution exclusion below reachable at all: the field is null on
+       * every row until it is grouped, so the filter that reads it has never
+       * once fired.
+       */
+      const usageGroupBy = ['product', 'model']
+      const costGroupBy = ['product', 'model', 'cost_type']
       // Serialize (NOT Promise.all): the Enterprise API caps at 60 RPM org-wide, shared
       // with reconciliation-sync. A concurrent usage+cost burst per day makes 429s more
       // likely; resilientFetch honors retry-after, and serializing bounds the burst.
-      const usage = await client.getUserUsageReport({ startingAt, endingAt, groupBy })
-      const cost = await client.getUserCostReport({ startingAt, endingAt, groupBy })
+      const usage = await client.getUserUsageReport({ startingAt, endingAt, groupBy: usageGroupBy })
+      const cost = await client.getUserCostReport({ startingAt, endingAt, groupBy: costGroupBy })
 
       // Per-(actor email, product) aggregation within the day.
       interface ProductAgg {

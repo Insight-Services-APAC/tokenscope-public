@@ -1,0 +1,152 @@
+# API-sourced usage carries its dimensions
+
+**Status:** proposed, for adversarial review before any code moves.
+
+## What this is for
+
+A day of usage the provider's API reported — because the teammate had no OTel
+emission — should behave like a session. It should show its model mix, its token
+split and its cache economics, and when the teammate tags it to a project, all of
+that goes with it.
+
+Today it is a bare dollar figure with a Tag button, and the reporting layer files
+47% of company attributed spend under **"Not split by model"** while the same card
+on the billed lane names **eight** models covering 100%.
+
+The product's own copy already promises the parity: *"tag each day to a budget,
+**same as a session**."*
+
+## The one-sentence principle
+
+**Nothing the provider sent is discarded, and §A reads the API lane's dimensions
+by key rather than storing them twice.**
+
+## Terminology this document uses
+
+`provider_usage_fact` is the **API lane** — what the provider reported, including
+money that is never charged (NFR orgs, non-enterprise Claude, Copilot inside the
+AIC pool, `copilot-unclassified`: *"counted, alerted, NEVER charged"*). **Billed
+is a filter over it.** `target-state-data-architecture.md` §6 calls it "the billed
+lane", which collapses two orthogonal axes — source (OTel vs API) and billability
+— and that naming has produced repeated wrong conclusions.
+
+## What is structurally impossible
+
+Two things, both session-shaped, and neither should ever be faked:
+
+- **Session id** — a day is not a conversation.
+- **Duration** — the provider reports a day; there is no start or end.
+
+Everything else in the session-detail panel has provider data behind it.
+
+## The three discards — they are NOT one fix
+
+| dimension | where it is lost | recoverable today? |
+|---|---|---|
+| **model** | `unaccounted_usage` (mig 0071) has no column; `v_complete_usage` arm 2 selects `NULL::text AS model` | **yes** — read-side |
+| **token split** (input / output / cache read / cache write / requests) | written to `provider_usage_fact` by `provider-transform.ts:[REDACTED:BSB]`, never read by §A | **yes** — read-side |
+| **feature lane** — Copilot `totals_by_model_feature[]`, Anthropic `server_tool_use.web_search_requests`, `product` | never declared in Zod, so never parsed | **no** — schema change **plus a re-poll** |
+
+The first two are stored and unread. The third is dropped at the HTTP boundary:
+no read-side work recovers it. `server_tool_use` is flagged
+`undeclaredByOurSchema` in the 2026-08-02 capture (257/257 stored, 85/85 live) —
+the same latent shape `model` was in before it was declared.
+
+## Work item 1 — §A reads model and token split by key
+
+`v_complete_usage` arm 2 is the API-minus-OTel residual at
+`(teammate_id, day, tool)`. `provider_usage_fact` holds the same key refined by
+`model` and `cost_type`. Read across, do not copy.
+
+`§4` forbids the alternative by name: *"Where a per-model view of that remainder
+is wanted, read it from the billed lane on the same key — do not store it twice"*
+and *"The fill row is never split by MODEL."* Adding `model` to
+`unaccounted_usage` would break its `(teammate, day, tool)` unique key and shatter
+one tagging/dismissal decision into several independently taggable rows.
+
+### The correctness split — identity versus apportionment
+
+**No money figure comes from a ratio.** `f = min(1, T_otel/T_api)` was deleted
+from this architecture. So the split is decided per key, by case:
+
+- **OTel coverage absent for the key** — the fill row's amount **is** the whole
+  API amount for that key. Distributing it across that key's per-model rows is an
+  **identity**: the parts are the provider's own numbers and they already sum to
+  the whole. Legitimate.
+- **Coverage present but short** (`max(0, API − OTel)`) — the remainder is not
+  any provider-reported figure. Splitting it by provider proportions is an
+  **apportionment**. Forbidden. That portion keeps its own labelled bucket.
+
+**If the identity cannot be shown to hold exactly, per key, to the cent, this
+work item is wrong and should be rejected rather than rounded into place.**
+
+## Work item 2 — declare the feature lane, then backfill
+
+Declare `server_tool_use` (Anthropic) and `totals_by_model_feature[]` (Copilot)
+in the parse schemas, carry them into `provider_usage_fact`, and re-poll the
+retained window to populate history.
+
+This is a separate slice with a different risk profile: it changes ingest, needs
+a backfill, and touches the poller's call budget (already ~5,950 calls/day,
+task #36). **It should not ride with work item 1.**
+
+## Work item 3 — the detail panel for a provider-recorded day
+
+Same shape as the session panel, with the two impossible sections absent rather
+than zeroed: model mix, where the tokens went, cost by model, cache economics,
+requests. Feature lane appears only after work item 2.
+
+An absent section is stated once, plainly, or omitted — not explained in a
+paragraph.
+
+## Work item 4 — tagging carries it
+
+Tagging a provider-recorded day sets `project_id` on one `unaccounted_usage` row
+at `(teammate, day, tool)`. Because the dimensions are read by that same key, the
+project rollup sees the full model and token detail without any further write.
+**The whole day is one taggable unit** — every model in it moves together, so no
+apportionment arises at tag time either.
+
+This should need no new code. **Verify that claim; do not assume it.**
+
+## What the reader sees afterwards
+
+- The attributed model axis names real models and sums to the attributed headline.
+- "Not split by model" shrinks to what is genuinely model-less: Chat, Office, the
+  Copilot agent, and Copilot's day-grain money (`ai_credits_used` sits at the
+  record root — splitting it per model would need the forbidden ratio).
+- A provider-recorded day opens to the same detail as a session, minus identity
+  and duration.
+- `Every pivot sums to that lane's total` stays true, so no pivot needs a lane
+  caveat or a second denominator.
+
+## Test plan — each must fail when its fix is reverted
+
+1. **Identity holds.** A seeded key with no OTel coverage: Σ per-model rows equals
+   the fill row exactly, to the cent.
+2. **Apportionment refused.** A key with partial OTel coverage keeps a labelled
+   bucket; no per-model split of the remainder is emitted.
+3. **No model rows for a key** → labelled bucket, money intact, nothing invented.
+4. **Copilot day-grain money** is never split by model.
+5. **Sum-back at both widths and both lanes**: Σ model-axis = the headline it
+   renders under.
+6. **Tagging**: tagging a day moves its whole model breakdown to the project;
+   assert the project rollup by model, not just the total.
+7. **Static**: no ratio of two totals in the split path.
+8. **The 47% bucket shrinks** on the reporting fixture; what remains is only the
+   structurally model-less surfaces.
+
+## Open questions for review
+
+1. **Does the identity actually hold at the boundary?** `unaccounted_usage` is
+   `(teammate, day, tool)`; `provider_usage_fact` is
+   `(teammate, date, tool, model, cost_type)`. Tool-name normalisation, UTC day
+   boundaries, `cost_type` rows versus token rows, and unresolved actors
+   (`teammate_id IS NULL` with `actor_ref`) are all places the join could drop or
+   double money.
+2. **Which consumers change silently?** Exports, cost-centre and finance drills,
+   the needs-tagging worklist and the rollups all read arm 2. Any of them may
+   change behaviour the moment its model stops being NULL.
+3. **Is anything already signed off against the current figures?** This moves a
+   chargeback-adjacent surface.
+

@@ -43,6 +43,9 @@ const usageActor = (email: string | null, deleted = false) => ({
 
 // Tracks which endpoints the adapter hit (branch-selection assertion).
 let usagePathHit = false
+/** group_by[] as the ADAPTER actually sent it, per report. */
+const costGroupBySeen: string[][] = []
+const usageGroupBySeen: string[][] = []
 let costPathHit = false
 
 beforeAll(async () => {
@@ -61,6 +64,7 @@ beforeAll(async () => {
     const u = new URL(req.url ?? '/', 'http://localhost')
     const onDay = u.searchParams.get('starting_at')?.startsWith(SPEND_DATE) ?? false
     if (u.pathname === '/v1/organizations/analytics/user_usage_report') {
+      usageGroupBySeen.push(u.searchParams.getAll('group_by[]'))
       usagePathHit = true
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(
@@ -118,6 +122,17 @@ beforeAll(async () => {
     }
     if (u.pathname === '/v1/organizations/analytics/user_cost_report') {
       costPathHit = true
+      /*
+       * Record what the ADAPTER asked for. The stub returns cost_type whatever
+       * the request says, so without this a caller that stopped requesting
+       * cost_type would leave every test green while production got null back
+       * and folded web-search cost into per-developer model_tokens.
+       *
+       * The poller has the same coverage; this is its sibling. The two callers
+       * build the array independently, so one being right proves nothing about
+       * the other.
+       */
+      costGroupBySeen.push(u.searchParams.getAll('group_by[]'))
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(
         JSON.stringify({
@@ -246,5 +261,20 @@ describe('Anthropic enterprise-analytics adapter branch', () => {
     await adapter.pull({ startDate: SPEND_DATE, endDate: SPEND_DATE }).catch(() => undefined)
     expect(usagePathHit).toBe(false)
     expect(costPathHit).toBe(false)
+  })
+})
+
+describe('the group_by the reconciliation adapter ACTUALLY sends', () => {
+  it('asks the cost report for cost_type, and does not ask the usage report for it', () => {
+    /*
+     * The sibling of the poller's assertion. `cost_type` is what makes the
+     * adapter's org-grain aggregation reachable at all -- the field is null on
+     * every row until it is grouped, so `toolCostByCategory` had never once
+     * populated and web-search / code-execution cost folded into per-developer
+     * totals instead.
+     */
+    expect(costGroupBySeen.length).toBeGreaterThan(0)
+    for (const g of costGroupBySeen) expect(g).toContain('cost_type')
+    for (const g of usageGroupBySeen) expect(g).not.toContain('cost_type')
   })
 })

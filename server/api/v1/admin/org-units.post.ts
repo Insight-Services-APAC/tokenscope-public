@@ -28,6 +28,7 @@ import { requireRole, requireRegionScope } from '../../../auth/rbac'
 import { assertSameOrigin } from '../../../auth/csrf'
 import { withRequestRls } from '../../../db/request-rls'
 import { recordAuditEvent } from '../../../db/audit'
+import { assertHoldingNodeNotCostOwning } from '../../../db/org-units'
 
 const Body = z.object({
   region_id: z.string().uuid(),
@@ -50,7 +51,38 @@ export default defineEventHandler(async (event) => {
   const caller = await requireRole(event, 'admin', 'global-finops')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
+
+  // S3 part (f): 'default' is RESERVED for a region's root org unit — the one
+  // regions.post.ts plants automatically, parentless, in the same transaction as
+  // the region insert. This endpoint never creates that row (it always creates
+  // through the normal parent/path derivation below), so 'default' is reserved
+  // unconditionally here. Without this, a legitimate non-root unit coded
+  // 'default' — the (region_id, code) unique allows it in any OTHER region —
+  // would blind placedBelowRegionRootPredicate()'s naming arm for a properly-
+  // placed teammate on that unit (the exact false positive org-subtree-scope.ts
+  // documents `code <> 'default'` alone carries).
+  if (body.code === 'default') {
+    throw createError({
+      statusCode: 409,
+      statusMessage: `Org unit code 'default' is reserved`,
+      data: {
+        type: 'https://tokenscope.example.com/errors/conflict',
+        title: 'Conflict',
+        status: 409,
+        detail: `The code 'default' is reserved for a region's root org unit (created automatically when the region is created) and cannot be assigned to another unit.`,
+      },
+    })
+  }
+
   await requireRegionScope(event, body.region_id)
+
+  // Guard rail (same rule as the PATCH door): a holding node may never be
+  // cost-owning — see server/db/org-units.ts for why that is not cosmetic.
+  assertHoldingNodeNotCostOwning({
+    unitType: body.unit_type,
+    isCostOwningUnit: body.is_cost_owning_unit,
+  })
+
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
   const ua = getHeader(event, 'user-agent') ?? null
 

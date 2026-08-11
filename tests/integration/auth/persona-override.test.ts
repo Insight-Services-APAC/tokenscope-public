@@ -24,6 +24,7 @@ let regionId: string
 let orgUnitId: string
 let lenaId: string
 let priyaId: string
+let nonDemoId: string
 const LENA_OID = 'oid-lena-wave-v'
 const PRIYA_OID = 'oid-priya-wave-v'
 
@@ -87,6 +88,25 @@ beforeAll(async () => {
     if (seed.email === 'demo-lena.park@example.com') lenaId = row!.id
     if (seed.email === 'demo-priya.iyer@example.com') priyaId = row!.id
   }
+
+  // A regular, NON-demo teammate — the DEMO_PERSONAS target check's
+  // negative case. The dev-login handler can never mint an override
+  // naming this teammate (getPersona() only accepts DEMO_PERSONAS keys),
+  // so a cookie naming it can only exist via a hand-mint (HMAC secret
+  // exfiltration or a future code path bug) — resolvePersonaTarget must
+  // refuse it regardless of which caller reaches it.
+  const [nonDemoRow] = await t.db
+    .insert(schema.teammate)
+    .values({
+      entraOid: 'oid-non-demo-wave-v',
+      email: 'regular.dev@example.com',
+      displayName: 'Regular Dev',
+      role: 'developer',
+      regionId,
+      orgUnitId,
+    })
+    .returning()
+  nonDemoId = nonDemoRow!.id
 })
 
 afterAll(async () => {
@@ -231,15 +251,54 @@ describe('persona-override cookie READ is env-gated (the cookie-read enforcement
 
   /** Build an event carrying a VALID override cookie that targets priya. */
   async function eventWithValidOverrideCookie() {
+    return eventWithOverrideCookieFor(priyaId)
+  }
+
+  /** Build an event carrying a VALID (properly HMAC-signed) override cookie
+   *  naming an ARBITRARY target teammate — used to probe resolvePersonaTarget's
+   *  DEMO_PERSONAS check independent of the cookie's own tamper-detection. */
+  async function eventWithOverrideCookieFor(targetTeammateId: string) {
     const ev = overrideEvent()
     const { setPersonaOverrideCookie } = await import('../../../server/utils/persona-override-cookie')
     setPersonaOverrideCookie(ev as unknown as Parameters<typeof setPersonaOverrideCookie>[0], {
-      targetTeammateId: priyaId,
+      targetTeammateId,
       issuedAt: '2026-05-25T00:00:00Z',
       impersonatorOid: LENA_OID,
       impersonatorEmail: 'demo-lena.park@example.com',
     })
     return ev
+  }
+
+  /**
+   * Run `fn` with getUserSession (nuxt-oidc-auth's session reader) mocked to
+   * return a fabricated OIDC session carrying `claims` — the ONLY way to
+   * reach `resolveSession`'s "Normal path" (server/utils/auth.ts:155-211)
+   * and therefore `applyPersonaOverride`. Every OTHER integration test in
+   * this repo bypasses OIDC entirely via injectTestSession(), which
+   * pre-populates tryAuth's per-event cache before resolveSession ever
+   * runs — so applyPersonaOverride has no prior test coverage at all.
+   * Restores the project's default stub (tests/helpers/nuxt-oidc-auth-stub.ts,
+   * aliased in vitest.config.ts) afterwards so later tests keep the
+   * "no OIDC session" baseline they're written against.
+   */
+  async function withMockedOidcSession<T>(
+    claims: { oid: string; email: string; name?: string },
+    fn: (authModule: typeof import('../../../server/utils/auth')) => Promise<T>,
+  ): Promise<T> {
+    vi.doMock('nuxt-oidc-auth/runtime/server/utils/session.js', () => ({
+      getUserSession: async () => ({
+        loggedInAt: Math.floor(Date.now() / 1000),
+        claims: { oid: claims.oid, email: claims.email, name: claims.name },
+      }),
+    }))
+    vi.resetModules()
+    const authModule = await import('../../../server/utils/auth')
+    try {
+      return await fn(authModule)
+    } finally {
+      vi.doUnmock('nuxt-oidc-auth/runtime/server/utils/session.js')
+      vi.resetModules()
+    }
   }
 
   it('demo-capable (local) + dev-mode + override flag → cookie IS honored (the seam still works)', async () => {
@@ -285,6 +344,56 @@ describe('persona-override cookie READ is env-gated (the cookie-read enforcement
       // Fail-closed: unauthenticated on error; `session` stays null.
     }
     expect(session?.teammateId).not.toBe(priyaId)
+  })
+
+  // ── The "missing DEMO_PERSONAS target check" defect (resolvePersonaTarget
+  //    extraction, server/utils/auth.ts) — assert BOTH callers ────────────
+  it('demo-capable (local) + dev-mode + override flag → a hand-minted cookie naming a NON-demo teammate resolves to null (resolveFromOverrideOnly caller)', async () => {
+    process.env.NUXT_OIDC_AUTH_DEV_MODE = 'true'
+    process.env.NUXT_ALLOW_PERSONA_OVERRIDE = 'true'
+    const { tryAuth } = await import('../../../server/utils/auth')
+    const ev = await eventWithOverrideCookieFor(nonDemoId)
+    const session = await tryAuth(ev as never)
+    expect(session).toBeNull()
+  })
+
+  it('demo-capable (local) + dev-mode + override flag → the same cookie shape naming a DEMO_PERSONAS teammate still resolves (resolveFromOverrideOnly caller)', async () => {
+    process.env.NUXT_OIDC_AUTH_DEV_MODE = 'true'
+    process.env.NUXT_ALLOW_PERSONA_OVERRIDE = 'true'
+    const { tryAuth } = await import('../../../server/utils/auth')
+    const ev = await eventWithOverrideCookieFor(priyaId)
+    const session = await tryAuth(ev as never)
+    expect(session?.teammateId).toBe(priyaId)
+  })
+
+  it('non-dev-mode (real OIDC) + override flag → a hand-minted cookie naming a NON-demo teammate resolves to null (applyPersonaOverride caller: the impersonator falls back to their own identity, no impersonation stamp)', async () => {
+    process.env.NUXT_ALLOW_PERSONA_OVERRIDE = 'true'
+    // NUXT_OIDC_AUTH_DEV_MODE stays unset (beforeEach clears it) → devMode
+    // is false → resolveSession takes the "Normal path" (real OIDC
+    // required), which is what reaches applyPersonaOverride rather than
+    // resolveFromOverrideOnly.
+    const session = await withMockedOidcSession(
+      { oid: LENA_OID, email: 'demo-lena.park@example.com', name: 'Lena Park' },
+      async ({ tryAuth }) => {
+        const ev = await eventWithOverrideCookieFor(nonDemoId)
+        return tryAuth(ev as never)
+      },
+    )
+    expect(session?.teammateId).toBe(lenaId)
+    expect(session?.impersonatorEmail).toBeUndefined()
+  })
+
+  it('non-dev-mode (real OIDC) + override flag → the same cookie shape naming a DEMO_PERSONAS teammate still resolves (applyPersonaOverride caller, unaffected by the resolvePersonaTarget extraction)', async () => {
+    process.env.NUXT_ALLOW_PERSONA_OVERRIDE = 'true'
+    const session = await withMockedOidcSession(
+      { oid: LENA_OID, email: 'demo-lena.park@example.com', name: 'Lena Park' },
+      async ({ tryAuth }) => {
+        const ev = await eventWithOverrideCookieFor(priyaId)
+        return tryAuth(ev as never)
+      },
+    )
+    expect(session?.teammateId).toBe(priyaId)
+    expect(session?.impersonatorEmail).toBe('demo-lena.park@example.com')
   })
 })
 

@@ -16,13 +16,20 @@ node_modules/
 dist/
 
 # ── Env / secrets ────────────────────────────────────────────────────
-.env
-.env.local
-.env.*.local
+# Collapsed (S12): the enumerated form let .env.dev/.env.prod/.env.production/
+# .env.staging/.env.bak/.env.old slip through untracked (none of `.env`,
+# `.env.local`, `.env.*.local` matched them). `.env*` covers every dotted
+# variant; the two negations below are load-bearing — both templates ARE
+# tracked and must stay that way.
+.env*
+!.env.example
+!.env.sandbox.example
 # Sandbox deploy secrets — generated locally by az-deployment iteration.
 # Never commit these. The deploy KV (Bicep-managed) is the persistent
 # store; this file just lets us re-apply without re-generating.
-.azure-*-secrets.env
+# Generalised (S12) from `.azure-*-secrets.env`: same reasoning applies to
+# any `*secrets.env` file, not just the azure-prefixed one.
+*secrets.env
 
 # ── Test artefacts ───────────────────────────────────────────────────
 coverage/
@@ -58,9 +65,8 @@ infra/parameters/*.json
 # docs/development/claude-code-telemetry-contract.md and sandbox-realclaude-journey.md).
 scripts/spikes/
 
-# Sandbox reconciliation PATs (never commit)
-.env.sandbox
-
 # Node/V8 core dumps (e.g. from an OOM during build)
 core
 core.*
+# TokenScope repo tag (carries device config; do not commit)
+.claude/settings.local.json

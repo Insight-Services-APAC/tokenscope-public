@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { pgTable, uuid, text, date, numeric, bigint, timestamp, index, uniqueIndex } from 'drizzle-orm/pg-core'
+import { pgTable, uuid, text, date, numeric, bigint, timestamp, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core'
 import { teammate, region, orgUnit } from './identity'
 import { project } from './projects'
 
@@ -61,9 +61,48 @@ export const unaccountedUsage = pgTable(
     computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
     taggedAt: timestamp('tagged_at', { withTimezone: true }),
     taggedBy: uuid('tagged_by').references(() => teammate.id),
+    // Worklist-only (mig 0094): the teammate decided to leave this day
+    // unallocated. It leaves the needs-tagging queue; the spend is untouched and
+    // still counts in the unallocated total. A CHECK makes tagged-and-dismissed
+    // unrepresentable. See needs-tagging-worklist.md.
+    dismissedAt: timestamp('dismissed_at', { withTimezone: true }),
+    // The reconciled delta when the decision was made. Reconciliation recomputes
+    // that delta every run, so a dismissal that predates a large upward revision
+    // is stale — sweepStaleDismissals hands it back.
+    dismissedCostUsd: numeric('dismissed_cost_usd', { precision: 14, scale: 6 }),
+    // Why this row has no unaccounted_usage_model children (mig 0123, r1-H5):
+    // 'provider-day-grain' (only github money backs the key — Copilot money is
+    // day-grain, mig 0120) | 'awaiting-provider-detail' (no cost-bearing facts
+    // landed yet — transient) | NULL (children exist, or nothing to explain).
+    // Stamped by unaccounted-reconciliation.ts on every recompute. NOT a model
+    // column — the (teammate, day, tool) key and one-tagging-decision stand.
+    modelGapReason: text('model_gap_reason'),
   },
   (t) => [
     uniqueIndex('unaccounted_usage_teammate_day_tool_unique').on(t.teammateId, t.day, t.tool),
     index('unaccounted_usage_teammate_day_idx').on(t.teammateId, t.day),
   ],
+)
+
+/*
+ * unaccounted_usage_model (mig 0123) — the fill's per-model residual, one row per
+ * (parent, model): cap(GREATEST(0, API_model − OTel_model)), a subtraction of two
+ * OBSERVED operands (provider_usage_fact cost/token rows vs corroborated OTel),
+ * never an apportionment. Written by unaccounted-reconciliation.ts in the SAME
+ * transaction as the parent upsert, replaced wholesale per run — so
+ * Σ children ≤ parent holds at every read. No tagging columns: the parent stays
+ * the one tagging decision. See
+ * docs/design/reporting-consolidation/07-model-axis-subtraction-build.md D1-D3.
+ */
+export const unaccountedUsageModel = pgTable(
+  'unaccounted_usage_model',
+  {
+    unaccountedUsageId: uuid('unaccounted_usage_id')
+      .notNull()
+      .references(() => unaccountedUsage.id, { onDelete: 'cascade' }),
+    model: text('model').notNull(),
+    costUsd: numeric('cost_usd', { precision: 14, scale: 6 }).notNull(),
+    tokens: bigint('tokens', { mode: 'bigint' }).notNull().default(0n),
+  },
+  (t) => [primaryKey({ columns: [t.unaccountedUsageId, t.model] })],
 )

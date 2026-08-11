@@ -17,6 +17,8 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { stateDir as resolveStateDir } from './plugin-runtime.mjs'
+import { assertSafeEndpoint } from './endpoint-guard.mjs'
 
 const TIMEOUT_MS = 4000
 
@@ -33,8 +35,14 @@ function readJson(p) {
  * @param {{ env?: Record<string,string>, stateDir?: string }} opts
  */
 export async function refreshLanded({ env = {}, stateDir } = {}) {
-  const dir = stateDir || process.env.TOKENSCOPE_STATE_DIR || join(homedir(), '.tokenscope')
-  const bearerEndpoint = env.TOKENSCOPE_BEARER_ENDPOINT || process.env.TOKENSCOPE_BEARER_ENDPOINT || ''
+  // S1 fix 2: route through the shared stateDir() resolver rather than
+  // reading process.env.TOKENSCOPE_STATE_DIR directly here — one deletion
+  // (safeProcessEnv, or repoTagEnv never carrying it at all) then covers
+  // every call site, this one included, instead of leaving a second,
+  // independent read a repo-tagged process.env could still poison.
+  const dir = stateDir || resolveStateDir(env)
+  const bearerEndpoint =
+    env.TOKENSCOPE_BEARER_ENDPOINT || process.env.TOKENSCOPE_BEARER_ENDPOINT || ''
   const attrs = env.OTEL_RESOURCE_ATTRIBUTES || process.env.OTEL_RESOURCE_ATTRIBUTES || ''
   const instanceId = attrs.match(/tokenscope\.instance_id=([^,]+)/)?.[1]
   if (!bearerEndpoint || !instanceId) return { ok: false, reason: 'not-configured' }
@@ -42,6 +50,15 @@ export async function refreshLanded({ env = {}, stateDir } = {}) {
   // .../instances/{id}/bearer  →  .../instances/{id}/health
   const healthUrl = bearerEndpoint.replace(/\/bearer(\?.*)?$/, '/health')
   if (healthUrl === bearerEndpoint) return { ok: false, reason: 'bad-endpoint' }
+  // S1 fix 3: validate before the fetch (defence-in-depth — a backstop for
+  // ANY caller, regardless of which fallback above resolved bearerEndpoint).
+  // Loopback allowed: local-dev TOKENSCOPE_API_BASE (:3450) legitimately
+  // returns a loopback bearer endpoint.
+  try {
+    assertSafeEndpoint(healthUrl, { allowLoopback: true })
+  } catch {
+    return { ok: false, reason: 'bad-endpoint' }
+  }
 
   const access = readJson(join(dir, 'oauth-access.json'))
   const token = access?.access_token || access?.accessToken || access?.token
@@ -51,7 +68,10 @@ export async function refreshLanded({ env = {}, stateDir } = {}) {
   try {
     const ctrl = new AbortController()
     const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS)
-    res = await fetch(healthUrl, { headers: { Authorization: `Bearer ${token}` }, signal: ctrl.signal })
+    res = await fetch(healthUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: ctrl.signal,
+    })
     clearTimeout(t)
   } catch {
     return { ok: false, reason: 'fetch-failed' }
@@ -94,5 +114,7 @@ export async function refreshLanded({ env = {}, stateDir } = {}) {
 // CLI: refresh using the global settings.json env (best-effort, prints the result).
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const settings = readJson(join(homedir(), '.claude', 'settings.json'))
-  refreshLanded({ env: settings?.env || {} }).then((r) => process.stdout.write(`${JSON.stringify(r)}\n`))
+  refreshLanded({ env: settings?.env || {} }).then((r) =>
+    process.stdout.write(`${JSON.stringify(r)}\n`),
+  )
 }

@@ -20,11 +20,21 @@ export default withNuxt(
   },
   {
     // Standalone CLI executables that run OUTSIDE the Nuxt app: Claude Code /
-    // Copilot plugin-runtime scripts (statusline, status, redeem) and dev/ops
-    // scripts. Their contract IS to write to stdout (JSON for the host to read,
-    // or human progress output) — `consola` is neither available nor wanted
-    // here, so `console` is the correct and intended interface.
-    files: ['plugin/scripts/**', 'copilot-plugin/scripts/**', 'scripts/**'],
+    // Copilot plugin-runtime scripts (statusline, status, redeem), dev/ops
+    // scripts, and the dev-stack tools. Their contract IS to write to stdout
+    // (JSON for the host to read, or human progress output) — `consola` is
+    // neither available nor wanted here, so `console` is the correct and
+    // intended interface.
+    //
+    // `tools/**` belongs to this set for the same reason and was simply
+    // omitted: they are standalone CLI utilities and local dev-stack
+    // containers (fake-azure-monitor, synthetic-anthropic-api,
+    // mutation-sweep, the OTLP capture server) that never load the Nitro
+    // runtime, so they cannot import consola. Leaving them out produced 12
+    // permanently-unfixable warnings that trained readers to ignore lint
+    // output — the rule was reporting a violation of a convention that does
+    // not apply to those files.
+    files: ['plugin/scripts/**', 'copilot-plugin/scripts/**', 'scripts/**', 'tools/**'],
     rules: {
       'no-console': 'off',
     },

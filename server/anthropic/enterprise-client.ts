@@ -26,6 +26,7 @@
  */
 import { z } from 'zod'
 import { resilientFetch } from '../utils/resilient-fetch'
+import { readRawPage, paramPairsOf, pathOf, type RawPage } from '../utils/raw-page'
 
 /* The user_actor identity carried by both reports. email/name are nullable; a
  * deleted user is flagged (the caller carries forward / skips, never guesses). */
@@ -58,6 +59,47 @@ const UsageRow = z
     output_tokens: z.number().int().nonnegative().optional().default(0),
     total_tokens: z.number().int().nonnegative().optional().default(0),
     requests: z.number().int().nonnegative().optional().default(0),
+    /*
+     * DECLARED — the same latent shape `model` was in before task #32, and
+     * closed the same way.
+     *
+     * The 2026-08-02 wire capture observed
+     * `data[].server_tool_use.web_search_requests` on 85/85 live and 257/257
+     * STORED usage rows and listed BOTH the parent and the leaf under
+     * `undeclaredByOurSchema`. It reaches `actual_spend.raw_payload` today only
+     * because of the `.passthrough()` below, so anyone tightening this object
+     * would silently drop a dimension the provider sends on every row.
+     *
+     * NULLISH THROUGHOUT, and no `.default()`. `.default()` substitutes only for
+     * an ABSENT key — an explicit `null` still fails the parse, and that failure
+     * is not local: it escapes the per-day loop in runEnterpriseAnalyticsPoll and
+     * the org silently writes no actual_spend rows on that cycle or any cycle
+     * after (the outage documented on CostRow.requests below). A default here
+     * would also be a fabrication rather than a substitution: "0 web searches"
+     * and "the provider did not say" are different facts, and the fact table
+     * keeps them different (NULL vs 0).
+     *
+     * `.passthrough()` on the inner object so a sibling server-tool counter
+     * (code execution, say) rides into raw_payload the way this one already did.
+     */
+    server_tool_use: z
+      .object({ web_search_requests: z.number().int().nonnegative().nullish() })
+      .passthrough()
+      .nullish(),
+    /*
+     * DECLARED for W0a (developer-pages-consolidation/01-build-design.md D2),
+     * the same discipline as `server_tool_use` above: NULLISH THROUGHOUT, no
+     * `.default()` — an explicit `null` (which is what the wire sends whenever
+     * `context_window` is not in `group_by`, capture 2026-08-02) must parse, or
+     * the failure escapes the per-day loop and silently kills every
+     * `actual_spend` write for the org.
+     *
+     * NO ENUM, deliberately: the band vocabulary ('0-200k' / '200k+' today,
+     * pinned by tests/unit/server/provider-wire-shape.test.ts) is the
+     * PROVIDER'S to extend. An unknown band must ride through to the fact
+     * column verbatim, never 500.
+     */
+    context_window: z.string().nullish(),
   })
   .passthrough()
 export type EnterpriseUsageRow = z.infer<typeof UsageRow>
@@ -82,7 +124,46 @@ const CostRow = z
     cost_type: z.string().nullable().optional(), // 'tokens'|'web_search'|'code_execution'|null
     token_type: z.string().nullable().optional(),
     product: z.string().nullable().optional(),
-    requests: z.number().int().nonnegative().optional().default(0),
+    /*
+     * DECLARED, closing the schema half of task #32.
+     *
+     * We have always REQUESTED it — `group_by[]=model` on the cost report
+     * (analytics-poller.ts) — and the provider has always sent it: the
+     * 2026-08-02 wire capture observed `data[].model` on 255/255 live cost rows
+     * and listed it under `undeclaredByOurSchema`. It reached
+     * `actual_spend.raw_payload` (and from there `provider_usage_fact.model`)
+     * only because of the `.passthrough()` below, so the model axis on the
+     * billed lane rested on an UNDECLARED field: tightening this object, or
+     * anyone reading `EnterpriseCostRow` and concluding the dimension is not
+     * there, silently empties that axis. Declaring it makes the carry a contract
+     * instead of a side effect, and makes it visible in the type.
+     *
+     * Same shape as UsageRow's, deliberately: `.nullable().optional()` accepts
+     * both an absent key and an explicit null, so the only value that could
+     * throw is a non-string, non-null one — which no capture has ever seen.
+     */
+    model: z.string().nullable().optional(),
+    /*
+     * NULLISH, not `.optional()`. Anthropic documents `requests` as NULL
+     * whenever group_by includes cost_type or token_type, and `.default(0)`
+     * substitutes only for an ABSENT key -- an explicit `null` fails the parse.
+     *
+     * That failure is not local: the throw escapes the per-day loop in
+     * runEnterpriseAnalyticsPoll, the per-org catch records "poll failed", and
+     * the org writes NO actual_spend rows on that cycle or any cycle after,
+     * silently, until someone notices. Requesting cost_type without this line
+     * is a deterministic outage on the next poll.
+     */
+    requests: z.number().int().nonnegative().nullish().transform((v) => v ?? 0),
+    /*
+     * Same declaration as UsageRow's, and on BOTH reports deliberately — the
+     * canon clause is "add `context_window` and `speed` to both reports or
+     * neither: the usage and cost reports are at different grains and a
+     * dimension on one side only makes the join harder"
+     * (target-state-data-architecture.md). `speed` is NOT taken (no card needs
+     * it). Nullish, no default, no enum — see UsageRow.context_window.
+     */
+    context_window: z.string().nullish(),
   })
   .passthrough()
 export type EnterpriseCostRow = z.infer<typeof CostRow>
@@ -247,6 +328,34 @@ export class AnthropicEnterpriseClient {
       // Network/transport failure (DNS, TLS, refused). status 0 => caller treats
       // it as a generic connect failure, never as an auth/scope verdict.
       return { ok: false, status: 0, parsed: false }
+    }
+  }
+
+  /*
+   * DIAGNOSTICS ONLY — the FIRST page of a report, UNPARSED.
+   *
+   * Feeds the wire-shape probe (server/diagnostics/), which must see the body
+   * before Zod touches it: UsageRow/CostRow default several fields (so a parsed
+   * object reports a key the wire omitted as present) and the report ENVELOPE is
+   * a non-passthrough object (so an added envelope key would be stripped). It
+   * reuses buildUrl + headers verbatim, so the probe asks the provider exactly
+   * what the poller asks it; it never follows the cursor — one page, one call.
+   *
+   * Returns the request path + params alongside the body so the probe reports
+   * what was actually sent rather than what a caller believes was sent. The
+   * params are unredacted here (this is the client, not the report); redaction
+   * is the report's job.
+   */
+  async rawReportPage(
+    report: 'user_usage_report' | 'user_cost_report',
+    opts: EnterpriseReportOpts,
+  ): Promise<{ path: string; params: Array<[string, string]>; page: RawPage }> {
+    const url = this.buildUrl(report, opts)
+    const res = await resilientFetch(url, { headers: this.headers() })
+    return {
+      path: pathOf(url),
+      params: paramPairsOf(url),
+      page: await readRawPage(res, { secrets: [this.apiKey] }),
     }
   }
 

@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest'
 import {
   mapAttributesToRegion,
   resolvePlacementViaManagerChain,
+  resolvesToSingleUnit,
   derivePlacement,
   makeChainCaches,
   type GetManager,
@@ -18,21 +19,25 @@ import {
 import { normalizeMatchValue, type RegionAttributeKey } from '../../../shared/placement/region-attributes'
 import type { DirectoryUser } from '../../../server/azure/directory'
 
-/** Build a RegionRuleSet from [attribute, value, regionId, mode?] tuples. */
-function ruleset(rules: Array<[RegionAttributeKey, string, string, ('exact' | 'prefix')?]>): RegionRuleSet {
+/** Build a RegionRuleSet from [attribute, value, regionId, mode?, orgUnitId?] tuples.
+ *  A 5th element makes it a UNIT rule (mig 0112); omitted = the region-only shape. */
+function ruleset(
+  rules: Array<[RegionAttributeKey, string, string, ('exact' | 'prefix')?, string?]>,
+): RegionRuleSet {
   const exact: RegionRuleSet['exact'] = new Map()
   const prefix: RegionRuleSet['prefix'] = []
-  for (const [attr, val, rid, mode] of rules) {
+  for (const [attr, val, rid, mode, orgUnitId] of rules) {
     const v = normalizeMatchValue(val)
+    const target = { regionId: rid, orgUnitId: orgUnitId ?? null }
     if (mode === 'prefix') {
-      prefix.push({ attribute: attr, value: v, regionId: rid })
+      prefix.push({ attribute: attr, value: v, target })
     } else {
       let m = exact.get(attr)
       if (!m) {
         m = new Map()
         exact.set(attr, m)
       }
-      m.set(v, rid)
+      m.set(v, target)
     }
   }
   prefix.sort((a, b) => b.value.length - a.value.length)
@@ -59,7 +64,7 @@ describe('mapAttributesToRegion', () => {
   it('exact match, case-insensitive + trim; blank/unmapped → null', () => {
     const rules = ruleset([['companyName', 'Insight Australia', 'rg-apac']])
     expect(mapAttributesToRegion(dir({ companyName: ' Insight Australia ' }), rules))
-      .toEqual({ regionId: 'rg-apac', attribute: 'companyName', conflict: false })
+      .toEqual({ regionId: 'rg-apac', orgUnitId: null, attribute: 'companyName', conflict: false })
     expect(mapAttributesToRegion(dir({ companyName: 'Insight USA' }), rules)).toBeNull()
     expect(mapAttributesToRegion(dir({ companyName: null }), rules)).toBeNull()
   })
@@ -75,7 +80,44 @@ describe('mapAttributesToRegion', () => {
       ['department', 'Services', 'rg-emea'],
     ])
     const m = mapAttributesToRegion(dir({ companyName: 'Insight Australia', department: 'Services' }), rules)
-    expect(m).toEqual({ regionId: 'rg-apac', attribute: 'companyName', conflict: true })
+    expect(m).toEqual({ regionId: 'rg-apac', orgUnitId: null, attribute: 'companyName', conflict: true })
+  })
+  it('a UNIT rule carries its unit target through the match', () => {
+    const rules = ruleset([['department', 'Sales-Solution', 'rg-emea', 'exact', 'ou-emea-core']])
+    expect(mapAttributesToRegion(dir({ department: 'Sales-Solution' }), rules))
+      .toEqual({ regionId: 'rg-emea', orgUnitId: 'ou-emea-core', attribute: 'department', conflict: false })
+  })
+  it('conflict compares the COMPLETE TARGET: two rules naming two cost centres in ONE region ARE a conflict', () => {
+    // Which cost centre a person's spend charges is the decision this whole
+    // feature makes. Comparing regions only reported "no conflict" here, so the
+    // broad-catalogue rule quietly won and the narrow one an admin had just
+    // written did nothing — with no counter anywhere saying so.
+    const rules = ruleset([
+      ['companyName', 'Insight Australia', 'rg-apac', 'exact', 'ou-1'],
+      ['department', 'Services', 'rg-apac', 'exact', 'ou-2'],
+    ])
+    const m = mapAttributesToRegion(dir({ companyName: 'Insight Australia', department: 'Services' }), rules)
+    // Highest precedence still WINS the target; the divergence is surfaced, not
+    // resolved differently.
+    expect(m).toEqual({ regionId: 'rg-apac', orgUnitId: 'ou-1', attribute: 'companyName', conflict: true })
+  })
+
+  it('two rules naming the SAME unit are not a conflict', () => {
+    const rules = ruleset([
+      ['companyName', 'Insight Australia', 'rg-apac', 'exact', 'ou-1'],
+      ['department', 'Services', 'rg-apac', 'exact', 'ou-1'],
+    ])
+    expect(mapAttributesToRegion(dir({ companyName: 'Insight Australia', department: 'Services' }), rules)?.conflict)
+      .toBe(false)
+  })
+
+  it('a unit rule and a region-only rule on the same person diverge — one places, the other does not', () => {
+    const rules = ruleset([
+      ['companyName', 'Insight Australia', 'rg-apac', 'exact', 'ou-1'],
+      ['department', 'Services', 'rg-apac'],
+    ])
+    expect(mapAttributesToRegion(dir({ companyName: 'Insight Australia', department: 'Services' }), rules)?.conflict)
+      .toBe(true)
   })
   it('same region across attributes → no conflict', () => {
     const rules = ruleset([
@@ -120,6 +162,21 @@ describe('resolvePlacementViaManagerChain', () => {
     const owners = new Map([['kat', [unit('ou-mp'), unit('ou-data')]], ['vp', [unit('ou-bu')]]])
     const r = await resolvePlacementViaManagerChain('a', { unitOwnerMap: owners, leaderMap: noLeaders, getManager: m.get, caches: makeChainCaches() })
     expect(r).toMatchObject({ kind: 'unit', orgUnitId: 'ou-bu' }) // kat skipped (2 units), vp wins
+  })
+
+  /*
+   * The admin surface (server/api/v1/admin/org-units.get.ts) warns "this owner
+   * places nobody" from THIS function, so the warning cannot describe a behaviour
+   * the walk does not have. Pinned as an explicit agreement rather than left
+   * implicit: these four rows are the walk's own branch condition, and the case
+   * above ("multi-unit owner is AMBIGUOUS → skipped") fails alongside them if the
+   * predicate changes.
+   */
+  it('resolvesToSingleUnit IS the walk\'s unit-hit condition — one rule, two readers', () => {
+    expect(resolvesToSingleUnit([unit('ou-one')])).toBe(true)
+    expect(resolvesToSingleUnit([unit('ou-one'), unit('ou-two')])).toBe(false) // ambiguous
+    expect(resolvesToSingleUnit([])).toBe(false)
+    expect(resolvesToSingleUnit(undefined)).toBe(false) // not an owner at all
   })
 
   it('multi-unit owner with no owner above → falls to region', async () => {
@@ -187,7 +244,42 @@ describe('derivePlacement', () => {
       rules, unitOwnerMap: new Map([['kat', [unit('ou-mp', 'rg-x')]]]), leaderMap: new Map([['kat', 'rg-y']]),
       getManager: m.get, caches: makeChainCaches(),
     })
-    expect(r).toEqual({ orgUnitId: 'ou-mp', regionId: 'rg-x', ownerOid: 'kat', via: 'unit' })
+    expect(r).toEqual({
+      orgUnitId: 'ou-mp', regionId: 'rg-x', ownerOid: 'kat', via: 'unit',
+      // The walk ran, so it reports the person's OWN manager for the C9 snapshot.
+      manager: { oid: 'kat', email: null },
+    })
+  })
+  it('a UNIT RULE outranks the manager chain — an explicit statement beats an inference', async () => {
+    // The chain would place them in ou-chain (kat owns it). The rule names
+    // ou-rule, and the rule wins. Nothing walks: the derivation stops at step 0.
+    const m = fakeManager({ u: { oid: 'kat', email: null } })
+    const unitRules = ruleset([['department', 'APAC Digital', 'rg-x', 'exact', 'ou-rule']])
+    const r = await derivePlacement(dir({ department: 'APAC Digital', oid: 'u' }), {
+      rules: unitRules,
+      unitOwnerMap: new Map([['kat', [unit('ou-chain', 'rg-x')]]]),
+      leaderMap: new Map(),
+      getManager: m.get,
+      caches: makeChainCaches(),
+    })
+    expect(r).toEqual({
+      orgUnitId: 'ou-rule', regionId: 'rg-x', via: 'unit-rule',
+      attribute: 'department', conflict: false,
+    })
+    expect(m.calls).toEqual([]) // no Graph hop was needed to reach the answer
+  })
+  it('a REGION rule still loses to the chain unit — only a UNIT rule outranks it', async () => {
+    const m = fakeManager({ u: { oid: 'kat', email: null } })
+    const regionRule = ruleset([['department', 'APAC Digital', 'rg-dept']])
+    const r = await derivePlacement(dir({ department: 'APAC Digital', oid: 'u' }), {
+      rules: regionRule,
+      unitOwnerMap: new Map([['kat', [unit('ou-chain', 'rg-x')]]]),
+      leaderMap: new Map(),
+      getManager: m.get,
+      caches: makeChainCaches(),
+    })
+    expect(r.via).toBe('unit')
+    expect(r.orgUnitId).toBe('ou-chain')
   })
   it('no unit → ATTRIBUTE region wins over chain region', async () => {
     const m = fakeManager({ u: { oid: 'vp', email: null } })
@@ -195,7 +287,12 @@ describe('derivePlacement', () => {
       rules, unitOwnerMap: new Map(), leaderMap: new Map([['vp', 'rg-chain']]),
       getManager: m.get, caches: makeChainCaches(),
     })
-    expect(r).toEqual({ regionId: 'rg-dept', via: 'attribute', attribute: 'department', conflict: false })
+    // unitOwnerMap is empty so step 1's walk is skipped; nothing asked Graph who
+    // 'u' reports to, so `manager` is UNDEFINED ("we did not look"), not null.
+    expect(r).toEqual({
+      regionId: 'rg-dept', via: 'attribute', attribute: 'department', conflict: false,
+      manager: undefined,
+    })
   })
   it('no unit, no attribute → chain REGION (manager)', async () => {
     const m = fakeManager({ u: { oid: 'vp', email: null } })
@@ -203,21 +300,22 @@ describe('derivePlacement', () => {
       rules, unitOwnerMap: new Map(), leaderMap: new Map([['vp', 'rg-chain']]),
       getManager: m.get, caches: makeChainCaches(),
     })
-    expect(r).toEqual({ regionId: 'rg-chain', via: 'manager' })
+    expect(r).toEqual({ regionId: 'rg-chain', via: 'manager', manager: { oid: 'vp', email: null } })
   })
   it('nothing resolves → via null', async () => {
     const m = fakeManager({ u: { oid: 'vp', email: null } })
     const r = await derivePlacement(dir({ department: 'Services', oid: 'u' }), {
       rules, unitOwnerMap: new Map(), leaderMap: new Map(), getManager: m.get, caches: makeChainCaches(),
     })
-    expect(r).toEqual({ via: null })
+    // Neither map has entries, so neither walk runs → the manager was never asked for.
+    expect(r).toEqual({ via: null, manager: undefined })
   })
   it('no oid → no walk', async () => {
     const m = fakeManager({})
     const r = await derivePlacement(dir({ oid: '' }), {
       rules, unitOwnerMap: new Map([['kat', [unit('ou')]]]), leaderMap: new Map(), getManager: m.get, caches: makeChainCaches(),
     })
-    expect(r).toEqual({ via: null })
+    expect(r).toEqual({ via: null, manager: undefined })
     expect(m.calls).toEqual([])
   })
 })

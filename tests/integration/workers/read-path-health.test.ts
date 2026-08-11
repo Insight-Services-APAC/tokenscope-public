@@ -72,12 +72,14 @@ async function insertReaderRun(opts: {
   rowsAffected?: number | null
   sessionsProcessed?: number
   errors?: number
+  scoped?: boolean
 }): Promise<void> {
   const started = new Date(opts.startedAtMs).toISOString()
   const result = JSON.stringify({
     sessionsProcessed: opts.sessionsProcessed ?? 5,
     attributionRowsWritten: opts.rowsAffected ?? 0,
     errors: opts.errors ?? 0,
+    ...(opts.scoped === undefined ? {} : { scoped: opts.scoped }),
   })
   await t.client`
     INSERT INTO worker_run (worker_name, status, started_at, finished_at, rows_affected, result)
@@ -175,6 +177,46 @@ describe('runReadPathHealth — STALL (reader dead, fleet still emitting)', () =
     expect(second.reason).toBe('stall')
     expect(second.autoResolved).toBe(0)
     expect(second.skippedExisting).toBe(1)
+    expect(await openAlerts()).toBe(1)
+  })
+
+  it('HIGH regression: a SCOPED recovery batch must not mask (or auto-resolve) a live outage', async () => {
+    // The operator recovery lever writes successful, row-writing worker_run rows
+    // by construction. Counting them here would break the zero-write STALL streak
+    // AND satisfy the recent-success check — silently auto-resolving an open
+    // alert in the middle of an outage. And a recovery campaign runs many such
+    // batches during exactly the deploy window when the scheduled reader is most
+    // likely to be struggling.
+    await resetLedger()
+    await seedFleetEmit(NOW.getTime() - 10 * MIN)
+
+    await insertReaderRun({ startedAtMs: NOW.getTime() - 5 * MIN, rowsAffected: 0 })
+    await insertReaderRun({ startedAtMs: NOW.getTime() - 20 * MIN, rowsAffected: 0 })
+    await insertReaderRun({ startedAtMs: NOW.getTime() - 35 * MIN, rowsAffected: 0 })
+
+    const first = await runReadPathHealth(t.db, { now: NOW })
+    expect(first.reason).toBe('stall')
+    expect(await openAlerts()).toBe(1)
+
+    // Operator starts recovering: scoped batches land, writing plenty of rows.
+    await insertReaderRun({ startedAtMs: NOW.getTime() - 2 * MIN, rowsAffected: 900, scoped: true })
+    await insertReaderRun({ startedAtMs: NOW.getTime() - 1 * MIN, rowsAffected: 850, scoped: true })
+
+    // The scheduled read path is still dead — the alert MUST stay open.
+    const second = await runReadPathHealth(t.db, { now: NOW })
+    expect(second.reason).toBe('stall')
+    expect(second.autoResolved).toBe(0)
+    expect(await openAlerts()).toBe(1)
+
+    // ...and an IN-FLIGHT batch is even sneakier: dispatchWorker writes the row at
+    // START, so `result` (and the scoped flag) is still NULL and it slips past the
+    // scoped filter, with NULL rows_affected breaking the zero-write streak.
+    await t.client`
+      INSERT INTO worker_run (worker_name, status, started_at)
+      VALUES ('azure-monitor-read', 'running', ${new Date(NOW.getTime() - 30 * 1000).toISOString()}::timestamptz)`
+    const third = await runReadPathHealth(t.db, { now: NOW })
+    expect(third.reason).toBe('stall')
+    expect(third.autoResolved).toBe(0)
     expect(await openAlerts()).toBe(1)
   })
 })

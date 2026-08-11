@@ -190,11 +190,18 @@ describe('copilot-pool-bill Wave-0 invariants', () => {
         AND tool IN ('copilot-license', 'copilot-usage', 'copilot-unclassified')`
     expect(Number(c)).toBe(7450) // NOT 7450 + 39 (the copilot-seat actual_spend row is excluded)
 
-    // NULL-CoU bucket (unmapped 'lonely' 1100 + residual 50) is present + visible.
+    // NULL-CoU bucket: 'lonely' license 1000 (unmapped org, unaffected by allocation) + the
+    // WHOLE enterprise-month's overage (beta 300 + lonely 100 + residual 50 = 450). Workstream C:
+    // this fixture seeds no reconciliation_record usage, so the overage allocation (ADR-0011
+    // D10, default consumption-share) finds zero attributable weight and routes the entire
+    // overage to the explicit unallocated bucket — replacing the org-homed breakdown that used
+    // to leave beta's 300 at couB. Total conservation (Σ allocations == overage net) is asserted
+    // separately by server/governance/copilot-overage-allocation.ts; see the dedicated
+    // integration tests in tests/integration/governance/copilot-overage-allocation.test.ts.
     const [{ nullcou }] = await t.client<{ nullcou: string }[]>`
       SELECT COALESCE(SUM(charge_usd),0)::text AS nullcou FROM v_finance_chargeback_month
       WHERE period_month = ${MONTH}::date AND cost_owning_unit_id IS NULL`
-    expect(Number(nullcou)).toBe(1150)
+    expect(Number(nullcou)).toBe(1450)
 
     // The bill_totals Copilot term comes ONLY from copilot_pool_bill.
     const [{ gh }] = await t.client<{ gh: string }[]>`
@@ -268,16 +275,21 @@ describe('copilot-pool-bill Wave-0 invariants', () => {
       SELECT unsettled FROM v_finance_bill_totals_month WHERE period_month = ${MONTH}::date AND provider = 'github'`
     expect(unsettled).toBe(true)
 
-    // The chargeback figure for acme's CoU is the OVERAGE ONLY (300) — NOT 39 (flat) or 339.
+    // The chargeback figure for the month's Copilot lanes is the OVERAGE ONLY (300) — NOT 39
+    // (flat) or 339. Checked ENTERPRISE-WIDE (not scoped to couA): this fixture seeds no
+    // reconciliation_record usage, so the overage allocation (ADR-0011 D10) finds zero
+    // attributable weight and routes the 300 to the unallocated bucket rather than couA — the
+    // homing changed, but the invariant this test exists to pin (no flat-rate leak; the money
+    // sits on copilot-usage, not copilot-license) is unaffected and CoU-independent.
     // (mig 0085 lane split: the money sits on the copilot-usage lane.)
     const [{ charge }] = await t.client<{ charge: string }[]>`
       SELECT COALESCE(SUM(charge_usd),0)::text AS charge FROM v_finance_chargeback_month
-      WHERE period_month = ${MONTH}::date AND cost_owning_unit_id = ${couA}::uuid
+      WHERE period_month = ${MONTH}::date
         AND tool IN ('copilot-license', 'copilot-usage', 'copilot-unclassified')`
     expect(Number(charge)).toBe(300)
     const [{ usage_lane }] = await t.client<{ usage_lane: string }[]>`
-      SELECT charge_usd::text AS usage_lane FROM v_finance_chargeback_month
-      WHERE period_month = ${MONTH}::date AND tool = 'copilot-usage' AND cost_owning_unit_id = ${couA}::uuid`
+      SELECT COALESCE(SUM(charge_usd),0)::text AS usage_lane FROM v_finance_chargeback_month
+      WHERE period_month = ${MONTH}::date AND tool = 'copilot-usage'`
     expect(Number(usage_lane)).toBe(300)
 
     // reset the flat price so it can't leak into other tests
@@ -482,6 +494,20 @@ describe('copilot-pool-bill Wave-0 invariants', () => {
   })
 
   it('(12) C2 lane identity: the three view lanes are exactly the three columns per (cou, month)', async () => {
+    // Workstream C: the overage allocation (ADR-0011 D10, default consumption-share) needs
+    // attributable usage weight, or the overage lands in the unallocated (NULL cou) bucket
+    // instead of couA. Seed ONE teammate's reconciliation_record row, homed to couA under this
+    // enterprise — the ONLY org/teammate with activity this month, so 100% of the weight (and
+    // therefore the overage) resolves back to couA, reproducing the pre-allocation split this
+    // test pins.
+    const tm12 = await mkTeammate(couA)
+    await t.db.insert(schema.reconciliationRecord).values({
+      teammateId: tm12, provider: 'github', enterpriseRef: ENT, licenseOrg: 'acme',
+      periodDate: '2026-06-10', category: 'copilot_interactive', scope: 'teammate',
+      costOwningUnitId: couA, providerEnterpriseId: entId,
+      actualUsd: '100', otelAttributedUsd: '0', deltaUsd: '100', spendClass: 'indicative',
+      disposition: 'under', status: 'applied',
+    })
     const items: GithubBillingUsageItem[] = [
       item('acme', LICENSE, { net: 200, quantity: 5 }),
       item('acme', CREDITS, { gross: 300, discount: 200, net: 100 }),

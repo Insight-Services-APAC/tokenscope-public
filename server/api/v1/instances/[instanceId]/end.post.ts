@@ -26,7 +26,9 @@ export default defineEventHandler(async (event) => {
 
   // OAuth-only re-auth FIRST (AUTH-7 — no unauthenticated existence oracle): an
   // unauthenticated caller gets 401 for existing and non-existing ids alike.
-  const teammate = await requireOAuthBearer(event, 'tokenscope.emit', db as never)
+  // Instance-bound (sid) so a DIFFERENT instance's emit credential 401s here
+  // instead of degrading to a per-teammate check.
+  const teammate = await requireOAuthBearer(event, 'tokenscope.emit', db as never, sid)
 
   const [row] = await db
     .select({
@@ -37,14 +39,11 @@ export default defineEventHandler(async (event) => {
     .from(schema.instanceAttestation)
     .where(eq(schema.instanceAttestation.instanceId, sid))
     .limit(1)
-  if (!row) throw createError({ statusCode: 404, statusMessage: 'Session not found' })
 
-  // The emit-scoped Bearer's teammate must own this instance.
-  if (!row.teammateId || row.teammateId !== teammate.teammateId) {
-    throw createError({
-      statusCode: 403,
-      statusMessage: 'This credential does not own the requested instance',
-    })
+  // Not-found AND not-owned collapse to the SAME 404 (mirrors /bearer, /health,
+  // and me/instances/[instanceId]/revoke.post.ts).
+  if (!row || !row.teammateId || row.teammateId !== teammate.teammateId) {
+    throw createError({ statusCode: 404, statusMessage: 'Instance not found' })
   }
 
   if (row.tsActualEnd) {

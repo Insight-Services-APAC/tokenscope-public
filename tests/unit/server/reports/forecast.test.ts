@@ -43,6 +43,7 @@ describe('forecastForMonth anchoring', () => {
     })
     expect(f).not.toBeNull()
     expect(f!.daysElapsed).toBe(10) // asOf's day, never now's 20
+    expect(f!.dayOfMonth).toBe(20) // the clock's day, never asOf's 10
     expect(f!.daysInMonth).toBe(30)
     expect(f!.factor).toBe(3) // 30 / 10
     expect(f!.meteredProjectedUsd).toBe(300) // 100 × 3
@@ -79,6 +80,13 @@ describe('forecastForMonth anchoring', () => {
     })
     expect(f).not.toBeNull()
     expect(f!.daysElapsed).toBe(1) // anchored on month start, floored at 1
+    /*
+     * …and the CAPTION's day is the CLOCK's, not that fallback. One field used
+     * to serve both, so here a scope with no data yet said "day 1 of 30" when
+     * it was the 3rd. Harmless for the projection (MTD is 0, so the factor
+     * cannot matter); a false statement in the hero.
+     */
+    expect(f!.dayOfMonth).toBe(3)
     expect(f!.projectedUsd).toBe(0)
     expect(f!.asOfDate).toBeNull()
   })

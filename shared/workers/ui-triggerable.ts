@@ -36,6 +36,11 @@ export const UI_TRIGGERABLE_WORKER_NAMES = [
   // (destructive workers stay cron/HMAC-only) it is not one-click-triggerable.
   'aggregate-rollup',
   'went-silent',
+  // github-coverage-sweep — read-mostly (a live App-mode probe + an upsert into the
+  // two coverage observation tables, plus a deduplicated inbox alert) and idempotent;
+  // an admin who just fixed a permission grant or an installation has a real reason
+  // to force an immediate recheck rather than wait up to an hour.
+  'github-coverage-sweep',
 ] as const
 
 /*

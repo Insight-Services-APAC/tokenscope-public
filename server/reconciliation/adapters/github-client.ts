@@ -19,7 +19,9 @@
 import { z } from 'zod'
 import { createError } from 'h3'
 import { resilientFetch, type ResilientFetchOptions } from '../../utils/resilient-fetch'
+import { readRawPage, errorPageFrom, paramPairsOf, pathOf, type RawPage, type RawPageErr } from '../../utils/raw-page'
 import type { GithubAppAuth } from './github-app-auth'
+import { decodePem } from './github-app-auth'
 
 const API_BASE = 'https://api.github.com'
 const SEATS_API_VERSION = '2026-03-10' // public preview — pin (§15.5)
@@ -47,6 +49,25 @@ const SeatsPageSchema = z.object({
   total_seats: z.number().optional(),
   seats: z.array(SeatSchema).default([]),
 })
+
+/*
+ * Pagination diagnostics for a listSeats() pull (S9). `listSeats()`'s plain
+ * `GithubSeat[]` return makes a genuinely-small/empty roster INDISTINGUISHABLE from a
+ * truncated one — three separate ways: the `seats` schema default([]) on a 200 with a
+ * missing/renamed key, a short page ending pagination early, or the 100-page hard cap.
+ * A caller that DELETEs based on the roster (the seat-convergence prune) needs these
+ * flags to reason about whether "the roster came back empty/small" is trustworthy.
+ */
+export interface SeatsPullDiagnostics {
+  seats: GithubSeat[]
+  /** The 100-page (10,000-seat) hard cap was hit — pagination stopped because it ran
+   *  out of page budget, not because the API signalled the end. */
+  pagesCapped: boolean
+  /** Pagination ended via a short page (fewer than per_page seats on a page). The
+   *  NORMAL end-of-roster signal for a real pull — but indistinguishable at this layer
+   *  from a short/empty page produced by a partial outage or an API-shape change. */
+  shortPageBreak: boolean
+}
 
 const UsageItemSchema = z
   .object({
@@ -172,6 +193,16 @@ const ConsumedLicensesPageSchema = z.object({
   users: z.array(ConsumedLicenseUserSchema).default([]),
 })
 
+/* GET /users/{login}. Both fields are self-asserted profile text and are null far more often
+ * than not (a private profile has neither), so both are optional-and-nullable by design —
+ * see getUserProfile for why this is a display hint and never an identity source. */
+const UserProfileSchema = z
+  .object({
+    name: z.string().nullable().optional(),
+    email: z.string().nullable().optional(),
+  })
+  .passthrough()
+
 /*
  * A consumed-license identity row: github login -> SSO email (the SAML name id).
  * SHAPE-COMPATIBLE with SamlIdentity on purpose so the App identity path reuses the
@@ -191,16 +222,139 @@ const MetricsReportSchema = z.object({
   report_day: z.string().optional(),
 })
 
-// One per-user record in the users-1-day NDJSON. We consume only the identity (user_login)
-// + ai_credits_used (gross per-user daily AI-credit CONSUMPTION); .passthrough keeps the
-// engagement fields for ReconciledLine.raw. Verified live 2026-06-30 (53 users, the field
-// present on the record alongside user_login/day/ai_adoption_phase).
+/*
+ * ── DECLARING A DIMENSION MUST NOT BE ABLE TO COST US THE MONEY (task #48) ───
+ *
+ * `getUserDailyCredits` parses each NDJSON line inside a try/catch that SKIPS
+ * the line on failure. That is right for a corrupt line and catastrophic for a
+ * shape surprise in a field we merely wanted to read: a `totals_by_cli` that
+ * arrived as an array rather than an object would drop the WHOLE record, and
+ * with it that user-day's `ai_credits_used`.
+ *
+ * So every field added below is `.optional()` (absence is ordinary — 47/200
+ * records carry `totals_by_cli` at all) AND carries `.catch(undefined)`, which
+ * makes a wrongly-shaped subtree degrade to "this dimension is absent" instead
+ * of failing the record. A declaration buys types and validation; it must never
+ * buy them with the figure the surface exists to deliver.
+ * tests/unit/reconciliation/github-metrics-record-schema.test.ts pins that.
+ */
+const cliTokenUsage = z
+  .object({
+    prompt_tokens_sum: z.number().nullable().optional(),
+    output_tokens_sum: z.number().nullable().optional(),
+    avg_tokens_per_request: z.number().nullable().optional(),
+  })
+  .passthrough()
+
+/*
+ * One per-user record in the users-1-day NDJSON.
+ *
+ * FOUR FIELDS WERE DECLARED (user_login, user_id, day, ai_credits_used) while
+ * ~90 more arrived and survived unread through .passthrough(). The 2026-08-02
+ * wire capture is what made that visible
+ * (docs/design/provider-wire-captures/) and #48 is declaring the ones the
+ * transform actually consumes. Observed frequencies, from that capture:
+ *
+ *   ai_credits_used                                        100%, AT THE RECORD ROOT
+ *   totals_by_model_feature[].model                        487/487 stored, 34/34 live
+ *   totals_by_cli.token_usage.{prompt,output}_tokens_sum   47/200 stored — SPARSE
+ *   loc_{added,deleted,suggested_to_add,suggested_to_delete}_sum   number, 100%
+ *   code_{generation,acceptance}_activity_count                    number, 100%
+ *   user_initiated_interaction_count                               number, 100%
+ *   totals_by_language_model[].{model,language}            756/756 stored, 45/45 live
+ *   totals_by_language_feature[]                           813 rows stored (language × feature)
+ *
+ * The ENGAGEMENT fields (developer-pages W0b, D7) — the LOC sums, the three
+ * activity counts, and the two language arrays — are declared for the
+ * self-depth engagement card's derived read
+ * (server/usage/copilot-engagement.ts). The TRANSFORM still bands on
+ * `totals_by_model_feature` only: a model's share of DELIBERATE user
+ * interactions is the closest Copilot has to "how much work ran on this model"
+ * and the language dimension answers a different question
+ * (04-prototype-delta.md §5). Declaring the language arrays here does not
+ * change that choice — it types what the engagement read consumes.
+ *
+ * WIRE-CHECK CAVEAT on the language-array ENTRY MEASURES (W0b's D1-style
+ * check): the 2026-08-02 capture inventories `totals_by_language_model`
+ * entries' `model`/`language` keys but NOT their entry-level numeric measures,
+ * and no raw capture file exists to name one. The per-entry
+ * `user_initiated_interaction_count` declared below is therefore a CANDIDATE
+ * weighting measure, `.nullish()` like everything else: absence parses, and
+ * the read side (copilot-engagement.ts) weights by it only when the wire
+ * actually sends it, falling back per D9's ladder — never equal-splitting,
+ * never fabricating weights.
+ *
+ * NOTE ON WHAT #48 DOES AND DOES NOT UNLOCK: these fields were ALREADY reaching
+ * `reconciliation_record.raw` verbatim. Declaring them changes nothing at rest;
+ * it gives the consumer a type and a validated shape instead of a cast.
+ * Every declared field keeps the `.catch(undefined)` discipline of the header
+ * above — a shape surprise degrades to "this dimension is absent" and can
+ * never cost the record its `ai_credits_used`.
+ */
+/** One `totals_by_language_model` entry: the language × model dimension pair
+ *  plus the candidate per-entry weighting measure (see the schema header). */
+const languageModelEntry = z
+  .object({
+    model: z.string().nullable().optional(),
+    language: z.string().nullable().optional(),
+    user_initiated_interaction_count: z.number().nullish().catch(undefined),
+  })
+  .passthrough()
+
+/** One `totals_by_language_feature` entry — D9's fallback weighting rung. */
+const languageFeatureEntry = z
+  .object({
+    language: z.string().nullable().optional(),
+    feature: z.string().nullable().optional(),
+    user_initiated_interaction_count: z.number().nullish().catch(undefined),
+  })
+  .passthrough()
+
 const UserMetricsRecordSchema = z
   .object({
     user_login: z.string().nullable().optional(),
     user_id: z.number().nullable().optional(),
     day: z.string().nullable().optional(),
     ai_credits_used: z.number().nullable().optional(),
+    // ── Engagement scalars (W0b D7) — all nullish, no defaults, catch-guarded:
+    // a wrongly-typed count degrades to absent, never fails the record (and a
+    // consumer must render absence as absent, not zero — honest numbers).
+    loc_added_sum: z.number().nullish().catch(undefined),
+    loc_deleted_sum: z.number().nullish().catch(undefined),
+    loc_suggested_to_add_sum: z.number().nullish().catch(undefined),
+    loc_suggested_to_delete_sum: z.number().nullish().catch(undefined),
+    code_generation_activity_count: z.number().nullish().catch(undefined),
+    code_acceptance_activity_count: z.number().nullish().catch(undefined),
+    user_initiated_interaction_count: z.number().nullish().catch(undefined),
+    // The MODEL dimension, per user-day. `user_initiated_interaction_count` is
+    // the activity measure; one model appears under several features, so a
+    // consumer must SUM rather than take the first.
+    totals_by_model_feature: z
+      .array(
+        z
+          .object({
+            model: z.string().nullable().optional(),
+            feature: z.string().nullable().optional(),
+            user_initiated_interaction_count: z.number().nullable().optional(),
+          })
+          .passthrough(),
+      )
+      .optional()
+      .catch(undefined),
+    // The LANGUAGE × MODEL dimension (W0b D7) — the engagement card's language
+    // mix source, weighted per the schema-header caveat.
+    totals_by_language_model: z.array(languageModelEntry).optional().catch(undefined),
+    // The LANGUAGE × FEATURE dimension — D9's fallback weighting rung when the
+    // language × model entries carry no numeric measure.
+    totals_by_language_feature: z.array(languageFeatureEntry).optional().catch(undefined),
+    // TOKENS, and only on the CLI surface. Day grain — there is no model
+    // beneath this subtree, so tokens can never be attributed to a model from
+    // here. Sparse: absence means "no CLI use that day", never "tokens lost".
+    totals_by_cli: z
+      .object({ token_usage: cliTokenUsage.nullable().optional() })
+      .passthrough()
+      .optional()
+      .catch(undefined),
   })
   .passthrough()
 type UserMetricsRecord = z.infer<typeof UserMetricsRecordSchema>
@@ -210,6 +364,63 @@ export interface UserDailyCredits {
   login: string
   credits: number
   raw: unknown
+}
+
+/**
+ * Step 2 of the DIAGNOSTIC two-step read: what came back from the ONE signed
+ * NDJSON file the probe downloaded. Every count here exists so the report can
+ * state its bound instead of letting a partial read look exhaustive.
+ */
+export interface RawNdjsonRead {
+  /** How many entries `download_links` carried. The probe follows only the first. */
+  linksAvailable: number
+  /** How many were downloaded. 1 on a successful read, 0 otherwise. Never more. */
+  linksRead: number
+  /** The line cap this read applied. */
+  lineLimit: number
+  /** Non-blank lines consumed, unparseable ones included. Never exceeds lineLimit. */
+  linesRead: number
+  /** True when the file held MORE non-blank lines than the cap — `records` is a PREFIX. */
+  linesCapped: boolean
+  /** Lines that were not JSON and were skipped. */
+  linesUnparseable: number
+  /** The parsed lines, with NO schema applied — the entire point of this accessor. */
+  records: unknown[]
+  /**
+   * Set when the download itself failed; `records` is then empty. The signed link
+   * is scrubbed out of this text, so it is safe to render (see the method).
+   */
+  error: RawPageErr | null
+}
+
+/** The DIAGNOSTIC two-step read of the users-1-day metrics report. */
+export interface RawUserDailyCreditsPage {
+  /** Path of the step-1 report request, for display. Never a download link. */
+  path: string
+  /** Query parameters of the step-1 request. Never a download link. */
+  params: Array<[string, string]>
+  /** Step 1's response, UNPARSED. */
+  envelope: RawPage
+  /** Step 2. null when step 1 failed — there was no link to follow. */
+  ndjson: RawNdjsonRead | null
+}
+
+// GET /enterprises/{ent}/apps/installable_organizations page schema — verified against
+// GitHub's documented "Installable Organization" shape ({id, login,
+// accessible_repositories_url}); we consume only id/login (.passthrough tolerates the
+// rest, incl. accessible_repositories_url, which coverage detection never needs).
+const InstallableOrganizationSchema = z.object({ id: z.number(), login: z.string() }).passthrough()
+const InstallableOrganizationsPageSchema = z.array(InstallableOrganizationSchema)
+
+/** listInstallableOrganizations() result — see the method doc for the pagination contract. */
+export interface InstallableOrganizationsResult {
+  organizations: Array<{ id: number; login: string }>
+  /** The 100-page (10,000-org) hard cap was hit — the list above is a PREFIX of the
+   *  enterprise's orgs, not the whole census. Never treat this pull as authoritative
+   *  for a completeness/denominator claim when true (coverage.ts). */
+  pagesCapped: boolean
+  /** Pagination ended via a short page — the NORMAL end-of-census signal. */
+  shortPageBreak: boolean
 }
 
 export class GithubCopilotClient {
@@ -237,8 +448,33 @@ export class GithubCopilotClient {
     private readonly fetchOpts?: ResilientFetchOptions,
   ) {}
 
-  /** PAT-mode client (the classic enterprise manage_billing PAT). */
+  /*
+   * PAT-mode client (the classic enterprise manage_billing PAT).
+   *
+   * HARDENED SEAM (S9): two call sites once flattened a `ResolvedCredential` to
+   * `.value` and passed the GitHub App PRIVATE KEY here, which would have minted
+   * `Authorization: Bearer <base64 PEM>` (a key transmitted as if it were a token).
+   * Reuses github-app-auth.ts's OWN PEM parser (decodePem) rather than a second ad
+   * hoc sniff — if the value round-trips through it (base64-decodes AND parses as a
+   * private key), it is categorically not a PAT, so refuse construction rather than
+   * silently building a client that would leak the key on the wire. The failure
+   * message never includes the value itself, only that the shape was rejected.
+   */
   static withPat(enterpriseSlug: string, pat: string, fetchOpts?: ResilientFetchOptions): GithubCopilotClient {
+    let looksLikeAppKey = false
+    try {
+      decodePem(pat)
+      looksLikeAppKey = true
+    } catch {
+      // Expected for a real PAT — decodePem's rejection IS the "not a PEM" signal.
+    }
+    if (looksLikeAppKey) {
+      throw new Error(
+        'GithubCopilotClient.withPat: the supplied value parses as a base64-encoded PEM private key, ' +
+          'not a PAT. Pass the whole ResolvedCredential and branch on credential.kind (GithubCopilotClient.withApp ' +
+          'for App mode) instead of flattening it to .value.',
+      )
+    }
     return new GithubCopilotClient(enterpriseSlug, pat, undefined, fetchOpts)
   }
 
@@ -301,9 +537,19 @@ export class GithubCopilotClient {
     })
   }
 
-  /** All Copilot seats in the enterprise (paginated). The lane authority (§4.2). */
-  async listSeats(): Promise<GithubSeat[]> {
+  /*
+   * Shared seats pagination loop — the SINGLE implementation both listSeats() (back-
+   * compat surface for callers that only need the array) and listSeatsWithDiagnostics()
+   * (S9: the seat-convergence prune needs to know whether the pull may have been
+   * truncated) read from. `seats: z.array(SeatSchema).default([])` means a 200 whose
+   * body is missing/renames the `seats` key parses to an EMPTY page with no error —
+   * so an empty/short result from this loop is NOT proof the roster is actually
+   * empty/small; see SeatsPullDiagnostics.
+   */
+  private async pullSeats(): Promise<SeatsPullDiagnostics> {
     const out: GithubSeat[] = []
+    let shortPageBreak = false
+    let pagesCapped = false
     for (let page = 1; page <= 100; page++) {
       // resilientFetch (ING-7): timeout + backoff honouring retry-after — GitHub
       // secondary rate limits are a certainty at seats×days serial calls per tick.
@@ -315,9 +561,35 @@ export class GithubCopilotClient {
       if (!res.ok) this.fail('seats', res.status)
       const body = SeatsPageSchema.parse(await res.json())
       out.push(...body.seats)
-      if (body.seats.length < 100) break
+      if (body.seats.length < 100) {
+        shortPageBreak = true
+        break
+      }
+      if (page === 100) {
+        // Consumed all 100 pages at a full 100 seats each — the hard cap was reached
+        // without a natural end-of-roster signal. The enterprise may have MORE seats
+        // beyond page 100 that were never fetched.
+        pagesCapped = true
+      }
     }
-    return out
+    return { seats: out, pagesCapped, shortPageBreak }
+  }
+
+  /** All Copilot seats in the enterprise (paginated). The lane authority (§4.2). */
+  async listSeats(): Promise<GithubSeat[]> {
+    return (await this.pullSeats()).seats
+  }
+
+  /*
+   * Like listSeats(), but also surfaces pagination diagnostics (S9) so a caller that
+   * DELETEs based on the roster (the Copilot seat-convergence prune in copilot-bill.ts)
+   * can tell a truncated pull apart from a genuinely small/empty one — `listSeats()`'s
+   * plain array return makes those indistinguishable. A separate method (not a changed
+   * `listSeats()` signature) because github-identity.ts and github.ts also call
+   * listSeats() and only need the array.
+   */
+  async listSeatsWithDiagnostics(): Promise<SeatsPullDiagnostics> {
+    return this.pullSeats()
   }
 
   /*
@@ -325,15 +597,69 @@ export class GithubCopilotClient {
    * 400, so we never pass org — the license org comes from the seat roster. day is
    * REQUIRED here (verified daily-grain): the engine reconciles per periodDate.
    */
-  async getAiCreditUsage(login: string, date: { year: number; month: number; day: number }): Promise<GithubAiCreditUsage> {
+  /*
+   * The per-login ai_credit/usage URL for one UTC day. Single source of truth for
+   * getAiCreditUsage and the wire-shape probe, so the diagnostic cannot describe a
+   * differently-shaped request than the one reconciliation issues.
+   */
+  private aiCreditUsageUrl(login: string, date: { year: number; month: number; day: number }): string {
     const qs = `user=${encodeURIComponent(login)}&year=${date.year}&month=${date.month}&day=${date.day}`
+    return `${API_BASE}/enterprises/${this.enterpriseSlug}/settings/billing/ai_credit/usage?${qs}`
+  }
+
+  async getAiCreditUsage(login: string, date: { year: number; month: number; day: number }): Promise<GithubAiCreditUsage> {
     const res = await resilientFetch(
-      `${API_BASE}/enterprises/${this.enterpriseSlug}/settings/billing/ai_credit/usage?${qs}`,
+      this.aiCreditUsageUrl(login, date),
       { headers: this.headers() },
       this.fetchOpts,
     )
     if (!res.ok) this.fail('ai_credit/usage', res.status)
     return AiCreditUsageSchema.parse(await res.json())
+  }
+
+  /*
+   * DIAGNOSTICS ONLY — ai_credit/usage for one login/day, UNPARSED.
+   *
+   * Feeds the wire-shape probe (server/diagnostics/). AiCreditUsageSchema defaults
+   * six numeric fields and `usageItems`, so its parsed output reports keys the wire
+   * may never have sent; the probe has to see the body first.
+   *
+   * PAT MODE ONLY, ASSERTED RATHER THAN ASSUMED. An App-mode client holds no PAT
+   * (`withApp` passes ''), so `readRawPage` would have no credential to scrub out
+   * of the error body and the "credentials removed" promise on that body would be
+   * vacuous. The probe already declines to call this in App mode
+   * (provider-wire-probe.ts reports 'not-configured' there, because the per-user
+   * ai_credit endpoint is App-blocked), but that is a property of one caller, not
+   * of this method — so the requirement is enforced here instead of depending on
+   * a caller continuing to behave.
+   *
+   * The `user` param is returned unredacted here; the report redacts it.
+   */
+  async rawAiCreditUsagePage(
+    login: string,
+    date: { year: number; month: number; day: number },
+  ): Promise<{ path: string; params: Array<[string, string]>; page: RawPage }> {
+    if (this.appAuth || !this.pat) {
+      throw createError({
+        statusCode: 500,
+        statusMessage: 'Internal Server Error',
+        data: {
+          type: 'https://tokenscope.example.com/errors/github-app-misconfig',
+          title: 'Diagnostics method called on a client with no PAT',
+          status: 500,
+          detail:
+            'rawAiCreditUsagePage is PAT-mode only: it returns a raw provider error body and can ' +
+            'only promise to scrub a credential it actually holds.',
+        },
+      })
+    }
+    const url = this.aiCreditUsageUrl(login, date)
+    const res = await resilientFetch(url, { headers: this.headers() }, this.fetchOpts)
+    return {
+      path: pathOf(url),
+      params: paramPairsOf(url),
+      page: await readRawPage(res, { secrets: [this.pat] }),
+    }
   }
 
   /*
@@ -487,11 +813,7 @@ export class GithubCopilotClient {
     const installationId = await app.enterpriseInstallationId(this.enterpriseSlug)
     if (installationId == null) this.fail('enterprises/{ent}/installation (no install)', 404)
     const token = await app.installationToken(installationId)
-    const res = await resilientFetch(
-      `${API_BASE}/enterprises/${encodeURIComponent(this.enterpriseSlug)}/copilot/metrics/reports/users-1-day?day=${encodeURIComponent(day)}`,
-      { headers: this.appHeaders(token) },
-      this.fetchOpts,
-    )
+    const res = await resilientFetch(this.userDailyCreditsUrl(day), { headers: this.appHeaders(token) }, this.fetchOpts)
     if (!res.ok) {
       const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 200)
       this.fail('enterprises/{ent}/copilot/metrics/reports/users-1-day', res.status, body)
@@ -541,6 +863,179 @@ export class GithubCopilotClient {
     return out
   }
 
+  /** The users-1-day metrics-report URL. One builder for getUserDailyCredits and the
+   *  probe below, so the diagnostic cannot describe a differently-shaped request than
+   *  the one reconciliation issues (the aiCreditUsageUrl convention). */
+  private userDailyCreditsUrl(day: string): string {
+    return `${API_BASE}/enterprises/${encodeURIComponent(this.enterpriseSlug)}/copilot/metrics/reports/users-1-day?day=${encodeURIComponent(day)}`
+  }
+
+  /*
+   * DIAGNOSTICS ONLY — the users-1-day report AND one of its NDJSON files, UNPARSED.
+   *
+   * Feeds the wire-shape probe (server/diagnostics/). getUserDailyCredits above
+   * returns {login, credits} rows: MetricsReportSchema drops every envelope field it
+   * does not declare, UserMetricsRecordSchema is passthrough but its output is thrown
+   * away bar two fields, and `ai_credits_used` carries a `?? 0`. None of that can
+   * answer "what does GitHub actually send", so this reads both bodies first.
+   *
+   * APP MODE ONLY — requireApp() throws for a PAT-mode client, like every other
+   * App-mode method here.
+   *
+   * BOUNDED, and the bounds are RETURNED rather than applied silently: ONE report,
+   * the FIRST of its download links, and at most `lineLimit` lines of that file. The
+   * caller reports linksAvailable/linksRead/linesCapped so a partial read cannot be
+   * mistaken for a census. The file is downloaded in full — the cap is on how many
+   * lines are parsed and summarised, not on bytes transferred.
+   *
+   * WHAT THIS METHOD DOES AND DOES NOT PROMISE ABOUT THE SIGNED LINKS.
+   * `download_links` entries are capability URLs — holding one IS access to the
+   * per-user data — and they are handled in two different places, deliberately:
+   *   - `envelope.body` is the report body VERBATIM, download_links included. That
+   *     is the contract of every raw accessor here (readRawPage's header): a probe
+   *     that pre-edited the body could not see what the provider actually sent, and
+   *     an undeclared envelope key is half of what this surface exists to find. The
+   *     body goes to the SHAPE SUMMARISER and nowhere else; withholding the values
+   *     from the operator-facing report is wire-shape.ts's key denylist
+   *     (CAPABILITY_KEY_SUBSTRINGS), which does it by key name and so does not
+   *     depend on a link looking like a URL.
+   *   - Everywhere this method CONSTRUCTS text, the link is a scrubbed secret: the
+   *     download error body, and the network-throw path where the URL is known to
+   *     ride along on the error (the same hazard getUserDailyCredits guards with a
+   *     constant surface string). It is also absent from `path`/`params`, which
+   *     describe step 1 only, and from `records`.
+   * What IS returned from a failure is the provider's own scrubbed text, because a
+   * classified reason hides the cause.
+   */
+  async rawUserDailyCreditsPage(day: string, opts: { lineLimit: number }): Promise<RawUserDailyCreditsPage> {
+    const app = this.requireApp()
+    const installationId = await app.enterpriseInstallationId(this.enterpriseSlug)
+    if (installationId == null) this.fail('enterprises/{ent}/installation (no install)', 404)
+    const token = await app.installationToken(installationId)
+    const url = this.userDailyCreditsUrl(day)
+    const res = await resilientFetch(url, { headers: this.appHeaders(token) }, this.fetchOpts)
+    // The installation token is scrubbed from an error body for the same reason the
+    // PAT is on the ai_credit accessor: this text is rendered to an operator.
+    const envelope = await readRawPage(res, { secrets: [token] })
+    const base = { path: pathOf(url), params: paramPairsOf(url), envelope }
+    if (!envelope.ok) return { ...base, ndjson: null }
+
+    const rawLinks = (envelope.body as { download_links?: unknown } | null)?.download_links
+    const linksAvailable = Array.isArray(rawLinks) ? rawLinks.length : 0
+    const read = (over: Partial<RawNdjsonRead>): RawUserDailyCreditsPage => ({
+      ...base,
+      ndjson: {
+        linksAvailable,
+        linksRead: 0,
+        lineLimit: opts.lineLimit,
+        linesRead: 0,
+        linesCapped: false,
+        linesUnparseable: 0,
+        records: [],
+        error: null,
+        ...over,
+      },
+    })
+    if (linksAvailable === 0) return read({})
+
+    // The report is generated asynchronously and its links are signed, so a first
+    // entry that is not an https URL is anomalous — never fetch it. The text says
+    // what was wrong with it and deliberately does not quote it.
+    const link = (rawLinks as unknown[])[0]
+    if (typeof link !== 'string' || !link.startsWith('https://')) {
+      return read({
+        error: errorPageFrom(0, 'the first download_links entry is not an https:// string; it was not fetched.'),
+      })
+    }
+
+    let dl: Response
+    try {
+      // Signed blob URL — send NO auth header (a bearer can break the pre-signed signature).
+      dl = await resilientFetch(link, { headers: { 'User-Agent': 'tokenscope-reconciliation' } }, this.fetchOpts)
+    } catch (err) {
+      const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+      return read({ error: errorPageFrom(0, `signed-link download failed with no response :: ${detail}`, [link]) })
+    }
+    if (!dl.ok) {
+      const body = await dl.text().catch(() => '<body could not be read>')
+      return read({ error: errorPageFrom(dl.status, body, [link]) })
+    }
+
+    const text = await dl.text().catch(() => '')
+    const records: unknown[] = []
+    let linesRead = 0
+    let linesUnparseable = 0
+    let linesCapped = false
+    for (const rawLine of text.split('\n')) {
+      const line = rawLine.trim()
+      if (!line) continue
+      if (linesRead >= opts.lineLimit) {
+        linesCapped = true
+        break
+      }
+      linesRead += 1
+      try {
+        records.push(JSON.parse(line) as unknown)
+      } catch {
+        linesUnparseable += 1
+      }
+    }
+    return read({ linksRead: 1, linesRead, linesCapped, linesUnparseable, records })
+  }
+
+  /*
+   * Coverage detection (Workstream D, design §6): GET
+   * /enterprises/{ent}/apps/installable_organizations — the enterprise's OWN org
+   * census, "the organizations OWNED BY the enterprise" (GitHub's own description),
+   * NOT merely orgs the App is not yet installed on. App mode ONLY: this endpoint
+   * requires "Enterprise organization installations: read" on an ENTERPRISE
+   * installation and has no PAT equivalent — requireApp() throws for a PAT-mode
+   * client, exactly like the other App-only methods above.
+   *
+   * BOUNDED pagination mirrors pullSeats(): 100/page, a 100-page (10,000-org) HARD
+   * CAP, using the SAME injectable fetchOpts (deadline/retry) as every other call on
+   * this client. `pagesCapped` is surfaced, never swallowed — a capped pull is a
+   * PREFIX of the enterprise's orgs, not the whole census, so the caller
+   * (coverage-compute.ts) must not treat it as authoritative for an "N of M" claim
+   * even though the pull itself succeeded (censusAvailable=true, capped=true).
+   *
+   * A non-OK response (401/403 = the permission is not granted; anything else =
+   * transient/unknown) THROWS via fail() exactly like every other method here — this
+   * client never itself decides granted/denied/unknown, so the classification stays
+   * with the caller (matching the discover-orgs.post.ts / github-health.ts precedent
+   * of pattern-matching the thrown createError's status, never re-implemented here).
+   */
+  async listInstallableOrganizations(): Promise<InstallableOrganizationsResult> {
+    const app = this.requireApp()
+    const installationId = await app.enterpriseInstallationId(this.enterpriseSlug)
+    if (installationId == null) this.fail('enterprises/{ent}/installation (no install)', 404)
+    const token = await app.installationToken(installationId)
+    const out: Array<{ id: number; login: string }> = []
+    let shortPageBreak = false
+    let pagesCapped = false
+    for (let page = 1; page <= 100; page++) {
+      const res = await resilientFetch(
+        `${API_BASE}/enterprises/${encodeURIComponent(this.enterpriseSlug)}/apps/installable_organizations?per_page=100&page=${page}`,
+        { headers: this.appHeaders(token) },
+        this.fetchOpts,
+      )
+      if (!res.ok) this.fail('enterprises/{ent}/apps/installable_organizations', res.status)
+      const body = InstallableOrganizationsPageSchema.parse(await res.json())
+      for (const o of body) out.push({ id: o.id, login: o.login })
+      if (body.length < 100) {
+        shortPageBreak = true
+        break
+      }
+      if (page === 100) {
+        // All 100 pages consumed at a full 100 orgs each — the hard cap was reached
+        // with no natural end-of-census signal. The enterprise may own MORE orgs
+        // beyond page 100 that were never fetched.
+        pagesCapped = true
+      }
+    }
+    return { organizations: out, pagesCapped, shortPageBreak }
+  }
+
   /*
    * Per-org Copilot SEAT-HOLDERS for ONE license org (App mode only): GET
    * /orgs/{org}/copilot/billing/seats (via THAT org's installation token). Returns
@@ -567,6 +1062,41 @@ export class GithubCopilotClient {
       if (body.seats.length < 100) break
     }
     return out
+  }
+
+  /*
+   * GET /users/{login} — the PUBLIC profile (name + public email), for the "Unresolved Copilot
+   * users" map picker only.
+   *
+   * SELF-ASSERTED, NEVER AN IDENTITY SOURCE. This is user-editable profile text, not a
+   * provider attestation: anyone can set their profile email to a colleague's address. Binding
+   * spend on it would be a claim-jacking vector, which is exactly why the identity resolver
+   * reads SAML externalIdentities and nothing else. It exists here to spare an admin the
+   * manual round-trip to github.com to find out who a login belongs to before mapping it — a
+   * HINT for a human decision that the audit records. Callers must label it unverified.
+   *
+   * Both fields are frequently null (a private profile has neither), so consumers must degrade
+   * rather than depend on it. Returns null when the profile cannot be read at all; a failure
+   * here must never break the list it decorates.
+   */
+  async getUserProfile(login: string): Promise<{ name: string | null; email: string | null } | null> {
+    let headers: Record<string, string>
+    if (this.appAuth) {
+      const installationId = await this.appAuth.enterpriseInstallationId(this.enterpriseSlug)
+      if (installationId == null) return null
+      headers = this.appHeaders(await this.appAuth.installationToken(installationId))
+    } else {
+      headers = this.headers()
+    }
+    const res = await resilientFetch(
+      `${API_BASE}/users/${encodeURIComponent(login)}`,
+      { headers },
+      this.fetchOpts,
+    )
+    if (!res.ok) return null
+    const parsed = UserProfileSchema.safeParse(await res.json())
+    if (!parsed.success) return null
+    return { name: parsed.data.name ?? null, email: parsed.data.email ?? null }
   }
 
   /*

@@ -290,4 +290,48 @@ describe('manager-chain UNIT (practice) placement — cou_owner is the manager�
     expect(r.viaUnit).toBe(0)
     expect((await homeOf('report2@example.com')).ou_code).toBe('__UNPLACED__') // global fallback, not the unit
   })
+
+  it('a UNIT-RULE placement is counted as one, and a divergent lower rule is counted as a conflict', async () => {
+    /*
+     * Two things the coverage breakdown was getting wrong about a rule that names
+     * a cost centre (mig 0112):
+     *
+     *   - it landed in `fellToGlobal`, the one bucket that means the OPPOSITE of
+     *     what it is — the whole "which signal is placing people" ratio the
+     *     operator watches before trusting the backfill was reading a successful
+     *     rule placement as an unplaceable one;
+     *   - `conflicts` was counted only for region-rule placements, so two rules
+     *     naming two DIFFERENT cost centres for one person — the divergence that
+     *     decides whose P&L the spend charges — was reported nowhere.
+     */
+    const [rg] = await t.client<{ id: string }[]>`SELECT region_id::text AS id FROM org_unit WHERE id=${apacOrgUnit}::uuid`
+    const [other] = await t.client<{ id: string }[]>`
+      INSERT INTO org_unit (region_id, path, code, display_name, unit_type, is_cost_owning_unit, cost_centre_code)
+      VALUES (${rg!.id}::uuid, 'apac.other'::ltree, 'apac-other', 'APAC Other', 'practice', true, 'CC-OTHER')
+      RETURNING id::text AS id`
+    // companyName (precedence 0) → apac-digital; department (precedence 4) →
+    // apac-other. Both match this person; the broad one wins and the narrow one
+    // silently does nothing, which is exactly what `conflicts` has to report.
+    await t.client`INSERT INTO directory_region_rule (attribute, match_mode, match_value, match_value_raw, region_id, org_unit_id)
+      VALUES ('companyName', 'exact', 'ruleco', 'RuleCo', ${rg!.id}::uuid, ${apacOrgUnit}::uuid),
+             ('department', 'exact', 'services', 'Services', ${rg!.id}::uuid, ${other!.id}::uuid)`
+
+    await enqueueOwedBill(t.db, { provider: 'anthropic', actualSource: 'anthropic-analytics-api:o1', email: 'report3@example.com', tool: 'claude-code', date: '2026-06-12', costUsd: 2 })
+    const r = await runPlacementSync(t.db, {
+      lookupDirectory: async (email) => ({
+        oid: 'report3-oid', email, displayName: 'Report 3', department: 'Services', jobTitle: null,
+        costCenter: 'CC-NONE', division: null, companyName: 'RuleCo',
+      }),
+      getManager: async () => null,
+    })
+    expect(r.viaUnitRule).toBe(1)
+    expect(r.viaUnit).toBe(0)
+    expect(r.fellToGlobal).toBe(0)
+    expect(r.conflicts).toBe(1)
+    const tm = await homeOf('report3@example.com')
+    expect(tm.ou_code).toBe('apac-digital') // the broad rule's target, as precedence says
+    expect(tm.via).toBe('attribute-rule')
+
+    await t.client`DELETE FROM directory_region_rule WHERE match_value IN ('ruleco', 'services')`
+  })
 })

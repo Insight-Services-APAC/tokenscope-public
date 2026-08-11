@@ -15,7 +15,11 @@ import * as schema from '../../../drizzle/schema'
 import { resetHmacKeyForTests } from '../../../server/auth/hmac'
 import { issueEmitCredential } from '../../../server/auth/emit-credential'
 import { refreshAccessToken } from '../../../server/auth/oauth'
+import { issueInstanceEmitCredentialTx } from '../../../server/auth/emit-provision'
 import bearerHandler from '../../../server/api/v1/instances/[instanceId]/bearer.get'
+import healthHandler from '../../../server/api/v1/instances/[instanceId]/health.get'
+import endHandler from '../../../server/api/v1/instances/[instanceId]/end.post'
+import projectResolveHandler from '../../../server/api/v1/instances/[instanceId]/project-resolve.get'
 
 let t: TestDb
 let regionId: string
@@ -63,19 +67,67 @@ async function enrolInstance(teammateId: string, email: string, tsStart = new Da
   return { instanceId }
 }
 
-/** Mint a fresh emit-scoped OAuth access token for a teammate. */
+/**
+ * Mint a fresh emit-scoped OAuth access token for a teammate — via
+ * issueEmitCredential, the SAME bypass helper bearer-revocation /
+ * route-auth-hardening / project-resolve / end / mcp-tools / oauth-flow all
+ * use. It NEVER sets oauth_token.instance_id (the legacy-permissive/NULL
+ * shape) — exactly what makes it right for the "legacy grant still passes"
+ * coverage below, and exactly why it must NOT be used to test the NEW
+ * cross-instance DENIAL (see boundEmitAccessTokenFor).
+ */
 async function emitAccessTokenFor(teammateId: string): Promise<string> {
   const cred = await issueEmitCredential(t.db as never, teammateId)
   return cred.tokens.access_token
 }
 
-function bearerEvent(instanceId: string, token: string) {
+/**
+ * Mint a fresh emit-scoped OAuth access token BOUND to a specific instance —
+ * via issueInstanceEmitCredentialTx (the real bind path: redeem/enroll), NOT
+ * issueEmitCredential. THE TEST-CORPUS TRAP (per the story): every other
+ * helper in this repo's instance-route tests bypasses the binding, so a
+ * denial case built on the wrong helper silently never fires. Asserts the
+ * minted row's instance_id is genuinely set before returning, so a
+ * regression in the mint path itself can't quietly turn this into another
+ * unbound token.
+ */
+async function boundEmitAccessTokenFor(teammateId: string, instanceId: string): Promise<string> {
+  const emit = await t.db.transaction((tx) =>
+    issueInstanceEmitCredentialTx(tx as never, teammateId, instanceId, issueEmitCredential),
+  )
+  const [bound] = await t.client<{ n: string }[]>`
+    SELECT COUNT(*)::text AS n FROM oauth_token
+     WHERE teammate_id = ${teammateId}::uuid AND instance_id = ${instanceId}::uuid
+       AND scope = 'tokenscope.emit' AND revoked_at IS NULL`
+  if (Number(bound?.n ?? 0) < 1) {
+    throw new Error('boundEmitAccessTokenFor: minted row is not instance-bound — test would prove nothing')
+  }
+  const refreshed = await refreshAccessToken(t.db as never, emit.refreshToken, emit.clientId)
+  return refreshed.access_token
+}
+
+/** Minimal h3-event stub shared by all four /instances/{instanceId}/* routes. */
+function instanceEvent(
+  instanceId: string,
+  token: string,
+  opts: { method?: string; query?: Record<string, string> } = {},
+) {
+  const qs = opts.query ? '?' + new URLSearchParams(opts.query).toString() : ''
+  const url = '/x' + qs
   // requireOAuthBearer sets a WWW-Authenticate header on the OAuth failure paths,
   // so provide a minimal res stub.
   return {
+    // h3's getQuery(event) reads event.path (NOT node.req.url) — project-resolve's
+    // code_hash query param silently vanished without this, failing its OWN
+    // validation (400) before the auth/binding logic under test ever ran.
+    path: url,
     context: { params: { instanceId } },
     node: {
-      req: { method: 'GET', url: '/x', headers: { authorization: `Bearer ${token}` } },
+      req: {
+        method: opts.method ?? 'GET',
+        url,
+        headers: { authorization: `Bearer ${token}` },
+      },
       res: {
         _headers: {} as Record<string, string | string[]>,
         statusCode: 200,
@@ -89,6 +141,8 @@ function bearerEvent(instanceId: string, token: string) {
   }
 }
 
+const bearerEvent = instanceEvent
+
 describe('ADR-0005 — /bearer OAuth emit credential', () => {
   it('mints for an OAuth token whose teammate OWNS the instance', async () => {
     const { instanceId } = await enrolInstance(ownerId, 'bo-owner@x.test')
@@ -97,11 +151,15 @@ describe('ADR-0005 — /bearer OAuth emit credential', () => {
     expect(out.Authorization).toMatch(/^Bearer /)
   })
 
-  it('403s for an OAuth token whose teammate does NOT own the instance', async () => {
+  it('404s for an OAuth token whose teammate does NOT own the instance (403→404 collapse, server-edge-auth:agentic:0008)', async () => {
+    // The 403/404 split is collapsed to a single 404 (mirrors
+    // me/instances/[instanceId]/revoke.post.ts) so a stranger can't tell
+    // "exists but isn't yours" from "doesn't exist" — see the identical-body
+    // assertion in the "no existence oracle" describe block below.
     const { instanceId } = await enrolInstance(ownerId, 'bo-owner@x.test')
     const strangerAccess = await emitAccessTokenFor(strangerId)
     await expect(bearerHandler(bearerEvent(instanceId, strangerAccess) as never)).rejects.toMatchObject({
-      statusCode: 403,
+      statusCode: 404,
     })
   })
 
@@ -189,11 +247,11 @@ describe('/bearer records the bearer-auth-failed health signal (owner-gated)', (
     expect(await openBearerFailures(instanceId)).toBe(0)
   })
 
-  it('a FOREIGN valid token does NOT resolve the owner\'s open failure (403; resolve is after ownership)', async () => {
+  it('a FOREIGN valid token does NOT resolve the owner\'s open failure (404; resolve is after ownership)', async () => {
     const { instanceId } = await enrolInstance(ownerId, 'bo-owner@x.test')
     await t.db.insert(schema.instanceAttestationHealth).values({ instanceId, status: 'bearer-auth-failed', payload: {} })
     const strangerAccess = await emitAccessTokenFor(strangerId)
-    await expect(bearerHandler(bearerEvent(instanceId, strangerAccess) as never)).rejects.toMatchObject({ statusCode: 403 })
+    await expect(bearerHandler(bearerEvent(instanceId, strangerAccess) as never)).rejects.toMatchObject({ statusCode: 404 })
     expect(await openBearerFailures(instanceId)).toBe(1) // not resolved by a non-owner
   })
 
@@ -204,5 +262,108 @@ describe('/bearer records the bearer-auth-failed health signal (owner-gated)', (
     await t.client.unsafe(`UPDATE instance_attestation SET ts_actual_end = NOW() WHERE instance_id = '${instanceId}'`)
     await expect(bearerHandler(bearerEvent(instanceId, access) as never)).rejects.toMatchObject({ statusCode: 401 })
     expect(await openBearerFailures(instanceId)).toBe(0)
+  })
+})
+
+// ── Per-DEVICE binding (server-edge-auth:token_scope:0004, agentic:0004/0005/0008) ──
+//
+// oauth_token.instance_id is written at mint (mig 0031) but was never selected
+// at USE — every instance-scoped consumer degraded a per-DEVICE binding to a
+// per-TEAMMATE check. These four routes are the whole surface: one bound
+// emit token must not drive ANY of the SAME teammate's OTHER devices.
+//
+// Well-formed but arbitrary — /project-resolve only needs a syntactically
+// valid code_hash to reach the auth/binding layer under test; it never needs
+// to resolve to a real project here.
+const VALID_CODE_HASH = '0'.repeat(64)
+
+const FOUR_INSTANCE_ROUTES: Array<{
+  name: string
+  call: (instanceId: string, token: string) => Promise<unknown>
+}> = [
+  { name: 'bearer', call: (id, tok) => bearerHandler(instanceEvent(id, tok) as never) },
+  { name: 'health', call: (id, tok) => healthHandler(instanceEvent(id, tok) as never) },
+  { name: 'end', call: (id, tok) => endHandler(instanceEvent(id, tok, { method: 'POST' }) as never) },
+  {
+    name: 'project-resolve',
+    call: (id, tok) =>
+      projectResolveHandler(instanceEvent(id, tok, { query: { code_hash: VALID_CODE_HASH } }) as never),
+  },
+]
+
+describe('per-DEVICE binding — a device-bound emit token must not drive a DIFFERENT device', () => {
+  it('instance-A\'s bound emit token is REJECTED (401, not 403/404) on instance-B\'s bearer/health/end/project-resolve', async () => {
+    const { instanceId: instanceA } = await enrolInstance(ownerId, 'bo-owner@x.test')
+    const { instanceId: instanceB } = await enrolInstance(ownerId, 'bo-owner@x.test')
+    const boundToA = await boundEmitAccessTokenFor(ownerId, instanceA)
+
+    for (const route of FOUR_INSTANCE_ROUTES) {
+      await expect(
+        route.call(instanceB, boundToA),
+        `${route.name} should reject instance-A's token on instance-B`,
+      ).rejects.toMatchObject({ statusCode: 401 })
+    }
+  })
+
+  it('instance-A\'s bound emit token still WORKS on instance-A\'s own bearer/health/end/project-resolve', async () => {
+    const { instanceId: instanceA } = await enrolInstance(ownerId, 'bo-owner@x.test')
+    const boundToA = await boundEmitAccessTokenFor(ownerId, instanceA)
+
+    // bearer + health + project-resolve first (non-terminal); end last (it
+    // closes the instance — project-resolve/health have no lifecycle gate so
+    // ordering only matters for /bearer, which does).
+    await expect(bearerHandler(instanceEvent(instanceA, boundToA) as never)).resolves.toBeDefined()
+    await expect(healthHandler(instanceEvent(instanceA, boundToA) as never)).resolves.toBeDefined()
+    await expect(
+      projectResolveHandler(instanceEvent(instanceA, boundToA, { query: { code_hash: VALID_CODE_HASH } }) as never),
+    ).resolves.toBeDefined()
+    await expect(endHandler(instanceEvent(instanceA, boundToA, { method: 'POST' }) as never)).resolves.toBeDefined()
+  })
+})
+
+describe('legacy NULL-bound emit grant stays permissive (pre-mig-0031 devices must not brick)', () => {
+  it('a legacy (oauth_token.instance_id = NULL) emit token still passes bearer/health/end/project-resolve', async () => {
+    const { instanceId } = await enrolInstance(ownerId, 'bo-owner@x.test')
+    const legacyAccess = await emitAccessTokenFor(ownerId) // NULL-bound by construction (never sets instance_id)
+
+    const [row] = await t.client<{ instance_id: string | null }[]>`
+      SELECT instance_id::text AS instance_id FROM oauth_token
+       WHERE teammate_id = ${ownerId}::uuid AND scope = 'tokenscope.emit' AND revoked_at IS NULL
+       ORDER BY access_issued_at DESC LIMIT 1`
+    expect(row?.instance_id).toBeNull() // sanity: genuinely testing the permissive branch
+
+    await expect(bearerHandler(instanceEvent(instanceId, legacyAccess) as never)).resolves.toBeDefined()
+    await expect(healthHandler(instanceEvent(instanceId, legacyAccess) as never)).resolves.toBeDefined()
+    await expect(
+      projectResolveHandler(instanceEvent(instanceId, legacyAccess, { query: { code_hash: VALID_CODE_HASH } }) as never),
+    ).resolves.toBeDefined()
+    await expect(endHandler(instanceEvent(instanceId, legacyAccess, { method: 'POST' }) as never)).resolves.toBeDefined()
+  })
+})
+
+describe('no existence oracle — an unknown id and a peer\'s real instance are indistinguishable', () => {
+  it('produce the IDENTICAL status + body on bearer/health/end/project-resolve (404 collapse)', async () => {
+    const { instanceId: peerInstance } = await enrolInstance(strangerId, 'bo-stranger@x.test')
+    const unknownId = randomUUID()
+    const access = await emitAccessTokenFor(ownerId) // legacy-shape (NULL-bound) token; owner ≠ stranger either way
+
+    for (const route of FOUR_INSTANCE_ROUTES) {
+      const unknownErr = (await route.call(unknownId, access).catch((e) => e)) as {
+        statusCode?: number
+        statusMessage?: string
+        data?: unknown
+      }
+      const peerErr = (await route.call(peerInstance, access).catch((e) => e)) as {
+        statusCode?: number
+        statusMessage?: string
+        data?: unknown
+      }
+      expect(unknownErr.statusCode, `${route.name}: unknown id`).toBe(404)
+      expect(peerErr.statusCode, `${route.name}: peer's real instance`).toBe(404)
+      expect(
+        { statusCode: peerErr.statusCode, statusMessage: peerErr.statusMessage, data: peerErr.data },
+        `${route.name}: body must match the unknown-id body exactly`,
+      ).toEqual({ statusCode: unknownErr.statusCode, statusMessage: unknownErr.statusMessage, data: unknownErr.data })
+    }
   })
 })

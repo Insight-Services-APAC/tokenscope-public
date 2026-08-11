@@ -32,18 +32,35 @@ beforeAll(async () => {
   process.env.NUXT_HMAC_SESSION_KEY = 'enroll-test-hmac-key-padded-well-beyond-32-chars'
   process.env.NUXT_ENROLLMENT_SECRET = BOOTSTRAP_SECRET
 
-  const [r] = await t.db.insert(schema.region).values({ code: 'en', displayName: 'EN Region' }).returning()
+  const [r] = await t.db
+    .insert(schema.region)
+    .values({ code: 'en', displayName: 'EN Region' })
+    .returning()
   regionId = r!.id
   const [ou] = await t.db
     .insert(schema.orgUnit)
-    .values({ regionId, path: 'en.svc', code: 'en-svc', displayName: 'EN Svc', unitType: 'bu', isCostOwningUnit: true })
+    .values({
+      regionId,
+      path: 'en.svc',
+      code: 'en-svc',
+      displayName: 'EN Svc',
+      unitType: 'bu',
+      isCostOwningUnit: true,
+    })
     .returning()
   ouId = ou!.id
   // A REAL (provisional=false) teammate whose email an attacker might claim — used
   // to assert constant-shape (known vs unknown) + that enroll never touches it.
   await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'en-oid-real', email: 'known@example.com', displayName: 'Known', role: 'developer', regionId, orgUnitId: ouId })
+    .values({
+      entraOid: 'en-oid-real',
+      email: 'known@example.com',
+      displayName: 'Known',
+      role: 'developer',
+      regionId,
+      orgUnitId: ouId,
+    })
     .returning()
 }, 90_000)
 
@@ -53,8 +70,8 @@ afterAll(async () => {
 
 // ── harness (mirrors provision-redeem-robustness.test.ts ev()) ────────────────
 
-function ev(body: unknown) {
-  const headers: Record<string, string> = { host: 'localhost:3450' }
+function ev(body: unknown, host = 'localhost:3450') {
+  const headers: Record<string, string> = { host }
   return {
     method: 'POST',
     path: '/x',
@@ -71,11 +88,21 @@ function ev(body: unknown) {
       res: {
         _headers: {} as Record<string, string | string[]>,
         statusCode: 200,
-        getHeader(n: string) { return this._headers[n.toLowerCase()] },
-        setHeader(n: string, v: string | string[]) { this._headers[n.toLowerCase()] = v },
-        removeHeader(n: string) { this._headers[n.toLowerCase()] = '' },
-        appendHeader(n: string, v: string | string[]) { this._headers[n.toLowerCase()] = v },
-        get headersSent() { return false },
+        getHeader(n: string) {
+          return this._headers[n.toLowerCase()]
+        },
+        setHeader(n: string, v: string | string[]) {
+          this._headers[n.toLowerCase()] = v
+        },
+        removeHeader(n: string) {
+          this._headers[n.toLowerCase()] = ''
+        },
+        appendHeader(n: string, v: string | string[]) {
+          this._headers[n.toLowerCase()] = v
+        },
+        get headersSent() {
+          return false
+        },
       },
     },
   }
@@ -95,8 +122,10 @@ interface EnrollResponse {
   telemetry: { claude?: Record<string, unknown>; copilot?: Record<string, unknown> }
 }
 
-async function enroll(body: unknown): Promise<EnrollResponse> {
-  return (await enrollHandler(ev(body) as unknown as Parameters<typeof enrollHandler>[0])) as EnrollResponse
+async function enroll(body: unknown, host?: string): Promise<EnrollResponse> {
+  return (await enrollHandler(
+    ev(body, host) as unknown as Parameters<typeof enrollHandler>[0],
+  )) as EnrollResponse
 }
 
 function validBody(overrides: Record<string, unknown> = {}) {
@@ -119,11 +148,20 @@ async function emitScopesForInstance(instanceId: string): Promise<string[]> {
 
 describe('enroll — secret gate', () => {
   it('a valid bootstrap secret mints a provisional instance bound to a provisional teammate', async () => {
-    const out = await enroll(validBody({ claimed_email: 'gate-ok@example.com', device_binding: 'dev-gate-ok' }))
+    const out = await enroll(
+      validBody({ claimed_email: 'gate-ok@example.com', device_binding: 'dev-gate-ok' }),
+    )
     expect(out.instance_id).toMatch(/^[0-9a-f-]{36}$/)
     expect(out.oauth_refresh_token).toMatch(/.{20,}/)
 
-    const att = await t.client<{ identity_state: string; claimed_email: string; teammate_id: string; principal_email: string | null }[]>`
+    const att = await t.client<
+      {
+        identity_state: string
+        claimed_email: string
+        teammate_id: string
+        principal_email: string | null
+      }[]
+    >`
       SELECT identity_state, claimed_email, teammate_id::text AS teammate_id, principal_email
         FROM instance_attestation WHERE instance_id = ${out.instance_id}::uuid`
     expect(att[0]!.identity_state).toBe('provisional')
@@ -142,26 +180,38 @@ describe('enroll — secret gate', () => {
     await t.client`
       INSERT INTO enrollment_secret (secret_hash, label, not_before, not_after)
       VALUES (${hashSessionToken(rowSecret)}, 'cohort-A', now() - interval '1 hour', now() + interval '1 hour')`
-    const out = await enroll(validBody({ enrollment_secret: rowSecret, claimed_email: 'table@example.com', device_binding: 'dev-table' }))
+    const out = await enroll(
+      validBody({
+        enrollment_secret: rowSecret,
+        claimed_email: 'table@example.com',
+        device_binding: 'dev-table',
+      }),
+    )
     expect(out.instance_id).toMatch(/^[0-9a-f-]{36}$/)
   })
 
   it('rejects a bad secret with 401 (the only distinguishable failure)', async () => {
-    await expect(enroll(validBody({ enrollment_secret: 'totally-wrong-secret' }))).rejects.toMatchObject({ statusCode: 401 })
+    await expect(
+      enroll(validBody({ enrollment_secret: 'totally-wrong-secret' })),
+    ).rejects.toMatchObject({ statusCode: 401 })
   })
 
   it('rejects a revoked enrollment_secret row with 401', async () => {
     const revoked = 'revoked-secret-value-999'
     await t.client`
       INSERT INTO enrollment_secret (secret_hash, revoked_at) VALUES (${hashSessionToken(revoked)}, now())`
-    await expect(enroll(validBody({ enrollment_secret: revoked }))).rejects.toMatchObject({ statusCode: 401 })
+    await expect(enroll(validBody({ enrollment_secret: revoked }))).rejects.toMatchObject({
+      statusCode: 401,
+    })
   })
 
   it('rejects an expired (not_after in the past) enrollment_secret row with 401', async () => {
     const expired = 'expired-secret-value-888'
     await t.client`
       INSERT INTO enrollment_secret (secret_hash, not_after) VALUES (${hashSessionToken(expired)}, now() - interval '1 minute')`
-    await expect(enroll(validBody({ enrollment_secret: expired }))).rejects.toMatchObject({ statusCode: 401 })
+    await expect(enroll(validBody({ enrollment_secret: expired }))).rejects.toMatchObject({
+      statusCode: 401,
+    })
   })
 })
 
@@ -169,7 +219,9 @@ describe('enroll — secret gate', () => {
 
 describe('enroll — emit-only credential', () => {
   it('mints a credential carrying tokenscope.emit ONLY (never read/tag)', async () => {
-    const out = await enroll(validBody({ claimed_email: 'emit-only@example.com', device_binding: 'dev-emit-only' }))
+    const out = await enroll(
+      validBody({ claimed_email: 'emit-only@example.com', device_binding: 'dev-emit-only' }),
+    )
     const scopes = await emitScopesForInstance(out.instance_id)
     expect(scopes).toEqual(['tokenscope.emit'])
   })
@@ -179,7 +231,9 @@ describe('enroll — emit-only credential', () => {
 
 describe('enroll — tool discriminator', () => {
   it('defaults to claude-code (no tool field) → claude bundle + attestation.tool=claude-code', async () => {
-    const out = await enroll(validBody({ claimed_email: 'tool-default@example.com', device_binding: 'dev-tool-default' }))
+    const out = await enroll(
+      validBody({ claimed_email: 'tool-default@example.com', device_binding: 'dev-tool-default' }),
+    )
     expect(out.tool).toBe('claude-code')
     expect(out.telemetry.claude).toBeDefined()
     expect(out.telemetry.copilot).toBeUndefined()
@@ -196,7 +250,11 @@ describe('enroll — tool discriminator', () => {
 
   it('tool=copilot-cli → copilot bundle (telemetry.copilot, tool=copilot-cli) + attestation.tool=copilot-cli', async () => {
     const out = await enroll(
-      validBody({ claimed_email: 'tool-copilot@example.com', device_binding: 'dev-tool-copilot', tool: 'copilot-cli' }),
+      validBody({
+        claimed_email: 'tool-copilot@example.com',
+        device_binding: 'dev-tool-copilot',
+        tool: 'copilot-cli',
+      }),
     )
     expect(out.tool).toBe('copilot-cli')
     expect(out.telemetry.copilot).toBeDefined()
@@ -209,7 +267,9 @@ describe('enroll — tool discriminator', () => {
     expect(copilot.TOKENSCOPE_BEARER_ENDPOINT).toBe(out.bearer_endpoint)
     expect(copilot.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT).toBe(out.oauth_token_endpoint)
     expect(typeof copilot.TOKENSCOPE_LOGS_ENDPOINT).toBe('string')
-    expect(copilot.OTEL_RESOURCE_ATTRIBUTES).toBe(`tokenscope.instance_id=${out.instance_id},tool=copilot-cli`)
+    expect(copilot.OTEL_RESOURCE_ATTRIBUTES).toBe(
+      `tokenscope.instance_id=${out.instance_id},tool=copilot-cli`,
+    )
     // No claude-only keys leaked into the copilot bundle.
     expect(copilot.OTEL_LOGS_EXPORTER).toBeUndefined()
 
@@ -221,13 +281,23 @@ describe('enroll — tool discriminator', () => {
 
   it('rejects an unknown tool value (the enum is closed)', async () => {
     await expect(
-      enroll(validBody({ claimed_email: 'tool-bad@example.com', device_binding: 'dev-tool-bad', tool: 'gemini-cli' })),
+      enroll(
+        validBody({
+          claimed_email: 'tool-bad@example.com',
+          device_binding: 'dev-tool-bad',
+          tool: 'gemini-cli',
+        }),
+      ),
     ).rejects.toBeTruthy()
   })
 
   it('emit-only credential is identical regardless of tool (copilot enroll is still tokenscope.emit ONLY)', async () => {
     const out = await enroll(
-      validBody({ claimed_email: 'copilot-emit@example.com', device_binding: 'dev-copilot-emit', tool: 'copilot-cli' }),
+      validBody({
+        claimed_email: 'copilot-emit@example.com',
+        device_binding: 'dev-copilot-emit',
+        tool: 'copilot-cli',
+      }),
     )
     expect(await emitScopesForInstance(out.instance_id)).toEqual(['tokenscope.emit'])
   })
@@ -285,8 +355,12 @@ describe('enroll — idempotent re-enroll', () => {
 
 describe('enroll — constant-shape (no existence oracle)', () => {
   it('a known real email and an unknown email return the identical response shape', async () => {
-    const known = await enroll(validBody({ claimed_email: 'known@example.com', device_binding: 'dev-known' }))
-    const unknown = await enroll(validBody({ claimed_email: 'nobody-here@example.com', device_binding: 'dev-unknown' }))
+    const known = await enroll(
+      validBody({ claimed_email: 'known@example.com', device_binding: 'dev-known' }),
+    )
+    const unknown = await enroll(
+      validBody({ claimed_email: 'nobody-here@example.com', device_binding: 'dev-unknown' }),
+    )
 
     expect(Object.keys(known).sort()).toEqual(Object.keys(unknown).sort())
     // No teammate field / canonicalised email leaks into the body.
@@ -315,7 +389,9 @@ describe('enroll — provisional caps return 429', () => {
         enroll(validBody({ claimed_email: 'capped@example.com', device_binding: 'cap-dev-2' })),
       ).rejects.toMatchObject({ statusCode: 429 })
       // But an idempotent re-enroll of the FIRST device still succeeds (no new row).
-      const again = await enroll(validBody({ claimed_email: 'capped@example.com', device_binding: 'cap-dev-1' }))
+      const again = await enroll(
+        validBody({ claimed_email: 'capped@example.com', device_binding: 'cap-dev-1' }),
+      )
       expect(again.instance_id).toMatch(/^[0-9a-f-]{36}$/)
     } finally {
       delete process.env.MAX_PROVISIONAL_INSTANCES_PER_EMAIL
@@ -329,10 +405,74 @@ describe('enroll — provisional caps return 429', () => {
     process.env.MAX_PROVISIONAL_INSTANCES = '1'
     try {
       await expect(
-        enroll(validBody({ claimed_email: `global-${randomUUID()}@example.com`, device_binding: 'global-dev' })),
+        enroll(
+          validBody({
+            claimed_email: `global-${randomUUID()}@example.com`,
+            device_binding: 'global-dev',
+          }),
+        ),
       ).rejects.toMatchObject({ statusCode: 429 })
     } finally {
       delete process.env.MAX_PROVISIONAL_INSTANCES
+    }
+  })
+  // ── durable-origin trust gate ───────────────────────────────────────────────
+  // What enroll returns is not a one-request answer: bearer_endpoint and the OTLP
+  // endpoint are written to the device and re-read for the life of the enrolment.
+  // Azure Container Apps rewrites `Host` to the internal CA FQDN, so trusting it
+  // blind mints an enrolment that reports success and then emits nothing, forever.
+
+  it('refuses to enrol when it cannot trust its own public origin', async () => {
+    const saved = { origin: process.env.APP_PUBLIC_ORIGIN, fd: process.env.AZURE_FRONT_DOOR_ID }
+    delete process.env.APP_PUBLIC_ORIGIN
+    delete process.env.AZURE_FRONT_DOOR_ID
+    const beforeRows = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM instance_attestation
+       WHERE claimed_email = 'alice@example.com' AND identity_state = 'provisional'`
+    const before = Number(beforeRows[0]!.n)
+    try {
+      await expect(
+        enroll(
+          validBody({ device_binding: `device-untrusted-${randomUUID()}` }),
+          'internal.a1b2c3.eastus.azurecontainerapps.io',
+        ),
+      ).rejects.toMatchObject({ statusCode: 500 })
+      // And it must cost the caller NOTHING. The handler commits its
+      // transaction before building the bundle, so a check that fired only at
+      // bundle-build time would have consumed a provisional cap slot and minted
+      // an orphaned credential for a fault the caller cannot fix.
+      const rows = await t.client<{ n: string }[]>`
+        SELECT COUNT(*)::text AS n FROM instance_attestation
+         WHERE claimed_email = 'alice@example.com' AND identity_state = 'provisional'`
+      expect(Number(rows[0]!.n)).toBe(before)
+    } finally {
+      if (saved.origin === undefined) delete process.env.APP_PUBLIC_ORIGIN
+      else process.env.APP_PUBLIC_ORIGIN = saved.origin
+      if (saved.fd === undefined) delete process.env.AZURE_FRONT_DOOR_ID
+      else process.env.AZURE_FRONT_DOOR_ID = saved.fd
+    }
+  })
+
+  it('the remedy the error names actually works: APP_PUBLIC_ORIGIN unblocks it', async () => {
+    // An error that prescribes a fix the operator cannot apply is worse than no
+    // error, so pin that the named remedy is the real one AND that the pinned
+    // origin (not the untrusted Host) is what gets baked.
+    const saved = { origin: process.env.APP_PUBLIC_ORIGIN, fd: process.env.AZURE_FRONT_DOOR_ID }
+    delete process.env.AZURE_FRONT_DOOR_ID
+    process.env.APP_PUBLIC_ORIGIN = 'https://tokenscope.example.com'
+    try {
+      const res = await enroll(
+        validBody({ device_binding: `device-pinned-${randomUUID()}` }),
+        'internal.a1b2c3.eastus.azurecontainerapps.io',
+      )
+      expect(res.bearer_endpoint).toMatch(/^https:\/\/tokenscope\.example\.com\//)
+      expect(res.bearer_endpoint).not.toContain('azurecontainerapps.io')
+      expect(res.oauth_token_endpoint).toMatch(/^https:\/\/tokenscope\.example\.com\//)
+    } finally {
+      if (saved.origin === undefined) delete process.env.APP_PUBLIC_ORIGIN
+      else process.env.APP_PUBLIC_ORIGIN = saved.origin
+      if (saved.fd === undefined) delete process.env.AZURE_FRONT_DOOR_ID
+      else process.env.AZURE_FRONT_DOOR_ID = saved.fd
     }
   })
 })

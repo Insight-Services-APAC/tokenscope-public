@@ -11,7 +11,19 @@
  *
  * Honoured options:
  *  - `deepRescan` (azure-monitor-read) — forces a full-window re-read to recover
- *    a read-path backlog after a silent outage.
+ *    a read-path backlog after a silent outage. NOTE: "full window" means the
+ *    reader's OUTER duration, which defaults to 7 days — pair it with
+ *    `lookbackDays` to reach further back.
+ *  - `lookbackDays` (azure-monitor-read) — widen the reader's outer scan bound
+ *    beyond the 7-day default, up to 90 (the longest retention we provision).
+ *    THE recovery lever for a backlog older than a week: the joiner dead-zone
+ *    incident left weeks of already-ingested spend unjoined, and without this
+ *    a signed re-run silently recovers only the last 7 days and reports success
+ *    — indistinguishable from a full recovery. Costs query time proportional to
+ *    the window, so use it for one-off recovery, not the cron.
+ *  - `sessionIds` (azure-monitor-read) — scope a re-run to specific instance
+ *    ids instead of the scheduled selection, so a recovery pass targets the
+ *    affected instances rather than re-reading the whole fleet at a wide window.
  *  - `apply` (privileged-identity-cleanup) — the destructive-apply gate: without
  *    it the cleanup worker only REPORTS; with it (and only via this signed body,
  *    never the UI trigger) it may deactivate excluded teammates, under a hard cap.
@@ -35,6 +47,20 @@ import { readRawBody, type H3Event } from 'h3'
 import { z } from 'zod'
 import type { WorkerRunContext } from './registry'
 
+/*
+ * Max instances per WIDENED (lookbackDays) recovery run.
+ *
+ * The bound is DATA VOLUME, not round-trip count — those are the same for a
+ * 500-id run whatever the window, and the unwidened path (and the daily deep
+ * tick) already do 500 serially. What a widened run multiplies is how much each
+ * of those reads scans: 50 instances x 90 days = 4,500 instance-days, roughly
+ * 1.3x the unattended daily deep pass (500 x 7d = 3,500). So a widened batch is
+ * sized to cost about what the fleet already absorbs once a day, which the ~120s
+ * worker gateway ceiling demonstrably tolerates. Unwidened scoped runs keep the
+ * larger cap because they scan no more than a normal tick.
+ */
+const MAX_WIDENED_BATCH = 50
+
 const isoDay = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD')
@@ -52,12 +78,58 @@ const isoDay = z
 export const workerOptsSchema = z
   .object({
     deepRescan: z.boolean().optional(),
+    // Bounded to the reader's own MAX_LOOKBACK_DAYS so an absurd value cannot
+    // reach the Azure query; the reader clamps too (defence in depth).
+    lookbackDays: z.number().int().min(1).max(90).optional(),
+    sessionIds: z.array(z.string().uuid()).min(1).max(500).optional(),
     apply: z.boolean().optional(),
     startingAt: isoDay.optional(),
     endingAt: isoDay.optional(),
     externalOrgId: z.string().min(1).optional(),
   })
   .strip()
+  .superRefine((v, ctx) => {
+    // A widened window without a scope is a self-DoS, not a recovery: the full
+    // selection (up to the instance cap) would be re-read at up to 90 days,
+    // serially, two Log Analytics round-trips each, past the ~120s worker
+    // gateway ceiling — the handler keeps running holding the single-flight
+    // lock, so every scheduled tick 409s and attribution stops fleet-wide for
+    // the duration. Enforced rather than left to a doc comment.
+    if (v.lookbackDays !== undefined && (v.sessionIds === undefined || v.sessionIds.length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['lookbackDays'],
+        message: 'lookbackDays requires sessionIds — a widened read must be scoped to the instances being recovered',
+      })
+    }
+    // Scoping alone does not bound the cost the paragraph above describes: 500
+    // ids at 90 days is the SAME serial round-trip count as the unscoped body
+    // this refinement rejects, and the explicit-ids read path has neither a LIMIT
+    // nor a time window of its own. So a WIDENED read is additionally capped to a
+    // batch the gateway ceiling can actually serve. Recovery is a campaign of
+    // small batches (see the runbook), not one heroic call.
+    // A widened read without deepRescan is near-useless and fails SILENTLY: the
+    // per-instance watermark bounds the read to events newer than the last
+    // attributed one, and post-deploy that watermark is already fresh (the first
+    // liveness-fixed tick moved it). So the query scans 90 days and returns
+    // almost nothing, while lookbackDaysApplied/scoped/sessionsProcessed all read
+    // GREEN — the operator's verification passes on a near-zero recovery. Enforce
+    // the pairing rather than documenting it.
+    if (v.lookbackDays !== undefined && v.deepRescan !== true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['deepRescan'],
+        message: 'lookbackDays requires deepRescan:true — without it the per-instance watermark bounds the widened read to almost nothing',
+      })
+    }
+    if (v.lookbackDays !== undefined && v.sessionIds && v.sessionIds.length > MAX_WIDENED_BATCH) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['sessionIds'],
+        message: `a widened read (lookbackDays) is limited to ${MAX_WIDENED_BATCH} instances per run — split the recovery into batches`,
+      })
+    }
+  })
 
 /*
  * Parse the (already-verified, already-read) request body into worker opts.
@@ -89,7 +161,22 @@ export async function parseWorkerOpts(event: H3Event): Promise<WorkerRunContext[
     return undefined
   }
   const parsed = workerOptsSchema.safeParse(json)
-  if (!parsed.success) return undefined
+  if (!parsed.success) {
+    // Fail-soft is deliberate (a future scheduler sending options this build
+    // does not know must never 500 the tick) but it MUST NOT be silent. Unknown
+    // keys are already handled by .strip(), so reaching here means a KNOWN option
+    // was malformed — e.g. `"lookbackDays": "90"` as a string from a shell
+    // template. The run then takes the DEFAULT path and returns HTTP 200 with
+    // rows written, which is indistinguishable from the operator's intent: the
+    // exact silent-success trap that made a recoverable backlog look recovered.
+    // Say so loudly; the worker result also echoes what was actually applied.
+    console.warn(
+      `[run-worker-opts] worker options were DROPPED (malformed) — the run will take its DEFAULT path, ignoring every option in the body: ${parsed.error.issues
+        .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+        .join('; ')}`,
+    )
+    return undefined
+  }
   // Omit `opts` when it carries nothing (e.g. the body was `{}`) so ctx.opts
   // stays undefined and workers take their auto path unchanged.
   return Object.keys(parsed.data).length > 0 ? parsed.data : undefined

@@ -43,6 +43,8 @@ import { createError } from 'h3'
 import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { recordAuditEvent } from '../db/audit'
+import { advisoryGlobalCapLock, advisoryXactLock } from '../db/advisory-lock'
+import { maxLiveInstancesGlobal, maxLiveInstancesPerTeammate } from './emit-provision'
 
 type Db = PostgresJsDatabase<Record<string, unknown>>
 
@@ -104,6 +106,17 @@ export async function confirmProvisionalInstance(
   const realEmail = normalizeEmail(input.realTeammateEmail)
 
   return db.transaction(async (tx) => {
+    // Advisory locks BEFORE the row lock, and in ascending namespace order.
+    // provisionEmit takes principal(2) then globalCap(3) and only THEN writes
+    // instance_attestation rows. If we took the row lock first we would hold it
+    // while waiting for the advisory locks that provisionEmit holds while
+    // waiting for the row: a textbook deadlock. Taking them here also makes the
+    // cap reads below serialise against the create door, which is the only way
+    // a count-then-write can hold. Both keys are known upfront, so hoisting
+    // them costs nothing. See server/db/advisory-lock.ts for the contract.
+    await tx.execute(advisoryXactLock('principal', input.realTeammateId))
+    await tx.execute(advisoryGlobalCapLock('confirmed'))
+
     // Lock the attestation row for the life of the merge.
     const attRows = await tx.execute<AttRow>(sql`
       SELECT identity_state,
@@ -162,6 +175,61 @@ export async function confirmProvisionalInstance(
     const real = [...realRows][0]
     if (!real) {
       throw createError({ statusCode: 404, statusMessage: 'Confirming teammate not found' })
+    }
+
+    // Confirmation is the THIRD door into the confirmed population, and it was
+    // the only one that never counted. The other two both cap themselves:
+    // provisionEmit caps creates, and the enrol door caps its own provisional
+    // population. This transition moves a row OUT of the second and INTO the
+    // first, and enforced neither. Two distinct escapes follow from that:
+    //
+    //   - The per-teammate cap. A provisional row is bound to its own SHADOW
+    //     teammate, so it never counted against the real one. Enrol N devices
+    //     claiming your own address, confirm all N, and the real teammate ends
+    //     up with N live instances no matter what the cap says. That leg is
+    //     pre-existing.
+    //   - The global confirmed cap. Making that count exclude provisional rows
+    //     is what turned this flip into an increment, so that leg arrived with
+    //     the preceding commit and is mine.
+    //
+    // Enforce both with the SAME predicates the create door uses, so the three
+    // doors cannot drift apart. Neither count includes the row being confirmed
+    // (it is still provisional, and still bound to the shadow), so `>=` is the
+    // correct comparison in both — identical to provisionEmit's.
+    const teammateLive = await tx.execute<{ count: string }>(sql`
+      SELECT COUNT(*)::text AS count FROM instance_attestation
+       WHERE teammate_id = ${input.realTeammateId}::uuid
+         AND ts_actual_end IS NULL AND ts_purged IS NULL
+    `)
+    if (Number([...teammateLive][0]?.count ?? 0) >= maxLiveInstancesPerTeammate()) {
+      throw createError({
+        statusCode: 429,
+        statusMessage: 'Device capacity reached',
+        data: {
+          type: 'https://tokenscope.example.com/errors/capacity-reached',
+          title: 'Device capacity reached',
+          status: 429,
+          detail:
+            'You already have the maximum number of live devices. Revoke one, then confirm this device.',
+        },
+      })
+    }
+    const confirmedLive = await tx.execute<{ count: string }>(sql`
+      SELECT COUNT(*)::text AS count FROM instance_attestation
+       WHERE identity_state = 'confirmed'
+         AND ts_actual_end IS NULL AND ts_purged IS NULL
+    `)
+    if (Number([...confirmedLive][0]?.count ?? 0) >= maxLiveInstancesGlobal()) {
+      throw createError({
+        statusCode: 429,
+        statusMessage: 'Enrollment capacity reached',
+        data: {
+          type: 'https://tokenscope.example.com/errors/capacity-reached',
+          title: 'Enrollment capacity reached',
+          status: 429,
+          detail: 'This deployment is at its device limit. Contact your TokenScope administrator.',
+        },
+      })
     }
 
     const priorShadowTeammateId = att.teammate_id

@@ -31,15 +31,15 @@
  * `systemMessage` is shown to the developer; `additionalContext` goes to the
  * model). No credential/token material is ever written to stdout or stderr.
  */
-import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, chmodSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, chmodSync, mkdirSync, appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import http from 'node:http'
 import { resolveRepoProjectCode, computeCodeHash, readGlobalEnrolment, writeRepoTag } from '../scripts/tag-repo.mjs'
-import { reconcilePluginPaths, applyOtlpProxyRepoint, otlpForwarderPath, mergeClaudeSettings, otlpProxyStashMissing, isLoopbackHost } from '../scripts/env-builder.mjs'
-import { readSettingsEnv, readEmitSentinel, runEmitHelper, stateDir } from '../scripts/plugin-runtime.mjs'
+import { reconcilePluginPaths, applyOtlpProxyRepoint, otlpForwarderPath, mergeClaudeSettings, otlpProxyStashMissing, isLoopbackHost, OTLP_DCE_ENV_KEY } from '../scripts/env-builder.mjs'
+import { readSettingsEnv, readEmitSentinel, runEmitHelper, stateDir, globalSettingsEnv, repoTagEnv } from '../scripts/plugin-runtime.mjs'
 import { resolveShim, shimActive } from '../scripts/otlp-shim-policy.mjs'
 import { refreshLanded } from '../scripts/landed-check.mjs'
 import { checkRepoProjectBillable } from '../scripts/project-check.mjs'
@@ -51,6 +51,20 @@ const HOOK_DIR = dirname(fileURLToPath(import.meta.url))
 
 // Bound the active probe so a network blackhole can't hang session startup.
 const PROBE_TIMEOUT_MS = 4000
+
+/**
+ * The env the NEXT launch in `cwd` will actually use — GLOBAL settings, with
+ * ONLY `OTEL_RESOURCE_ATTRIBUTES` taken from the repo-local tag (S1 fix 1,
+ * `repoTagEnv` in plugin-runtime.mjs). Every credential-bearing read in this
+ * hook (the emit-health probe, the forwarder spawn env, the enrol/landed/
+ * project-billability calls) MUST go through this — never a raw
+ * `{...global, ...repo}` spread, which lets a repo committed into any cloned
+ * repository override the endpoint a credential gets POSTed to while the
+ * credential itself still comes from the trusted global file.
+ */
+function repoAwareEnv(cwd) {
+  return repoTagEnv(globalSettingsEnv(), readSettingsEnv(join(cwd, '.claude', 'settings.local.json')))
+}
 
 /**
  * Job 0: repoint OUR version-pinned GLOBAL settings paths (statusLine.command,
@@ -125,11 +139,18 @@ function selfHealRepoTag() {
   const codeHash = computeCodeHash(resolved.code)
   // EXISTING enrolments self-heal onto the local Content-Length forwarder (CC
   // #72671) on next session without a re-redeem: re-point the enrolment's logs
-  // endpoint (and stash the real DCE URL) before it's copied into the repo tag.
-  // Idempotent + kill-switch-gated (TOKENSCOPE_OTLP_PROXY=0). Fail-open — the
-  // enclosing try in main() swallows any error, and writeRepoTag still runs on
-  // the (unchanged) env if the re-point throws.
-  if (enrolment.env) applyOtlpProxyRepoint(enrolment.env)
+  // endpoint (and record the real DCE URL, stash + durable env copy) before it's
+  // copied into the repo tag. Idempotent + kill-switch-gated
+  // (TOKENSCOPE_OTLP_PROXY=0). Fail-open: the try here makes the long-standing
+  // "writeRepoTag still runs on the (unchanged) env if the re-point throws"
+  // guarantee actually true — previously a repoint throw skipped the tag write.
+  if (enrolment.env) {
+    try {
+      applyOtlpProxyRepoint(enrolment.env)
+    } catch {
+      /* tag the repo with the unchanged env */
+    }
+  }
   // SELF-HEAL (ADR-0006): always re-derive from the CURRENT global enrolment.
   // writeRepoTag is change-detecting, so a true no-op leaves the file untouched.
   writeRepoTag({ cwd, enrolment, codeHash })
@@ -142,31 +163,43 @@ const OTLP_PORT = Number(process.env.TOKENSCOPE_OTLP_PROXY_PORT) || 14318
  * the stateDir THIS session expects, decide what to do with whatever holds the port:
  *   - probe `'refused'`  → nothing listening → spawn.
  *   - probe `'hung'`     → bound but not answering /healthz → kill the pidfile owner + spawn.
- *   - probe `{ok,pid,dir}` → answering: if `dir` matches ours it is healthy (leave it);
+ *   - probe `{ok,dirMatches,ready}` → answering: if `dirMatches` it is healthy (leave it);
  *     otherwise it is a STALE forwarder (a prior run under a leaked HOME resolving a
- *     different stateDir/config — the recurring silent-drop) → kill its pid + spawn.
+ *     different stateDir/config — the recurring silent-drop) → kill the pidfile owner + spawn.
  * The old port-bind-only guard could not tell "listening" from "listening but broken",
  * so a wedged forwarder kept the port forever and every export 502'd unnoticed.
+ *
+ * S1 fix (6): the forwarder no longer reports a raw `pid` in /healthz (an
+ * unauthenticated local HTTP response is untrusted input — trusting a
+ * network-supplied pid for a SIGTERM target would let anything able to bind
+ * or answer on the port choose what this hook kills). Every kill decision now
+ * goes through the PIDFILE (killForwarderPidfile), which reads from inside
+ * our own 0700 state dir — filesystem-trusted, not network-trusted. `dir` (the
+ * raw absolute path) is likewise replaced by the boolean `dirMatches`, which
+ * the SERVER computes against a caller-supplied `?dir=` — see probeForwarder.
+ * LEGACY TOLERANCE (unchanged principle, extended to the new fields): a
+ * pre-hardening forwarder mid-upgrade still answers with the OLD shape
+ * (`{ok,pid,dir,ready}`, no `dirMatches`) — fall back to comparing `dir`
+ * directly so an in-flight upgrade isn't treated as unconditionally stale.
  */
 export function decideForwarderAction(probe, expectedDir) {
   if (probe === 'refused') return { action: 'spawn' }
   if (probe === 'hung') return { action: 'spawn', killPidfile: true }
-  // Healthy = answering AND resolved OUR stateDir AND (if it reports readiness)
-  // able to resolve its DCE stash. `ready === false` on a dir-match means the
-  // stash is gone (wiped ~/.tokenscope, copied settings without its state dir) —
-  // replace it. `ready` undefined = an older forwarder that predates the field:
-  // fall back to dir-match alone (no regression). Since stateDir() is now
-  // passwd-anchored, `expectedDir` is itself HOME-leak-proof, so a dir match is
-  // trustworthy where it previously wasn't.
-  if (probe && probe.ok && probe.dir === expectedDir && probe.ready !== false) return { action: 'healthy' }
-  if (probe && typeof probe.pid === 'number') return { action: 'spawn', killPid: probe.pid }
-  return { action: 'spawn' } // malformed response → best-effort respawn
+  if (!probe || !probe.ok) return { action: 'spawn' } // malformed response → best-effort respawn
+  const dirOk = typeof probe.dirMatches === 'boolean' ? probe.dirMatches : probe.dir === expectedDir
+  if (dirOk && probe.ready !== false) return { action: 'healthy' }
+  return { action: 'spawn', killPidfile: true }
 }
 
-/** GET /healthz → the forwarder's `{ok,pid,dir}`, or `'refused'` / `'hung'`. Bounded. */
-function probeForwarder(port) {
+/**
+ * GET /healthz?dir=<expectedDir> → the forwarder's `{ok,dirMatches,ready}`, or
+ * `'refused'` / `'hung'`. Bounded. Passing OUR expected dir lets the server
+ * compute `dirMatches` itself rather than handing back the raw absolute path.
+ */
+function probeForwarder(port, expectedDir) {
   return new Promise((resolve) => {
-    const req = http.get({ host: '127.0.0.1', port, path: '/healthz', timeout: 700 }, (res) => {
+    const path = `/healthz?dir=${encodeURIComponent(expectedDir ?? '')}`
+    const req = http.get({ host: '127.0.0.1', port, path, timeout: 700 }, (res) => {
       const chunks = []
       res.on('data', (c) => chunks.push(c))
       res.on('end', () => {
@@ -186,11 +219,31 @@ function probeForwarder(port) {
   })
 }
 
+/**
+ * Best-effort append to `<state>/otlp-forwarder.log` (S1 fix 6 — eviction
+ * must be LOUD). Never throws; a logging failure must not compound a kill
+ * failure into a session-start crash.
+ */
+function logForwarderEvent(msg) {
+  try {
+    const dir = stateDir()
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    appendFileSync(join(dir, 'otlp-forwarder.log'), `${new Date().toISOString()} ${msg}\n`)
+  } catch {
+    /* best-effort */
+  }
+}
+
 function killPid(pid) {
   try {
     process.kill(pid, 'SIGTERM')
-  } catch {
-    /* already gone — or another user's process (permission denied) */
+  } catch (err) {
+    // ESRCH ("already gone") is the ROUTINE case on every self-heal — logging
+    // it every session would be noise, not signal. EPERM (another user's
+    // process) means eviction genuinely did NOT take effect: a wedged/stale
+    // forwarder then keeps answering forever with nothing telling anyone why
+    // the self-heal never converged. That must be loud, not silently swallowed.
+    if (err && err.code === 'EPERM') logForwarderEvent(`killPid(${pid}) EPERM — could not evict (owned by another user?)`)
   }
 }
 
@@ -219,6 +272,18 @@ function killForwarderPidfile(dir) {
 }
 
 /**
+ * Env for the detached forwarder spawn: the hook's own process env PLUS an
+ * EXPLICIT durable-DCE handoff read fresh from the merged settings env. The
+ * forwarder's env fallback must not depend on Claude exporting settings `env`
+ * into hook subprocesses — that inheritance link is unverified, and this
+ * project's standing lesson is to capture, not infer. Exported for tests.
+ */
+export function forwarderSpawnEnv(baseEnv, settingsEnv) {
+  const v = settingsEnv && typeof settingsEnv[OTLP_DCE_ENV_KEY] === 'string' ? settingsEnv[OTLP_DCE_ENV_KEY].trim() : ''
+  return v ? { ...baseEnv, [OTLP_DCE_ENV_KEY]: v } : { ...baseEnv }
+}
+
+/**
  * (b) Ensure a HEALTHY local OTLP Content-Length forwarder (CC #72671) is running.
  * Detached + unref'd so it outlives the hook. SELF-HEALING: probes /healthz and, unless
  * the forwarder answers AND resolved OUR stateDir, replaces it (killing a wedged/stale
@@ -244,14 +309,21 @@ async function spawnOtlpForwarder() {
   const scriptPath = otlpForwarderPath(scriptsDir)
   if (!existsSync(scriptPath)) return // partial install — never spawn a phantom path
 
-  const decision = decideForwarderAction(await probeForwarder(OTLP_PORT), dir)
+  const decision = decideForwarderAction(await probeForwarder(OTLP_PORT, dir), dir)
   if (decision.action === 'healthy') return
-  if (typeof decision.killPid === 'number') killPid(decision.killPid)
   if (decision.killPidfile) killForwarderPidfile(dir)
   // Let a killed owner release the port before the fresh one binds.
-  if (decision.killPid != null || decision.killPidfile) await new Promise((r) => setTimeout(r, 250))
+  if (decision.killPidfile) await new Promise((r) => setTimeout(r, 250))
 
-  const child = spawn(process.execPath, [scriptPath], { detached: true, stdio: 'ignore' })
+  // Hand the durable DCE copy to the forwarder EXPLICITLY (merged settings env,
+  // read from disk AFTER the self-heals above may have backfilled it) so its
+  // stash-lost fallback works deterministically.
+  const settingsEnv = repoAwareEnv(process.cwd())
+  const child = spawn(process.execPath, [scriptPath], {
+    detached: true,
+    stdio: 'ignore',
+    env: forwarderSpawnEnv(process.env, settingsEnv),
+  })
   child.on('error', () => {}) // fail-open: never break session start over a spawn error
   child.unref()
 }
@@ -262,7 +334,7 @@ async function spawnOtlpForwarder() {
  * UNTAGGED repos read the global env directly, so without this they'd keep the
  * raw DCE endpoint → chunked → still broken. applyOtlpProxyRepoint is reversible,
  * so the kill-switch (TOKENSCOPE_OTLP_PROXY=0) restores the global back to the
- * direct DCE here too. IDEMPOTENT: writes ONLY when the endpoint actually changed
+ * direct DCE here too. IDEMPOTENT: writes ONLY when the env actually changed
  * (never churns the global every session). Atomic temp+rename, 0600 (the file
  * carries the emit credential); fail-OPEN. Returns nothing.
  */
@@ -302,16 +374,22 @@ export async function selfHealGlobalOtlpEndpoint({
   // than risk dropping the sibling — the safe-for-the-fleet reading of "off".
   let revertWhenDormant = true
   if (isLoopbackHost(before) && !shimActive()) {
-    const probe = forwarderProbe ?? (await probeForwarder(OTLP_PORT))
+    const probe = forwarderProbe ?? (await probeForwarder(OTLP_PORT, stateDir()))
     const healthy = decideForwarderAction(probe, stateDir()).action === 'healthy'
     revertWhenDormant = !healthy
   }
-  // Reconcile a COPY of the env so we can compare and skip a no-op write.
+  // Reconcile a COPY of the env so we can compare and skip a no-op write. The
+  // comparison covers the WHOLE env block, not just the endpoint: the reconcile
+  // can also add the durable DCE copy (backfilling a legacy pin) or remove it
+  // (after a revert), and both must reach disk.
+  const envBefore = JSON.stringify(settings.env ?? {})
   const nextEnv = applyOtlpProxyRepoint({ ...settings.env }, { revertWhenDormant })
-  if (nextEnv.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT === before) return // no change — do not churn
-  // Additive merge keeps every other env key + all top-level keys (permissions,
-  // otelHeadersHelper, statusLine); only the endpoint moves.
-  const next = mergeClaudeSettings(settings, null, nextEnv)
+  if (JSON.stringify(nextEnv) === envBefore) return // no change — do not churn
+  // REPLACE the env block with the reconciled copy: it started as a full copy so
+  // nothing is lost, and replace makes a key REMOVAL (the durable DCE copy after
+  // a revert) actually stick where an additive merge would resurrect it. All
+  // top-level keys (permissions, otelHeadersHelper, statusLine) are preserved.
+  const next = mergeClaudeSettings(settings, null, nextEnv, { replaceEnv: true })
   const tmp = `${settingsPath}.tmp.${process.pid}`
   try {
     writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
@@ -367,12 +445,9 @@ function warnFor(http) {
  */
 function emissionHealthWarning() {
   const cwd = process.cwd()
-  // The env the NEXT launch will use: global device env overlaid with the
-  // repo-local env the self-heal just reconciled (Claude merges the same way).
-  const env = {
-    ...readSettingsEnv(join(homedir(), '.claude', 'settings.json')),
-    ...readSettingsEnv(join(cwd, '.claude', 'settings.local.json')),
-  }
+  // The env the NEXT launch will use: global device env with ONLY the repo's
+  // OTEL_RESOURCE_ATTRIBUTES overlaid (repoAwareEnv / repoTagEnv — S1 fix 1).
+  const env = repoAwareEnv(cwd)
   const endpoint = (env.TOKENSCOPE_BEARER_ENDPOINT ?? '').trim()
   const hasOAuth = Boolean(
     (env.TOKENSCOPE_OAUTH_REFRESH_TOKEN ?? '').trim() &&
@@ -418,21 +493,20 @@ function projectBillabilityWarning(result) {
 
 /**
  * CC #72671 durability warning: when the logs endpoint is pinned to the local
- * forwarder but its DCE stash is missing/unreadable (a wiped/ephemeral
- * ~/.tokenscope, a HOME/TOKENSCOPE_STATE_DIR divergence, or a settings.json copied
- * without its state dir), the forwarder 502s on every export AND the kill-switch
- * cannot self-revert (the real DCE lives only in the stash). That silent wedge is
- * the one state this fail-open design must fail LOUD on. Returns a warning string,
- * or null when healthy / not pinned. Reads the SAME merged env Claude will use.
+ * forwarder and NEITHER copy of the real DCE survives — no state-dir stash AND no
+ * durable copy in the settings env (a legacy pin whose ephemeral ~/.tokenscope was
+ * wiped before the durable copy existed). The forwarder 502s on every export and
+ * the revert has nothing to restore, so this fail-open design must fail LOUD.
+ * Pins made at 0.1.26+ carry the durable copy and self-heal instead of reaching
+ * here. Returns a warning string, or null when healthy / not pinned / healable.
+ * Reads the SAME merged env Claude will use — AFTER the self-heals above ran, so
+ * a recovered state never warns.
  */
 function otlpForwarderStashWarning() {
   const cwd = process.cwd()
-  const env = {
-    ...readSettingsEnv(join(homedir(), '.claude', 'settings.json')),
-    ...readSettingsEnv(join(cwd, '.claude', 'settings.local.json')),
-  }
+  const env = repoAwareEnv(cwd)
   if (!otlpProxyStashMissing(env)) return null
-  return `⚠ TokenScope: telemetry is routed through the local OTLP forwarder but its DCE stash (~/.tokenscope/otlp-forward.json) is missing — emission is failing this session and cannot self-revert. Re-provision emit via the tokenscope-setup MCP prompt to restore it.`
+  return `⚠ TokenScope: telemetry is routed through the local OTLP forwarder but the real ingest endpoint is unrecoverable (no DCE stash in ~/.tokenscope and no durable copy in settings.json) — emission is failing this session and cannot self-revert. Re-provision emit via the tokenscope-setup MCP prompt to restore it.`
 }
 
 async function main() {
@@ -467,10 +541,7 @@ async function main() {
   // which the probe + landed refresh then re-read from disk and exercise. Fail-open.
   try {
     const cwd = process.cwd()
-    const env = {
-      ...readSettingsEnv(join(homedir(), '.claude', 'settings.json')),
-      ...readSettingsEnv(join(cwd, '.claude', 'settings.local.json')),
-    }
+    const env = repoAwareEnv(cwd)
     await enrollIfNeeded({ env })
   } catch {
     /* fail-open: never break session start over enrolment */
@@ -505,35 +576,50 @@ async function main() {
   // real green `✓ landed`) AND check project billability CONCURRENTLY — both bounded,
   // best-effort, under the same merged env. project-check warns ONLY on an explicit
   // not-billable; every other path (offline, unauth, no-tag, errors) is silent.
+  let projectWarning = null
   try {
     const cwd = process.cwd()
-    const env = {
-      ...readSettingsEnv(join(homedir(), '.claude', 'settings.json')),
-      ...readSettingsEnv(join(cwd, '.claude', 'settings.local.json')),
-    }
+    const env = repoAwareEnv(cwd)
     const hasBearer = Boolean((env.TOKENSCOPE_BEARER_ENDPOINT ?? '').trim())
     const [, projectResult] = await Promise.all([
       hasBearer ? refreshLanded({ env }).catch(() => null) : Promise.resolve(null),
       hasBearer ? checkRepoProjectBillable({ env, cwd }).catch(() => null) : Promise.resolve(null),
     ])
-    const projectWarning = projectBillabilityWarning(projectResult)
-    if (projectWarning) lines.push(projectWarning)
+    projectWarning = projectBillabilityWarning(projectResult)
   } catch {
     /* fail-open — the statusline simply stays ◎ emit-auth */
   }
 
+  const output = buildHookOutput(lines, projectWarning)
+  if (output) process.stdout.write(JSON.stringify(output))
+}
+
+/**
+ * Compose the hook's stdout payload from the collected warning `lines` and
+ * the (possibly null) `projectWarning`. Pure + exported for tests. Returns
+ * null when there is nothing to say at all.
+ *
+ * S1 fix 5: `additionalContext` carries ONLY `lines`, NEVER `projectWarning`.
+ * projectWarning interpolates the repo's OWN `.tokenscope`-declared code — an
+ * ATTACKER-CONTROLLED string in a hostile repo — and `additionalContext`
+ * reaches the MODEL's context, not just the developer. The SessionStart
+ * `systemMessage` (which DOES carry projectWarning) already reaches the
+ * developer, which is the actual requirement; the model does not need it, so
+ * it is omitted entirely rather than sanitised (the charset validation on
+ * `code` in tokenscope-project.mjs is the parse-boundary defence; this is the
+ * render-boundary one — belt and suspenders, not a substitute).
+ */
+export function buildHookOutput(lines, projectWarning) {
+  const allLines = projectWarning ? [...lines, projectWarning] : lines
+  if (!allLines.length) return null
+  const output = { systemMessage: allLines.join('\n\n') }
   if (lines.length) {
-    const systemMessage = lines.join('\n\n')
-    process.stdout.write(
-      JSON.stringify({
-        systemMessage,
-        hookSpecificOutput: {
-          hookEventName: 'SessionStart',
-          additionalContext: `TokenScope session-start checks: ${systemMessage}`,
-        },
-      }),
-    )
+    output.hookSpecificOutput = {
+      hookEventName: 'SessionStart',
+      additionalContext: `TokenScope session-start checks: ${lines.join('\n\n')}`,
+    }
   }
+  return output
 }
 
 // Exported for unit tests (the pure-ish warning helpers).

@@ -12,6 +12,7 @@
  * recipient teammate id(s). Inserts are batched by the caller so callers
  * can dispatch many items in one transaction.
  */
+import { consola } from 'consola'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { eq, sql } from 'drizzle-orm'
 import * as schema from '../../drizzle/schema'
@@ -26,12 +27,15 @@ export type InboxCategory =
   | 'over-attribution' // reconciled-lane otel spend exceeds the authoritative Anthropic actual (forgery/mis-tag backstop)
   | 'reconciliation-gap' // OTel-attributed vs Anthropic-actuals gap exceeds the alert bar (ADR-0005 §4 safety net; the detection-based P2 defense leans on it)
   | 'structural-conflict' // TODO(convergence-followup): no producer wired; schema lacks structural-divergence detection
-  | 'connector-health' // TODO(convergence-followup): no producer wired; no connector_health table yet
+  | 'connector-health' // PRODUCED by the connector-health worker (owed-bill aging: pending_placement rows un-placed past the grace window); admin-routed
   | 'read-path-stale' // the OTel read path (azure-monitor-read gatherer) has silently stalled/failed while clients still emit (read-path-health worker); admin-routed
+  | 'attribution-gap' // ONE instance is minting ingest credentials (so it is emitting) while its attribution has fallen days behind (attribution-gap worker); admin-routed. read-path-stale gates on FLEET-wide signals and cannot see a single starved instance — the 2026-07-24 dead-zone outage was invisible to every other alarm
   | 'copilot-bill-unsettled' // a Copilot org-month has usage but no read license SKU line (copilot-pool-bill worker) — the month reports unsettled; admin-routed (finance concern)
   | 'copilot-bill-unclassified' // a Copilot org-month booked unclassified SKU spend, or the C1 conservation assertion tripped (copilot-pool-bill worker, mig 0085) — classify the SKU + re-run the month; admin-routed (finance concern)
   | 'project-ending-soon' // D3: a project a dev is tagged to enters its end_date warning window — re-tag ahead
   | 'project-ended-retag' // D2a: a dev's spend spilled to unallocated because the project ended — re-tag the spilled portion
+  | 'github-coverage-gap' // a GitHub org transitioned into a non-connected coverage state, or an enterprise lost its census capability (github-coverage-sweep worker); admin-routed — Workstream D, design §6
+  | 'personal-subscription-prompt' // settled Claude usage has no provider corroboration; prompt the teammate to declare only when personally funded (ADR-0011 D4)
 
 export interface DispatchInput {
   category: InboxCategory
@@ -80,8 +84,16 @@ export async function dispatchInbox(
   const { recipientIds, routingScope } = await resolveRecipients(db, input)
   if (recipientIds.length === 0) {
     // Caller-facing: no-op rather than throw, so a missing manager (e.g.
-    // unassigned project) doesn't crash the worker. Surfaces as 'no
-    // recipient' lookup in the audit log.
+    // unassigned project) doesn't crash the worker. But it must not be SILENT —
+    // an admin-paging category (read-path-stale, attribution-gap, connector-health)
+    // resolving to zero recipients means a deployment with no active
+    // platform-admin/global-finops just dropped an urgent page, and a per-dev
+    // category dropped means its producer forgot recipientTeammateIdHint. Both
+    // are the silent-no-op class; log so they are diagnosable.
+    consola.warn(
+      `[dispatch] "${input.category}" resolved to ZERO recipients — inbox item DROPPED (routing=${routingScope ?? 'n/a'}). ` +
+        `Admin categories need an active platform-admin/global-finops; per-dev categories need recipientTeammateIdHint.`,
+    )
     return []
   }
 
@@ -110,6 +122,10 @@ export async function dispatchInbox(
         relatedEntityId,
       })),
     )
+    // Category-specific partial unique indexes may suppress the same open
+    // transition when two producers race after reading the same prior state.
+    // Returning only inserted rows preserves the dispatcher's count contract.
+    .onConflictDoNothing()
     .returning({ id: schema.inboxItem.id, recipientTeammateId: schema.inboxItem.recipientTeammateId })
 
   return rows.map((r) => ({ inboxItemId: r.id, recipientTeammateId: r.recipientTeammateId }))
@@ -124,11 +140,15 @@ function defaultSeverity(category: InboxCategory): 'info' | 'attention' | 'urgen
     case 'reconciliation-gap':
     case 'project-ending-soon':
     case 'project-ended-retag':
+    case 'github-coverage-gap': // per-org gap default; the sweep overrides 'urgent' for a whole-enterprise capability loss
       return 'attention'
-    // 'read-path-stale': a silent read-path outage means spend stops attributing
-    // entirely (the 5.5-day incident) — page it like a connector failure, not a nag.
+    // Silent-attribution failures page like a connector outage, not a nag:
+    //  - 'read-path-stale': the whole read path stopped (the 5.5-day incident).
+    //  - 'attribution-gap': ONE device is emitting and its spend is going
+    //    nowhere — same consequence, scoped to an instance (the 19-day outage).
     case 'connector-health':
     case 'read-path-stale':
+    case 'attribution-gap':
       return 'urgent'
     case 'copilot-bill-unsettled':
     case 'copilot-bill-unclassified':
@@ -188,6 +208,20 @@ async function resolveRecipients(
         routingScope: 'platform',
       }
     }
+    case 'attribution-gap':
+      // Scoped to ONE instance, but the cause is always platform-side (the join
+      // path), never something that instance's regional admin can fix — and
+      // deriving a region from the instance would split a fleet-wide defect
+      // across regional inboxes, hiding the pattern. Route to cross-region ops,
+      // matching read-path-stale.
+      return { recipientIds: await resolveAdmins(db, null), routingScope: 'platform' }
+    case 'github-coverage-gap':
+      // A GitHub enterprise/org config gap — enterprises are credential-custody
+      // units that can span multiple regions' orgs (region homing is a PER-ORG,
+      // downstream concern, not a property of the enterprise itself), so there is
+      // no single region to derive. Routes to cross-region ops, matching
+      // read-path-stale/attribution-gap — the same "no region to derive" shape.
+      return { recipientIds: await resolveAdmins(db, null), routingScope: 'platform' }
     case 'velocity-warning':
     case 'untagged-backlog':
     case 'over-attribution':
@@ -247,7 +281,12 @@ async function resolveOverBudgetRecipients(
   `)
   const contributorRows = await db.execute<{ teammate_id: string }>(sql`
     SELECT DISTINCT ar.teammate_id::text AS teammate_id
-    FROM attribution_record ar
+    -- v_complete_usage, not raw attribution_record: Copilot per-user spend lands
+    -- in unaccounted_usage, so the raw table misses Copilot contributors entirely.
+    -- budget-alert now TRIGGERS on Copilot-complete spend, so the AUDIENCE must be
+    -- complete too — otherwise the Copilot dev who blew the budget is the one
+    -- person not told about it.
+    FROM v_complete_usage ar
     WHERE ar.project_id = ${projectId}::uuid
       AND ar.ts_event >= ${monthStartIso}::timestamptz
   `)

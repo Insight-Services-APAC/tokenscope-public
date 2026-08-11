@@ -29,6 +29,7 @@ export type DrawerBodyVariant =
   | 'velocity'
   | 'sync-conflict'
   | 'untagged'
+  | 'personal-subscription'
   | 'generic'
 
 export function variantForCategory(category: string): DrawerBodyVariant {
@@ -42,6 +43,8 @@ export function variantForCategory(category: string): DrawerBodyVariant {
       return 'sync-conflict'
     case 'untagged-backlog':
       return 'untagged'
+    case 'personal-subscription-prompt':
+      return 'personal-subscription'
     default:
       return 'generic'
   }

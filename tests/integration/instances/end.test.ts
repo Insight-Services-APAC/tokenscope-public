@@ -4,7 +4,8 @@
  * session-token auth was removed). Coverage (R2 M1 — the auth-critical rewrite
  * was previously untested):
  *   - owner's emit token → closes (204), sets ts_actual_end.
- *   - non-owner's emit token → 403 (can't end someone else's instance).
+ *   - non-owner's emit token → 404, byte-identical to an unknown id (S5,
+ *     de1c74d — the 403 ownership oracle was deliberately collapsed).
  *   - bogus bearer → 401.
  *   - double-end by the owner → idempotent 204.
  */
@@ -99,10 +100,25 @@ describe('POST /instances/:id/end — OAuth-only', () => {
     expect(await tsActualEnd(instanceId)).not.toBeNull()
   })
 
-  it("403s a non-owner's emit token (can't end someone else's instance)", async () => {
+  it("404s a non-owner's emit token, byte-identical to an unknown id (S5 — no ownership oracle)", async () => {
     const instanceId = await enrolInstance(ownerId)
     const strangerAccess = await emitAccessTokenFor(strangerId)
-    await expect(endHandler(endEvent(instanceId, strangerAccess) as never)).rejects.toMatchObject({ statusCode: 403 })
+    const notOwned = (await endHandler(endEvent(instanceId, strangerAccess) as never).catch((e) => e)) as {
+      statusCode?: number
+      statusMessage?: string
+      data?: unknown
+    }
+    const unknown = (await endHandler(endEvent(randomUUID(), strangerAccess) as never).catch((e) => e)) as {
+      statusCode?: number
+      statusMessage?: string
+      data?: unknown
+    }
+    expect(notOwned.statusCode).toBe(404)
+    // Byte-identical to an unknown id — a 403 (or any body difference) here
+    // would re-open the ownership oracle S5 deliberately closed (de1c74d).
+    expect(
+      { statusCode: notOwned.statusCode, statusMessage: notOwned.statusMessage, data: notOwned.data },
+    ).toEqual({ statusCode: unknown.statusCode, statusMessage: unknown.statusMessage, data: unknown.data })
     expect(await tsActualEnd(instanceId)).toBeNull() // untouched
   })
 

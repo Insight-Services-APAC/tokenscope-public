@@ -48,14 +48,23 @@ beforeAll(async () => {
   }
   regionA = await mkRegion('pra', 'Prac Region A')
   regionB = await mkRegion('prb', 'Prac Region B')
-  const mkUnit = async (region: string, path: string, code: string, cou = true) => {
-    await t.client`INSERT INTO org_unit (region_id, path, code, display_name, unit_type, is_cost_owning_unit)
-      VALUES (${region}::uuid, ${path}::ltree, ${code}, ${code}, 'practice', ${cou})`
+  const mkUnit = async (region: string, path: string, code: string, cou = true, parent: string | null = null) => {
+    await t.client`INSERT INTO org_unit (region_id, parent_id, path, code, display_name, unit_type, is_cost_owning_unit)
+      VALUES (${region}::uuid, ${parent}::uuid, ${path}::ltree, ${code}, ${code}, 'practice', ${cou})`
     const [r] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM org_unit WHERE region_id=${region}::uuid AND code=${code}`
     return r!.id
   }
-  mpoId = await mkUnit(regionA, 'mpo', 'mpo')
-  bizId = await mkUnit(regionA, 'biz', 'biz')
+  // S3 part (a): 'mpo' is used below as a MANAGER's own placement, which now must pass
+  // placedBelowRegionRootPredicate() (parent_id IS NOT NULL). 'biz' gets the SAME parent_id
+  // (not just any non-null value) because the comparison panel below groups siblings by
+  // `parent_id IS NOT DISTINCT FROM` (practice/[ouId].get.ts) — giving mpo a DIFFERENT
+  // parent than biz would silently break "comparison shows region siblings for an admin
+  // (mpo + biz)". `cou=false` keeps this placeholder out of the comparison query (it
+  // requires is_cost_owning_unit=TRUE) and every usage/bill query (none reference its id) —
+  // it exists ONLY as a parent_id target.
+  const s3RegionARootId = await mkUnit(regionA, 'pra_root', '__s3_root__', false, null)
+  mpoId = await mkUnit(regionA, 'mpo', 'mpo', true, s3RegionARootId)
+  bizId = await mkUnit(regionA, 'biz', 'biz', true, s3RegionARootId)
   opsId = await mkUnit(regionB, 'ops', 'ops')
 
   const mkTeammate = async (id: string | null, region: string, unit: string, email: string) => {

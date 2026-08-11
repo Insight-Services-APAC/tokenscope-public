@@ -27,9 +27,16 @@ import {
 import type {
   SeasonalityCell,
   ChargeDowBucket,
-  ShowbackWeeklyLaneCell,
+  UsageSurfaceWeeklyCell,
+  BilledLaneMeta,
+  ChargebackCoverage,
+  DriverSurfaceAmount,
+  DriverProvenanceAmount,
 } from '../../shared/reports/types'
-import { toolToVendor, VENDOR_LANES } from '../../shared/usage/vendor'
+import { csvEscape } from '../utils/csv-escape'
+import { toolToVendor, VENDOR_LANES, VENDOR_LABELS, type Vendor } from '../../shared/usage/vendor'
+import { GITHUB_USAGE_LANE_IDS } from '../../shared/usage/github-surface'
+import { USAGE_PROVENANCE_VALUES } from '../../shared/usage/provenance'
 
 /**
  * `format=json|csv`. The screen endpoints always serve JSON; the CSV serialiser
@@ -333,21 +340,23 @@ export function fillDowBuckets(byDow: Map<number, number>): ChargeDowBucket[] {
   return Array.from({ length: 7 }, (_, dow) => ({ dow, chargeUsd: byDow.get(dow) ?? 0 }))
 }
 
-// ── Weekly showback lane merge (pure — shared by Across + Regional, iter-2 I1) ─
+// ── Weekly lane merge (pure — shared by Across + Regional usage weekly-lane fetchers) ─
 /** Canonical lane order index for deterministic weekly-lane emission. */
 const WEEKLY_LANE_ORDER = new Map<string, number>(VENDOR_LANES.map((l, i) => [l, i]))
 
 /**
- * Merge raw `(week_start, tool, usd)` showback group rows into `(week, LANE)`
- * cells: tools sharing a lane (N:1 by contract) SUM, unknown/NULL falls to
- * 'other' (toolToVendor's catch-all — nothing ever vanishes from the billed
- * composition), emitted (week asc, canonical lane order) deterministically.
- * Pure — ONE definition for the Across + Regional weekly showback fetchers so
- * their cell shape can never drift (and it is unit-testable without a DB).
+ * Merge raw `(week_start, tool, usd)` group rows into `(week, LANE)` cells:
+ * tools sharing a lane (N:1 by contract) SUM, unknown/NULL falls to 'other'
+ * (toolToVendor's catch-all — nothing ever vanishes from the composition),
+ * emitted (week asc, canonical lane order) deterministically. Pure and
+ * basis-agnostic (the caller's SQL determines whether `usd` is §A usage or §B
+ * billed) — ONE definition for the Across + Regional weekly per-surface usage
+ * fetchers so their cell shape can never drift (and it is unit-testable
+ * without a DB).
  */
 export function mergeWeeklyLaneRows(
   rows: Iterable<{ week_start: string; tool: string | null; usd: string }>,
-): ShowbackWeeklyLaneCell[] {
+): UsageSurfaceWeeklyCell[] {
   const byWeekLane = new Map<string, number>()
   for (const r of rows) {
     const k = `${r.week_start} ${toolToVendor(r.tool)}`
@@ -363,4 +372,200 @@ export function mergeWeeklyLaneRows(
         (a.weekStart < b.weekStart ? -1 : a.weekStart > b.weekStart ? 1 : 0) ||
         (WEEKLY_LANE_ORDER.get(a.lane) ?? 99) - (WEEKLY_LANE_ORDER.get(b.lane) ?? 99),
     )
+}
+
+// ── Driver-row surface + provenance breakdown fold (requirements 3/4) ────────
+// Shared by every axis whose query groups by an extra (tool, usage_provenance)
+// pair per key — the teammate axis today (across-regions.ts / regional.ts /
+// cost-centres.ts) — so a row's total, its `surfaceBreakdown`, and its
+// `provenanceBreakdown` are always computed from the SAME underlying rows
+// (guaranteeing the sum-back invariant, build-design §7(4)) rather than three
+// separate queries that could silently drift apart.
+
+/** One raw (key, label, tool, provenance, value) row — one row per
+ *  (key, tool, usage_provenance) triple in the source query. */
+export interface DriverBreakdownRaw {
+  key: string | null
+  label: string | null
+  tool: string | null
+  provenance: string | null
+  value: string
+}
+
+/** A single driver key's folded aggregate — its total plus both breakdowns. */
+export interface FoldedDriverAggregate {
+  label: string | null
+  total: number
+  /** Registry lane id → Σ usd for that lane, this key. */
+  bySurface: Map<Vendor, number>
+  /** usage_provenance → Σ usd for that provenance, this key. */
+  byProvenance: Map<string, number>
+}
+
+/**
+ * Fold raw (key, label, tool, provenance, value) rows into per-KEY aggregates
+ * carrying a per-surface (registry lane, `toolToVendor`) AND a per-provenance
+ * breakdown, from ONE row set.
+ */
+export function foldDriverBreakdown(
+  raws: Iterable<DriverBreakdownRaw>,
+): Map<string, FoldedDriverAggregate> {
+  const byKey = new Map<string, FoldedDriverAggregate>()
+  for (const r of raws) {
+    const k = r.key ?? ''
+    let agg = byKey.get(k)
+    if (!agg) {
+      agg = { label: r.label, total: 0, bySurface: new Map(), byProvenance: new Map() }
+      byKey.set(k, agg)
+    }
+    const usd = Number(r.value)
+    agg.total += usd
+    if (!agg.label && r.label) agg.label = r.label
+    const lane = toolToVendor(r.tool)
+    agg.bySurface.set(lane, (agg.bySurface.get(lane) ?? 0) + usd)
+    if (r.provenance) {
+      agg.byProvenance.set(r.provenance, (agg.byProvenance.get(r.provenance) ?? 0) + usd)
+    }
+  }
+  return byKey
+}
+
+/** Registry lane order index — reused so a breakdown's lane order can never
+ *  drift from the weekly-lane merge above. */
+const SURFACE_LANE_ORDER = new Map<string, number>(VENDOR_LANES.map((l, i) => [l, i]))
+
+/**
+ * `bySurface` → the wire `DriverSurfaceAmount[]`, in canonical REGISTRY lane
+ * order (never $-desc — requirement 3: "colors/labels from a shared registry
+ * helper" — a surface breakdown reads as a fixed composition, like the
+ * provider split / lane legend, not a re-sorted ranking). Zero-amount lanes
+ * are elided (nothing to show); labels are registry-derived (`VENDOR_LABELS`),
+ * never hand-typed.
+ */
+export function driverSurfaceBreakdown(
+  bySurface: ReadonlyMap<Vendor, number>,
+): DriverSurfaceAmount[] {
+  return [...bySurface.entries()]
+    .filter(([, usd]) => usd !== 0)
+    .sort(([a], [b]) => (SURFACE_LANE_ORDER.get(a) ?? 99) - (SURFACE_LANE_ORDER.get(b) ?? 99))
+    .map(([lane, usd]) => ({ lane, label: VENDOR_LABELS[lane], usd }))
+}
+
+/**
+ * `byProvenance` → the wire `DriverProvenanceAmount[]`, in the canonical Axis-1
+ * order (`USAGE_PROVENANCE_VALUES`, `shared/usage/provenance.ts`).
+ */
+export function driverProvenanceBreakdown(
+  byProvenance: ReadonlyMap<string, number>,
+): DriverProvenanceAmount[] {
+  return USAGE_PROVENANCE_VALUES.filter(
+    (p) => (byProvenance.get(p) ?? 0) !== 0,
+  ).map((p) => ({ provenance: p, usd: byProvenance.get(p)! }))
+}
+
+/**
+ * True when EVERY dollar in `bySurface` sits on a GitHub §A USAGE lane
+ * (`GITHUB_USAGE_LANE_IDS` — 'copilot' + 'copilot-agent', registry-derived) —
+ * the driver-row `pooled-usage` gate (both GitHub usage lanes draw against the
+ * SAME pooled per-org AI-Credit allowance, docs/wiki/Reporting.md §5, so a
+ * teammate whose ENTIRE usage sits there is never a per-user charge). Widens
+ * the pre-existing 'copilot-cli'-only check now that `copilot-agent` is a live
+ * `v_complete_usage` lane (migration 0101's ingest-only completeness arm) —
+ * mixed/Claude usage stays `indicative`.
+ */
+export function isPooledSurfaceOnly(bySurface: ReadonlyMap<Vendor, number>): boolean {
+  let total = 0
+  for (const [lane, usd] of bySurface) {
+    if (usd === 0) continue
+    total += usd
+    if (!GITHUB_USAGE_LANE_IDS.includes(lane)) return false
+  }
+  return total > 0
+}
+
+// ── Driver CSV additive columns (requirement 8 — screen/CSV parity) ──────────
+// The FIXED-header trailing columns every driver CSV appends for a row
+// carrying either breakdown, per the codebase's additive-only CSV convention
+// (new columns append at the END, never splice into the middle). A row from an
+// axis this requirement did not extend (region/practice/project) carries
+// neither breakdown, so its cells are the explicit empty string — never a
+// fabricated 0.00 implying a computation that never ran.
+
+/** One CSV cell per `USAGE_PROVENANCE_VALUES` member, '' when `row` carries no
+ *  `provenanceBreakdown` at all. Σ(non-empty cells) === row.usd, cent-exact. */
+export function driverProvenanceCsvCells(row: {
+  provenanceBreakdown?: DriverProvenanceAmount[]
+}): string[] {
+  if (!row.provenanceBreakdown) return USAGE_PROVENANCE_VALUES.map(() => '')
+  const byProvenance = new Map(row.provenanceBreakdown.map((p) => [p.provenance, p.usd]))
+  return USAGE_PROVENANCE_VALUES.map((p) => (byProvenance.get(p) ?? 0).toFixed(2))
+}
+
+/** A single semicolon-joined `lane:usd` compound cell (registry order), '' when
+ *  `row` carries no `surfaceBreakdown`. Σ(parsed usd) === row.usd, cent-exact. */
+export function driverSurfaceMixCsvCell(row: { surfaceBreakdown?: DriverSurfaceAmount[] }): string {
+  if (!row.surfaceBreakdown?.length) return ''
+  return row.surfaceBreakdown.map((s) => `${s.lane}:${s.usd.toFixed(2)}`).join(';')
+}
+
+// ── The chargeback-lane EXPORT GRAIN (build-design §2 + §7, byte-identical) ──
+/*
+ * A driver CSV used to serialise `rows` and nothing else. In the chargeback lane
+ * that is a subset of what is ON SCREEN: the DriversTable renders the per-arm
+ * consumption blocks below the billed total, and — since the pooled Copilot
+ * invoice landed — the headline itself is folded from more than one arm. Every
+ * one of those figures vanished from a file stamped `lane=billed`, which breaks
+ * the byte-identical export rule in the direction that matters most: a
+ * spreadsheet reader sees the Anthropic charge and has no way to learn that the
+ * Copilot money existed at all.
+ *
+ * So the arms are a SECOND GRAIN in the same file, one line per (arm, driver),
+ * each line naming what its money MEANS (`measure`) and where it was read from
+ * (`source`). Two grains rather than extra columns on the first, because an arm
+ * row and a folded row are different populations: folding them into one grid
+ * would let a naive `SUM(spend_usd)` double-count the charge arms.
+ */
+
+/** `''` for a $-less cell — never a fabricated `0.00`. */
+function armUsd(n: number): string {
+  return n.toFixed(2)
+}
+
+/**
+ * The CSV lines for every provider arm behind a chargeback answer, plus the
+ * chargeback-coverage statement, or `[]` when the answer is not a billed one.
+ *
+ * An arm with NO rows still gets a line (empty driver + empty spend): "GitHub
+ * has not been derived for this window" is information, and an absent line is
+ * indistinguishable from an arm nobody looked for.
+ */
+export function driverArmCsvLines(
+  billedLane: BilledLaneMeta | undefined,
+  coverage?: ChargebackCoverage,
+): string[] {
+  const lines: string[] = []
+  if (coverage) {
+    /*
+     * The reason a Copilot column is missing travels IN THE FILE. A CSV outlives
+     * the page, and "Anthropic only" is exactly the qualifier a reader loses
+     * first when a figure is pasted into a deck.
+     */
+    lines.push('')
+    lines.push(
+      `# chargeback_providers=${coverage.providers.join('+') || 'none'}`,
+      ...coverage.gaps.map((g) => `# gap · ${g.provider ?? 'all providers'} · ${g.reason}`),
+    )
+  }
+  if (!billedLane) return lines
+  lines.push('')
+  lines.push('provider,measure,source,availability,arm_total_usd,driver,spend_usd')
+  for (const arm of billedLane.arms) {
+    const stem = `${csvEscape(arm.provider)},${csvEscape(arm.measure)},${csvEscape(arm.source)},${csvEscape(arm.availability)},${armUsd(arm.totalUsd)}`
+    if (arm.rows.length === 0) {
+      lines.push(`${stem},,`)
+      continue
+    }
+    for (const r of arm.rows) lines.push(`${stem},${csvEscape(r.label)},${armUsd(r.usd)}`)
+  }
+  return lines
 }

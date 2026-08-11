@@ -20,15 +20,22 @@
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { z } from 'zod'
 import { requireAuth } from '../../../../auth/rbac'
-import { resolveReportGrants } from '../../../../auth/report-scope'
+import { requireReportScope } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
+import {
+  withReportCache,
+  identityKey,
+  normalizedQuery,
+} from '../../../../reporting/report-cache'
 import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
   fetchVisibleCostCentres,
   fetchCostCentreCards,
+  costCentreScope,
   summariseCostCentres,
 } from '../../../../reporting/cost-centres'
 import { providerStatesForWindow } from '../../../../reports/settling'
+import { reportCoverageMeta } from '../../../../reports/coverage-meta'
 import { copilotChargebackEnabled } from '../../../../reports/copilot-mode'
 import { MONTH_REGEX, monthKeyUtc } from '../../../../utils/period'
 import type { ReportMeta } from '../../../../../shared/reports/types'
@@ -40,7 +47,11 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const session = await requireAuth(event)
+  // Early auth gate (401 before any window/query work). requireReportScope below
+  // re-resolves the session, but requireAuth is per-event cached (server/utils/
+  // auth.ts) so this costs nothing extra — it just keeps the 401 ordering this
+  // handler already had before the grants call moved into requireReportScope.
+  await requireAuth(event)
   const query = await getValidatedQuery(event, (d) => Query.parse(d))
   const now = new Date()
   // Month OR custom from/to window. The window filters BURN; allocation is
@@ -53,11 +64,36 @@ export default defineEventHandler(async (event) => {
   const monthCtx = win.isMonth && win.monthStr ? { month: win.monthStr, now } : null
   const copilotChargeback = copilotChargebackEnabled()
 
-  return await withRequestRls(event, async (tx) => {
-    // A loosened policy mode (reportGrants.costCentre === 'all') makes every cost
-    // centre visible; non-elevated callers keep the owner/subtree predicate unchanged.
-    const grants = await resolveReportGrants(event, tx, session)
+  // Authz tx first (plan D5/r1-M2): the grant AND the visible-CC set resolve
+  // LIVE — a revoked grant 403s here, an ownership/retirement change re-keys —
+  // then the connection is released; the compute tx below runs only for a
+  // cache-miss leader.
+  //
+  // S3 part (d): the missing deny arm — WITHOUT this, a caller whose
+  // reportGrants.costCentre === false (denied entirely) fell through to
+  // fetchVisibleCostCentres' owner/subtree predicate and got a silent EMPTY
+  // 200 instead of an explicit 403 (Theme 4's one small independent defect: a
+  // 'false' grant was never distinguished from 'owned-or-subtree'). A loosened
+  // policy mode (reportGrants.costCentre === 'all') still makes every cost
+  // centre visible; non-elevated callers keep the owner/subtree predicate
+  // unchanged.
+  const { grants, ccs } = await withRequestRls(event, async (tx) => {
+    const { grants } = await requireReportScope(event, tx, 'cost-centre')
     const ccs = await fetchVisibleCostCentres(tx, { unbounded: grants.costCentre === 'all' })
+    return { grants, ccs }
+  })
+  const session = await requireAuth(event)
+
+  return await withReportCache(
+    event,
+    [
+      'cost-centres',
+      normalizedQuery(query),
+      identityKey(session),
+      `grant:${grants.costCentre}`,
+      `ccs:${ccs.map((c) => c.id).sort().join(',')}`,
+    ],
+    () => withRequestRls(event, async (tx) => {
     const { cards, asOfDate, monthFloor, copilotChargebackPartialMonth } =
       await fetchCostCentreCards(tx, ccs, win, monthCtx, {
         copilotChargeback,
@@ -71,6 +107,7 @@ export default defineEventHandler(async (event) => {
       monthFloor: monthFloor ?? metaMonth,
       asOfDate,
       providerStates: providerStatesForWindow(win, now),
+      coverage: await reportCoverageMeta(tx),
       scope: 'cost-centre',
       // Burn is the point-in-time emit-home cost_owning_unit_id (usage lane).
       pointInTimeDims: true,
@@ -79,6 +116,18 @@ export default defineEventHandler(async (event) => {
 
     return {
       meta,
+      /*
+       * WHERE THE READER IS (F5 D23). Derived from `ccs` — the very list that
+       * clamped the cards above — so the name the page prints and the
+       * population the figures cover are one fact, not two that agree today.
+       *
+       * The Cost-centre tab has no unscoped state (prototype note `scope`): a
+       * reader arriving with no `?cc=` is landed on `defaultCcId`. This block is
+       * what lets the client do that without inventing a landing rule of its
+       * own. Whether a SELECTOR renders is counted off `options` at the view
+       * (`CcScopeLine.vue:65`) — one option is not a selector, it is a label.
+       */
+      scope: costCentreScope(ccs),
       summary,
       cards,
       // §B — copilot chargeback ON over a partial-month range → the pooled (monthly)
@@ -91,5 +140,6 @@ export default defineEventHandler(async (event) => {
       laneNote:
         'Per-cost-centre burn is the project cost-owning-unit usage axis. Pooled Copilot usage with no cost-owning unit is excluded here and shown in the finance drill.',
     }
-  })
+    }),
+  )
 })

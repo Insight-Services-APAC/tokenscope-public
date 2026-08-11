@@ -1,0 +1,29 @@
+{
+  "endpoint": "anthropic-enterprise-user-cost",
+  "provenance": "schema-derived",
+  "capturedAt": null,
+  "note": "Transcribed from the Zod schemas in server/anthropic/enterprise-client.ts (CostReport / CostRow / Actor). This records what TokenScope ASSUMES, not what has been observed. SETTLED 2026-08-01 by a live run: `data[].model` IS present 395/395 on this report (255/255 again on 2026-08-02). CostRow now DECLARES it, so it is listed below and a live run no longer reports it as undeclared -- until that declaration landed, the model reached actual_spend.raw_payload only through .passthrough(), which is what left the billed lane's whole model axis resting on a field no schema named (task #32). `data[].requests` allows null because the poller requests group_by[]=cost_type, and the provider returns a null count whenever cost_type or token_type is grouped -- number-only here would have reported that as provider drift on every run. presentRate is 1 only where the schema makes the field REQUIRED. `data[].context_window` is DECLARED since W0a (mig 0127), same shape as `data[].model` and on BOTH reports (the canon clause: both or neither) -- requested in group_by, nullish string with no enum, listed below so a run no longer reports it as undeclared. `data[].speed` stays undeclared on purpose: not requested, not taken.",
+  "paths": [
+    { "path": "data", "types": ["array"], "presentRate": 1 },
+    { "path": "data[]", "types": ["object"], "presentRate": 1 },
+    { "path": "data[].actor", "types": ["object"], "presentRate": 1 },
+    { "path": "data[].actor.deleted", "types": ["boolean"], "presentRate": null, "defaulted": true },
+    { "path": "data[].actor.email", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].actor.name", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].actor.type", "types": ["string"], "presentRate": 1 },
+    { "path": "data[].actor.user_id", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].amount", "types": ["string"], "presentRate": 1 },
+    { "path": "data[].context_window", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].cost_type", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].currency", "types": ["string"], "presentRate": null },
+    { "path": "data[].list_amount", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].model", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].product", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].requests", "types": ["number", "null"], "presentRate": null, "defaulted": true },
+    { "path": "data[].token_type", "types": ["string", "null"], "presentRate": null },
+    { "path": "data_refreshed_at", "types": ["string", "null"], "presentRate": null },
+    { "path": "has_more", "types": ["boolean"], "presentRate": null, "defaulted": true },
+    { "path": "next_page", "types": ["string", "null"], "presentRate": null },
+    { "path": "organization_id", "types": ["string", "null"], "presentRate": null }
+  ]
+}

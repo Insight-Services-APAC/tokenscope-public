@@ -20,16 +20,16 @@ export interface RlsContext {
   userTeammateId: string
 }
 
-export async function withRlsContext<T>(
-  db: PostgresJsDatabase<Record<string, unknown>>,
+export async function withRlsContext<TSchema extends Record<string, unknown>, T>(
+  db: PostgresJsDatabase<TSchema>,
   ctx: RlsContext,
-  fn: (tx: PostgresJsDatabase<Record<string, unknown>>) => Promise<T>,
+  fn: (tx: PostgresJsDatabase<TSchema>) => Promise<T>,
 ): Promise<T> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`SELECT set_config('app.user_region_id', ${ctx.userRegionId}, true)`)
     await tx.execute(sql`SELECT set_config('app.user_org_path', ${ctx.userOrgPath}, true)`)
     await tx.execute(sql`SELECT set_config('app.user_role', ${ctx.userRole}, true)`)
     await tx.execute(sql`SELECT set_config('app.user_teammate_id', ${ctx.userTeammateId}, true)`)
-    return fn(tx as unknown as PostgresJsDatabase<Record<string, unknown>>)
+    return fn(tx as unknown as PostgresJsDatabase<TSchema>)
   })
 }

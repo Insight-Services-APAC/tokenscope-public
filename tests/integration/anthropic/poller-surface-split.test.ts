@@ -20,7 +20,11 @@
  *     window) still converges;
  *   - runAnalyticsPollReconciledOrgs honours { onlyExternalOrgId } — one org
  *     polled, unknown id → clean no-op (#142 org scoping);
- *   - migration 0084: non-Code lanes never leak into the §A needs-tagging view.
+ *   - non-Code lanes never leak into the §A needs-tagging view — via mig 0084 at
+ *     the time this file's fixtures were written, via mig 0101's
+ *     INGEST_ONLY_USAGE_TOOLS today (v_teammate_usage_daily itself is restored
+ *     to the complete usage truth; see the "migration 0101 (A1)" describe block
+ *     below).
  */
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -67,18 +71,35 @@ function fakeEnterpriseClient(
 ): AnthropicEnterpriseClient {
   const day = (startingAt: string) => startingAt.slice(0, 10)
   return {
-    getUserUsageReport: async ({ startingAt }: { startingAt: string }) => ({
-      has_more: false,
-      next_page: null,
-      data: byDay[day(startingAt)]?.usage ?? [],
-    }),
-    getUserCostReport: async ({ startingAt }: { startingAt: string }) => ({
-      has_more: false,
-      next_page: null,
-      data: byDay[day(startingAt)]?.cost ?? [],
-    }),
+    getUserUsageReport: async ({ startingAt, groupBy }: { startingAt: string; groupBy?: string[] }) => {
+      usageGroupBySeen.push(groupBy ?? [])
+      return {
+        has_more: false,
+        next_page: null,
+        data: byDay[day(startingAt)]?.usage ?? [],
+      }
+    },
+    getUserCostReport: async ({ startingAt, groupBy }: { startingAt: string; groupBy?: string[] }) => {
+      /*
+       * Record what the PRODUCTION caller asked for. The client-level test that
+       * covers cost_type passes the arrays in by hand, so deleting cost_type
+       * from analytics-poller.ts would leave it green -- a test that cannot
+       * fail for the regression it is named after. This stub captures the real
+       * request so the assertion below is about the caller, not the fixture.
+       */
+      costGroupBySeen.push(groupBy ?? [])
+      return {
+        has_more: false,
+        next_page: null,
+        data: byDay[day(startingAt)]?.cost ?? [],
+      }
+    },
   } as unknown as AnthropicEnterpriseClient
 }
+
+/** group_by[] as the poller actually sent it, per call, per report. */
+const costGroupBySeen: string[][] = []
+const usageGroupBySeen: string[][] = []
 
 /* ------------------------------ DB helpers ------------------------------ */
 
@@ -566,8 +587,24 @@ describe('runAnalyticsPollReconciledOrgs — { onlyExternalOrgId } scoping (#142
   })
 })
 
-describe('migration 0084 — §A view excludes non-Code surfaces', () => {
-  it('v_teammate_usage_daily returns ONLY the claude-code lane for a teammate-day with mixed surfaces', async () => {
+describe('migration 0101 (A1) — §A view is RESTORED to include non-Code surfaces', () => {
+  it('v_teammate_usage_daily returns EVERY surface lane for a teammate-day with mixed surfaces (mig 0084 reverted)', async () => {
+    /*
+     * Migration 0084 excluded the non-Code Claude surfaces from this view so
+     * they could never become a taggable `unaccounted_usage` worklist item —
+     * but that exclusion ALSO removed them from `v_complete_usage`'s
+     * completeness rollups, since this view was the reconciliation worker's
+     * only source (docs/design/usage-completeness-and-provider-governance.md
+     * §1.1's arithmetic-impossibility finding). Migration 0101 (A1) reverts the
+     * exclusion here and moves worklist safety to A2
+     * (INGEST_ONLY_USAGE_TOOLS in server/usage/unaccounted-reconciliation.ts) —
+     * so this view is restored to being the complete per-(teammate, day, tool)
+     * USAGE truth its name and header claim, and the historical
+     * migration-0084 pin (tests/unit/usage/surface.test.ts, parsing 0084's own
+     * file text) is left untouched: 0084 genuinely excluded these tools WHEN IT
+     * SHIPPED, and that pin is a fact about that migration's file, not about
+     * today's live view.
+     */
     const DAY = '2026-07-05'
     await seedSpend(priyaId, DAY, 'claude-code', 5.0, 'seed-view-a')
     await seedSpend(priyaId, DAY, 'claude-ai', 7.0, 'seed-view-a')
@@ -576,8 +613,132 @@ describe('migration 0084 — §A view excludes non-Code surfaces', () => {
     const rows = await t.client<{ tool: string; usage_usd: string }[]>`
       SELECT tool, usage_usd::text AS usage_usd FROM v_teammate_usage_daily
       WHERE teammate_id = ${priyaId}::uuid AND day = ${DAY}::date ORDER BY tool`
-    expect(rows).toHaveLength(1)
-    expect(rows[0]!.tool).toBe('claude-code')
-    expect(Number(rows[0]!.usage_usd)).toBeCloseTo(5.0, 6) // chat + cowork NOT folded in
+    expect(rows).toHaveLength(3)
+    expect(rows.map((r) => [r.tool, Number(r.usage_usd)])).toEqual([
+      ['claude-ai', 7],
+      ['claude-code', 5],
+      ['claude-cowork', 2],
+    ])
+  })
+
+  it('copilot-cli / copilot-agent remain excluded from the actual_spend branch (unchanged reason: their usage truth is reconciliation_record)', async () => {
+    const DAY = '2026-07-12'
+    await seedSpend(priyaId, DAY, 'claude-code', 5.0, 'seed-view-b')
+    // Neither of these should ever reach v_teammate_usage_daily FROM actual_spend
+    // (a future §B bill writer might land one there; the exclusion firewalls it).
+    await seedSpend(priyaId, DAY, 'copilot-cli', 99.0, 'seed-view-b')
+    await seedSpend(priyaId, DAY, 'copilot-agent', 88.0, 'seed-view-b')
+
+    const rows = await t.client<{ tool: string }[]>`
+      SELECT tool FROM v_teammate_usage_daily
+      WHERE teammate_id = ${priyaId}::uuid AND day = ${DAY}::date ORDER BY tool`
+    expect(rows.map((r) => r.tool)).toEqual(['claude-code'])
+  })
+})
+
+describe('the group_by the poller ACTUALLY sends', () => {
+  it('asks the cost report for cost_type, and does not ask the usage report for it', () => {
+    /*
+     * This is what makes the cost_type fix regression-proof at the CALLER.
+     * enterprise-client.test.ts covers the wire shape but passes the arrays in
+     * by hand, so removing cost_type from analytics-poller.ts would leave it
+     * green -- a test that cannot fail for the thing it is named after.
+     *
+     * Two directions, both load-bearing:
+     *  - cost_type ON the cost report is what makes the web_search /
+     *    code_execution exclusion reachable at all (it is null until grouped,
+     *    so the filter reading it had never once fired).
+     *  - cost_type OFF the usage report matters because UsageRow has no such
+     *    field: sending it fragments those rows by a dimension we cannot read
+     *    back, multiplying them against the 100-page ceiling for nothing.
+     */
+    expect(costGroupBySeen.length).toBeGreaterThan(0)
+    expect(usageGroupBySeen.length).toBeGreaterThan(0)
+    for (const g of costGroupBySeen) expect(g).toContain('cost_type')
+    for (const g of usageGroupBySeen) expect(g).not.toContain('cost_type')
+    // Both still carry the dimensions the model work depends on.
+    for (const g of [...costGroupBySeen, ...usageGroupBySeen]) {
+      expect(g).toContain('product')
+      expect(g).toContain('model')
+      /*
+       * W0a D3, and the canon clause it implements verbatim: "Add
+       * `context_window` and `speed` to BOTH reports or neither — the usage
+       * and cost reports are at different grains and a dimension on one side
+       * only makes the join harder" (target-state-data-architecture.md).
+       * Pinned at the CALLER for the same reason cost_type is above:
+       * enterprise-client.test.ts passes its arrays in by hand, so dropping
+       * the dimension from analytics-poller.ts would leave it green.
+       * `speed` is deliberately NOT requested (no card needs it).
+       */
+      expect(g).toContain('context_window')
+      expect(g).not.toContain('speed')
+    }
+  })
+})
+
+describe('org-grain tool rows and the stale-prune identity guard', () => {
+  it('does not let web_search/code_execution rows dilute the skip ratio', async () => {
+    /*
+     * A regression introduced BY requesting cost_type, and the reason the
+     * filter now runs before `total` is incremented.
+     *
+     * `total` is the denominator of the prune's identity guard
+     * (skipped/total <= PRUNE_MAX_SKIP_RATIO = 0.5). The guard refuses a prune
+     * when an outsized share of rows failed to bind a teammate, because that is
+     * OUR failure and pruning then deletes rows the broken run merely failed to
+     * re-assert.
+     *
+     * Org-grain tool rows never attempt identity resolution. Counting them makes
+     * ONE unbindable token row beside TWO tool rows read as 1/3 = 0.33 -- under
+     * the threshold, so the prune fires -- when it is really 1/1 = 1.0 and must
+     * not. Before cost_type was requested these rows could not appear at all.
+     *
+     * THE FIXTURE MUST HAVE SOMETHING TO LOSE. An earlier version of this test
+     * asserted staleRowsDeleted === 0 with no pre-existing rows, so it passed
+     * whether the guard blocked the prune or the prune ran and found nothing --
+     * green under the mutation it was named after. So: run once with a
+     * RESOLVABLE actor to write real rows, then run again for the same day with
+     * only unresolvable + org-grain rows. The first run's rows are now stale by
+     * pulled_at. If the guard is diluted they are deleted; if it holds they
+     * survive.
+     */
+    const good = PRIYA // seeded in beforeAll, so the resolver binds it
+    const unknown = { type: 'user_actor', email: 'nobody-here@x.test' }
+
+    const seedRun = fakeEnterpriseClient({
+      '2026-07-09': {
+        usage: [],
+        cost: [costRow(good, 'claude_code', '2000.000000')],
+      },
+    })
+    await runEnterpriseAnalyticsPoll(t.db, seedRun, { startingAt: '2026-07-09', endingAt: '2026-07-09' })
+
+    const before = await t.client`
+      SELECT id FROM actual_spend WHERE date = '2026-07-09'::date AND tool = 'claude-code'
+    `
+    // Guard the guard: if the seed wrote nothing, the assertion below is vacuous.
+    expect(before.length).toBeGreaterThan(0)
+
+    const brokenRun = fakeEnterpriseClient({
+      '2026-07-09': {
+        usage: [],
+        cost: [
+          { actor: unknown, amount: '1000.000000', currency: 'USD', cost_type: null, product: 'claude_code' },
+          { actor: unknown, amount: '500.000000', currency: 'USD', cost_type: 'web_search', product: null },
+          { actor: unknown, amount: '500.000000', currency: 'USD', cost_type: 'code_execution', product: null },
+        ],
+      },
+    })
+    const res = await runEnterpriseAnalyticsPoll(t.db, brokenRun, {
+      startingAt: '2026-07-09',
+      endingAt: '2026-07-09',
+    })
+
+    // Every identity-eligible row failed to bind, so the prune must be refused.
+    expect(res.staleRowsDeleted).toBe(0)
+    const after = await t.client`
+      SELECT id FROM actual_spend WHERE date = '2026-07-09'::date AND tool = 'claude-code'
+    `
+    expect(after.length).toBe(before.length)
   })
 })

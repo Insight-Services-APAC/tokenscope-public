@@ -21,9 +21,9 @@
  * an interval to verify the at-speed read path.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import postgres from 'postgres'
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
+import { createDbClient } from '../drizzle/connect'
 import * as schema from '../drizzle/schema'
 import { LocalCollectorReader } from '../server/azure/reader'
 import { runReadJoiner } from '../server/workers/azure-monitor-reader'
@@ -207,7 +207,7 @@ async function main() {
     process.exit(1)
   }
 
-  const client = postgres(dbUrl, { max: 1, idle_timeout: 5 })
+  const client = createDbClient(dbUrl, { max: 1, idle_timeout: 5 })
   const db = drizzle(client, { schema })
   const reader = new LocalCollectorReader(endpoint)
 

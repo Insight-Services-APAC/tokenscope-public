@@ -139,6 +139,64 @@ describe('buildWeeklyLanes — fold + partial-week rules (I1)', () => {
   })
 })
 
+/*
+ * ── The week axis never runs into the future ─────────────────────────────────
+ *
+ * Every series here is zero-filled across the axis, so a week beyond today
+ * renders as a MEASURED $0 — the chart asserting "nobody spent that week" about
+ * a week that has not begun. That is the same false claim the KPI sparklines
+ * carried at day grain, and it is reachable from the custom date range, whose
+ * `to` input has no upper bound.
+ *
+ * The clamp must not touch the ordinary case: `to` is today at every current
+ * call site (month mode fetches `[today-59, today]`), and a PAST week with no
+ * spend is a real zero that stays.
+ */
+describe('buildWeeklyLanes — the axis stops at the present', () => {
+  // `to` two months past today: 2026-07-08 is a Wednesday; the current week is
+  // 2026-07-06 and nothing beyond it has happened.
+  const FAR = '2026-09-13'
+
+  it('does not emit weeks that have not begun', () => {
+    const b = buildWeeklyLanes(makeCells(), { from: FROM, to: FAR, today: TODAY })
+    expect(b.weeks.at(-1)).toBe('2026-07-06')
+    expect(b.weeks).toEqual(WEEKS)
+    // And no series carries a manufactured point past it.
+    for (const s of b.series) {
+      expect(s.data.every((p) => p.x <= '2026-07-06'), `${s.key} has no future points`).toBe(true)
+    }
+  })
+
+  it('still extends past today when a CELL genuinely carries a later week', () => {
+    /*
+     * Same escape hatch as the server-side day clamp: clipping to today alone
+     * would drop money the window total still counts. A future-dated cell is
+     * pathological data, but hiding it is worse than showing it.
+     */
+    const cells = [...makeCells(), { weekStart: '2026-07-20', lane: 'claude', usd: 77 }]
+    const b = buildWeeklyLanes(cells, { from: FROM, to: FAR, today: TODAY })
+    expect(b.weeks.at(-1)).toBe('2026-07-20')
+    const claude = b.series.find((s) => s.key === 'claude')!
+    expect(claude.data.find((p) => p.x === '2026-07-20')?.y).toBe(77)
+  })
+
+  it('leaves a window that already ends at today completely unchanged', () => {
+    // The regression guard: the clamp must be a no-op on every real call site.
+    const clamped = buildWeeklyLanes(makeCells(), { from: FROM, to: TO, today: TODAY })
+    expect(clamped.weeks).toEqual(WEEKS)
+    expect(clamped.inProgressWeek).toBe('2026-07-06')
+  })
+
+  it('keeps an EMPTY PAST week as a genuine zero', () => {
+    // Only the future is suppressed. A past week nobody spent in is a measurement.
+    const cells = makeCells().filter((c) => c.weekStart !== '2026-06-01')
+    const b = buildWeeklyLanes(cells, { from: FROM, to: FAR, today: TODAY })
+    expect(b.weeks).toContain('2026-06-01')
+    const claude = b.series.find((s) => s.key === 'claude')!
+    expect(claude.data.find((p) => p.x === '2026-06-01')?.y).toBe(0)
+  })
+})
+
 describe('computeCompositionDelta — UNFOLDED basis, complete-4 vs prior-4 (r1-F5)', () => {
   it('recomputes the delta independently from the raw rows', () => {
     const cells = makeCells()

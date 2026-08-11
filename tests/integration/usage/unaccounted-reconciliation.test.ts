@@ -183,9 +183,12 @@ describe('reconcileUnaccountedUsage (§A)', () => {
   it('#142 REGRESSION: non-Code surface spend (chat-only day) produces NO needs-tagging record', async () => {
     // The per-surface split (#142) writes actual_spend lanes for chat / Cowork /
     // etc. Those surfaces are §B chargeback-only — no OTel, no sessions,
-    // deliberately untaggable. Migration 0084 excludes them from
-    // v_teammate_usage_daily, so a chat-only day must NOT surface in the §A
-    // developer worklist as "unaccounted usage".
+    // deliberately untaggable. Migration 0084 excluded them from
+    // v_teammate_usage_daily; migration 0101 (A1) restores them to that view
+    // (it is now the complete usage truth again) but keeps them out of THIS
+    // worklist via the generalised INGEST_ONLY_USAGE_TOOLS exclusion (A2) — so a
+    // chat-only day must STILL NOT surface in the §A developer worklist as
+    // "unaccounted usage", via a different mechanism than before.
     await bill('2026-06-18', '42.00', 'claude-ai') // Claude Chat spend, bill lane only
     await bill('2026-06-18', '3.00', 'claude-cowork')
     const res = await reconcileUnaccountedUsage(t.db, WINDOW)
@@ -202,5 +205,20 @@ describe('reconcileUnaccountedUsage (§A)', () => {
     const rows = await records()
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ day: '2026-06-19', tool: 'claude-code', cost: 6 }) // 10 − 4, NOT 109 − 4
+  })
+
+  it('mig 0101 (A1/A2): non-Code surface spend IS visible in v_teammate_usage_daily again, but STILL never taggable — "visible ≠ taggable" holds for this lane too', async () => {
+    // A1 restored the non-Code surfaces to v_teammate_usage_daily (the view is the
+    // complete usage truth again); this asserts BOTH halves of the design in one
+    // place: visible in the source view, invisible in the taggable worklist.
+    await bill('2026-06-20', '42.00', 'claude-ai')
+    const [lane] = await t.client<{ usd: string }[]>`
+      SELECT usage_usd::text AS usd FROM v_teammate_usage_daily
+      WHERE teammate_id = ${teammateId}::uuid AND day = '2026-06-20'::date AND tool = 'claude-ai'`
+    expect(Number(lane!.usd)).toBe(42) // A1: visible again in the source view
+
+    const res = await reconcileUnaccountedUsage(t.db, WINDOW)
+    expect(res.recordsWithDelta).toBe(0)
+    expect(await records()).toHaveLength(0) // A2: still never a needs-tagging record
   })
 })

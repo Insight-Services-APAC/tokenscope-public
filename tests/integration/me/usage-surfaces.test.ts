@@ -1,6 +1,6 @@
 // @vitest-environment node
 /*
- * #142 — /api/v1/me/usage `surfaces` section (§B display-only, non-Code Claude
+ * #142 — /api/v1/me/home `surfaces` section (§B display-only, non-Code Claude
  * surfaces), against real Postgres via the REAL handler (per AGENTS.md §"Never
  * mock Drizzle").
  *
@@ -19,7 +19,7 @@ import * as schema from '../../../drizzle/schema'
 import { injectTestSession } from '../../helpers/auth'
 import type { Session } from '../../../server/utils/auth'
 import { NON_CODE_CLAUDE_TOOLS } from '../../../shared/usage/surface'
-import usageHandler from '../../../server/api/v1/me/usage.get'
+import usageHandler from '../../../server/api/v1/me/home.get'
 
 let t: TestDb
 let regionId = ''
@@ -129,7 +129,7 @@ afterAll(async () => {
   if (t) await stopTestDb(t)
 }, 30_000)
 
-describe('/me/usage surfaces (§B non-Code Claude lanes, #142)', () => {
+describe('/me/home surfaces (§B non-Code Claude lanes, #142)', () => {
   it('returns the requester-only per-surface MTD totals + per-day series, canonical order, zero surfaces elided', async () => {
     const res = await usageHandler(ev(sess(priyaId)))
 

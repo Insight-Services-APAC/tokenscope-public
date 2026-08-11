@@ -19,11 +19,15 @@ import { requireRole } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
+import { recomputeGovernanceVerdicts } from '../../../../../governance/recompute'
+import { persistCopilotOverageAllocation } from '../../../../../governance/copilot-overage-allocation'
+import { lockGovernanceCutoverForBillingEdit } from '../../../../../governance/cutover'
 import { requireUuidParam } from '../../../../../utils/require-uuid-param'
 import { translatePgConstraintError } from '../../../../../utils/pg-constraint-error'
 import {
   reconciliationModeSchema,
   billingSchema,
+  overageAllocationPolicySchema,
   credentialSecretNameSchema,
   githubAppIdSchema,
   canonicaliseExternalId,
@@ -38,9 +42,13 @@ const Body = z
     billing: billingSchema.optional(),
     credentialSecretName: credentialSecretNameSchema.nullish(),
     // ADR-0010 D1/D2 (Copilot only): whole-month flat seat price + per-user included
-    // allowance, both USD. null clears (disables that bill component).
+    // allowance, both USD. null clears (disables that bill component). FORECAST/SHOWBACK
+    // reference only — see server/governance/copilot-rate-plan.ts for the period-aware,
+    // effective-dated source computations actually use.
     flatSeatPriceUsd: z.number().min(0).max(1_000_000).nullish(),
     includedAllowanceUsd: z.number().min(0).max(1_000_000).nullish(),
+    // ADR-0011 D10 — configurable per-enterprise pooled-overage allocation policy.
+    overageAllocationPolicy: overageAllocationPolicySchema.optional(),
     // Optional GitHub App id (mig 0078). Supply to opt into App mode; supply null to
     // clear it (revert to PAT). Absent key = unchanged. github-only (enforced below).
     githubAppId: githubAppIdSchema.nullish(),
@@ -77,6 +85,9 @@ export default defineEventHandler(async (event) => {
   const has = (k: keyof typeof body) => Object.prototype.hasOwnProperty.call(body, k)
 
   return await withRequestRls(event, async (tx) => {
+    if (has('billing')) {
+      await lockGovernanceCutoverForBillingEdit(tx)
+    }
     const rows = await tx.execute<CurrentRow>(sql`
       SELECT provider, external_id FROM provider_enterprise WHERE id = ${id}::uuid LIMIT 1
     `)
@@ -142,6 +153,8 @@ export default defineEventHandler(async (event) => {
       sets.push(sql`flat_seat_price_usd = ${body.flatSeatPriceUsd != null ? body.flatSeatPriceUsd.toFixed(6) : null}::numeric`)
     if (has('includedAllowanceUsd'))
       sets.push(sql`included_allowance_usd = ${body.includedAllowanceUsd != null ? body.includedAllowanceUsd.toFixed(6) : null}::numeric`)
+    if (has('overageAllocationPolicy'))
+      sets.push(sql`overage_allocation_policy = ${body.overageAllocationPolicy}`)
     if (has('githubAppId')) sets.push(sql`github_app_id = ${body.githubAppId ?? null}`)
     if (has('notes')) sets.push(sql`notes = ${body.notes ?? null}`)
 
@@ -177,6 +190,9 @@ export default defineEventHandler(async (event) => {
           ...(has('includedAllowanceUsd')
             ? { included_allowance_usd: body.includedAllowanceUsd ?? null }
             : {}),
+          ...(has('overageAllocationPolicy')
+            ? { overage_allocation_policy: body.overageAllocationPolicy }
+            : {}),
           ...(has('githubAppId') ? { github_app_id: body.githubAppId ?? null } : {}),
           ...(has('notes') ? { notes: body.notes ?? null } : {}),
         },
@@ -184,6 +200,41 @@ export default defineEventHandler(async (event) => {
       ipAddress: ip,
       userAgent: ua,
     })
+
+    // A `billing` edit must change chargeability for every OPEN-period row
+    // this enterprise governs, IMMEDIATELY (design §4.1 "governance edits take
+    // effect immediately") — never wait for the next worker tick. Closed
+    // periods are structurally excluded by recomputeGovernanceVerdicts itself.
+    // Pre-activation this is a no-op (the legacy heuristic ignores `billing`
+    // entirely), matching today's behaviour exactly.
+    if (has('billing')) {
+      await recomputeGovernanceVerdicts(tx, { providerEnterpriseId: id })
+    }
+
+    // ADR-0011 D7 ("dead governance is a defect... ships with the reader that
+    // consumes it"): an `overageAllocationPolicy` edit must change the persisted
+    // distribution for every OPEN month this enterprise already has a bill for,
+    // immediately — never wait for the next bill-refresh tick. Closed months are
+    // refused by persistCopilotOverageAllocation itself (require reopen/restate).
+    if (has('overageAllocationPolicy')) {
+      const months = await tx.execute<{ month: string }>(sql`
+        SELECT DISTINCT b.month::text AS month
+        FROM copilot_pool_bill b
+        LEFT JOIN finance_period fp ON fp.period_month = b.month
+        WHERE b.provider_enterprise_id = ${id}::uuid AND COALESCE(fp.state, 'open') = 'open'
+        ORDER BY month
+      `)
+      for (const m of months) {
+        await persistCopilotOverageAllocation(tx, {
+          providerEnterpriseId: id,
+          enterpriseExternalId: nextExternalId,
+          month: m.month,
+          actorTeammateId: caller.teammateId,
+          ipAddress: ip,
+          userAgent: ua,
+        })
+      }
+    }
 
     return { id, updated: true }
   })

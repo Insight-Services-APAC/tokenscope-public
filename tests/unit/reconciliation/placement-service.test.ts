@@ -31,7 +31,10 @@ function fakeStore(
     loadActiveUnitOwners: vi.fn(async () => new Map()),
     createBillTeammate: vi.fn(async () => 'tm-new'),
     homeTeammate: vi.fn(async () => {}),
+    homeTeammateIfStillDerivable: vi.fn(async () => true),
+    stampPlacementAttempt: vi.fn(async () => {}),
     setPlacementProvenance: vi.fn(async () => {}),
+    captureDirectorySnapshot: vi.fn(async () => {}),
     replayOwedBills: vi.fn(async () => 0),
     ...over,
   }
@@ -61,7 +64,7 @@ describe('provisionAndPlace', () => {
     expect(r).toMatchObject({ created: true, placed: true, placedVia: 'unit' })
     expect(store.createBillTeammate).toHaveBeenCalledWith(expect.objectContaining({ orgUnitId: 'ou-mp' }))
     expect(store.unplacedOrgUnitIdForRegion).not.toHaveBeenCalled()
-    expect(store.setPlacementProvenance).toHaveBeenCalledWith('tm-new', { ownerOid: 'kat-oid' })
+    expect(store.setPlacementProvenance).toHaveBeenCalledWith('tm-new', { via: 'manager-chain', ownerOid: 'kat-oid' })
   })
 
   it('no unit, ATTRIBUTE region → region holding node, placed=false, provenance cleared', async () => {
@@ -104,6 +107,41 @@ describe('provisionAndPlace', () => {
     })
     expect(r).toMatchObject({ reason: 'directory-miss', placedVia: 'global' })
     expect(store.createBillTeammate).toHaveBeenCalledWith(expect.objectContaining({ orgUnitId: 'ou-unplaced' }))
+  })
+
+  /*
+   * C3 — the worklist's Department/Company columns are fed by capturing the
+   * directory record this lane ALREADY fetched. Three properties, because each
+   * one is a different way of getting it wrong.
+   */
+  describe('directory snapshot', () => {
+    it('captures department + company from the record already in hand', async () => {
+      const store = fakeStore()
+      await provisionAndPlace('dev@example.com', {
+        store,
+        lookupDirectory: async () => ({ ...dirUser('CC-9001', 'Sales-Solution'), companyName: 'Insight EMEA' }),
+      })
+      expect(store.captureDirectorySnapshot).toHaveBeenCalledWith('tm-new', {
+        department: 'Sales-Solution',
+        companyName: 'Insight EMEA',
+      })
+    })
+
+    it('writes NOTHING on a directory miss — a row of nulls would read as "the tenant leaves these empty"', async () => {
+      const store = fakeStore()
+      await provisionAndPlace('ghost@example.com', { store, lookupDirectory: async () => null })
+      expect(store.captureDirectorySnapshot).not.toHaveBeenCalled()
+    })
+
+    it('a snapshot failure does NOT stop the owed bills replaying — display data never costs money', async () => {
+      const store = fakeStore({
+        captureDirectorySnapshot: vi.fn(async () => { throw new Error('snapshot boom') }),
+        replayOwedBills: vi.fn(async () => 4),
+      })
+      const r = await provisionAndPlace('dev@example.com', { store, lookupDirectory: async () => dirUser('CC-9001') })
+      expect(r.replayedBills).toBe(4)
+      expect(store.replayOwedBills).toHaveBeenCalled()
+    })
   })
 
   it('existing on holding + rehome-safe → re-homed', async () => {

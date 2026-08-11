@@ -37,6 +37,12 @@ function ev(opts: { session: Session; unitId: string; body: unknown }) {
 }
 const admin = (): Session => ({ teammateId: ADMIN_ID, email: 'ow-admin@x.test', displayName: 'Admin', role: 'admin', regionId, orgPath: 'ow' } as Session)
 
+async function unplacedIdFor(rid: string): Promise<string> {
+  const [row] = await t.client<{ id: string }[]>`
+    SELECT id::text AS id FROM org_unit WHERE region_id = ${rid}::uuid AND code = '__UNPLACED__'`
+  return row!.id
+}
+
 // The #121 pair from MOCK_DIRECTORY: a standard @example.com account and a
 // separate privileged/CLD account on the tenant onmicrosoft domain.
 const RIO_PRIMARY_OID = 'dir-oid-0007'
@@ -82,11 +88,14 @@ describe('cost-centre owner assignment (directory-backed)', () => {
     expect(res.provisioned).toBe(true)
     expect(res.identity_adopted).toBe(false)
     expect(res.email).toBe('sasha.kumar@example.com')
-    // teammate created in THIS region, placed in the region default, source=directory.
+    // teammate created in THIS region, homed on the region's __UNPLACED__
+    // holding node (S3, server/auth/placement-home.ts) — NOT the region-root
+    // 'default' BU, whose subtree is the whole region.
     const [tm] = await t.client<{ region_id: string; org_unit_id: string; source: string }[]>`
       SELECT region_id::text AS region_id, org_unit_id::text AS org_unit_id, source FROM teammate WHERE entra_oid = 'dir-oid-0001'`
     expect(tm!.region_id).toBe(regionId)
-    expect(tm!.org_unit_id).toBe(ids['default'])
+    expect(tm!.org_unit_id).toBe(await unplacedIdFor(regionId))
+    expect(tm!.org_unit_id).not.toBe(ids['default'])
     expect(tm!.source).toBe('directory')
     // ownership row exists for the practice.
     const [own] = await t.client<{ n: string }[]>`SELECT count(*)::text AS n FROM cou_owner WHERE org_unit_id = ${ids['prac']}::uuid AND teammate_id = ${res.teammate_id}::uuid AND revoked_at IS NULL`
@@ -94,11 +103,41 @@ describe('cost-centre owner assignment (directory-backed)', () => {
   })
 
   it('does NOT re-provision when the directory person is already a teammate', async () => {
+    /*
+     * This used to assign the same person to a SECOND unit and assert it
+     * succeeded — which was the old, unbounded shape. Since the one-owner-one-BU
+     * ruling (2026-08-10) the second grant is a 409, so the test now proves the
+     * thing it was actually about: the second call resolves the EXISTING
+     * teammate rather than provisioning a duplicate. That resolution happens
+     * before the ownership check, so the teammate count is the assertion and
+     * the rejection is the new invariant, asserted beside it.
+     */
     await handler(ev({ session: admin(), unitId: ids['prac']!, body: { oid: 'dir-oid-0002' } })) // provisions tom
-    const res = (await handler(ev({ session: admin(), unitId: ids['team']!, body: { oid: 'dir-oid-0002' } }))) as { provisioned: boolean }
-    expect(res.provisioned).toBe(false) // already a teammate → just assigned to the second unit
+    await expect(
+      handler(ev({ session: admin(), unitId: ids['team']!, body: { oid: 'dir-oid-0002' } })),
+    ).rejects.toMatchObject({ statusCode: 409 })
     const [tm] = await t.client<{ n: string }[]>`SELECT count(*)::text AS n FROM teammate WHERE entra_oid = 'dir-oid-0002'`
     expect(tm!.n).toBe('1') // exactly one teammate, not duplicated
+  })
+
+  it('refuses a SECOND Business Unit for someone who already owns one (409)', async () => {
+    /*
+     * Owner ruling 2026-08-10. Not tidiness: the manager-chain placement walk
+     * treats an owner of more than one active cost-owning unit as AMBIGUOUS and
+     * skips them entirely, so a multi-BU owner silently places nobody and their
+     * reports pile up on the region default.
+     */
+    await handler(ev({ session: admin(), unitId: ids['prac']!, body: { oid: 'dir-oid-0003' } }))
+    await expect(
+      handler(ev({ session: admin(), unitId: ids['team']!, body: { oid: 'dir-oid-0003' } })),
+    ).rejects.toMatchObject({ statusCode: 409 })
+    // …and the first ownership is untouched: a refused second grant must not
+    // disturb the one that was already valid.
+    const [own] = await t.client<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM cou_owner co
+      JOIN teammate tm ON tm.id = co.teammate_id
+      WHERE tm.entra_oid = 'dir-oid-0003' AND co.revoked_at IS NULL`
+    expect(own!.n).toBe('1')
   })
 
   it('rejects a body with neither oid nor teammate_id (400)', async () => {

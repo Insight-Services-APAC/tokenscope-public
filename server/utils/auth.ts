@@ -211,6 +211,70 @@ async function resolveSession(event: H3Event): Promise<Session | null> {
   return session
 }
 
+interface PersonaTarget {
+  id: string
+  email: string
+  displayName: string | null
+  role: Role
+  regionId: string
+  orgPath: string
+}
+
+/**
+ * Resolve + validate a persona-override cookie's target teammate. Shared by
+ * BOTH callers below (dev-mode's resolveFromOverrideOnly and sandbox's
+ * applyPersonaOverride) — previously `applyPersonaOverride` alone performed
+ * the DEMO_PERSONAS check while `resolveFromOverrideOnly` had its own
+ * verbatim-duplicated lookup WITHOUT it. That divergence meant a hand-minted
+ * (or HMAC-secret-exfiltrated) override cookie naming an arbitrary,
+ * non-demo teammate would resolve in dev-mode. Extracting the check here
+ * closes that gap for both paths in one place.
+ */
+async function resolvePersonaTarget(
+  db: ReturnType<typeof getDb>,
+  targetTeammateId: string,
+): Promise<PersonaTarget | null> {
+  const [tm] = await db
+    .select({
+      id: schema.teammate.id,
+      email: schema.teammate.email,
+      displayName: schema.teammate.displayName,
+      role: schema.teammate.role,
+      regionId: schema.teammate.regionId,
+      orgUnitId: schema.teammate.orgUnitId,
+    })
+    .from(schema.teammate)
+    .where(eq(schema.teammate.id, targetTeammateId))
+    .limit(1)
+  if (!tm) return null
+
+  // Defence in depth: the override cookie can only have been minted by
+  // /api/v1/auth/dev-login.post.ts which routes through getPersona() and
+  // therefore only accepts DEMO_PERSONAS targets. If the HMAC secret were
+  // ever exfiltrated, OR if a future code path mints an override with an
+  // arbitrary target, this gate refuses to impersonate a non-demo teammate.
+  const targetIsDemo = DEMO_PERSONAS.some(
+    (p) => p.email.toLowerCase() === tm.email.toLowerCase(),
+  )
+  if (!targetIsDemo) return null
+
+  const [unit] = await db
+    .select({ path: schema.orgUnit.path })
+    .from(schema.orgUnit)
+    .where(eq(schema.orgUnit.id, tm.orgUnitId))
+    .limit(1)
+  if (!unit) return null
+
+  return {
+    id: tm.id,
+    email: tm.email,
+    displayName: tm.displayName,
+    role: tm.role as Role,
+    regionId: tm.regionId,
+    orgPath: unit.path,
+  }
+}
+
 async function resolveFromOverrideOnly(
   event: H3Event,
   allowOverride: boolean,
@@ -225,34 +289,16 @@ async function resolveFromOverrideOnly(
   if (!override) return null
 
   const db = getDb()
-  const [tm] = await db
-    .select({
-      id: schema.teammate.id,
-      email: schema.teammate.email,
-      displayName: schema.teammate.displayName,
-      role: schema.teammate.role,
-      regionId: schema.teammate.regionId,
-      orgUnitId: schema.teammate.orgUnitId,
-    })
-    .from(schema.teammate)
-    .where(eq(schema.teammate.id, override.targetTeammateId))
-    .limit(1)
-  if (!tm) return null
-
-  const [unit] = await db
-    .select({ path: schema.orgUnit.path })
-    .from(schema.orgUnit)
-    .where(eq(schema.orgUnit.id, tm.orgUnitId))
-    .limit(1)
-  if (!unit) return null
+  const target = await resolvePersonaTarget(db, override.targetTeammateId)
+  if (!target) return null
 
   const session: Session = {
-    teammateId: tm.id,
-    email: tm.email,
-    displayName: tm.displayName ?? tm.email,
-    role: tm.role as Role,
-    regionId: tm.regionId,
-    orgPath: unit.path,
+    teammateId: target.id,
+    email: target.email,
+    displayName: target.displayName ?? target.email,
+    role: target.role,
+    regionId: target.regionId,
+    orgPath: target.orgPath,
     issuedAt: override.issuedAt,
     ...(override.impersonatorOid ? { impersonatorOid: override.impersonatorOid } : {}),
     ...(override.impersonatorEmail ? { impersonatorEmail: override.impersonatorEmail } : {}),
@@ -284,45 +330,16 @@ async function applyPersonaOverride(
     .limit(1)
   if (!callerOid || callerOid.entraOid !== override.impersonatorOid) return null
 
-  // Resolve the persona target.
-  const [tm] = await db
-    .select({
-      id: schema.teammate.id,
-      email: schema.teammate.email,
-      displayName: schema.teammate.displayName,
-      role: schema.teammate.role,
-      regionId: schema.teammate.regionId,
-      orgUnitId: schema.teammate.orgUnitId,
-    })
-    .from(schema.teammate)
-    .where(eq(schema.teammate.id, override.targetTeammateId))
-    .limit(1)
-  if (!tm) return null
-
-  // Defence in depth: the override cookie can only have been minted by
-  // /api/v1/auth/dev-login.post.ts which routes through getPersona() and
-  // therefore only accepts DEMO_PERSONAS targets. If the HMAC secret were
-  // ever exfiltrated, OR if a future code path mints an override with an
-  // arbitrary target, this gate refuses to impersonate a non-demo teammate.
-  const targetIsDemo = DEMO_PERSONAS.some(
-    (p) => p.email.toLowerCase() === tm.email.toLowerCase(),
-  )
-  if (!targetIsDemo) return null
-
-  const [unit] = await db
-    .select({ path: schema.orgUnit.path })
-    .from(schema.orgUnit)
-    .where(eq(schema.orgUnit.id, tm.orgUnitId))
-    .limit(1)
-  if (!unit) return null
+  const target = await resolvePersonaTarget(db, override.targetTeammateId)
+  if (!target) return null
 
   return {
-    teammateId: tm.id,
-    email: tm.email,
-    displayName: tm.displayName ?? tm.email,
-    role: tm.role as Role,
-    regionId: tm.regionId,
-    orgPath: unit.path,
+    teammateId: target.id,
+    email: target.email,
+    displayName: target.displayName ?? target.email,
+    role: target.role,
+    regionId: target.regionId,
+    orgPath: target.orgPath,
     impersonatorOid: override.impersonatorOid,
     impersonatorEmail: override.impersonatorEmail,
     impersonatedAt: override.issuedAt,

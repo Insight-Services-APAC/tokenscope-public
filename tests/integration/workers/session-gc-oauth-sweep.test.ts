@@ -7,6 +7,13 @@
  * consumed auth codes, emit handoffs, or expired/revoked tokens — abandoned
  * registrations monotonically fill the MAX_OAUTH_CLIENTS cap until registration
  * 429s forever. The GC worker now sweeps all four, with retention graces.
+ *
+ * S6 adds a SECOND, much shorter (1h) sweep for clients that NEVER had a
+ * token or auth code at all — reclaiming abandoned/flood registrations fast
+ * instead of waiting the full 30-day CREDENTIAL_GC_GRACE_DAYS. It runs BEFORE
+ * the other deletes so its "never transacted" reading is accurate; the 30-day
+ * sweep further down is what still catches clients that DID transact but are
+ * now fully cold. See ABANDONED_QUICK_CLIENT / MID_FLOW_CLIENT below.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
@@ -26,11 +33,13 @@ const TEAM = '33333333-3333-3333-3333-333333333333'
 const INST = '66666666-6666-6666-6666-666666666666'
 
 // oauth_client ids
-const STALE_CLIENT = 'c0c0c0c0-0000-0000-0000-000000000001' // old, no tokens/codes → swept
+const STALE_CLIENT = 'c0c0c0c0-0000-0000-0000-000000000001' // old, no tokens/codes → swept (abandoned sweep)
 const LIVE_CLIENT = 'c0c0c0c0-0000-0000-0000-000000000002' // old, but holds a LIVE token → kept
 const FRESH_CLIENT = 'c0c0c0c0-0000-0000-0000-000000000003' // registered yesterday → kept
 const INTERNAL_CLIENT = 'c0c0c0c0-0000-0000-0000-000000000004' // internal emit client → never swept
-const DEAD_TOKEN_CLIENT = 'c0c0c0c0-0000-0000-0000-000000000005' // old; its dead token sweeps first, then the client goes too
+const DEAD_TOKEN_CLIENT = 'c0c0c0c0-0000-0000-0000-000000000005' // old; its dead token sweeps first, then the client goes too (30-day sweep)
+const ABANDONED_QUICK_CLIENT = 'c0c0c0c0-0000-0000-0000-000000000006' // 2h old, never had a token/code → swept (S6, well before the 30-day grace)
+const MID_FLOW_CLIENT = 'c0c0c0c0-0000-0000-0000-000000000007' // 2h old, but has a LIVE auth code → kept (S6 "must not delete mid-flow")
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -59,7 +68,9 @@ beforeAll(async () => {
       ('${LIVE_CLIENT}', 'h2', 'Live MCP', '{"http://127.0.0.1/cb"}', false, '2026-04-01 00:00:00+00'),
       ('${FRESH_CLIENT}', 'h3', 'Fresh MCP', '{"http://127.0.0.1/cb"}', false, '2026-06-08 00:00:00+00'),
       ('${INTERNAL_CLIENT}', 'h4', 'tokenscope-emit', '{"http://127.0.0.1/cb"}', true, '2026-01-01 00:00:00+00'),
-      ('${DEAD_TOKEN_CLIENT}', 'h5', 'Dead-token MCP', '{"http://127.0.0.1/cb"}', false, '2026-04-01 00:00:00+00');
+      ('${DEAD_TOKEN_CLIENT}', 'h5', 'Dead-token MCP', '{"http://127.0.0.1/cb"}', false, '2026-04-01 00:00:00+00'),
+      ('${ABANDONED_QUICK_CLIENT}', 'h6', 'Abandoned Quick', '{"http://127.0.0.1/cb"}', false, NOW() - INTERVAL '2 hours'),
+      ('${MID_FLOW_CLIENT}', 'h7', 'Mid Flow', '{"http://127.0.0.1/cb"}', false, NOW() - INTERVAL '2 hours');
 
     INSERT INTO oauth_token
       (access_token_hash, refresh_token_hash, client_id, teammate_id, scope,
@@ -96,6 +107,10 @@ beforeAll(async () => {
        'tokenscope.read', NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '5 minutes', NOW() - INTERVAL '4 minutes'),
       -- Live (unconsumed, unexpired) → kept.
       ('code-live', '${FRESH_CLIENT}', '${TEAM}', 'http://127.0.0.1/cb', 'ch', 'S256',
+       'tokenscope.read', NOW(), NOW() + INTERVAL '5 minutes', NULL),
+      -- Live auth code on a client past the 1h abandonment grace (S6): proves
+      -- the short sweep does not delete a client mid-flow.
+      ('code-mid-flow', '${MID_FLOW_CLIENT}', '${TEAM}', 'http://127.0.0.1/cb', 'ch', 'S256',
        'tokenscope.read', NOW(), NOW() + INTERVAL '5 minutes', NULL);
 
     INSERT INTO emit_handoff (code_hash, teammate_id, instance_id, created_at, expires_at, consumed_at)
@@ -115,17 +130,25 @@ describe('runSessionGc — OAuth-lifecycle sweep (AUTH-5)', () => {
     expect(result.authCodesDeleted).toBe(2)
     expect(result.emitHandoffsDeleted).toBe(1)
     expect(result.oauthTokensDeleted).toBe(2)
-    // STALE_CLIENT + DEAD_TOKEN_CLIENT (its dead token sweeps earlier in the run).
-    expect(result.oauthClientsDeleted).toBe(2)
+    // Never transacted at all, past the 1h abandonment grace (S6):
+    // STALE_CLIENT + ABANDONED_QUICK_CLIENT.
+    expect(result.abandonedClientsDeleted).toBe(2)
+    // DID transact (DEAD_TOKEN_CLIENT) — its dead token sweeps earlier in the
+    // same run, then the 30-day sweep catches the now-cold client.
+    expect(result.oauthClientsDeleted).toBe(1)
 
     const clients = await t.client<{ client_id: string }[]>`
       SELECT client_id::text AS client_id FROM oauth_client ORDER BY client_id`
     const remaining = clients.map((c) => c.client_id)
     expect(remaining).not.toContain(STALE_CLIENT)
     expect(remaining).not.toContain(DEAD_TOKEN_CLIENT)
+    expect(remaining).not.toContain(ABANDONED_QUICK_CLIENT)
     expect(remaining).toContain(LIVE_CLIENT)
     expect(remaining).toContain(FRESH_CLIENT)
     expect(remaining).toContain(INTERNAL_CLIENT)
+    // A live auth code protects a client from the abandonment sweep even
+    // though it's past the 1h grace — the sweep must not delete mid-flow.
+    expect(remaining).toContain(MID_FLOW_CLIENT)
 
     const tokens = await t.client<{ access_token_hash: string }[]>`
       SELECT access_token_hash FROM oauth_token ORDER BY access_token_hash`
@@ -133,7 +156,7 @@ describe('runSessionGc — OAuth-lifecycle sweep (AUTH-5)', () => {
 
     const codes = await t.client<{ code_hash: string }[]>`
       SELECT code_hash FROM oauth_auth_code ORDER BY code_hash`
-    expect(codes.map((c) => c.code_hash)).toEqual(['code-consumed-new', 'code-live'])
+    expect(codes.map((c) => c.code_hash)).toEqual(['code-consumed-new', 'code-live', 'code-mid-flow'])
 
     const handoffs = await t.client<{ code_hash: string }[]>`
       SELECT code_hash FROM emit_handoff ORDER BY code_hash`
@@ -143,6 +166,7 @@ describe('runSessionGc — OAuth-lifecycle sweep (AUTH-5)', () => {
   it('second run is a clean no-op (idempotent)', async () => {
     const second = await runSessionGc(t.db, NOW)
     expect(second.oauthClientsDeleted).toBe(0)
+    expect(second.abandonedClientsDeleted).toBe(0)
     expect(second.authCodesDeleted).toBe(0)
     expect(second.emitHandoffsDeleted).toBe(0)
     expect(second.oauthTokensDeleted).toBe(0)

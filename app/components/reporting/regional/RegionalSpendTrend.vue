@@ -10,13 +10,19 @@
  * series between plain lines and stacked areas (the stacked total reads as the
  * region spend curve). Axis + tooltip use a compact $ format so the scale stays
  * legible.
+ *
+ * In LINE mode the daily series is drawn faint under a bold 7-DAY TRAILING MEAN
+ * (prototype fix 5): spend is a working-week signal, so the raw line is a
+ * sawtooth and the eye reads the weekend dips rather than the direction. The
+ * chart owns the key line naming the two strokes (it is the only thing that
+ * knows whether one was drawn); stacked mode leaves the daily line alone.
  */
 import { computed, ref } from 'vue'
 import UiCard from '../../ui/Card.vue'
 import ChartTrend from '../charts/ChartTrend.client.vue'
 import LaneSwitchLink from '../LaneSwitchLink.vue'
 import { computePeakDay } from '../charts/weekly-lanes'
-import { shortDay } from '../charts/chart-utils'
+import { shortDay, TRAILING_MEAN_DAYS } from '../charts/chart-utils'
 import { fmtUsd } from '../../../composables/useFormat'
 import type { TrendSeries } from './build-regional-trend'
 
@@ -86,7 +92,7 @@ function compactUsd(v: number): string {
       class="mb-2 text-[11px] text-carbon-2"
       data-testid="regional-trend-peak-day"
     >
-      Peak day: <b>{{ shortDay(peakDay.day) }}</b> · {{ fmtUsd(peakDay.totalUsd) }} — true linear scale, nothing clipped.
+      Peak day: <b>{{ shortDay(peakDay.day) }}</b> · {{ fmtUsd(peakDay.totalUsd) }}
     </p>
 
     <ChartTrend
@@ -95,6 +101,7 @@ function compactUsd(v: number): string {
       :stacked="stacked"
       :value-format="compactUsd"
       :height="300"
+      :trailing-mean-days="TRAILING_MEAN_DAYS"
     />
 
     <p
@@ -102,7 +109,7 @@ function compactUsd(v: number): string {
       class="mt-2 text-[11px] text-carbon-3 italic"
       data-testid="regional-trend-projected-note"
     >
-      Dashed line (shaded band when stacked) = run-rate projection to month-end — provisional, not a settled figure.
+      dashed = run-rate projection to month-end
     </p>
     <!-- I5 cross-link: this usage card's §B sibling is the chargeback trend. -->
     <LaneSwitchLink label="See the chargeback trend" />

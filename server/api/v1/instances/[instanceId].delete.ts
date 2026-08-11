@@ -37,7 +37,7 @@ export default defineEventHandler(async (event) => {
     .from(schema.instanceAttestation)
     .where(eq(schema.instanceAttestation.instanceId, sid))
     .limit(1)
-  if (!row) throw createError({ statusCode: 404, statusMessage: 'Session not found' })
+  if (!row) throw createError({ statusCode: 404, statusMessage: 'Instance not found' })
 
   // Region-bound the admin to the session's region. RLS's region policy
   // is inert at runtime (owner DB connection), so without this any admin

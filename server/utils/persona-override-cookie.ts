@@ -20,6 +20,7 @@
  */
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { deleteCookie, getCookie, setCookie, type H3Event } from 'h3'
+import { checkEnvKeyStrength } from '../auth/key-strength'
 
 export const PERSONA_OVERRIDE_COOKIE_NAME = 'ts_persona_override'
 
@@ -44,11 +45,36 @@ const COOKIE_OPTIONS = {
   secure: process.env.NODE_ENV === 'production',
 }
 
-function getSecret(): string {
+/**
+ * Length + entropy check against NUXT_SESSION_SECRET. Behaves in TWO
+ * different ways deliberately:
+ *
+ *   - missing/too-short (length arm): THROWS, unchanged from before this
+ *     story — an operator misconfiguration this module has always
+ *     surfaced loudly, and that contract isn't touched here.
+ *   - low-entropy (the NEW arm this story adds): FAILS CLOSED, returning
+ *     null rather than throwing. The deployed NUXT_SESSION_SECRET (KV
+ *     `session-secret`, container-app.bicep:303) has never been scored
+ *     against the entropy floor — a throwing entropy check here would
+ *     turn a sandbox request carrying the persona-override cookie from
+ *     "no persona override" into a 500 on decode(), on every request,
+ *     the moment the deployed secret happens to score below 3.5
+ *     bits/byte. `null` here reads as "no usable secret" to every
+ *     caller below, which decode() already treats as "no override" —
+ *     exactly the warn-never-throw posture this story requires of the
+ *     one file it's changing. Blast radius is bounded to local +
+ *     sandbox (auth.ts:146 gates on demoCapable; isDemoCapableEnv
+ *     allowlists only {local, sandbox}, fail-closed) — bounded is not
+ *     the same as zero, hence this stays a runtime check, not a
+ *     one-time assertion.
+ */
+function getSecret(): string | null {
   const secret = process.env.NUXT_SESSION_SECRET
   if (!secret || secret.length < 32) {
     throw new Error('NUXT_SESSION_SECRET is missing or too short (need >= 32 chars)')
   }
+  const result = checkEnvKeyStrength('NUXT_SESSION_SECRET')
+  if (!result.ok) return null // low-entropy is the only remaining failure mode here
   return secret
 }
 
@@ -70,12 +96,23 @@ function verify(payload: string, signature: string, secret: string): boolean {
 
 function encode(payload: PersonaOverridePayload): string {
   const secret = getSecret()
+  if (!secret) {
+    // Minting a NEW override with a weak secret is a write-time operator
+    // action (an admin clicking "switch persona") — loud failure here is
+    // appropriate; it is the READ path (decode, below) that must stay
+    // silent. See getSecret()'s doc comment.
+    throw new Error(
+      'NUXT_SESSION_SECRET has insufficient entropy (need >= 3.5 bits/byte). ' +
+        'Generate via: openssl rand -base64 48',
+    )
+  }
   const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
   return `${body}.${sign(body, secret)}`
 }
 
 function decode(raw: string): PersonaOverridePayload | null {
   const secret = getSecret()
+  if (!secret) return null // fail closed: entropy floor unmet → "no override", never a 500
   const dot = raw.indexOf('.')
   if (dot < 1 || dot === raw.length - 1) return null
   const body = raw.slice(0, dot)

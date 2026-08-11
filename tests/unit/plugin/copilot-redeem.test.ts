@@ -35,8 +35,10 @@ import { join } from 'node:path'
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — mjs import resolved by Vitest
-const { writeTokenscopeConfig, removeBlock, upsertBlock, detectShellRcTargets, detectEnvChange, emitEnvLabel } =
-  await import('../../../plugin/scripts/copilot-redeem.mjs')
+const {
+  writeTokenscopeConfig, removeBlock, upsertBlock, detectShellRcTargets, detectEnvChange, emitEnvLabel,
+  assertSafeRedeemBundle,
+} = await import('../../../plugin/scripts/copilot-redeem.mjs')
 
 let dir: string
 
@@ -55,6 +57,49 @@ const FAKE_BUNDLE = {
   COPILOT_OTEL_FILE_EXPORTER_PATH: '/tmp/copilot-otel.ndjson',
   OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=bbbaaaaa',
 }
+
+// ── S2: validate the server-supplied endpoint bundle BEFORE persisting ─────────
+// Mirrors claude-redeem.test.ts's assertClaudeRedeemResponse coverage — S1's fix 3
+// said "both redeem paths"; this is the second one. A compromised/MITM'd redeem
+// response could otherwise plant a plaintext (or malformed) endpoint into
+// config.json; every SUBSEQUENT bearer mint (otel-headers-helper.sh) or span
+// forward (copilot-forwarder.mjs) would then send the durable credential / span
+// data wherever that endpoint points. assertSafeRedeemBundle must refuse it
+// BEFORE writeTokenscopeConfig ever writes it to disk.
+describe('assertSafeRedeemBundle — S2: no unsafe endpoint reaches config.json', () => {
+  it('does not throw for an all-https bundle', () => {
+    expect(() => assertSafeRedeemBundle(FAKE_BUNDLE)).not.toThrow()
+  })
+
+  it('rejects a bearer endpoint that downgrades to plaintext http (off-box)', () => {
+    const bad = { ...FAKE_BUNDLE, TOKENSCOPE_BEARER_ENDPOINT: 'http://attacker.example.com/bearer' }
+    expect(() => assertSafeRedeemBundle(bad)).toThrow(/TOKENSCOPE_BEARER_ENDPOINT/)
+  })
+
+  it('rejects a logs endpoint that downgrades to plaintext http (off-box)', () => {
+    const bad = { ...FAKE_BUNDLE, TOKENSCOPE_LOGS_ENDPOINT: 'http://attacker.example.com/v1/logs' }
+    expect(() => assertSafeRedeemBundle(bad)).toThrow(/TOKENSCOPE_LOGS_ENDPOINT/)
+  })
+
+  it('rejects an oauth_token_endpoint that downgrades to plaintext http (off-box)', () => {
+    const bad = { ...FAKE_BUNDLE, TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'http://attacker.example.com/oauth/token' }
+    expect(() => assertSafeRedeemBundle(bad)).toThrow(/TOKENSCOPE_OAUTH_TOKEN_ENDPOINT/)
+  })
+
+  it('rejects a missing field the same way (endpoint-guard\'s own "empty" check doubles as presence)', () => {
+    const bad = { ...FAKE_BUNDLE, TOKENSCOPE_LOGS_ENDPOINT: undefined }
+    expect(() => assertSafeRedeemBundle(bad)).toThrow()
+  })
+
+  it('accepts a loopback bundle (a locally-running dev TokenScope server)', () => {
+    const local = {
+      TOKENSCOPE_BEARER_ENDPOINT: 'http://localhost:3450/api/v1/instances/abc/bearer',
+      TOKENSCOPE_LOGS_ENDPOINT: 'http://127.0.0.1:3450/v1/logs',
+      TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'http://[::1]:3450/oauth/token',
+    }
+    expect(() => assertSafeRedeemBundle(local)).not.toThrow()
+  })
+})
 
 describe('writeTokenscopeConfig — credential separation', () => {
   it('config.json contains oauth_refresh_token (required by mintBearer)', () => {

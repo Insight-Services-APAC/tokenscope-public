@@ -1,5 +1,5 @@
 #!/usr/bin/env node
- 
+
 /*
  * /tokenscope:status implementation — "is my Claude emitting to TokenScope, and
  * is the MCP connection (the query side) authed?"
@@ -37,7 +37,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { readEmitSentinel, runEmitHelper } from './plugin-runtime.mjs'
+import { readEmitSentinel, runEmitHelper, safeProcessEnv } from './plugin-runtime.mjs'
 import { checkRepoProjectBillable } from './project-check.mjs'
 
 /**
@@ -51,14 +51,16 @@ export function interpretEmissionProbe({ status, stdoutHasAuth, sentinel }) {
     return {
       emitting: true,
       probe_status: 200,
-      message: 'Emission auth OK — the real emit path (headers helper → /bearer) minted an Azure Monitor bearer. This proves the credential is VALID; it does NOT confirm telemetry actually landed in Azure Monitor (the DCR/ingest/read path is downstream and not observable from here).',
+      message:
+        'Emission auth OK — the real emit path (headers helper → /bearer) minted an Azure Monitor bearer. This proves the credential is VALID; it does NOT confirm telemetry actually landed in Azure Monitor (the DCR/ingest/read path is downstream and not observable from here).',
     }
   }
   if (status === 0 && !stdoutHasAuth) {
     return {
       emitting: false,
       probe_status: null,
-      message: 'Headers helper exited 0 but returned no Authorization header — unexpected. Re-run /tokenscope:status; if it persists, re-provision emit via the tokenscope-setup MCP prompt.',
+      message:
+        'Headers helper exited 0 but returned no Authorization header — unexpected. Re-run /tokenscope:status; if it persists, re-provision emit via the tokenscope-setup MCP prompt.',
     }
   }
   // Non-zero exit: the helper printed a loud, sanitised reason to stderr and
@@ -86,13 +88,20 @@ export function interpretEmissionProbe({ status, stdoutHasAuth, sentinel }) {
 /**
  * Active emission-auth probe. Invokes the real emit path (runEmitHelper) and
  * interprets its exit code + sentinel. NEVER surfaces the bearer.
+ *
+ * S1 fix 2: `env` MUST be the caller's `safeProcessEnv()` result, never raw
+ * `process.env` — Claude Code has already applied a TAGGED repo's
+ * `settings.local.json` onto `process.env` by REPLACEMENT before spawning
+ * this script (ADR-0006 §2), so `process.env` may be entirely repo-
+ * controlled by the time this runs. `safeProcessEnv()` re-derives the
+ * trustworthy env once in main() and every read here goes through it.
  */
-function probeEmissionAuth() {
-  const endpoint = (process.env.TOKENSCOPE_BEARER_ENDPOINT ?? '').trim()
+function probeEmissionAuth(env) {
+  const endpoint = (env.TOKENSCOPE_BEARER_ENDPOINT ?? '').trim()
   const hasOAuth = Boolean(
-    (process.env.TOKENSCOPE_OAUTH_REFRESH_TOKEN ?? '').trim() &&
-      (process.env.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT ?? '').trim() &&
-      (process.env.TOKENSCOPE_OAUTH_CLIENT_ID ?? '').trim(),
+    (env.TOKENSCOPE_OAUTH_REFRESH_TOKEN ?? '').trim() &&
+    (env.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT ?? '').trim() &&
+    (env.TOKENSCOPE_OAUTH_CLIENT_ID ?? '').trim(),
   )
   if (!endpoint || !hasOAuth) {
     return {
@@ -102,7 +111,7 @@ function probeEmissionAuth() {
         "Not configured — no bearer endpoint / OAuth emit credential in this session's env. Run the tokenscope-setup MCP prompt (provision_emit), then restart `claude` (OTel env is read at startup).",
     }
   }
-  const { ran, status, hasAuth } = runEmitHelper()
+  const { ran, status, hasAuth } = runEmitHelper({ env })
   if (!ran) {
     return {
       emitting: false,
@@ -110,7 +119,7 @@ function probeEmissionAuth() {
       message: 'Headers helper not found — is the plugin installed / CLAUDE_PLUGIN_ROOT set?',
     }
   }
-  return interpretEmissionProbe({ status, stdoutHasAuth: hasAuth, sentinel: readEmitSentinel() })
+  return interpretEmissionProbe({ status, stdoutHasAuth: hasAuth, sentinel: readEmitSentinel(env) })
 }
 
 /** Abs path to Claude Code's own credential store. */
@@ -157,15 +166,19 @@ function probeMcpAuth() {
  * MCP needed). Fail-defensive: any non-billable verdict is the actionable wrong-env
  * warning; everything else (offline/unauth/no-tag) is reported neutrally, never red.
  */
-async function projectBlock() {
+async function projectBlock(env) {
   let r
   try {
-    r = await checkRepoProjectBillable({ env: process.env, cwd: process.cwd() })
+    r = await checkRepoProjectBillable({ env, cwd: process.cwd() })
   } catch {
     return { code: null, billable: null, message: 'Project-tag check unavailable.' }
   }
   if (r.status === 'ok') {
-    return { code: r.code ?? null, billable: true, message: `Project tag${r.code ? ` “${r.code}”` : ''} is billable on this environment.` }
+    return {
+      code: r.code ?? null,
+      billable: true,
+      message: `Project tag${r.code ? ` “${r.code}”` : ''} is billable on this environment.`,
+    }
   }
   if (r.status === 'not-billable') {
     const projects = (r.yourProjects || []).map((p) => p && p.code).filter(Boolean)
@@ -177,16 +190,30 @@ async function projectBlock() {
     }
   }
   if (r.status === 'no-tag') {
-    return { code: null, billable: null, message: 'No project tag (.tokenscope) in this repo — spend is untagged by default.' }
+    return {
+      code: null,
+      billable: null,
+      message: 'No project tag (.tokenscope) in this repo — spend is untagged by default.',
+    }
   }
-  return { code: null, billable: null, message: 'Project-tag billability unverified (offline, or emit not yet authed).' }
+  return {
+    code: null,
+    billable: null,
+    message: 'Project-tag billability unverified (offline, or emit not yet authed).',
+  }
 }
 
 async function main() {
-  const probe = probeEmissionAuth()
-  const sentinel = readEmitSentinel()
+  // S1 fix 2: compute the safe env ONCE — global settings win for every key
+  // global carries, and TOKENSCOPE_STATE_DIR / TOKENSCOPE_API_BASE (which
+  // global never writes at all) are deleted outright. Every credential-
+  // adjacent read below threads this SAME object through, so there is no
+  // second, forgotten call site still reading raw process.env.
+  const env = safeProcessEnv()
+  const probe = probeEmissionAuth(env)
+  const sentinel = readEmitSentinel(env)
   const mcpAuthed = probeMcpAuth()
-  const project = await projectBlock()
+  const project = await projectBlock(env)
 
   console.log(
     JSON.stringify(
@@ -211,7 +238,9 @@ async function main() {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
 if (isMain) {
   main().catch((err) => {
-    console.error(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }))
+    console.error(
+      JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }),
+    )
     process.exit(1)
   })
 }

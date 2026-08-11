@@ -87,7 +87,7 @@ export const DEMO_PERSONAS = [
     role: 'manager' as Role,
     email: 'demo-anil.verma@example.com',
     displayName: 'Anil Verma (demo)',
-    landing: '/reporting?scope=regional',
+    landing: '/reporting?scope=region',
   },
   {
     key: 'admin',

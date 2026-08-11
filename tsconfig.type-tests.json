@@ -1,0 +1,30 @@
+/*
+ * Typecheck the *.test-d.ts type-level assertions.
+ *
+ * `npm run typecheck` runs vue-tsc against the NUXT tsconfig, whose `include`
+ * covers app/, shared/ and tests/nuxt/ — but NOT tests/. A `@ts-expect-error`
+ * assertion placed under tests/ is therefore never evaluated, which makes it
+ * exactly the kind of guard that looks like proof and enforces nothing. (Found
+ * the hard way: removing the lane firewall left `npm run typecheck` green.)
+ *
+ * This project is the second checker. Each `@ts-expect-error` in a .test-d.ts
+ * file fails the build when the error it expects STOPS occurring — "Unused
+ * '@ts-expect-error' directive" — so a firewall cannot be quietly removed.
+ */
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "#shared/*": ["./shared/*"]
+    }
+  },
+  "include": ["tests/**/*.test-d.ts"]
+}

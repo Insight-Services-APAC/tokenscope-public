@@ -5,7 +5,13 @@
  * mapping logic (column-name keyed, type coercion, skip rules) now.
  */
 import { describe, it, expect } from 'vitest'
-import { parseLogAnalyticsRows, parseSignalRows } from '../../../server/azure/reader'
+import {
+  parseLogAnalyticsRows,
+  parseSignalRows,
+  emptyParseCounters,
+  buildSessionUsageKql,
+  KQL_PROJECTED_COLUMNS,
+} from '../../../server/azure/reader'
 
 const COLS = ['TokenscopeSessionId', 'Model', 'TokenType', 'Tokens', 'TsEvent', 'SourceRunId']
 
@@ -114,6 +120,122 @@ describe('parseLogAnalyticsRows', () => {
   })
 })
 
+/*
+ * S10 — ingest bounds. claudeSessionId, model, projectCodeHash and
+ * sourceRunId are all EMITTER-CONTROLLED strings; an over-length or
+ * control-character value must be REJECTED (never truncated) and COUNTED on
+ * the caller-supplied ParseCounters — the counter is the non-negotiable half
+ * of the story (bounds without it are strictly worse than no bounds).
+ */
+describe('parseLogAnalyticsRows — ingest bounds (S10)', () => {
+  const BASE_TS = '2026-06-01T00:00:00Z'
+  const VALID_SESSION_ID = '11111111-1111-4111-8111-111111111111' // UUID shape, 36 chars
+  const VALID_MODEL = 'claude-opus-4-8'
+  const VALID_HASH = 'a'.repeat(64) // hex-SHA-256 shape
+  const VALID_RUN_ID = 'req_01AbCdEfGhIjKlMnOpQrStUvWx'
+  const FULL_COLS = [...COLS, 'OrganizationId', 'ProjectCodeHash', 'ClaudeSessionId']
+
+  it('passes normal UUID/model/hash/run-id values byte-identically (regression pin — catches a too-strict charset)', () => {
+    const counters = emptyParseCounters()
+    const out = parseLogAnalyticsRows(
+      FULL_COLS,
+      [['sid-1', VALID_MODEL, 'input', 100, BASE_TS, VALID_RUN_ID, 'org-1', VALID_HASH, VALID_SESSION_ID]],
+      counters,
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({
+      model: VALID_MODEL,
+      sourceRunId: VALID_RUN_ID,
+      projectCodeHash: VALID_HASH,
+      claudeSessionId: VALID_SESSION_ID,
+    })
+    expect(counters).toEqual(emptyParseCounters())
+  })
+
+  it('rejects an over-length claudeSessionId: drops ONLY the field, keeps the row, counts it', () => {
+    const oversized = 'a'.repeat(129) // > MAX_CLAUDE_SESSION_ID_LENGTH (128)
+    const counters = emptyParseCounters()
+    const out = parseLogAnalyticsRows(
+      FULL_COLS,
+      [['sid-1', VALID_MODEL, 'input', 100, BASE_TS, VALID_RUN_ID, 'org-1', VALID_HASH, oversized]],
+      counters,
+    )
+    expect(out).toHaveLength(1) // the row is NOT dropped — claudeSessionId is optional
+    expect(out[0]!.claudeSessionId).toBeUndefined() // dropped, never stored truncated/raw
+    expect(out[0]!.tokens).toBe(100) // the rest of the record is intact
+    expect(counters.rejectedClaudeSessionId).toBe(1)
+  })
+
+  it('rejects a claudeSessionId carrying an unsafe character (charset, not just length)', () => {
+    const counters = emptyParseCounters()
+    const out = parseLogAnalyticsRows(
+      FULL_COLS,
+      [['sid-1', VALID_MODEL, 'input', 100, BASE_TS, VALID_RUN_ID, 'org-1', VALID_HASH, `id' OR 1=1`]],
+      counters,
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0]!.claudeSessionId).toBeUndefined()
+    expect(counters.rejectedClaudeSessionId).toBe(1)
+  })
+
+  it('rejects an over-length sourceRunId: drops ONLY the field, keeps the row, counts it', () => {
+    const oversized = 'r'.repeat(129) // > MAX_SOURCE_RUN_ID_LENGTH (128)
+    const counters = emptyParseCounters()
+    const out = parseLogAnalyticsRows(COLS, [['sid-1', VALID_MODEL, 'input', 100, BASE_TS, oversized]], counters)
+    expect(out).toHaveLength(1)
+    expect(out[0]!.sourceRunId).toBeUndefined()
+    expect(counters.rejectedSourceRunId).toBe(1)
+  })
+
+  it('rejects an over-length projectCodeHash: drops ONLY the field, keeps the row, counts it', () => {
+    const oversized = 'h'.repeat(129) // > MAX_PROJECT_CODE_HASH_LENGTH (128)
+    const counters = emptyParseCounters()
+    const out = parseLogAnalyticsRows(
+      [...COLS, 'ProjectCodeHash'],
+      [['sid-1', VALID_MODEL, 'input', 100, BASE_TS, VALID_RUN_ID, oversized]],
+      counters,
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0]!.projectCodeHash).toBeUndefined()
+    expect(counters.rejectedProjectCodeHash).toBe(1)
+  })
+
+  it('rejects an over-length model: SKIPS THE WHOLE ROW (model is required, unlike the optional fields above) and counts it; a rejected record does not abort the row batch', () => {
+    const oversized = 'm'.repeat(257) // > MAX_MODEL_LENGTH (256)
+    const counters = emptyParseCounters()
+    const out = parseLogAnalyticsRows(
+      COLS,
+      [
+        ['sid-1', oversized, 'input', 100, BASE_TS, VALID_RUN_ID], // rejected
+        ['sid-1', VALID_MODEL, 'output', 50, BASE_TS, VALID_RUN_ID], // sibling row in the SAME batch — must survive
+      ],
+      counters,
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0]!.model).toBe(VALID_MODEL)
+    expect(counters.rejectedModel).toBe(1)
+  })
+
+  it('rejects a model carrying a control character (charset, not just length)', () => {
+    const counters = emptyParseCounters()
+    const out = parseLogAnalyticsRows(
+      COLS,
+      [['sid-1', 'bad\x00model', 'input', 100, BASE_TS, VALID_RUN_ID]],
+      counters,
+    )
+    expect(out).toHaveLength(0)
+    expect(counters.rejectedModel).toBe(1)
+  })
+
+  it('does NOT constrain vendor SHAPE — unicode/punctuation in model or hash still passes (only length + control chars are bounded)', () => {
+    const counters = emptyParseCounters()
+    const unicodeModel = 'claude-企業-4.8 (preview)'
+    const out = parseLogAnalyticsRows(COLS, [['sid-1', unicodeModel, 'input', 100, BASE_TS, VALID_RUN_ID]], counters)
+    expect(out[0]!.model).toBe(unicodeModel)
+    expect(counters.rejectedModel).toBe(0)
+  })
+})
+
 // parseSignalRows — the pure usage_signal table → SignalRecord mapper (mig 0065).
 // One row (span) fans out to one SignalRecord per PRESENT signal column.
 const SIG_COLS = ['_ts', '_req', 'tool_count', 'mcp_count', 'ctx_pct', 'turn_count']
@@ -165,5 +287,159 @@ describe('parseSignalRows', () => {
   it('omits sourceRunId when _req is absent/empty', () => {
     const out = parseSignalRows(['_ts', 'tool_count'], [['2026-06-01T00:00:00Z', 30]])
     expect(out[0]!.sourceRunId).toBeUndefined()
+  })
+})
+
+/*
+ * S10 — sibling of parseLogAnalyticsRows's ingest bounds. parseSignalRows
+ * shares the sourceRunId field (and the identical counters shape) — "walk the
+ * sibling path": whatever bound landed on parseLogAnalyticsRows lands here too.
+ */
+describe('parseSignalRows — ingest bounds (S10, sibling of parseLogAnalyticsRows)', () => {
+  const ts = new Date('2026-06-01T00:00:00Z')
+
+  it('passes a normal run-id byte-identically (regression pin)', () => {
+    const counters = emptyParseCounters()
+    const out = parseSignalRows(SIG_COLS, [[ts, 'req_ok-1', 38, null, null, null]], counters)
+    expect(out[0]!.sourceRunId).toBe('req_ok-1')
+    expect(counters.rejectedSourceRunId).toBe(0)
+  })
+
+  it('rejects an over-length sourceRunId: drops ONLY the field, keeps the signal rows, counts it', () => {
+    const oversized = 'r'.repeat(129) // > MAX_SOURCE_RUN_ID_LENGTH (128)
+    const counters = emptyParseCounters()
+    const out = parseSignalRows(SIG_COLS, [[ts, oversized, 38, null, 12, null]], counters)
+    // the row is NOT dropped — sourceRunId is optional on SignalRecord too
+    expect(out).toHaveLength(2) // tool_count + ctx_pct, same as the unbounded-id case
+    expect(out.every((r) => r.sourceRunId === undefined)).toBe(true)
+    expect(counters.rejectedSourceRunId).toBe(1)
+  })
+
+  it('rejects a sourceRunId carrying an unsafe character (charset, not just length)', () => {
+    const counters = emptyParseCounters()
+    const out = parseSignalRows(SIG_COLS, [[ts, `r' OR 1=1`, 38, null, null, null]], counters)
+    expect(out[0]!.sourceRunId).toBeUndefined()
+    expect(counters.rejectedSourceRunId).toBe(1)
+  })
+})
+
+/*
+ * ── Emitting identity at the ingest boundary (mig 0119) ─────────────────────
+ * docs/design/emitting-identity-and-subscription-type.md §2, §5.
+ *
+ * `user.email` says WHICH ACCOUNT was signed in — the evidence the joiner stamps
+ * attribution_record.billing_lane from. Two properties are pinned here because
+ * both fail silently and both fail for a WHOLE COHORT at once:
+ *
+ *   1. It is CANONICALISED at storage. Set membership is the one comparison
+ *      shape where a case mismatch misclassifies every record of every teammate
+ *      whose IdP happens to send mixed case, and the wrong answer (self-billed)
+ *      looks exactly like a real verdict.
+ *   2. An unsafe value drops the FIELD, not the row. Declining to classify is
+ *      always a better trade than losing the spend.
+ */
+const IDENT_COLS = ['TokenType', 'Tokens', 'Model', 'TsEvent', 'UserEmail', 'OrganizationId']
+
+describe('parseLogAnalyticsRows — emitting identity (mig 0119)', () => {
+  const row = (email: unknown, org: unknown = null) => [
+    ['output', 100, 'm', '2026-07-01T00:00:00Z', email, org],
+  ]
+
+  it('canonicalises user.email at STORAGE — trim + lowercase, once, so no consumer has to', () => {
+    const out = parseLogAnalyticsRows(IDENT_COLS, row('  DEV@example.com  '))
+    expect(out[0]!.emittingEmail).toBe('dev@example.com')
+  })
+
+  it('treats an absent or all-whitespace address as ABSENT, never as an address that failed to match', () => {
+    // The two mean different things: absent → billing_lane 'unknown' (today's
+    // behaviour); non-matching → 'self-billed' (a verdict about a real account).
+    expect(parseLogAnalyticsRows(IDENT_COLS, row(null))[0]!.emittingEmail).toBeUndefined()
+    expect(parseLogAnalyticsRows(IDENT_COLS, row(''))[0]!.emittingEmail).toBeUndefined()
+    expect(parseLogAnalyticsRows(IDENT_COLS, row('   '))[0]!.emittingEmail).toBeUndefined()
+  })
+
+  it('rejects an over-length address: drops ONLY the field, KEEPS the row, counts it', () => {
+    const counters = emptyParseCounters()
+    const oversized = `${'a'.repeat(310)}@example.com` // > MAX_EMITTING_EMAIL_LENGTH (320)
+    const out = parseLogAnalyticsRows(IDENT_COLS, row(oversized), counters)
+    expect(out).toHaveLength(1) // the spend survives — this is NOT the `model` shape
+    expect(out[0]!.emittingEmail).toBeUndefined()
+    expect(counters.rejectedEmittingEmail).toBe(1)
+  })
+
+  it('rejects an address carrying a control character (charset, not just length)', () => {
+    const counters = emptyParseCounters()
+    const out = parseLogAnalyticsRows(IDENT_COLS, row('dev\x01@example.com'), counters)
+    expect(out).toHaveLength(1)
+    expect(out[0]!.emittingEmail).toBeUndefined()
+    expect(counters.rejectedEmittingEmail).toBe(1)
+  })
+
+  it('organization.id: the PERSISTED copy is bounded, the LANE operand stays raw', () => {
+    /*
+     * One wire value, two fields, because they answer to different masters.
+     * `emittingOrgId` becomes attribution_record.emitting_org_id — an
+     * emitter-controlled text column, so it takes the ingest bound.
+     * `organizationId` is a query parameter against provider_org and is never
+     * stored, so bounding it would make a new diagnostic column's storage limit
+     * change which reconciliation lane an existing record lands in.
+     *
+     * MUTATION: fold the two back into one bounded field (`rec.organizationId =
+     * bounded`) → the over-long case's `organizationId` goes undefined and this
+     * goes red.
+     */
+    const counters = emptyParseCounters()
+    const ok = parseLogAnalyticsRows(IDENT_COLS, row(null, 'org-abc123'), counters)
+    expect(ok[0]!.organizationId).toBe('org-abc123')
+    expect(ok[0]!.emittingOrgId).toBe('org-abc123')
+    expect(counters.rejectedOrganizationId).toBe(0)
+
+    const oversized = 'o'.repeat(129) // > MAX_ORGANIZATION_ID_LENGTH (128)
+    const bad = parseLogAnalyticsRows(IDENT_COLS, row(null, oversized), counters)
+    expect(bad).toHaveLength(1)
+    expect(bad[0]!.organizationId).toBe(oversized) // the lane still gets its operand…
+    expect(bad[0]!.emittingOrgId).toBeUndefined() // …and nothing over-long is stored
+    expect(counters.rejectedOrganizationId).toBe(1)
+
+    // A control character is refused on the same terms — charset, not just length.
+    const ctrl = parseLogAnalyticsRows(IDENT_COLS, row(null, 'org-\x01abc'), counters)
+    expect(ctrl[0]!.organizationId).toBe('org-\x01abc')
+    expect(ctrl[0]!.emittingOrgId).toBeUndefined()
+    expect(counters.rejectedOrganizationId).toBe(2)
+  })
+})
+
+/*
+ * The final `| project` clause is GENERATED from KQL_PROJECTED_COLUMNS, but the
+ * intermediate `| project` that carries each alias through to it is hand-written.
+ * That seam is the one the single-sourcing does NOT close: drop an alias there
+ * and the query fails at Log Analytics, where no stubbed-reader test can reach it
+ * and the symptom is an empty read rather than an error anyone attributes here.
+ */
+describe('buildSessionUsageKql — the intermediate projection carries every alias', () => {
+  const SID = '00000000-0000-4000-8000-000000000001'
+
+  it('forwards every `_alias` the final projection consumes through the intermediate one', () => {
+    const kql = buildSessionUsageKql(SID)
+    // The intermediate `| project` is everything between the FIRST `| project`
+    // and the `| mv-expand` that fans a span into its token-type rows. An alias
+    // absent from that slice is dropped before the final projection can name it.
+    const start = kql.indexOf('| project ')
+    const end = kql.indexOf('| mv-expand')
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    const intermediate = kql.slice(start, end)
+    const finalProject = kql.slice(kql.lastIndexOf('| project '))
+
+    const aliases = Object.values(KQL_PROJECTED_COLUMNS).filter((e) => e.startsWith('_'))
+    expect(aliases.length).toBeGreaterThan(10) // anti-vacuity
+    for (const alias of aliases) {
+      expect(finalProject, `${alias} must be consumed by the final projection`).toContain(alias)
+      expect(intermediate, `${alias} must survive the intermediate projection`).toContain(alias)
+    }
+  })
+
+  it('reads the emitting account from Attributes[user.email]', () => {
+    expect(buildSessionUsageKql(SID)).toContain("_uemail = tostring(Attributes['user.email'])")
   })
 })

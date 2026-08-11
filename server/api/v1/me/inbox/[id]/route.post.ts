@@ -13,7 +13,7 @@
 import { createError, defineEventHandler, readValidatedBody } from 'h3'
 import { eq, sql } from 'drizzle-orm'
 import { assertSameOrigin } from '../../../../../auth/csrf'
-import { requireRole } from '../../../../../auth/rbac'
+import { requireRole, requireRegionScope } from '../../../../../auth/rbac'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { InboxRouteBody } from '../../../../../../shared/schemas/inbox'
 import { getDb, schema } from '../../../../../db'
@@ -28,15 +28,16 @@ interface SourceRow extends Record<string, unknown> {
   body: unknown
   related_entity_kind: string | null
   related_entity_id: string | null
+  region_id: string
 }
 
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
-  // Admin-only — under Epic 10's non-owner DB role, the inbox_item
-  // `FOR ALL` RLS policy would reject cross-recipient INSERTs unless
-  // the caller has the admin/global-finops bypass. Holding this at
-  // admin keeps Epic-10 RLS strict; a future SECURITY DEFINER could
-  // relax it back to "any user can forward their own item".
+  // Admin-only. NOTE: RLS is inert in every deployed environment (no FORCE
+  // ROW LEVEL SECURITY; the app connects as the table owner), so the
+  // inbox_item `FOR ALL` policy never actually executes — this requireRole,
+  // plus the explicit requireRegionScope calls below on BOTH the source
+  // item's recipient and the forward target, are the live gates, not RLS.
   const session = await requireRole(event, 'admin', 'global-finops')
   const sourceId = requireUuidParam(event, 'id', 'inbox item id')
   const body = await readValidatedBody(event, (data) => InboxRouteBody.parse(data))
@@ -44,10 +45,12 @@ export default defineEventHandler(async (event) => {
   // Read the source inside the RLS context — admins bypass via role.
   const sources = await withRequestRls(event, async (tx) =>
     tx.execute<SourceRow>(sql`
-      SELECT id::text AS id, category, severity, subject, body,
-             related_entity_kind, related_entity_id::text AS related_entity_id
-      FROM inbox_item
-      WHERE id = ${sourceId}::uuid
+      SELECT ii.id::text AS id, ii.category, ii.severity, ii.subject, ii.body,
+             ii.related_entity_kind, ii.related_entity_id::text AS related_entity_id,
+             t.region_id::text AS region_id
+      FROM inbox_item ii
+      JOIN teammate t ON t.id = ii.recipient_teammate_id
+      WHERE ii.id = ${sourceId}::uuid
       LIMIT 1
     `),
   )
@@ -55,6 +58,11 @@ export default defineEventHandler(async (event) => {
   if (!source) {
     throw createError({ statusCode: 404, statusMessage: 'Inbox item not found' })
   }
+  // Region-scope the SOURCE: a region admin may only read (and therefore
+  // forward) an item addressed to a recipient in their own region. Applied
+  // only after the 404 above, so an unresolvable id still 404s and this
+  // endpoint never becomes an existence oracle for other regions' item ids.
+  await requireRegionScope(event, source.region_id)
 
   // Validate the target teammate is active. Forwarding to a deactivated
   // teammate creates an item that nobody can resolve (and may leak to
@@ -64,6 +72,7 @@ export default defineEventHandler(async (event) => {
     .select({
       id: schema.teammate.id,
       isActive: schema.teammate.isActive,
+      regionId: schema.teammate.regionId,
     })
     .from(schema.teammate)
     .where(eq(schema.teammate.id, body.recipient_teammate_id))
@@ -71,6 +80,9 @@ export default defineEventHandler(async (event) => {
   if (!target) {
     throw createError({ statusCode: 404, statusMessage: 'Target teammate not found' })
   }
+  // Region-scope the TARGET: stops the mirror-image leak — a region-A admin
+  // injecting a forwarded item into region B. Same 404-before-403 ordering.
+  await requireRegionScope(event, target.regionId)
   if (!target.isActive) {
     throw createError({
       statusCode: 422,

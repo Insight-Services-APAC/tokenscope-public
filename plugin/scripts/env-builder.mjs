@@ -14,13 +14,15 @@
  *   - readDeviceEnrolment — reads the instance id + helper path back out of the
  *     global config so the repo tag can self-heal against it (ADR-0006).
  *   - applyOtlpProxyRepoint — re-points OTEL_EXPORTER_OTLP_LOGS_ENDPOINT at the
- *     local Content-Length forwarder (CC #72671 workaround), stashing the real
- *     DCE URL for the forwarder to read.
+ *     local Content-Length forwarder (CC #72671 workaround), recording the real
+ *     DCE URL in BOTH the state-dir stash (what the forwarder reads) and the env
+ *     block itself (OTLP_DCE_ENV_KEY — survives an ephemeral state dir).
  */
 import { writeFileSync, renameSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stateDir } from './plugin-runtime.mjs'
 import { shimActive } from './otlp-shim-policy.mjs'
+import { isUsableDce } from './endpoint-guard.mjs'
 
 /**
  * Resource-attr string for a REPO tag (repo-local config): the device session id
@@ -59,22 +61,25 @@ export function tokenscopeStatusLine(statuslinePath) {
 function isOurStatusLine(statusLine) {
   return Boolean(
     statusLine &&
-      typeof statusLine === 'object' &&
-      typeof statusLine.command === 'string' &&
-      statusLine.command.includes('statusline.mjs'),
+    typeof statusLine === 'object' &&
+    typeof statusLine.command === 'string' &&
+    statusLine.command.includes('statusline.mjs'),
   )
 }
 
 /** True if `p` is one of OUR plugin's script paths (under a tokenscope plugin dir),
  * so the self-heal only ever repoints paths we own — never a user's custom one. */
 function isOurPluginPath(p) {
-  return typeof p === 'string' && /[\\/]plugins[\\/](cache|marketplaces)[\\/]tokenscope[\\/]/.test(p)
+  return (
+    typeof p === 'string' && /[\\/]plugins[\\/](cache|marketplaces)[\\/]tokenscope[\\/]/.test(p)
+  )
 }
 
 /** The cache version [maj,min,patch] embedded in a tokenscope plugin path, or null
  * (e.g. the marketplace clone, which is unversioned). */
 function pluginPathVersion(p) {
-  const m = typeof p === 'string' && p.match(/[\\/]tokenscope[\\/]tokenscope[\\/](\d+)\.(\d+)\.(\d+)[\\/]/)
+  const m =
+    typeof p === 'string' && p.match(/[\\/]tokenscope[\\/]tokenscope[\\/](\d+)\.(\d+)\.(\d+)[\\/]/)
   return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
 }
 
@@ -149,7 +154,10 @@ export function reconcilePluginPaths(existing, { statuslinePath, helperPath }) {
   }
 
   if (helperPath && isOurPluginPath(settings.otelHeadersHelper)) {
-    if (settings.otelHeadersHelper !== helperPath && isForwardMove(settings.otelHeadersHelper, helperPath)) {
+    if (
+      settings.otelHeadersHelper !== helperPath &&
+      isForwardMove(settings.otelHeadersHelper, helperPath)
+    ) {
       settings.otelHeadersHelper = helperPath
       changed = true
     }
@@ -170,7 +178,10 @@ export function readDeviceEnrolment(globalSettings) {
   if (!m) return null
   return {
     sessionId: m[1].trim(),
-    helperPath: typeof globalSettings.otelHeadersHelper === 'string' ? globalSettings.otelHeadersHelper : null,
+    helperPath:
+      typeof globalSettings.otelHeadersHelper === 'string'
+        ? globalSettings.otelHeadersHelper
+        : null,
     // The full device env block (endpoint, exporter, bearer endpoint + OAuth emit
     // credential, resource attrs). The repo-local tag copies ALL of it (overriding
     // only OTEL_RESOURCE_ATTRIBUTES) so it's self-contained — Claude applies the
@@ -184,24 +195,64 @@ export function readDeviceEnrolment(globalSettings) {
 const OTLP_PROXY_PORT = Number(process.env.TOKENSCOPE_OTLP_PROXY_PORT) || 14318
 const OTLP_PROXY_ENDPOINT = `http://127.0.0.1:${OTLP_PROXY_PORT}/v1/logs`
 
-/** True if a URL's host is the local loopback (already the proxy — don't re-stash). */
+/**
+ * The DURABLE copy of the real DCE logs endpoint, kept in the SAME settings `env`
+ * block as the proxy pin so the two SHARE FATE. The stash file
+ * (~/.tokenscope/otlp-forward.json) is what the forwarder process reads, but the
+ * state dir and settings.json can live in different persistence domains (a CW
+ * container bind-mounts ~/.claude from the host while ~/.tokenscope is
+ * container-local): lose the stash to a container rebuild and a pinned endpoint
+ * had NOTHING to revert to — the 2026-07-24 cold-start wedge, which needed a
+ * manual re-provision. Every pin now records both copies; either one alone is
+ * enough to recover, and applyOtlpProxyRepoint reconciles them each session.
+ */
+export const OTLP_DCE_ENV_KEY = 'TOKENSCOPE_DCE_LOGS_ENDPOINT'
+
+/** True if a URL's host is the local loopback (already the proxy — don't re-stash).
+ * URL#hostname for an IPv6 literal INCLUDES the brackets ('[::1]', not '::1')
+ * — match both forms. */
 export function isLoopbackHost(urlStr) {
   try {
     const h = new URL(urlStr).hostname.toLowerCase()
-    return h === '127.0.0.1' || h === 'localhost' || h === '::1'
+    return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]'
   } catch {
     return false
   }
 }
 
+// isUsableDce (a usable "real DCE" value: a parseable HTTPS, NON-loopback URL)
+// was PROMOTED to endpoint-guard.mjs (S1 fix 3) — it is imported above rather
+// than kept as a private module-scoped copy, so the OTLP forwarder's stash
+// validation and this repoint/reconcile logic share ONE definition. Loopback
+// is rejected in both directions — the proxy's own address must never
+// masquerade as the DCE (restoring it would leave the endpoint self-
+// referentially wedged) — and https-only matches the forwarder's own off-box
+// plaintext refusal: a dormant REVERT takes the forwarder out of the path, so
+// this is the last guard before CC would POST the bearer directly to a restored URL.
+
 /** Read the stashed real DCE URL from ~/.tokenscope/otlp-forward.json, or null. */
 function readStashedDce() {
   try {
-    const { dceLogsEndpoint } = JSON.parse(readFileSync(join(stateDir(), 'otlp-forward.json'), 'utf8'))
-    return typeof dceLogsEndpoint === 'string' && dceLogsEndpoint.trim() ? dceLogsEndpoint : null
+    const { dceLogsEndpoint } = JSON.parse(
+      readFileSync(join(stateDir(), 'otlp-forward.json'), 'utf8'),
+    )
+    return isUsableDce(dceLogsEndpoint) ? dceLogsEndpoint : null
   } catch {
     return null
   }
+}
+
+/** Atomically (re)write the forwarder's stash file (owner-only dir + file). */
+function writeStashedDce(dce) {
+  const dir = stateDir()
+  const stashPath = join(dir, 'otlp-forward.json')
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const tmp = `${stashPath}.tmp.${process.pid}`
+  writeFileSync(tmp, JSON.stringify({ dceLogsEndpoint: dce }) + '\n', {
+    encoding: 'utf8',
+    mode: 0o600,
+  })
+  renameSync(tmp, stashPath) // atomic on the same filesystem
 }
 
 /**
@@ -239,27 +290,66 @@ export function applyOtlpProxyRepoint(env, { revertWhenDormant = true } = {}) {
   // forces on, =0 forces off. See plugin/scripts/otlp-forwarder.README.md.
   const active = shimActive()
   const atProxy = isLoopbackHost(current)
+  const durable = isUsableDce(env[OTLP_DCE_ENV_KEY]) ? env[OTLP_DCE_ENV_KEY] : null
 
   if (!active) {
     // Dormant (default): if a prior session left the endpoint pointed AT the
-    // forwarder, restore the direct DCE from the stash (reverts the shim) —
-    // UNLESS a live forwarder is still serving a sibling (revertWhenDormant=false).
-    if (atProxy && revertWhenDormant) {
-      const dce = readStashedDce()
-      if (dce) env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = dce
+    // forwarder, restore the direct DCE — durable env copy first (it shares the
+    // settings file's fate), stash second — UNLESS a live forwarder is still
+    // serving a sibling (revertWhenDormant=false).
+    if (atProxy) {
+      if (!revertWhenDormant) return env
+      const dce = durable ?? readStashedDce()
+      if (dce) {
+        env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = dce
+        delete env[OTLP_DCE_ENV_KEY] // the endpoint itself is the durable copy again
+      }
+      return env
+    }
+    // Direct emission: a leftover durable copy would go stale across a
+    // re-enrolment (it is only meaningful while the endpoint is pinned) — drop it.
+    if (OTLP_DCE_ENV_KEY in env) delete env[OTLP_DCE_ENV_KEY]
+    return env
+  }
+
+  if (atProxy) {
+    // Already pinned — reconcile the TWO copies of the revert key instead of
+    // no-opping: re-materialize a lost stash from the durable env copy (the
+    // forwarder reads the file), and backfill the env copy from a live stash
+    // (upgrades pins made before the durable copy existed, closing their window
+    // BEFORE the ephemeral state dir is next wiped). A live stash is left as-is
+    // even if it differs from the env copy: while pinned the forwarder relays
+    // what the stash holds; a divergence (tampering / a partial legacy write)
+    // resolves at the next pin or revert, not here.
+    if (durable) {
+      if (!readStashedDce()) {
+        try {
+          writeStashedDce(durable)
+        } catch {
+          /* fs error — the env copy still recovers the endpoint; the forwarder
+             falls back to it too, so don't fail the caller's reconcile */
+        }
+      }
+    } else {
+      const stashed = readStashedDce()
+      if (stashed) env[OTLP_DCE_ENV_KEY] = stashed
     }
     return env
   }
 
-  if (atProxy) return env // already the proxy — leave the stash intact
-
-  const dir = stateDir()
-  const stashPath = join(dir, 'otlp-forward.json')
-  mkdirSync(dir, { recursive: true, mode: 0o700 }) // lock the state dir (owner-only)
-  const tmp = `${stashPath}.tmp.${process.pid}`
-  writeFileSync(tmp, JSON.stringify({ dceLogsEndpoint: current }) + '\n', { encoding: 'utf8', mode: 0o600 })
-  renameSync(tmp, stashPath) // atomic on the same filesystem
+  // Pin: record the revert key in BOTH persistence domains, then re-point. The
+  // env copy goes first — it cannot fail and alone suffices to recover (and,
+  // handed to the forwarder's spawn env, to relay). The stash write is
+  // best-effort: aborting the pin on an unwritable state dir would leave a
+  // broken CLI emitting DIRECT chunked exports = silently dropped, which is
+  // strictly worse than a pin served from the env copy alone.
+  env[OTLP_DCE_ENV_KEY] = current
   env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = OTLP_PROXY_ENDPOINT
+  try {
+    writeStashedDce(current)
+  } catch {
+    /* the forwarder falls back to the env copy in its spawn env */
+  }
   return env
 }
 
@@ -270,17 +360,21 @@ export function otlpForwarderPath(scriptsDir) {
 
 /**
  * CC #72671 durability guard. True ONLY when the logs endpoint is pinned to the
- * local forwarder but the DCE stash it relays to is missing/unreadable — the one
- * state that wedges emission SILENTLY: the forwarder 502s on every export, and the
- * kill-switch cannot revert (the real DCE lives only in the stash). Once pinned,
- * applyOtlpProxyRepoint short-circuits at the `atProxy` no-op and never rewrites
- * the stash, so a later stash loss (wiped/ephemeral ~/.tokenscope, HOME divergence,
- * a settings.json copied without its state dir) has no self-heal. Lets session-start
- * fail LOUD instead of dropping telemetry into a black hole. `env` is a merged
- * settings env block; returns false for every healthy / not-pinned state.
+ * local forwarder and NEITHER copy of the real DCE survives — no stash file AND no
+ * durable env copy (OTLP_DCE_ENV_KEY). That is the one state that still wedges
+ * emission with no self-heal: the forwarder has nothing to relay to and the revert
+ * has nothing to restore. With the durable copy written on every pin (0.1.26+)
+ * this should only be reachable for a legacy pin whose ephemeral state dir was
+ * wiped — session-start fails LOUD instead of dropping telemetry into a black
+ * hole. `env` is a merged settings env block; returns false for every healthy /
+ * not-pinned / self-healable state.
  */
 export function otlpProxyStashMissing(env) {
-  const ep = env && typeof env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT === 'string' ? env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT : ''
+  const ep =
+    env && typeof env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT === 'string'
+      ? env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+      : ''
   if (!isLoopbackHost(ep)) return false // not routed through the forwarder — nothing to guard
+  if (env && isUsableDce(env[OTLP_DCE_ENV_KEY])) return false // durable copy present → self-heals
   return !readStashedDce()
 }

@@ -45,22 +45,46 @@ beforeAll(async () => {
   process.env.NUXT_HMAC_SESSION_KEY = 'confirm-test-hmac-key-padded-well-beyond-32-chars'
   process.env.NUXT_ENROLLMENT_SECRET = BOOTSTRAP_SECRET
 
-  const [r] = await t.db.insert(schema.region).values({ code: 'cf', displayName: 'CF Region' }).returning()
+  const [r] = await t.db
+    .insert(schema.region)
+    .values({ code: 'cf', displayName: 'CF Region' })
+    .returning()
   regionId = r!.id
   const [ou] = await t.db
     .insert(schema.orgUnit)
-    .values({ regionId, path: 'cf.svc', code: 'cf-svc', displayName: 'CF Svc', unitType: 'bu', isCostOwningUnit: true })
+    .values({
+      regionId,
+      path: 'cf.svc',
+      code: 'cf-svc',
+      displayName: 'CF Svc',
+      unitType: 'bu',
+      isCostOwningUnit: true,
+    })
     .returning()
   ouId = ou!.id
 
   const [alice] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'cf-oid-alice', email: ALICE, displayName: 'Alice', role: 'developer', regionId, orgUnitId: ouId })
+    .values({
+      entraOid: 'cf-oid-alice',
+      email: ALICE,
+      displayName: 'Alice',
+      role: 'developer',
+      regionId,
+      orgUnitId: ouId,
+    })
     .returning()
   aliceId = alice!.id
   const [bob] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'cf-oid-bob', email: BOB, displayName: 'Bob', role: 'developer', regionId, orgUnitId: ouId })
+    .values({
+      entraOid: 'cf-oid-bob',
+      email: BOB,
+      displayName: 'Bob',
+      role: 'developer',
+      regionId,
+      orgUnitId: ouId,
+    })
     .returning()
   bobId = bob!.id
 }, 90_000)
@@ -72,7 +96,10 @@ afterAll(async () => {
 // ── harness (combines the enroll + me-endpoint event shapes) ──────────────────
 
 function ev(opts: { params?: Record<string, string>; body?: unknown; session?: Session } = {}) {
-  const headers: Record<string, string> = { host: 'localhost:3450', origin: 'http://localhost:3450' }
+  const headers: Record<string, string> = {
+    host: 'localhost:3450',
+    origin: 'http://localhost:3450',
+  }
   const e = {
     method: 'POST',
     path: '/x',
@@ -90,15 +117,26 @@ function ev(opts: { params?: Record<string, string>; body?: unknown; session?: S
       res: {
         _headers: {} as Record<string, string | string[]>,
         statusCode: 200,
-        getHeader(n: string) { return this._headers[n.toLowerCase()] },
-        setHeader(n: string, v: string | string[]) { this._headers[n.toLowerCase()] = v },
-        removeHeader(n: string) { this._headers[n.toLowerCase()] = '' },
-        appendHeader(n: string, v: string | string[]) { this._headers[n.toLowerCase()] = v },
-        get headersSent() { return false },
+        getHeader(n: string) {
+          return this._headers[n.toLowerCase()]
+        },
+        setHeader(n: string, v: string | string[]) {
+          this._headers[n.toLowerCase()] = v
+        },
+        removeHeader(n: string) {
+          this._headers[n.toLowerCase()] = ''
+        },
+        appendHeader(n: string, v: string | string[]) {
+          this._headers[n.toLowerCase()] = v
+        },
+        get headersSent() {
+          return false
+        },
       },
     },
   }
-  if (opts.session) injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], opts.session)
+  if (opts.session)
+    injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], opts.session)
   return e as unknown
 }
 
@@ -108,14 +146,29 @@ async function call<R = unknown>(h: unknown, e: unknown): Promise<R> {
 }
 
 const sess = (id: string, email: string): Session =>
-  ({ teammateId: id, email, displayName: email, role: 'developer', regionId, orgPath: 'cf.svc' }) as Session
+  ({
+    teammateId: id,
+    email,
+    displayName: email,
+    role: 'developer',
+    regionId,
+    orgPath: 'cf.svc',
+  }) as Session
 
-interface EnrollResponse { instance_id: string }
+interface EnrollResponse {
+  instance_id: string
+}
 async function enrollProvisional(claimedEmail: string, device: string): Promise<string> {
-  const out = (await call<EnrollResponse>(
+  const out = await call<EnrollResponse>(
     enrollHandler,
-    ev({ body: { enrollment_secret: BOOTSTRAP_SECRET, claimed_email: claimedEmail, device_binding: device } }),
-  ))
+    ev({
+      body: {
+        enrollment_secret: BOOTSTRAP_SECRET,
+        claimed_email: claimedEmail,
+        device_binding: device,
+      },
+    }),
+  )
   return out.instance_id
 }
 
@@ -154,10 +207,13 @@ describe('GET /me/provisional-instances — email-scoped listing', () => {
     // A foil: an instance claiming Bob's email must NOT show for Alice.
     await enrollProvisional(BOB, 'list-dev-bob')
 
-    const out = await call<{ provisional_instances: { instance_id: string; device_hint: string | null; provisional_spend_usd: string }[] }>(
-      listProvisional,
-      ev({ session: sess(aliceId, ALICE) }),
-    )
+    const out = await call<{
+      provisional_instances: {
+        instance_id: string
+        device_hint: string | null
+        provisional_spend_usd: string
+      }[]
+    }>(listProvisional, ev({ session: sess(aliceId, ALICE) }))
     const row = out.provisional_instances.find((r) => r.instance_id === inst)
     expect(row).toBeTruthy()
     expect(row!.provisional_spend_usd).toBe('2.50')
@@ -168,7 +224,9 @@ describe('GET /me/provisional-instances — email-scoped listing', () => {
       await t.client<{ instance_id: string }[]>`
         SELECT instance_id::text AS instance_id FROM instance_attestation WHERE claimed_email = ${BOB}`
     ).map((r) => r.instance_id)
-    expect(out.provisional_instances.some((r) => bobInstanceIds.includes(r.instance_id))).toBe(false)
+    expect(out.provisional_instances.some((r) => bobInstanceIds.includes(r.instance_id))).toBe(
+      false,
+    )
   })
 })
 
@@ -187,7 +245,16 @@ describe('POST confirm — the merge', () => {
     expect(out).toMatchObject({ id: inst, confirmed: true, already_confirmed: false })
 
     // Attestation re-pointed + confirmed + claimed_email nulled + identity stamped.
-    const att = await t.client<{ teammate_id: string; identity_state: string; claimed_email: string | null; principal_email: string | null; principal_oid: string; region_id: string }[]>`
+    const att = await t.client<
+      {
+        teammate_id: string
+        identity_state: string
+        claimed_email: string | null
+        principal_email: string | null
+        principal_oid: string
+        region_id: string
+      }[]
+    >`
       SELECT teammate_id::text AS teammate_id, identity_state, claimed_email, principal_email,
              principal_oid, region_id::text AS region_id
         FROM instance_attestation WHERE instance_id = ${inst}::uuid`
@@ -201,7 +268,9 @@ describe('POST confirm — the merge', () => {
     // FIX 2: the already-written attribution history is re-pointed to the real
     // teammate AND upgraded to identity_state='confirmed' (+ re-stamped dims),
     // so the pre-confirm spend isn't orphaned on the retired shadow.
-    const ar = await t.client<{ teammate_id: string; identity_state: string; region_id: string; org_unit_id: string }[]>`
+    const ar = await t.client<
+      { teammate_id: string; identity_state: string; region_id: string; org_unit_id: string }[]
+    >`
       SELECT teammate_id::text AS teammate_id, identity_state,
              region_id::text AS region_id, org_unit_id::text AS org_unit_id
         FROM attribution_record WHERE instance_id = ${inst}::uuid`
@@ -233,7 +302,9 @@ describe('POST confirm — the merge', () => {
 
     // Shadow teammate retired (mark-revoke, never deleted) — still present (FKs
     // from attribution_record/audit pin it) but provisional + revoked.
-    const sh = await t.client<{ provisional: boolean; revoked_at: string | null; is_active: boolean }[]>`
+    const sh = await t.client<
+      { provisional: boolean; revoked_at: string | null; is_active: boolean }[]
+    >`
       SELECT provisional, revoked_at, is_active FROM teammate WHERE id = ${shadow}::uuid`
     expect(sh.length).toBe(1)
     expect(sh[0]!.revoked_at).not.toBeNull()
@@ -302,7 +373,13 @@ describe('POST confirm — idempotent', () => {
 
   it('an unknown instance → 404', async () => {
     await expect(
-      call(confirmHandler, ev({ params: { instanceId: '00000000-0000-4000-8000-0000000404ff' }, session: sess(aliceId, ALICE) })),
+      call(
+        confirmHandler,
+        ev({
+          params: { instanceId: '00000000-0000-4000-8000-0000000404ff' },
+          session: sess(aliceId, ALICE),
+        }),
+      ),
     ).rejects.toMatchObject({ statusCode: 404 })
   })
 })
@@ -316,7 +393,10 @@ describe('confirm → spend appears on the normal (confirmed) me/instances surfa
     await seedSpend(inst, shadow, '4.000000')
 
     // Before confirm: NOT on Alice's owner-scoped surface (owned by the shadow).
-    const before = await call<{ instances: { instance_id: string }[] }>(meInstances, ev({ session: sess(aliceId, ALICE) }))
+    const before = await call<{ instances: { instance_id: string }[] }>(
+      meInstances,
+      ev({ session: sess(aliceId, ALICE) }),
+    )
     expect(before.instances.some((i) => i.instance_id === inst)).toBe(false)
 
     await call(confirmHandler, ev({ params: { instanceId: inst }, session: sess(aliceId, ALICE) }))
@@ -329,5 +409,109 @@ describe('confirm → spend appears on the normal (confirmed) me/instances surfa
     const row = after.instances.find((i) => i.instance_id === inst)
     expect(row).toBeTruthy()
     expect(Number(row!.spend_usd_mtd)).toBeGreaterThanOrEqual(4)
+  })
+})
+
+/*
+ * Cap enforcement on the confirm transition.
+ *
+ * Confirmation is the third door into the confirmed population. The other two
+ * count and refuse; this one used to do neither, so both caps were bypassable
+ * by routing devices through the unauthenticated enrol door and then confirming
+ * them. These tests drive the real handlers end to end, so they fail if the
+ * locks or the counts are removed from confirm-instance.ts.
+ */
+describe('confirm — cap enforcement', () => {
+  it('refuses to confirm past the per-teammate cap, and says how to recover', async () => {
+    const prior = process.env.MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE
+    // Relative to what Alice already holds: earlier tests in this file confirm
+    // devices of hers, so an absolute cap would refuse the setup rather than
+    // the case under test.
+    const seedRows = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM instance_attestation
+       WHERE teammate_id = ${aliceId}::uuid AND ts_actual_end IS NULL AND ts_purged IS NULL`
+    const seed = Number(seedRows[0]!.n)
+    process.env.MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE = String(seed + 2)
+    try {
+      const ids: string[] = []
+      for (let i = 0; i < 3; i++) {
+        ids.push(await enrollProvisional(ALICE, `cap-teammate-device-${i}`))
+      }
+      // The first two fit under the cap of 2.
+      for (const id of ids.slice(0, 2)) {
+        await call(
+          confirmHandler,
+          ev({ params: { instanceId: id }, session: sess(aliceId, ALICE) }),
+        )
+      }
+      // The third is the one the cap exists to stop. Before this fix it
+      // succeeded, and Alice ended up with three live devices under a cap of two.
+      await expect(
+        call(
+          confirmHandler,
+          ev({ params: { instanceId: ids[2]! }, session: sess(aliceId, ALICE) }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 429 })
+
+      // The refusal must be observable in the data, not just the status code.
+      const live = await t.client<{ n: string }[]>`
+        SELECT COUNT(*)::text AS n FROM instance_attestation
+         WHERE teammate_id = ${aliceId}::uuid AND ts_actual_end IS NULL AND ts_purged IS NULL`
+      expect(Number(live[0]!.n)).toBe(seed + 2)
+
+      // And the refused instance must be left untouched, not half-merged.
+      const still = await t.client<{ identity_state: string }[]>`
+        SELECT identity_state FROM instance_attestation WHERE instance_id = ${ids[2]!}::uuid`
+      expect(still[0]!.identity_state).toBe('provisional')
+    } finally {
+      if (prior === undefined) delete process.env.MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE
+      else process.env.MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE = prior
+    }
+  })
+
+  it('refuses to confirm past the global confirmed cap', async () => {
+    const prior = process.env.MAX_LIVE_EMIT_INSTANCES
+    // Count what is already confirmed so the cap is set relative to it; earlier
+    // tests in this file confirm instances of their own.
+    const seed = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM instance_attestation
+       WHERE identity_state = 'confirmed' AND ts_actual_end IS NULL AND ts_purged IS NULL`
+    process.env.MAX_LIVE_EMIT_INSTANCES = String(Number(seed[0]!.n))
+    try {
+      const id = await enrollProvisional(BOB, 'cap-global-device')
+      await expect(
+        call(confirmHandler, ev({ params: { instanceId: id }, session: sess(bobId, BOB) })),
+      ).rejects.toMatchObject({ statusCode: 429 })
+      const still = await t.client<{ identity_state: string }[]>`
+        SELECT identity_state FROM instance_attestation WHERE instance_id = ${id}::uuid`
+      expect(still[0]!.identity_state).toBe('provisional')
+    } finally {
+      if (prior === undefined) delete process.env.MAX_LIVE_EMIT_INSTANCES
+      else process.env.MAX_LIVE_EMIT_INSTANCES = prior
+    }
+  })
+
+  it('still lets an already-confirmed device re-confirm at the cap', async () => {
+    // The cap must gate the TRANSITION, not the endpoint. A no-op re-confirm
+    // adds no row, so refusing it would break idempotency for anyone sitting
+    // exactly at their limit -- which is precisely who retries.
+    const id = await enrollProvisional(ALICE, 'cap-idempotent-device')
+    await call(confirmHandler, ev({ params: { instanceId: id }, session: sess(aliceId, ALICE) }))
+
+    const live = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM instance_attestation
+       WHERE teammate_id = ${aliceId}::uuid AND ts_actual_end IS NULL AND ts_purged IS NULL`
+    const prior = process.env.MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE
+    process.env.MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE = live[0]!.n
+    try {
+      const again = await call<{ already_confirmed: boolean }>(
+        confirmHandler,
+        ev({ params: { instanceId: id }, session: sess(aliceId, ALICE) }),
+      )
+      expect(again.already_confirmed).toBe(true)
+    } finally {
+      if (prior === undefined) delete process.env.MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE
+      else process.env.MAX_LIVE_EMIT_INSTANCES_PER_TEAMMATE = prior
+    }
   })
 })

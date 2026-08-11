@@ -21,6 +21,7 @@ import { requireRole } from '../../../../auth/rbac'
 import { withRequestRls } from '../../../../db/request-rls'
 import { isPersonaOverrideAllowed } from '../../../../utils/auth'
 import { currentServerDeployEnv, isDemoCapableEnv } from '../../../../../shared/env/deploy-env'
+import { getSessionStoreHealth, type StorageLike } from '../../../../utils/session-store-health'
 
 interface RegionRow extends Record<string, unknown> {
   id: string
@@ -63,20 +64,42 @@ export default defineEventHandler(async (event) => {
   // empty — meaning the runtime env carries ''. We normalise empty/unset
   // to `null` here so the UI can show "unknown" uniformly.
   //
-  // imageTag uses CONTAINER_APP_REVISION which Container Apps injects
-  // automatically (no Bicep wiring needed); local dev leaves it null.
+  // imageTag (CONTAINER_APP_REVISION) is DELIBERATELY not surfaced here —
+  // commitSha already answers "what is deployed", and the revision name is
+  // redundant infrastructure detail (server-api-app:deployment finding).
   const commitShaRaw = process.env.GIT_COMMIT_SHA
   const commitSha = commitShaRaw && commitShaRaw !== 'unknown'
     ? commitShaRaw
     : null
-  const imageTagRaw = process.env.CONTAINER_APP_REVISION
-  const imageTag = imageTagRaw && imageTagRaw.length > 0 ? imageTagRaw : null
+
+  // Session-store health (mig 0097). Reported here because the failure it
+  // guards against is invisible from the outside — an unmounted driver leaves
+  // the app building, booting and serving normally while silently keeping
+  // sessions per-replica and in-memory. On a deployed environment kv_store is
+  // behind a private endpoint, so this page is the only place the answer is
+  // actually reachable by the person who needs it.
+  // Resolving storage is itself guarded: `useStorage` is a Nitro runtime
+  // auto-import that does not exist when this handler is invoked directly (the
+  // admin integration tests do exactly that), and a diagnostic must never be
+  // the reason the page it lives on stops rendering.
+  let storage: StorageLike | null
+  try {
+    storage = useStorage() as unknown as StorageLike
+  } catch {
+    storage = null
+  }
+  const sessionStore = await getSessionStoreHealth(storage)
 
   return {
+    sessionStore,
     auth: {
       devMode: process.env.NUXT_OIDC_AUTH_DEV_MODE === 'true',
       allowPersonaOverride: isPersonaOverrideAllowed(),
-      bootstrapAdminEmail: process.env.NUXT_BOOTSTRAP_ADMIN_EMAIL ?? '',
+      // The ADDRESS is not surfaced (app-frontend:secret_sprawl finding) —
+      // only whether one is configured. The email itself adds nothing an
+      // operator needs from THIS page; anyone provisioning bootstrap access
+      // already knows the value they set.
+      bootstrapAdminConfigured: Boolean(process.env.NUXT_BOOTSTRAP_ADMIN_EMAIL),
       // The structural posture: deployEnv is the classified identity and
       // demoCapable is whether persona/demo features can run AT ALL here. On a
       // pilot-prod env demoCapable=false even if allowPersonaOverride drifts true.
@@ -85,7 +108,6 @@ export default defineEventHandler(async (event) => {
     },
     build: {
       commitSha,
-      imageTag,
     },
     // Provider key is `entra`, not `microsoft`. The Wave V env var names
     // set by infra/modules/container-app.bicep are

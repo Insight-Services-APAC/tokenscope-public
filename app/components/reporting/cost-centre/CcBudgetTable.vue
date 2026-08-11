@@ -18,9 +18,10 @@
  */
 import { computed } from 'vue'
 import { fmtUsd, fmtPct } from '../../../composables/useFormat'
-import { costCentreBudgetState } from '#shared/reports/types'
+import { costCentreBudgetState, type CostCentreBudgetState } from '#shared/reports/types'
 import type { ReportLane } from '../../../composables/useReportState'
 import type { CostCentreCard } from './cost-centre-view-types'
+import { BU_LABEL_LOWER } from '#shared/reports/vocabulary'
 
 const props = withDefaults(
   defineProps<{
@@ -35,7 +36,13 @@ const emit = defineEmits<{ select: [ccId: string] }>()
 const isChargeback = computed(() => props.lane === 'chargeback')
 const primaryLabel = computed(() => (isChargeback.value ? 'Chargeback' : 'Burn'))
 
-type BudgetState = 'over' | 'warn' | 'ok' | 'none'
+/*
+ * The shared classifier's own union (D26 added `not-started`), aliased rather
+ * than re-declared: a local copy is a second definition that drifts, and every
+ * `Record<BudgetState, …>` below is the compiler gate that makes a new member
+ * impossible to ignore.
+ */
+type BudgetState = CostCentreBudgetState
 
 interface RowVm {
   card: CostCentreCard
@@ -54,6 +61,9 @@ const STATUS_LABEL: Record<BudgetState, string> = {
   over: 'Over budget',
   warn: 'Near budget',
   ok: 'On track',
+  // The word `useRagState.ts:183` and both prototypes already use — never
+  // a second name (`idle`) for one fact.
+  'not-started': 'Not started',
   none: 'No budget set',
 }
 // Literal class strings (a map, so Tailwind sees them) — the bar fill + status text.
@@ -61,18 +71,21 @@ const BAR_CLASS: Record<BudgetState, string> = {
   over: 'bg-rag-red',
   warn: 'bg-rag-amber',
   ok: 'bg-rag-green',
+  'not-started': '',
   none: '',
 }
 const DOT_CLASS: Record<BudgetState, string> = {
   over: 'bg-rag-red',
   warn: 'bg-rag-amber',
   ok: 'bg-rag-green',
+  'not-started': 'bg-carbon-3/50',
   none: 'bg-carbon-3/50',
 }
 const TEXT_CLASS: Record<BudgetState, string> = {
   over: 'text-rag-red',
   warn: 'text-rag-amber',
   ok: 'text-rag-green',
+  'not-started': 'text-carbon-3',
   none: 'text-carbon-3',
 }
 // A thin left accent makes at-risk rows pop in the scan; healthy/no-budget rows
@@ -81,12 +94,13 @@ const ACCENT_CLASS: Record<BudgetState, string> = {
   over: 'border-l-rag-red',
   warn: 'border-l-rag-amber',
   ok: 'border-l-transparent',
+  'not-started': 'border-l-transparent',
   none: 'border-l-transparent',
 }
 
 const rows = computed<RowVm[]>(() => {
   const mapped = props.cards.map((card) => {
-    const state = costCentreBudgetState(card.utilisation) as BudgetState
+    const state = costCentreBudgetState(card.utilisation)
     const hasAlloc = card.allocationUsd > 0 && card.utilisation != null
     return {
       card,
@@ -127,8 +141,8 @@ const LEGEND: { state: BudgetState; label: string }[] = [
       <div class="min-w-0">
         <h3 class="text-sm font-semibold text-carbon-1">Budget tracker</h3>
         <p class="text-[11px] text-carbon-3 mt-0.5">
-          <template v-if="isChargeback">Chargeback (§B) per cost-centre — select a cost centre to drill in.</template>
-          <template v-else>Ranked by burn (project-tagged usage) · budget risk highlighted — select a cost centre to drill in.</template>
+          <template v-if="isChargeback">Chargeback (§B) per {{ BU_LABEL_LOWER }} — select one to drill in.</template>
+          <template v-else>Ranked by burn · select a {{ BU_LABEL_LOWER }} to drill in.</template>
         </p>
         <p
           v-if="isChargeback"

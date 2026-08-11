@@ -19,6 +19,7 @@ export type InboxCategoryFilter =
   | 'velocity-warning'
   | 'sync-conflict'
   | 'untagged-backlog'
+  | 'personal-subscription-prompt'
 
 export type InboxSeverityFilter = 'all' | 'info' | 'attention' | 'urgent'
 
@@ -30,6 +31,7 @@ const CATEGORY_OPTIONS: Array<{ key: InboxCategoryFilter; label: string }> = [
   { key: 'velocity-warning', label: 'Velocity' },
   { key: 'sync-conflict', label: 'Sync conflicts' },
   { key: 'untagged-backlog', label: 'Untagged' },
+  { key: 'personal-subscription-prompt', label: 'Personal subscription' },
 ]
 
 const SEVERITY_OPTIONS: Array<{ key: InboxSeverityFilter; label: string }> = [

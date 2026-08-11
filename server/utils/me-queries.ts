@@ -25,9 +25,8 @@ import {
   toolLabel,
   type NonCodeClaudeTool,
 } from '../../shared/usage/surface'
-import { GITHUB_USAGE_TOOLS } from '../../shared/usage/github-surface'
-import { laneListSql, toolToVendor, VENDOR_LABELS } from '../../shared/usage/vendor'
-import { monthStartIso as monthStartIsoFor } from './period'
+import { monthToDateWindow, monthStartIso as monthStartIsoFor } from './period'
+import { baseAllowanceUsd } from './base-allowance'
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
 
@@ -73,11 +72,27 @@ export interface TaggedSpend {
 }
 
 /**
- * Unallocated (no project budget) spend for the month, split tagged-by-activity
- * ("spill") vs genuinely-untagged ("needs tagging"). Accurate, month-scoped, and
- * UNCAPPED — the single source the dashboard's unallocated/tagged cards consume,
- * replacing the prior client-side composition off the LIMIT-100, all-time
+ * Unallocated (no project budget) spend for the month, split FOUR ways by the
+ * decision each item is in: tagged-by-activity ("spill"), genuinely-untagged
+ * ("needs tagging"), dismissed ("decided: leave it unallocated", mig 0094), and
+ * UNTAGGABLE (§A arm 3, mig 0101 — provider usage with no session and no
+ * unaccounted_usage row to carry a tag). Accurate, month-scoped, and UNCAPPED — the
+ * single source the dashboard's unallocated/tagged cards consume, replacing the
+ * prior client-side composition off the LIMIT-100, all-time
  * /me/sessions/untagged list.
+ *
+ *   total_cost_usd = tagged_cost_usd + untagged_cost_usd + dismissed_cost_usd
+ *                    + untaggable_cost_usd
+ *
+ * Dismissal moves spend between the middle two buckets and NEVER out of the
+ * total: it is a worklist decision, not a ledger write. See
+ * docs/design/needs-tagging-worklist.md.
+ *
+ * UNTAGGABLE is a different state from untagged, and the reporting surfaces
+ * already split them on the same predicate (`usage_provenance`, see
+ * server/reporting/engine/usage-coverage.ts). Only the first three buckets can
+ * ever reach the needs-tagging queue, because that queue is a list of decisions
+ * the developer can actually make.
  */
 export interface UnallocatedSummary {
   total_cost_usd: string
@@ -85,6 +100,27 @@ export interface UnallocatedSummary {
   tagged_cost_usd: string
   untagged_cost_usd: string
   needs_tagging_count: number
+  /** Of needs_tagging_count: conversations. */
+  needs_tagging_sessions: number
+  /** Of needs_tagging_count: API-reconciled (§A) day items. */
+  needs_tagging_days: number
+  /** Decided-and-left-unallocated: still in total_cost_usd, out of the queue. */
+  dismissed_cost_usd: string
+  dismissed_count: number
+  /**
+   * §A arm 3 (mig 0101): provider-reported usage on a surface that carries no
+   * session and no unaccounted_usage row, so there is nothing to attach a
+   * project or an activity to. Inside total_cost_usd; never inside the
+   * needs-tagging queue.
+   *
+   * NOT "no reconciled row": half of this arm is sourced FROM
+   * reconciliation_record (the Copilot coding-agent lane, via
+   * v_teammate_usage_daily — mig 0101:255-275). What it has no row in is
+   * unaccounted_usage, which is the one that carries project_id and activity.
+   */
+  untaggable_cost_usd: string
+  /** Of the untaggable bucket: (day, tool) items the providers reported. */
+  untaggable_count: number
   soft_cap_usd: string
   over_soft_cap: boolean
 }
@@ -134,6 +170,21 @@ export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Dat
   const monthStartIso = monthStartIsoFor(now)
   const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
   const monthEndIso = monthEnd.toISOString()
+  /*
+   * TWO windows, and they are not interchangeable (server/utils/period.ts):
+   *
+   *   spendEndIso  — MONTH TO DATE. "What have you spent" must stop at now. The
+   *     spend reads here were previously bounded BELOW only, so a row dated
+   *     later this month (clock-skewed emission, a backfill) counted toward a
+   *     month-to-date figure. PR #217 introduced monthToDateWindow and moved
+   *     five project surfaces onto it; these developer heroes were the last
+   *     unbounded callers.
+   *   monthEndIso  — the CALENDAR-month bound, used ONLY for allocation
+   *     overlap below. A top-up effective on the 28th is real budget for the
+   *     month on the 3rd, so the cap must see the whole month even though the
+   *     spend must not.
+   */
+  const spendEndIso = monthToDateWindow(now).endIso
   const activeCutoff = new Date(now.getTime() - ACTIVE_NOW_WINDOW_MINUTES * 60_000).toISOString()
 
   const rows = await tx.execute<BucketRow>(
@@ -151,18 +202,19 @@ export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Dat
            AND pa.effective && tstzrange(${monthStartIso}::timestamptz, ${monthEndIso}::timestamptz, '[)')
            AND ${activeProjectPredicate('p')}
         UNION ALL
-        SELECT DISTINCT ar.project_id, FALSE AS is_assigned, TRUE AS is_contributor
-          FROM attribution_record ar
-         WHERE ar.teammate_id = ${teammateId}::uuid
-           AND ar.ts_event >= ${monthStartIso}::timestamptz
-        -- §A: a project the dev tagged an "unaccounted usage" day to is also a
-        -- contributed bucket (its reconciled spend counts toward that budget).
-        UNION ALL
-        SELECT DISTINCT uu.project_id, FALSE AS is_assigned, TRUE AS is_contributor
-          FROM unaccounted_usage uu
-         WHERE uu.teammate_id = ${teammateId}::uuid
-           AND uu.project_id IS NOT NULL
-           AND uu.day >= ${monthStartIso}::date
+        -- CONTRIBUTOR lane, through the §A seam. v_complete_usage already
+        -- unions OTel-emitted spend (arm 1) with the reconciled API gap the dev
+        -- tagged to a project (arm 2) and applies the quarantine exclusion, so
+        -- this is one read where it used to be two hand-rolled ones. Arm 3
+        -- (provider-only) carries a NULL project_id by construction and so
+        -- cannot produce a bucket — which is correct, it has no project to
+        -- belong to.
+        SELECT DISTINCT u.project_id, FALSE AS is_assigned, TRUE AS is_contributor
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.project_id IS NOT NULL
+           AND u.ts_event >= ${monthStartIso}::timestamptz
+           AND u.ts_event <  ${spendEndIso}::timestamptz
       ),
       candidate AS (
         SELECT project_id,
@@ -174,17 +226,14 @@ export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Dat
       SELECT
         p.code AS project_code,
         p.display_name AS display_name,
-        -- §A: project cost = OTel-attributed spend + any "unaccounted usage" days the
-        -- dev tagged to this project (scalar subqueries so the LEFT JOIN above doesn't
-        -- fan out rows). Keeps the bucket equal to the dev's real spend on the budget.
-        (COALESCE(SUM(ar.cost_usd), 0) + COALESCE((
-          SELECT SUM(uu.cost_usd) FROM unaccounted_usage uu
-           WHERE uu.project_id = p.id AND uu.teammate_id = ${teammateId}::uuid
-             AND uu.day >= ${monthStartIso}::date), 0))::text AS cost_usd,
-        (COALESCE(SUM(ar.tokens), 0) + COALESCE((
-          SELECT SUM(uu.tokens) FROM unaccounted_usage uu
-           WHERE uu.project_id = p.id AND uu.teammate_id = ${teammateId}::uuid
-             AND uu.day >= ${monthStartIso}::date), 0))::text AS tokens,
+        -- §A project cost, THROUGH THE SEAM. This was an OTel sum plus a scalar
+        -- subquery over unaccounted_usage — a second, hand-rolled definition of
+        -- a figure that v_complete_usage already answers. PR #217 moved five
+        -- project surfaces onto that seam and left this one behind, so the
+        -- homepage hero and the project page could disagree about the same
+        -- project BY CONSTRUCTION (ADR 0012 decision 1).
+        COALESCE(SUM(u.cost_usd), 0)::text AS cost_usd,
+        COALESCE(SUM(u.tokens), 0)::text AS tokens,
         COALESCE(
           (SELECT SUM(al.budget_usd)::text
              FROM allocation al
@@ -227,18 +276,17 @@ export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Dat
         -- Distinct contributing clients this month. LEFT JOIN → NULL when the
         -- project has an assignment but no spend; array_remove drops it so an
         -- empty bucket reports [] not [null].
-        array_remove(array_agg(DISTINCT ar.tool ORDER BY ar.tool), NULL) AS tools
+        array_remove(array_agg(DISTINCT u.tool ORDER BY u.tool), NULL) AS tools
       FROM project p
       JOIN candidate c ON c.project_id = p.id
-      LEFT JOIN attribution_record ar
-        ON ar.project_id = p.id
-       AND ar.teammate_id = ${teammateId}::uuid
-       AND ar.ts_event >= ${monthStartIso}::timestamptz
-       -- §A integrity: exclude dev-confirmed forgeries (over-emission → quarantined).
-       AND NOT EXISTS (
-         SELECT 1 FROM session_quarantine sq
-         WHERE sq.teammate_id = ar.teammate_id AND sq.conversation_id = ar.claude_session_id
-           AND sq.resolved_at IS NULL AND sq.reason = 'api-uncorroborated')
+      -- The quarantine exclusion that used to be spelled out here lives INSIDE
+      -- v_complete_usage (mig 0082/0101), so it cannot drift out of step with
+      -- every other §A surface the way a copy would.
+      LEFT JOIN v_complete_usage u
+        ON u.project_id = p.id
+       AND u.teammate_id = ${teammateId}::uuid
+       AND u.ts_event >= ${monthStartIso}::timestamptz
+       AND u.ts_event <  ${spendEndIso}::timestamptz
       GROUP BY p.id, p.code, p.display_name, p.allocation_mode, c.is_assigned, c.is_contributor
       ORDER BY p.code
     `,
@@ -272,16 +320,24 @@ export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Dat
   const lastEventAt = [...freshRows][0]?.last_event_at ?? null
   const lastEventMs = lastEventAt === null ? null : new Date(lastEventAt).getTime()
 
-  const parsedBase = Number(process.env.NUXT_BASE_ALLOWANCE_USD)
-  const baseAllowanceUsd = Number.isFinite(parsedBase) && parsedBase >= 0 ? parsedBase : 100
-  const totalQuotaUsd = baseAllowanceUsd + totalAllocation
+  // ONE global constant, read through the shared policy fn so the manager-facing
+  // "over the soft cap" card (server/reporting/engine/over-soft-cap.ts) and this
+  // page cannot apply different arithmetic to the same rule.
+  const baseAllowance = baseAllowanceUsd()
+  const totalQuotaUsd = baseAllowance + totalAllocation
 
   const freshnessMinutesAgo =
     lastEventMs === null ? 0 : Math.max(0, Math.round((now.getTime() - lastEventMs) / 60_000))
 
   // Unallocated (no project budget) spend — month-scoped + uncapped. Extracted to
   // getUnallocatedSummary so it's the single source for the dashboard cards + CLI.
-  const { unallocated, tagged_spend } = await getUnallocatedSummary(tx, teammateId, monthStartIso, baseAllowanceUsd)
+  const { unallocated, tagged_spend } = await getUnallocatedSummary(
+    tx,
+    teammateId,
+    monthStartIso,
+    baseAllowance,
+    spendEndIso,
+  )
 
   // §B (#142) — the requester's non-Code Claude surface spend, MTD, per day,
   // straight from actual_spend (bill == usage on the pure-metered Anthropic
@@ -294,7 +350,7 @@ export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Dat
     total_cost_usd: totalCost.toFixed(2),
     total_tokens: Number(totalTokens),
     total_allocation_usd: totalAllocation.toFixed(2),
-    base_allowance_usd: baseAllowanceUsd.toFixed(2),
+    base_allowance_usd: baseAllowance.toFixed(2),
     total_quota_usd: totalQuotaUsd.toFixed(2),
     buckets: [...rows].map((r) => ({
       project_code: r.project_code,
@@ -321,28 +377,76 @@ export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Dat
 
 /**
  * Unallocated (no project budget) spend for the month, split tagged-by-activity
- * ("spill") vs genuinely-untagged ("needs tagging"). Aggregates per CONVERSATION
- * first (MAX(activity), matching the untagged worklist's session semantics), then
- * rolls up by activity. Month-scoped + UNCAPPED — the accurate single source the
- * dashboard's unallocated/tagged cards AND the usage MCP prompt both consume
- * (replacing the prior client-side composition off the LIMIT-100, all-time
- * /me/sessions/untagged list). Exported so the MCP surface can reuse it.
+ * ("spill") vs genuinely-untagged ("needs tagging") vs untaggable (§A arm 3).
+ * Aggregates per CONVERSATION first (MAX(activity), matching the untagged
+ * worklist's session semantics), then rolls up by activity. Month-scoped +
+ * UNCAPPED — the accurate single source the dashboard's unallocated/tagged cards
+ * AND the usage MCP prompt both consume (replacing the prior client-side
+ * composition off the LIMIT-100, all-time /me/sessions/untagged list). Exported
+ * so the MCP surface can reuse it.
+ *
+ * ALL THREE §A completeness arms are counted (ADR 0012 decision 1a — "your
+ * usage" means all of it). Arms 1 and 2 are read from their own tables because
+ * this function needs the worklist identity the seam does not expose (the
+ * conversation key, the activity, the dismissal); arm 3 is read THROUGH
+ * `v_complete_usage`, whose `usage_provenance = 'provider-usage'` selects
+ * exactly that arm — the same predicate the reporting coverage decomposition
+ * splits on (server/reporting/engine/usage-coverage.ts).
  */
 export async function getUnallocatedSummary(
   tx: Tx,
   teammateId: string,
   monthStartIso: string,
-  baseAllowanceUsd: number,
+  /**
+   * The soft cap this summary's `over_soft_cap` is decided against. Passed in
+   * rather than read here so ONE call resolves the policy per request — and named
+   * `baseAllowance` so it cannot shadow the `baseAllowanceUsd()` policy fn that
+   * produced it (server/utils/base-allowance.ts).
+   */
+  baseAllowance: number,
+  /*
+   * The EXCLUSIVE upper bound, as an instant. Required, not optional: both arms
+   * below were bounded BELOW only, so a projectless emission or an
+   * unaccounted_usage day dated later this month counted toward a month-to-date
+   * figure. The bucket path in getMyUsage was fixed for exactly this and these
+   * two adjacent queries were missed — a default here would let the next caller
+   * inherit the same hole silently.
+   *
+   * EXCLUSIVE, for every caller and every arm (r4-M2). The month-to-date callers
+   * pass `now`; `/me/usage` passes the RESOLVED window's own exclusive end
+   * (`clampedEnd`), which for a past month is the next month's 00:00Z. The day
+   * arm below used to compare `uu.day <= spendEndIso::date`, which is
+   * month-to-date-correct for the first shape (today's own row survives) and
+   * WRONG for the second: `2026-08-01T00:00:00Z::date` admitted a fill row dated
+   * 2026-08-01 into a July window, so the four-way split could exceed the
+   * `untagged_usd` it must foot to.
+   */
+  spendEndIso: string,
 ): Promise<{ unallocated: UnallocatedSummary; tagged_spend: TaggedSpend[] }> {
+  /*
+   * The last DAY the exclusive instant bound admits — the day containing the
+   * final instant strictly before `spendEndIso`. Derived here, in UTC, rather
+   * than in SQL: `::date` on a timestamptz resolves in the session's TimeZone,
+   * and `uu.day` is a UTC calendar day.
+   *
+   *   now  = 2026-08-05T14:23Z   → 2026-08-05  (today's own fill row survives)
+   *   July = 2026-08-01T00:00Z   → 2026-07-31  (August's first day is outside)
+   *
+   * Both callers stay correct off ONE bound, which is why this is derived from
+   * the shared argument rather than converted at each call site.
+   */
+  const lastDayInclusive = new Date(Date.parse(spendEndIso) - 1).toISOString().slice(0, 10)
   const unallocRows = await tx.execute<{
     activity: string | null
+    kind: 'session' | 'day' | 'provider'
+    dismissed: boolean
     cost_usd: string
     tokens: string
     sessions: string
     tools: string[] | null
   }>(
     sql`
-      WITH unalloc AS (
+      WITH conv AS (
         SELECT COALESCE(ar.claude_session_id, ar.instance_id::text) AS conv,
                MAX(ar.activity) AS activity,
                MAX(ar.tool)     AS tool,
@@ -352,6 +456,7 @@ export async function getUnallocatedSummary(
          WHERE ar.teammate_id = ${teammateId}::uuid
            AND ar.project_id IS NULL
            AND ar.ts_event >= ${monthStartIso}::timestamptz
+           AND ar.ts_event <  ${spendEndIso}::timestamptz
            -- §A integrity: a conversation the dev CONFIRMED as a forgery (over-emission
            -- → session_quarantine reason='api-uncorroborated') is excluded from usage.
            AND NOT EXISTS (
@@ -359,6 +464,22 @@ export async function getUnallocatedSummary(
              WHERE sq.teammate_id = ar.teammate_id AND sq.conversation_id = ar.claude_session_id
                AND sq.resolved_at IS NULL AND sq.reason = 'api-uncorroborated')
          GROUP BY COALESCE(ar.claude_session_id, ar.instance_id::text)
+      ),
+      -- Each item carries the DECISION it is in: which kind of item it is, and
+      -- whether the teammate has dismissed it (mig 0094 — decided to leave it
+      -- unallocated). Dismissal never removes an item from this union: it moves
+      -- it between the untagged and dismissed buckets below, and the unallocated
+      -- TOTAL is unchanged either way.
+      unalloc AS (
+        SELECT c.conv, c.activity, c.tool, c.cost, c.tokens,
+               'session'::text AS kind,
+               EXISTS (
+                 SELECT 1 FROM session_assignment sa
+                  WHERE sa.teammate_id = ${teammateId}::uuid
+                    AND sa.claude_session_id = c.conv
+                    AND sa.dismissed_at IS NOT NULL
+               ) AS dismissed
+          FROM conv c
         -- §A: per-day "unaccounted usage" (provider API truth OTel missed) is also
         -- unallocated spend that needs tagging — one item per (day, tool), counted
         -- like a conversation so the dashboard's needs-tagging total includes it.
@@ -367,20 +488,75 @@ export async function getUnallocatedSummary(
                uu.activity,
                uu.tool,
                uu.cost_usd AS cost,
-               uu.tokens   AS tokens
+               uu.tokens   AS tokens,
+               'day'::text AS kind,
+               uu.dismissed_at IS NOT NULL AS dismissed
           FROM unaccounted_usage uu
          WHERE uu.teammate_id = ${teammateId}::uuid
            AND uu.project_id IS NULL
            AND uu.cost_usd > 0
            AND uu.day >= ${monthStartIso}::date
+           -- day-grained lane: the last day the EXCLUSIVE instant bound admits
+           -- (see lastDayInclusive above) — a bare "<= spendEndIso::date" would
+           -- let the first day OUTSIDE a resolved window in.
+           AND uu.day <= ${lastDayInclusive}::date
+        -- §A arm 3 (mig 0101), through the seam. Genuine provider usage on a
+        -- surface that can never be OTel-emitted or reconciled into a taggable
+        -- row (the non-Code Claude surfaces, the Copilot coding-agent lane). It
+        -- carries project_id NULL BY CONSTRUCTION, so it IS unallocated spend and
+        -- belongs in this total (ADR 0012 decision 1a) — omitting it left the
+        -- /consumption headline short of the same dollars the reporting surfaces
+        -- already count. It is UNTAGGABLE, not untagged: there is no session and
+        -- no unaccounted_usage row to attach a project or an activity to, so its
+        -- own kind below keeps it out of the needs-tagging queue rather than
+        -- landing it in a queue the developer cannot action. (Half of this arm IS
+        -- sourced from reconciliation_record — the Copilot coding-agent lane, via
+        -- v_teammate_usage_daily — so "no reconciled row" would be false; what it
+        -- has no row in is unaccounted_usage, which is the taggable one.) One item
+        -- per (day, tool) — the grain v_teammate_usage_daily already aggregates to.
+        UNION ALL
+        -- ONE item per (day, tool) — the KEY grain, not the view-row grain
+        -- (design 07-model-axis-subtraction-build.md r1-H4). Mig 0124 fans a
+        -- provider day out into per-model rows plus a remainder, so counting
+        -- view rows here would inflate untaggable_count with model
+        -- cardinality. The GROUP BY folds each key back to one item (the
+        -- DISTINCT (teammate, day, tool) count — teammate is already clamped),
+        -- and the SUMs keep the dollars/tokens identical to the pre-fan-out
+        -- single row because Σ per key is invariant by construction (0124).
+        -- The key filter is HAVING SUM(cost) > 0, not per-row cost > 0: a
+        -- token-only fan-out row must not drop its tokens from a key whose
+        -- money is on its sibling rows.
+        SELECT 'provider:' || u.tool || ':' || u.ts_event::date::text AS conv,
+               NULL::text AS activity,
+               u.tool,
+               SUM(u.cost_usd) AS cost,
+               SUM(u.tokens)   AS tokens,
+               'provider'::text AS kind,
+               FALSE AS dismissed
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.project_id IS NULL
+           AND u.usage_provenance = 'provider-usage'
+           AND u.ts_event >= ${monthStartIso}::timestamptz
+           -- The SAME exclusive instant bound as both arms above. Arm 3's
+           -- ts_event is the DAY at 00:00Z (mig 0101:268 casts
+           -- v_teammate_usage_daily.day), so an exclusive bound on the instant
+           -- admits today's own row under a month-to-date "now" and excludes the
+           -- first day outside a resolved window — the two shapes the arm-2
+           -- sibling reaches through lastDayInclusive.
+           AND u.ts_event <  ${spendEndIso}::timestamptz
+         GROUP BY u.tool, u.ts_event::date
+        HAVING SUM(u.cost_usd) > 0
       )
       SELECT activity,
+             kind,
+             dismissed,
              SUM(cost)::text   AS cost_usd,
              SUM(tokens)::text AS tokens,
              COUNT(*)::text    AS sessions,
              array_remove(array_agg(DISTINCT tool ORDER BY tool), NULL) AS tools
         FROM unalloc
-       GROUP BY activity
+       GROUP BY activity, kind, dismissed
     `,
   )
 
@@ -388,27 +564,64 @@ export async function getUnallocatedSummary(
   let unallocTokens = BigInt(0)
   let taggedCost = 0
   let untaggedCost = 0
-  let needsTaggingCount = 0
-  const taggedSpend: TaggedSpend[] = []
+  let dismissedCost = 0
+  let untaggableCost = 0
+  let untaggableCount = 0
+  let needsTaggingSessions = 0
+  let needsTaggingDays = 0
+  let dismissedCount = 0
+  // The grain is now (activity, kind, dismissed), so one activity can arrive as
+  // several rows — accumulate per activity rather than pushing per row, or the
+  // spill card would show "Research" twice.
+  const byActivity = new Map<
+    string,
+    { cost: number; tokens: bigint; sessions: number; tools: Set<string> }
+  >()
   for (const r of unallocRows) {
     const cost = Number(r.cost_usd)
+    const items = Number(r.sessions)
     unallocCost += cost
     unallocTokens += BigInt(r.tokens)
+    if (r.kind === 'provider') {
+      // §A arm 3. Real unallocated usage, so it stays in the total above — but
+      // it is untaggable BY CONSTRUCTION (mig 0101), which is a different state
+      // from untagged. Routing it to `untaggedCost` would put spend the
+      // developer has no way to act on into a queue of actions they owe.
+      untaggableCost += cost
+      untaggableCount += items
+      continue
+    }
     if (r.activity === null || r.activity === '') {
-      untaggedCost += cost
-      needsTaggingCount += Number(r.sessions)
+      // No activity — the item is either awaiting a decision, or the teammate
+      // has made one: "leave it unallocated". Both stay in the unallocated
+      // total; only one of them is work the developer still owes.
+      if (r.dismissed) {
+        dismissedCost += cost
+        dismissedCount += items
+      } else {
+        untaggedCost += cost
+        if (r.kind === 'day') needsTaggingDays += items
+        else needsTaggingSessions += items
+      }
     } else {
       taggedCost += cost
-      taggedSpend.push({
-        activity: r.activity,
-        cost_usd: cost.toFixed(2),
-        tokens: Number(BigInt(r.tokens)),
-        sessions: Number(r.sessions),
-        tools: Array.isArray(r.tools) ? r.tools : [],
-      })
+      const acc = byActivity.get(r.activity) ?? { cost: 0, tokens: BigInt(0), sessions: 0, tools: new Set<string>() }
+      acc.cost += cost
+      acc.tokens += BigInt(r.tokens)
+      acc.sessions += items
+      for (const t of Array.isArray(r.tools) ? r.tools : []) acc.tools.add(t)
+      byActivity.set(r.activity, acc)
     }
   }
-  taggedSpend.sort((a, b) => Number(b.cost_usd) - Number(a.cost_usd))
+  const taggedSpend: TaggedSpend[] = [...byActivity.entries()]
+    .map(([activity, a]) => ({
+      activity,
+      cost_usd: a.cost.toFixed(2),
+      tokens: Number(a.tokens),
+      sessions: a.sessions,
+      tools: [...a.tools].sort(),
+    }))
+    .sort((a, b) => Number(b.cost_usd) - Number(a.cost_usd))
 
   return {
     unallocated: {
@@ -416,10 +629,19 @@ export async function getUnallocatedSummary(
       total_tokens: Number(unallocTokens),
       tagged_cost_usd: taggedCost.toFixed(2),
       untagged_cost_usd: untaggedCost.toFixed(2),
-      needs_tagging_count: needsTaggingCount,
-      soft_cap_usd: baseAllowanceUsd.toFixed(2),
+      needs_tagging_count: needsTaggingSessions + needsTaggingDays,
+      needs_tagging_sessions: needsTaggingSessions,
+      needs_tagging_days: needsTaggingDays,
+      dismissed_cost_usd: dismissedCost.toFixed(2),
+      dismissed_count: dismissedCount,
+      untaggable_cost_usd: untaggableCost.toFixed(2),
+      untaggable_count: untaggableCount,
+      soft_cap_usd: baseAllowance.toFixed(2),
       // >= (not >) to match the dashboard's "Over" badge threshold (>= 100% of base).
-      over_soft_cap: unallocCost >= baseAllowanceUsd,
+      // The manager-facing card applies the SAME comparison
+      // (server/reporting/engine/over-soft-cap.ts) — a `>` there would list a
+      // developer as within allowance whose own page badges them Over.
+      over_soft_cap: unallocCost >= baseAllowance,
     },
     tagged_spend: taggedSpend,
   }
@@ -473,187 +695,24 @@ export async function getMySurfaceSpend(
   return out
 }
 
-// ── consumption hero (visuals-iter2 §I3) — per-basis lane series ────────────
-
-/** One weekly bucket of a hero lane (Mon-UTC week start, matching date_trunc('week')). */
-export interface HeroLaneWeek {
-  week_start: string // 'YYYY-MM-DD' (Monday, UTC); gap weeks absent, client pads
-  usd: string
-}
-
-/**
- * One hero lane: a registry lane id + its weekly window series and its OWN
- * calendar-MTD total — always from the lane's own source, never summed across
- * bases (§I3 / r1-F1).
- */
-export interface HeroLane {
-  lane: string
-  label: string
-  mtd_usd: string
-  weekly: HeroLaneWeek[]
-}
-
-/**
- * One basis group of the /consumption hero. `basis` is the caption text the
- * UI must render verbatim beside the group — every element carries its basis
- * (axis rule a); no scalar ever sums across groups (axis rule b).
- */
-export interface HeroBasisGroup {
-  id: 'telemetry' | 'billed'
-  label: string
-  basis: string
-  lanes: HeroLane[]
-}
-
-/**
- * The "What kind of AI work drove this" hero series (§I3), requester-scoped:
- *
- *   - telemetry group — §A usage lanes:
- *       'claude' (Claude Code) from attribution_aggregate (the SAME source and
- *       window predicate as the page's daily series, so weekly Σ == daily Σ by
- *       construction — the grain-conservation test pins it);
- *       'copilot' + 'copilot-agent' from v_teammate_usage_daily's copilot
- *       branch (reconciliation_record per-(user, day) usage truth, mig 0086).
- *   - billed group — §B display of the non-Code Claude surfaces, straight from
- *     actual_spend (bill == usage on the pure-metered Anthropic lane), exactly
- *     the getMySurfaceSpend source.
- *
- * Zero lanes are elided EXCEPT 'claude' (the page's primary lane — an empty
- * month must still render the group, not a blank card). actual_spend /
- * reconciliation_record carry no RLS policy of their own: the explicit
- * teammate_id predicate IS the scope gate (the getMySurfaceSpend pattern).
- */
-export async function getMyConsumptionHero(
-  tx: Tx,
-  teammateId: string,
-  windowDays: number,
-  now: Date = new Date(),
-): Promise<HeroBasisGroup[]> {
-  const monthStartIso = monthStartIsoFor(now)
-
-  // Claude Code — attribution_aggregate, window predicate IDENTICAL to
-  // fetchDailySeries (server/usage/consumption.ts) so hero-weekly Σ == daily Σ.
-  const claudeWeekly = await tx.execute<{ week_start: string; usd: string }>(sql`
-    SELECT date_trunc('week', period_start AT TIME ZONE 'UTC')::date::text AS week_start,
-           SUM(total_cost_usd)::text AS usd
-    FROM attribution_aggregate
-    WHERE scope_type = 'teammate' AND scope_id = ${teammateId}::uuid
-      AND period_kind = 'day'
-      AND period_start >= (now() - make_interval(days => ${windowDays}))
-    GROUP BY 1 ORDER BY 1
-  `)
-  const claudeMtdRows = await tx.execute<{ usd: string }>(sql`
-    SELECT COALESCE(SUM(total_cost_usd), 0)::text AS usd
-    FROM attribution_aggregate
-    WHERE scope_type = 'teammate' AND scope_id = ${teammateId}::uuid
-      AND period_kind = 'day'
-      AND period_start >= date_trunc('month', now() AT TIME ZONE 'UTC')
-  `)
-
-  // Copilot usage lanes — v_teammate_usage_daily copilot branch (tool literals
-  // from the registry, never hand lists: copilot-surface-lanes checklist).
-  const copilotList = laneListSql(GITHUB_USAGE_TOOLS)
-  const copilotWeekly = await tx.execute<{ tool: string; week_start: string; usd: string }>(sql`
-    SELECT tool, date_trunc('week', day)::date::text AS week_start, SUM(usage_usd)::text AS usd
-    FROM v_teammate_usage_daily
-    WHERE teammate_id = ${teammateId}::uuid
-      AND tool IN (${copilotList})
-      AND day >= ((now() AT TIME ZONE 'UTC')::date - (${windowDays} - 1))
-    GROUP BY 1, 2 ORDER BY 1, 2
-  `)
-  const copilotMtd = await tx.execute<{ tool: string; usd: string }>(sql`
-    SELECT tool, SUM(usage_usd)::text AS usd
-    FROM v_teammate_usage_daily
-    WHERE teammate_id = ${teammateId}::uuid
-      AND tool IN (${copilotList})
-      AND day >= ${monthStartIso.slice(0, 10)}::date
-    GROUP BY 1
-  `)
-
-  // Billed surfaces — actual_spend over the non-Code Claude lanes (§B display).
-  const nonCodeList = laneListSql(NON_CODE_CLAUDE_TOOLS)
-  const billedWeekly = await tx.execute<{ tool: string; week_start: string; usd: string }>(sql`
-    SELECT tool, date_trunc('week', date)::date::text AS week_start, SUM(cost_usd)::text AS usd
-    FROM actual_spend
-    WHERE teammate_id = ${teammateId}::uuid
-      AND tool IN (${nonCodeList})
-      AND date >= ((now() AT TIME ZONE 'UTC')::date - (${windowDays} - 1))
-    GROUP BY 1, 2 ORDER BY 1, 2
-  `)
-  const billedMtd = await tx.execute<{ tool: string; usd: string }>(sql`
-    SELECT tool, SUM(cost_usd)::text AS usd
-    FROM actual_spend
-    WHERE teammate_id = ${teammateId}::uuid
-      AND tool IN (${nonCodeList})
-      AND date >= ${monthStartIso.slice(0, 10)}::date
-    GROUP BY 1
-  `)
-
-  const weeksOf = (
-    rows: Iterable<{ tool?: string; week_start: string; usd: string }>,
-    tool?: string,
-  ): HeroLaneWeek[] =>
-    [...rows]
-      .filter((r) => tool === undefined || r.tool === tool)
-      .map((r) => ({ week_start: r.week_start, usd: Number(r.usd).toFixed(2) }))
-  const mtdOf = (rows: Iterable<{ tool: string; usd: string }>, tool: string): number =>
-    Number([...rows].find((r) => r.tool === tool)?.usd ?? 0)
-
-  const telemetryLanes: HeroLane[] = [
-    {
-      lane: 'claude',
-      label: VENDOR_LABELS['claude'],
-      mtd_usd: Number([...claudeMtdRows][0]?.usd ?? 0).toFixed(2),
-      weekly: weeksOf(claudeWeekly),
-    },
-  ]
-  for (const toolId of GITHUB_USAGE_TOOLS) {
-    const lane = toolToVendor(toolId)
-    const weekly = weeksOf(copilotWeekly, toolId)
-    const mtd = mtdOf(copilotMtd, toolId)
-    if (weekly.length === 0 && mtd === 0) continue // elide silent lanes
-    telemetryLanes.push({
-      lane,
-      label: VENDOR_LABELS[lane],
-      mtd_usd: mtd.toFixed(2),
-      weekly,
-    })
-  }
-
-  const billedLanes: HeroLane[] = []
-  for (const toolId of NON_CODE_CLAUDE_TOOLS) {
-    const weekly = weeksOf(billedWeekly, toolId)
-    const mtd = mtdOf(billedMtd, toolId)
-    if (weekly.length === 0 && mtd === 0) continue // elide silent lanes
-    billedLanes.push({ lane: toolId, label: toolLabel(toolId), mtd_usd: mtd.toFixed(2), weekly })
-  }
-
-  return [
-    {
-      id: 'telemetry',
-      label: 'Telemetry-attributed',
-      basis: 'attributed telemetry usage · weekly',
-      lanes: telemetryLanes,
-    },
-    {
-      id: 'billed',
-      label: 'Billed surfaces',
-      basis: 'billed usage (provider bill) · weekly',
-      lanes: billedLanes,
-    },
-  ]
-}
-
 // ── provider-truth MTD (visuals-iter2 §I3 "one honest number") ──────────────
 
 /**
  * The requester's provider-truth month-to-date spend — the SAME per-user
- * sources /me/usage's §A reconciliation reads: Σ v_teammate_usage_daily
- * (claude-code + any other emitted tool from actual_spend, PLUS the Copilot
- * reconciliation usage the view lanes in — mig 0086 keeps the two arms
- * double-count-free by construction) + Σ actual_spend over the non-Code Claude
- * surfaces (which the view deliberately excludes as §B-only). No attribution
- * math anywhere: this is what the providers say the user consumed.
+ * source /me/usage's §A reconciliation reads: Σ v_teammate_usage_daily
+ * (claude-code + every non-Code Claude surface from actual_spend, PLUS the
+ * Copilot reconciliation usage the view lanes in — mig 0086 keeps the two
+ * arms double-count-free by construction). No attribution math anywhere:
+ * this is what the providers say the user consumed.
+ *
+ * A4 (mig 0101): this used to ALSO add Σ actual_spend over the non-Code Claude
+ * surfaces as a second operand, because migration 0084 had excluded those
+ * surfaces from v_teammate_usage_daily. Migration 0101 (A1) restored them to
+ * the view, which made that second operand a DUPLICATE — doubling every
+ * non-Code dollar on this "one honest number" surface (R1-H7). The operand is
+ * removed; v_teammate_usage_daily alone is now the complete provider-truth
+ * source. Pinned by a mixed-surface conservation test
+ * (tests/integration/me/consumption-hero.test.ts).
  */
 export async function getMyProviderTruthMtd(
   tx: Tx,
@@ -661,20 +720,24 @@ export async function getMyProviderTruthMtd(
   now: Date = new Date(),
 ): Promise<string> {
   const monthStart = monthStartIsoFor(now).slice(0, 10)
-  const nonCodeList = laneListSql(NON_CODE_CLAUDE_TOOLS)
+  /*
+   * MONTH TO DATE, bounded at BOTH ends. `day >= monthStart` alone let a
+   * future-dated reconciliation row — including one in a LATER month — into
+   * today's provider total, and this figure feeds the materiality decision
+   * behind the declared-personal disclosure, so a stray row moved a
+   * user-facing claim as well as a number.
+   *
+   * `day <= today` rather than `< now`: this lane is DAY-grained (a bill day is
+   * the whole day), so an exclusive instant bound would drop today's own row.
+   */
+  const today = new Date(now.getTime()).toISOString().slice(0, 10)
   const rows = await tx.execute<{ usd: string }>(sql`
-    SELECT (
-      COALESCE((
-        SELECT SUM(usage_usd) FROM v_teammate_usage_daily
-        WHERE teammate_id = ${teammateId}::uuid AND day >= ${monthStart}::date
-      ), 0)
-      +
-      COALESCE((
-        SELECT SUM(cost_usd) FROM actual_spend
-        WHERE teammate_id = ${teammateId}::uuid AND tool IN (${nonCodeList})
-          AND date >= ${monthStart}::date
-      ), 0)
-    )::text AS usd
+    SELECT COALESCE((
+      SELECT SUM(usage_usd) FROM v_teammate_usage_daily
+      WHERE teammate_id = ${teammateId}::uuid
+        AND day >= ${monthStart}::date
+        AND day <= ${today}::date
+    ), 0)::text AS usd
   `)
   return Number([...rows][0]?.usd ?? 0).toFixed(2)
 }
@@ -937,7 +1000,15 @@ export const grantScopeLabel = oauthScopeLabel
 
 export interface Grant extends Record<string, unknown> {
   id: string
+  /**
+   * The oauth_client row's OWN id (S6 Attestation fix) — distinct from `id`
+   * above (the grant/oauth_token row). Rendered beside client_name so a
+   * forged/self-registered name never stands alone as the client's identity.
+   */
+  client_id: string
   client_name: string
+  /** When the CLIENT itself was registered (S6 Attestation fix) — distinguishes a long-established app from one self-registered moments ago. */
+  client_registered_at: string
   /** Space-delimited scopes split into the granted list. */
   scopes: string[]
   /** Plain-language label per scope, index-aligned with `scopes`. */
@@ -952,7 +1023,9 @@ export interface Grant extends Record<string, unknown> {
 
 interface GrantRow extends Record<string, unknown> {
   id: string
+  client_id: string
   client_name: string
+  client_registered_at: string
   scope: string
   state: GrantState
   created_at: string
@@ -990,7 +1063,9 @@ function projectGrant(r: GrantRow): Grant {
   const scopes = r.scope ? r.scope.split(' ').filter(Boolean) : []
   return {
     id: r.id,
+    client_id: r.client_id,
     client_name: r.client_name,
+    client_registered_at: r.client_registered_at,
     scopes,
     scope_labels: scopes.map(grantScopeLabel),
     state: r.state,
@@ -1012,7 +1087,9 @@ export async function getMyGrants(tx: Tx, teammateId: string): Promise<Grant[]> 
   const rows = await tx.execute<GrantRow>(sql`
     SELECT
       t.id::text                AS id,
+      c.client_id::text         AS client_id,
       c.client_name             AS client_name,
+      c.created_at::text        AS client_registered_at,
       t.scope                   AS scope,
       ${grantStateExpr()}       AS state,
       t.refresh_issued_at::text AS created_at,
@@ -1044,7 +1121,9 @@ export async function getGrantsForTeammate(tx: Tx, teammateId: string): Promise<
   >(sql`
     SELECT
       t.id::text                AS id,
+      c.client_id::text         AS client_id,
       c.client_name             AS client_name,
+      c.created_at::text        AS client_registered_at,
       t.scope                   AS scope,
       ${grantStateExpr()}       AS state,
       t.refresh_issued_at::text AS created_at,

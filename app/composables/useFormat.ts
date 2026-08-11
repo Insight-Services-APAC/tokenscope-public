@@ -9,6 +9,9 @@
  * instead of rendering "$NaN" / "NaNd ago" into financial columns.
  */
 
+import { toolLabel } from '#shared/usage/surface'
+import { githubSurfaceAdapter } from '#shared/usage/github-surface'
+
 const EM_DASH = '—'
 
 export interface FmtUsdOptions {
@@ -77,12 +80,31 @@ export function fmtPct(
 }
 
 /**
- * Like `fmtPct`, but a tiny non-zero share reads `<1%` instead of rounding to
- * a misleading `0%` — the lane-bar tooltip/legend convention (#142; shared by
- * FinanceCouTable and the practice bill-by-surface card).
+ * Like `fmtPct`, but the two open bands either side of the absolutes are named
+ * as bands rather than rounded INTO an absolute — the lane-bar tooltip/legend
+ * convention (#142; shared by FinanceCouTable, the practice bill-by-surface
+ * card, OtherSurfacesPanel and BudgetCoverageNote):
+ *
+ *   - `(0, 1%)`   → `<1%`, never a rounded-away `0%`
+ *   - `(99%, 1)`  → `>99%`, never a rounded-up `100%`
+ *
+ * Both guards exist for one reason. Every caller renders a PART's share of a
+ * whole, so at 0 decimal places a reader takes `0%` to mean "none of it" and
+ * `100%` to mean "all of it". Rounding may not manufacture either claim: a
+ * $400 remainder on a $100,000 denominator is 99.6%, and printing that as
+ * `100%` tells the reader nothing is left over when $400 is.
+ *
+ * `0` and `1` themselves are passed through — they ARE the absolutes, and
+ * naming them is the point. So is anything above `1`: an over-100% share
+ * (a quota overrun) is a real reading, not a rounding artefact, and reads
+ * `125%`. Non-finite input falls back to an em-dash like every formatter
+ * above rather than rendering `NaN%` into a governance sentence.
  */
 export function fmtSharePct(p: number): string {
-  return p > 0 && p < 0.01 ? '<1%' : `${Math.round(p * 100)}%`
+  if (!Number.isFinite(p)) return EM_DASH
+  if (p > 0 && p < 0.01) return '<1%'
+  if (p > 0.99 && p < 1) return '>99%'
+  return `${Math.round(p * 100)}%`
 }
 
 /**
@@ -102,10 +124,36 @@ export function signedPct(
 
 // Map a tool code (claude-code / copilot-cli, or the CC/COP shorthand) to its
 // brand mark + name — the same client language as the Connect buttons.
+/*
+ * Tool -> label, from the SAME registries the server classifies on.
+ *
+ * This function used to be two branches: anything containing "copilot" was
+ * Copilot, and EVERYTHING ELSE was "Claude Code". So `claude-ai`,
+ * `claude-office`, `claude-cowork` and `claude-design` all rendered as "Claude
+ * Code" — including side by side on the surface-split card, which printed
+ * "Claude Code 75% · Claude Code 25%" and made the one card whose entire
+ * subject is WHICH SURFACE unreadable.
+ *
+ * That is the mirror image of the defect the vendor classifier
+ * (`server/reporting/vendor-split.ts`) was written to fix: the same four
+ * surfaces, swept into one bucket by hand-written literals instead of the
+ * canon's sets. It is fixed the same way — read the registry, so a surface
+ * labels correctly the day it is registered rather than the day someone
+ * remembers to extend an `if`.
+ *
+ * Unknown tools fall back to the raw key (via `toolLabel`), never to a vendor's
+ * name: an unrecognised surface is unrecognised, not Claude Code.
+ */
+const GITHUB_TOOL_LABELS: Readonly<Record<string, string>> = Object.fromEntries(
+  githubSurfaceAdapter.lanes.flatMap((l) => l.tools.map((t) => [t, l.label])),
+)
+
 export function clientMeta(tool: string): { icon: string; name: string } {
   const t = (tool || '').toLowerCase()
+  const gh = GITHUB_TOOL_LABELS[t]
+  if (gh) return { icon: 'logos:github-copilot', name: gh }
   if (t.includes('copilot') || t === 'cop') return { icon: 'logos:github-copilot', name: 'Copilot' }
-  return { icon: 'logos:claude-icon', name: 'Claude Code' }
+  return { icon: 'logos:claude-icon', name: toolLabel(t) }
 }
 
 export function useFormat() {

@@ -24,16 +24,24 @@
  * byte-identical to the screen figures (build-design §2 "byte-identical rule").
  */
 import { sql } from 'drizzle-orm'
+import { wholeCompanyFinance, wholeCompanyUsage } from './engine/scope'
+import { fetchKpiCore, type ReportKpiCore } from './engine/kpis'
+import { fetchPerPerson, type PerPersonKpi } from './engine/per-person'
+import { fetchDrivers, type DriversResult } from './engine/drivers'
+import type { ServerClock } from '../../shared/reports/clock'
+import { fetchUsageWeeklyLanes, fetchDailyMetrics } from './engine/usage-series'
+import { fetchUsageBudgetCoverage } from './engine/usage-coverage'
+import { fetchTierExposure } from './engine/tier-exposure'
+import {
+  fetchChargebackTrend,
+  fetchChargebackLaneTrend,
+  fetchChargebackLanes,
+} from './engine/chargeback-series'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { csvEscape } from '../utils/csv-escape'
-import {
-  laneListSql,
-  chargeToVendor,
-  SECTION_A_USAGE_TOOLS,
-  VENDOR_LANES,
-  type Vendor,
-} from '../../shared/usage/vendor'
+import { laneListSql, SECTION_A_USAGE_TOOLS } from '../../shared/usage/vendor'
 import { CLAUDE_CODE_TOOL } from '../../shared/usage/surface'
+import type { SpendLens } from '../../shared/usage/lens'
 import {
   GITHUB_CHARGEABLE_LANES,
   GITHUB_FIREWALL_EXCLUSIONS,
@@ -43,13 +51,16 @@ import {
 import {
   buildSeasonality,
   fillDowBuckets,
-  isMonthAlignedWindow,
-  mergeWeeklyLaneRows,
-  momPaceWindow,
+  driverProvenanceCsvCells,
+  driverSurfaceMixCsvCell,
+  driverArmCsvLines,
   type UsageWindow,
 } from './params'
-import { monthKeyUtc, monthRangeUtc, type MonthRangeUtc } from '../utils/period'
+import type { MonthRangeUtc } from '../utils/period'
 import type {
+  MeasureLane,
+  BilledLaneMeta,
+  ChargebackCoverage,
   DriverRow,
   DailyMetric,
   ProviderSplit,
@@ -60,10 +71,21 @@ import type {
   ChargeLanePoint,
   ChargebackLaneRow,
   ChargeDowBucket,
-  ShowbackWeeklyLaneCell,
+  UsageSurfaceWeeklyCell,
+  UsageBudgetCoverage,
 } from '../../shared/reports/types'
+import type { TierExposure } from '../../shared/reports/tier-exposure'
+/*
+ * The concentration MATHS lives in shared/ because the Region width computes the
+ * same statistic client-side and was cutting the cohorts with a different
+ * rounding rule. Imported here for this module's own use, and re-exported below
+ * so every existing importer of this module is unaffected.
+ */
+import { computeConcentration } from '../../shared/reports/concentration'
+import type { ConcentrationStats } from '../../shared/reports/concentration'
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
+
 
 /**
  * A half-open `[startIso, endIso)` usage window — re-exported from `./params`
@@ -73,243 +95,89 @@ type Tx = PostgresJsDatabase<Record<string, unknown>>
  */
 export type { UsageWindow }
 
-/** The drivers axis (build-design §2 `/reports/across-regions/drivers`). */
-export const ACROSS_DRIVER_AXES = ['region', 'practice', 'teammate', 'model'] as const
+/**
+ * The drivers axis (build-design §2 `/reports/across-regions/drivers`).
+ *
+ * 'project' is here because the unit of account is the budgeted project (D1):
+ * a whole-company viewer's first question is which PROJECTS carry the spend,
+ * and the axis is the same seam grouping the Regional scope and the Cost-Centre
+ * drill read, with no scope clamp.
+ *
+ * 'region' is NOT here, and its absence is the fix rather than an omission
+ * (prototype.html `note('fix 4a', …)`). The whole-company page already answers
+ * "which region" in its own Regions table, off `fetchAcrossRegionCards`; the
+ * pivot answered it a second time off `v_complete_usage` and the two disagreed —
+ * different values AND a different rank order. One fact needs one home, so the
+ * pivot's copy is the one that goes. `parseAxis` falls a saved `?axis=region`
+ * URL back to `project` rather than 400-ing it.
+ */
+export const ACROSS_DRIVER_AXES = [
+  'practice',
+  'teammate',
+  'model',
+  'project',
+  'surface',
+] as const
 export type AcrossDriverAxis = (typeof ACROSS_DRIVER_AXES)[number]
 
 // ── KPIs (whole-company headline) ────────────────────────────────────────────
-export interface AcrossKpis {
-  /** Usage-lane genuine total for the month (all genuine cost incl. NFR/exempt). */
-  genuineUsd: number
-  /** The chargeable subset (finance lane) — Anthropic + Copilot only in chargeback mode. */
-  chargeableUsd: number
-  /** Anthropic chargeable (always included). */
-  anthropicChargeableUsd: number
-  /** Copilot pooled net chargeable (finance lane) — folded into the total only in chargeback mode. */
-  copilotChargeableUsd: number
-  tokens: number
-  activeUsers: number
-  /** Previous-month genuine total (whole company) — the MoM operand. */
-  prevGenuineUsd: number
-  /** (genuine − prev)/prev as a FRACTION, or null when there is no prior month. */
-  momDeltaPct: number | null
-  /**
-   * Previous-CALENDAR-month chargeable total (§B finance lane) — the chargeback MoM
-   * operand. Composed the SAME way as `chargeableUsd` (Anthropic always; Copilot
-   * only in chargeback mode). 0 in range mode (no month anchor).
-   */
-  prevChargeableUsd: number
-  /**
-   * (chargeable − prevChargeable)/prevChargeable as a FRACTION, or null when there is
-   * no prior month / range mode. The §B analogue of `momDeltaPct` — NEVER mixes lanes.
-   * The finance lane is MONTH-grained, so this compares whole calendar months (no
-   * day-of-month pacing, which only applies to the day-grained usage lane).
-   */
-  chargeMomDeltaPct: number | null
-  /** genuine / activeUsers (0 when no active users). */
+/**
+ * The whole-company KPI row: the engine's KPI core, plus the one derived figure
+ * this scope still adds. Both MoM deltas moved INTO the core when the Region
+ * width started rendering the same KPI row — see engine/kpis.ts.
+ */
+export interface AcrossKpis extends ReportKpiCore {
+  /** §A genuine ÷ activeUsers (0 when no active users). Never a §B operand. */
   avgPerUserUsd: number
-  /**
-   * §B — distinct teammates carrying an ANTHROPIC chargeback bill over the window
-   * (`COUNT(DISTINCT teammate_id)` on `v_finance_bill_chargeback`, day-clipped). The
-   * chargeback-mode "Billed teammates" tile. Anthropic-lane (per-teammate); Copilot
-   * has no per-user chargeback (pooled).
-   */
-  billedTeammates: number
-  /** §B — Σ ANTHROPIC bill tokens over the window (`v_finance_bill_chargeback.bill_tokens`). */
-  billedTokens: number
-  /**
-   * §B — Anthropic chargeable ÷ billed teammates (0 when none). NOT the Copilot-inclusive
-   * chargeable (Copilot is pooled, has no per-user charge), so the average is Anthropic-only.
-   */
-  avgChargePerBilledUser: number
-  /**
-   * §B — copilot chargeback is ON but the window is NOT month-aligned, so the pooled
-   * (monthly) Copilot net is withheld from `chargeableUsd` (never sliced into a
-   * partial-month range, never $0-faked). The UI shows a "Copilot pooled (monthly) not
-   * shown for partial-month ranges" caveat instead of a bare $0.
-   */
-  copilotPartialMonthUnavailable: boolean
-  /** MAX(ts_event) in the month (`YYYY-MM-DD`), or null when the month has no data. */
-  asOfDate: string | null
-  /** Earliest month with company data (`YYYY-MM`), or null. */
-  monthFloor: string | null
-}
-
-interface KpiRow extends Record<string, unknown> {
-  genuine: string
-  tokens: string
-  active_users: number
-  as_of: string | null
-}
-interface ChargeRow extends Record<string, unknown> {
-  anthropic: string
-  copilot: string
 }
 
 /**
- * The whole-company KPI row: usage-lane genuine total (over the window) + the
- * finance-lane chargeable pair + MoM delta + active users + avg/user.
- * `copilotChargeback` decides whether the Copilot pooled net is folded into
- * `chargeableUsd` (chargeback mode) or held back with a "pending" marker
- * (build-design §6).
+ * The whole-company KPI row: the shared core summed with NO clamp on either lane
+ * (`wholeCompanyUsage` / `wholeCompanyFinance` — a written declaration that this
+ * really is every region, see engine/scope.ts), plus `avgPerUserUsd`.
  *
- * MoM is MONTH-ANCHORED: it is computed ONLY when `opts.momMonthRange` (the viewed
- * month's range, from which the as-of-paced previous-month window is derived) is
- * supplied — the month path passes it; a custom `from`/`to` range does NOT (and the
- * export path omits it), so `momDeltaPct` is `null` (an MTD delta has no
- * meaning for an arbitrary span). The finance/bill lane is month-grained
- * (`period_month` = month-start), so the charge is summed over every
- * `period_month` INSIDE the window — a single month reduces to today's one-row
- * result, and a multi-month range sums those months.
+ * Both MoM deltas ride the core and are MONTH-ANCHORED: they are computed only when
+ * `opts.momMonthRange` (the viewed month's range) is supplied — the month path
+ * passes it; a custom `from`/`to` range does NOT (and the export path omits it), so
+ * the deltas are `null` (an MTD delta has no meaning for an arbitrary span).
  */
 export async function fetchAcrossKpis(
   tx: Tx,
   window: UsageWindow,
   opts: { copilotChargeback: boolean; momMonthRange?: MonthRangeUtc | null; now?: Date },
 ): Promise<AcrossKpis> {
-  const [totals] = [
-    ...(await tx.execute<KpiRow>(sql`
-      SELECT COALESCE(SUM(cost_usd), 0)::text AS genuine,
-             COALESCE(SUM(tokens), 0)::text AS tokens,
-             COUNT(DISTINCT teammate_id)::int AS active_users,
-             to_char(MAX(ts_event), 'YYYY-MM-DD') AS as_of
-      FROM v_complete_usage
-      WHERE ts_event >= ${window.startIso}::timestamptz
-        AND ts_event <  ${window.endIso}::timestamptz`)),
-  ]
-  const asOfDate = totals?.as_of ?? null
+  const core = await fetchKpiCore(
+    tx,
+    {
+      usage: wholeCompanyUsage,
+      finance: wholeCompanyFinance,
+      // Whole-company, so one key for every caller.
+      monthFloorKey: 'across:global',
+    },
+    window,
+    opts,
+  )
 
-  // Previous-month genuine for the MoM delta (whole company, same lane) — month
-  // path only. Absent (range mode) ⇒ prevGenuineUsd stays 0 ⇒ momDeltaPct null.
-  // The pace window is clipped to the DATA'S as-of day-of-month, NOT `now`: during
-  // settling `as_of` lags today, so pacing on `now` would measure the current
-  // month's partial data against MORE previous-month days → a spurious drop (the
-  // very early-month bug the pace fix removes). No as_of (no current data) ⇒ no MoM.
-  let prevGenuineUsd = 0
-  if (opts.momMonthRange && asOfDate) {
-    const momPrevWindow = momPaceWindow(opts.momMonthRange, new Date(`${asOfDate}T00:00:00.000Z`))
-    const [prev] = [
-      ...(await tx.execute<{ genuine: string }>(sql`
-        SELECT COALESCE(SUM(cost_usd), 0)::text AS genuine
-        FROM v_complete_usage
-        WHERE ts_event >= ${momPrevWindow.startIso}::timestamptz
-          AND ts_event <  ${momPrevWindow.endIso}::timestamptz`)),
-    ]
-    prevGenuineUsd = Number(prev?.genuine ?? 0)
-  }
-
-  const [floor] = [
-    ...(await tx.execute<{ floor_month: string | null }>(sql`
-      SELECT to_char(MIN(ts_event), 'YYYY-MM') AS floor_month FROM v_complete_usage`)),
-  ]
-
-  const startDate = window.startIso.slice(0, 10)
-  const endDate = window.endIso.slice(0, 10)
-  // §B ANTHROPIC chargeable + the per-teammate bill grain — BOTH from the DAILY bill
-  // lane (`v_finance_bill_chargeback`, `period_date`-windowed). The month view's Anthropic
-  // portion is EXACTLY this view rolled to month, so reading it daily is correct for ANY
-  // window — a non-month-aligned custom range no longer drops the charge to $0 (the
-  // grain-mismatch bug) — and keeps the Anthropic chargeable, billed teammates + billed
-  // tokens on ONE window+grain (so `avgChargePerBilledUser` divides same-day-set operands).
-  // Copilot is ABSENT from this view (pooled, per-org, no per-teammate row) by construction.
-  const [billed] = [
-    ...(await tx.execute<{ anthropic: string; billed_teammates: number; billed_tokens: string }>(sql`
-      SELECT COALESCE(SUM(bill_usd), 0)::text AS anthropic,
-             COUNT(DISTINCT teammate_id)::int AS billed_teammates,
-             COALESCE(SUM(bill_tokens), 0)::text AS billed_tokens
-      FROM v_finance_bill_chargeback
-      WHERE period_date >= ${startDate}::date AND period_date < ${endDate}::date`)),
-  ]
-
-  // §B COPILOT pooled net is POOLED-MONTHLY (`v_finance_copilot_pool_chargeback`, month
-  // grain — no daily grain to window). Keep it month-grained (summed over every
-  // `period_month` inside the window) and fold it on top only in chargeback mode.
-  // CHARGEABLE lanes only (registry-driven, mig 0085): copilot-license + copilot-usage;
-  // copilot-unclassified NEVER enters a chargeable figure (design D2).
-  const [charge] = [
-    ...(await tx.execute<{ copilot: string }>(sql`
-      SELECT COALESCE(SUM(charge_usd), 0)::text AS copilot
-      FROM v_finance_chargeback_month
-      WHERE tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})
-        AND period_month >= ${startDate}::date AND period_month < ${endDate}::date`)),
-  ]
-
-  // §B chargeback MoM is computed ONLY for a fully-CLOSED calendar month. The bill lane
-  // (v_finance_chargeback_month) accrues intra-month, so an in-progress month is a PARTIAL
-  // MTD accrual; comparing it against a WHOLE prior month understates it (a spurious
-  // decline), and month-grained data CANNOT be day-paced the way the day-grained usage
-  // lane is. So the MoM is withheld (null) until the viewed month closes. Range mode
-  // (no momMonthRange) is null for the same "no month anchor" reason.
-  const now = opts.now ?? new Date()
-  // Closed = strictly BEFORE the current month (YYYY-MM string compare). `!==` would
-  // treat a FUTURE month as closed and compare it to the still-open current month
-  // (partial MTD) — the exact spurious MoM this gate exists to prevent (round-2 #5).
-  const chargeMomClosed =
-    opts.momMonthRange != null && opts.momMonthRange.month < monthKeyUtc(now)
-  let prevChargeableAnthropic = 0
-  let prevChargeableCopilot = 0
-  if (chargeMomClosed) {
-    const prevMonth = monthRangeUtc(
-      monthKeyUtc(new Date(opts.momMonthRange!.monthStartUtc.getTime() - 1)),
-    )
-    const prevStart = prevMonth.startIso.slice(0, 10)
-    const prevEnd = prevMonth.endIso.slice(0, 10)
-    // Anthropic = everything OUTSIDE the unified GitHub firewall set (every lane id
-    // + §A tool literal — never the narrower chargeback-lane list, r1 finding 1);
-    // copilot = the CHARGEABLE lanes only (unclassified never charges).
-    const [prevCharge] = [
-      ...(await tx.execute<ChargeRow>(sql`
-        SELECT COALESCE(SUM(charge_usd) FILTER (WHERE tool NOT IN (${laneListSql(GITHUB_FIREWALL_EXCLUSIONS)})), 0)::text AS anthropic,
-               COALESCE(SUM(charge_usd) FILTER (WHERE tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})), 0)::text  AS copilot
-        FROM v_finance_chargeback_month
-        WHERE period_month >= ${prevStart}::date AND period_month < ${prevEnd}::date`)),
-    ]
-    prevChargeableAnthropic = Number(prevCharge?.anthropic ?? 0)
-    prevChargeableCopilot = Number(prevCharge?.copilot ?? 0)
-  }
-
-  const genuineUsd = Number(totals?.genuine ?? 0)
-  const activeUsers = Number(totals?.active_users ?? 0)
-  // Anthropic from the DAILY bill lane (windowed); Copilot from the MONTH pool view.
-  const anthropicChargeableUsd = Number(billed?.anthropic ?? 0)
-  const copilotChargeableUsd = Number(charge?.copilot ?? 0)
-  // The Copilot pool is POOLED-MONTHLY (no daily grain), so it may only be folded over a
-  // MONTH-ALIGNED window. Over a partial-month range it is withheld (never a partial
-  // slice, never a silent $0 under a "+ Copilot pooled net" label) and flagged for the UI.
-  const isMonthAligned = isMonthAlignedWindow(window)
-  const foldCopilot = opts.copilotChargeback && isMonthAligned
-  const copilotPartialMonthUnavailable = opts.copilotChargeback && !isMonthAligned
-  const chargeableUsd = anthropicChargeableUsd + (foldCopilot ? copilotChargeableUsd : 0)
-  const prevChargeableUsd = prevChargeableAnthropic + (foldCopilot ? prevChargeableCopilot : 0)
-  const billedTeammates = Number(billed?.billed_teammates ?? 0)
   return {
-    genuineUsd,
-    anthropicChargeableUsd,
-    copilotChargeableUsd,
-    chargeableUsd,
-    tokens: Number(totals?.tokens ?? 0),
-    activeUsers,
-    prevGenuineUsd,
-    momDeltaPct: prevGenuineUsd > 0 ? (genuineUsd - prevGenuineUsd) / prevGenuineUsd : null,
-    prevChargeableUsd,
-    chargeMomDeltaPct:
-      prevChargeableUsd > 0 ? (chargeableUsd - prevChargeableUsd) / prevChargeableUsd : null,
-    avgPerUserUsd: activeUsers > 0 ? genuineUsd / activeUsers : 0,
-    billedTeammates,
-    billedTokens: Number(billed?.billed_tokens ?? 0),
-    // Anthropic charge ÷ billed teammates — NOT chargeableUsd (Copilot pooled has no per-user).
-    avgChargePerBilledUser: billedTeammates > 0 ? anthropicChargeableUsd / billedTeammates : 0,
-    copilotPartialMonthUnavailable,
-    asOfDate,
-    monthFloor: floor?.floor_month ?? null,
+    // Spread rather than re-listed field by field: a figure added to the core is
+    // then published by BOTH scopes, which is the whole point of sharing it.
+    // `prevGenuineUsd` / `momDeltaPct` now ride the core (engine/kpis.ts) — both
+    // widths render the delta, so both compute it from one clamped query.
+    ...core,
+    avgPerUserUsd: core.activeUsers > 0 ? core.genuineUsd / core.activeUsers : 0,
   }
 }
 
 // ── Daily metrics (§A usage sparkline series) ────────────────────────────────
 /**
  * The whole-company §A per-day usage series over the window (`v_complete_usage`) —
- * one row per UTC day with any usage: `SUM(cost_usd)`, `SUM(tokens)`,
- * `COUNT(DISTINCT teammate_id)`, ordered by day. Feeds the KPI-tile sparklines
+ * one row per UTC day in the window THAT HAS HAPPENED — zero-filled, so a day
+ * with no usage is present with 0s rather than absent: `SUM(cost_usd)`,
+ * `SUM(tokens)`, `COUNT(DISTINCT teammate_id)`, ordered by day. Dropping empty
+ * days would compress scattered activity into contiguous points and misstate the
+ * month's shape; emitting days that have not occurred asserts spend collapsed to
+ * zero. The exact bound lives on `fetchDailyMetrics` (engine/usage-series.ts).
+ * Feeds the KPI-tile sparklines
  * (Attributed usage / Tokens / Active users / Avg usage). Pure usage lane — the
  * chargeable tile has NO daily grain (the finance lane is month-grained) and so
  * gets no sparkline (honest).
@@ -317,56 +185,58 @@ export async function fetchAcrossKpis(
 export async function fetchAcrossDailyMetrics(
   tx: Tx,
   window: UsageWindow,
+  clock: ServerClock,
 ): Promise<DailyMetric[]> {
-  const startDate = window.startIso.slice(0, 10)
-  const endDate = window.endIso.slice(0, 10)
-  // Zero-fill EVERY calendar day in the window (generate_series LEFT JOIN the daily
-  // aggregate) so a day with NO usage renders a genuine 0 — the sparkline's temporal
-  // shape stays accurate instead of compressing scattered activity into contiguous
-  // points. `endDate` is the EXCLUSIVE window end, so the series stops one day before it.
-  const rows = await tx.execute<{
-    day: string
-    genuine: string
-    tokens: string
-    active_users: number
-  }>(sql`
-    WITH days AS (
-      SELECT generate_series(
-               ${startDate}::timestamp,
-               ${endDate}::timestamp - INTERVAL '1 day',
-               INTERVAL '1 day'
-             )::date AS day
-    ),
-    agg AS (
-      SELECT date_trunc('day', ts_event)::date AS day,
-             SUM(cost_usd) AS genuine,
-             SUM(tokens) AS tokens,
-             COUNT(DISTINCT teammate_id) AS active_users
-      FROM v_complete_usage
-      WHERE ts_event >= ${window.startIso}::timestamptz
-        AND ts_event <  ${window.endIso}::timestamptz
-      GROUP BY 1
-    )
-    SELECT to_char(d.day, 'YYYY-MM-DD') AS day,
-           COALESCE(a.genuine, 0)::text AS genuine,
-           COALESCE(a.tokens, 0)::text AS tokens,
-           COALESCE(a.active_users, 0)::int AS active_users
-    FROM days d LEFT JOIN agg a ON a.day = d.day
-    ORDER BY d.day`)
-  return [...rows].map((r) => ({
-    day: r.day,
-    genuineUsd: Number(r.genuine),
-    tokens: Number(r.tokens),
-    activeUsers: Number(r.active_users),
-  }))
+  return fetchDailyMetrics(tx, wholeCompanyUsage, window, clock)
+}
+
+// ── §A budget coverage (the denominator beside the company's own headline) ───
+/**
+ * The whole-company budget-coverage decomposition of `fetchAcrossKpis`'
+ * `genuineUsd` — how much of the company's attributed usage sits on a budgeted
+ * project and how much sits outside the budget lens.
+ *
+ * Unclamped for the same reason every other Across query is: this IS the
+ * whole-company claim. Its `totalUsd` is the company headline, so the parts foot
+ * to the number they are rendered beside. Pure §A — no bill-lane operand (C2).
+ *
+ * The scope NAME is stated here, next to `wholeCompanyUsage`, rather than typed into a
+ * template: the two are one decision, and the surface that renders the figure cannot
+ * see which scope produced it.
+ */
+export async function fetchAcrossUsageBudgetCoverage(
+  tx: Tx,
+  window: UsageWindow,
+): Promise<UsageBudgetCoverage> {
+  return fetchUsageBudgetCoverage(tx, wholeCompanyUsage, window, 'the whole company')
+}
+
+// ── §B behavioural exposure (model-tier bands over provider_usage_fact) ──────
+/**
+ * The whole-company Behavioural-exposure card: billed spend against consumption,
+ * banded by `model_catalog.tier`, for the window AND as a day-grain series over
+ * it (the Region card passes the rolling 60-day window — a share metric with no
+ * time axis cannot show that a policy worked).
+ *
+ * `wholeCompanyFinance` is a written declaration that this really is every
+ * region (engine/scope.ts), not a clamp somebody forgot to pass. §B lane
+ * (`provider_usage_fact`) — NEVER summed with the §A `genuineUsd` headline
+ * beside it on the same page (contract C2).
+ */
+export async function fetchAcrossTierExposure(
+  tx: Tx,
+  window: UsageWindow,
+): Promise<TierExposure> {
+  return fetchTierExposure(tx, wholeCompanyFinance, window)
 }
 
 // ── §B chargeback daily trend (bill lane — day-grained, whole-company) ───────
 /**
  * The whole-company §B ANTHROPIC chargeback per-day series over the window
  * (`v_finance_bill_chargeback`, the per-teammate DAILY bill lane). One point per UTC
- * day, `SUM(bill_usd)`, zero-filled across the whole window (like the §A daily metrics)
- * so the trend/sparkline's temporal shape stays honest. Copilot is ABSENT by
+ * day, `SUM(bill_usd)`, zero-filled across every day of the window that has HAPPENED
+ * (like the §A daily metrics — same bound, see engine/chargeback-series.ts) so the
+ * trend/sparkline's temporal shape stays honest. Copilot is ABSENT by
  * construction (its chargeback is pooled, MONTH-grained — never in this view), so this
  * is a single Anthropic series; the card's caveat explains the pooled Copilot exclusion.
  * Feeds BOTH the chargeback-mode spend-trend card (rolling window) and the Chargeable
@@ -375,32 +245,12 @@ export async function fetchAcrossDailyMetrics(
 export async function fetchAcrossChargebackTrend(
   tx: Tx,
   window: UsageWindow,
+  clock: ServerClock,
 ): Promise<ChargeDailyPoint[]> {
-  const startDate = window.startIso.slice(0, 10)
-  const endDate = window.endIso.slice(0, 10)
-  const rows = await tx.execute<{ day: string; charge: string }>(sql`
-    WITH days AS (
-      SELECT generate_series(
-               ${startDate}::timestamp,
-               ${endDate}::timestamp - INTERVAL '1 day',
-               INTERVAL '1 day'
-             )::date AS day
-    ),
-    agg AS (
-      SELECT period_date AS day, SUM(bill_usd) AS charge
-      FROM v_finance_bill_chargeback
-      WHERE period_date >= ${startDate}::date AND period_date < ${endDate}::date
-      GROUP BY period_date
-    )
-    SELECT to_char(d.day, 'YYYY-MM-DD') AS day, COALESCE(a.charge, 0)::text AS charge
-    FROM days d LEFT JOIN agg a ON a.day = d.day
-    ORDER BY d.day`)
-  return [...rows].map((r) => ({ day: r.day, chargeUsd: Number(r.charge) }))
+  return fetchChargebackTrend(tx, wholeCompanyFinance, window, clock)
 }
 
 // ── §B chargeback lane trend (bill lane, per-lane — lane-visuals V2) ──────────
-/** Canonical lane order index for deterministic per-day lane ordering. */
-const LANE_ORDER = new Map<string, number>(VENDOR_LANES.map((l, i) => [l, i]))
 
 /**
  * The per-LANE widening of {@link fetchAcrossChargebackTrend}: the SAME
@@ -417,61 +267,30 @@ export async function fetchAcrossChargebackLaneTrend(
   tx: Tx,
   window: UsageWindow,
 ): Promise<ChargeLanePoint[]> {
-  const startDate = window.startIso.slice(0, 10)
-  const endDate = window.endIso.slice(0, 10)
-  const rows = await tx.execute<{ day: string; tool: string | null; charge: string }>(sql`
-    SELECT to_char(period_date, 'YYYY-MM-DD') AS day, tool, SUM(bill_usd)::text AS charge
-    FROM v_finance_bill_chargeback
-    WHERE period_date >= ${startDate}::date AND period_date < ${endDate}::date
-    GROUP BY period_date, tool
-    ORDER BY 1`)
-  // Merge tools sharing a lane (e.g. nothing today, but the mapping is N:1 by
-  // contract) and emit (day asc, canonical lane order) deterministically.
-  const byDayLane = new Map<string, number>()
-  for (const r of rows) {
-    const k = `${r.day} ${chargeToVendor(r.tool)}`
-    byDayLane.set(k, (byDayLane.get(k) ?? 0) + Number(r.charge))
-  }
-  return [...byDayLane.entries()]
-    .map(([k, chargeUsd]) => {
-      const [day, lane] = k.split(' ') as [string, string]
-      return { day, lane, chargeUsd }
-    })
-    .sort(
-      (a, b) =>
-        (a.day < b.day ? -1 : a.day > b.day ? 1 : 0) ||
-        (LANE_ORDER.get(a.lane) ?? 99) - (LANE_ORDER.get(b.lane) ?? 99),
-    )
+  return fetchChargebackLaneTrend(tx, wholeCompanyFinance, window)
 }
 
-// ── §B billed showback weekly lanes (bill lane — the usage-view composition hero) ─
+// ── §A per-surface weekly usage lanes (the usage-view composition hero) ──────
 /**
- * The whole-company BILLED showback weekly lane series over the window
- * (`v_finance_bill_showback` GROUP BY `date_trunc('week', period_date)` × tool,
- * tools mapped to registry lane ids via `toolToVendor`) — lane-visuals iter-2 I1:
- * the "Where the AI spend goes" hero + its pinned "Spend by surface · billed"
- * donut. SHOWBACK basis (every genuine dollar incl. NFR/exempt — ADR-0010 rule
- * 3), with the §A GitHub usage tools firewalled OUT (GITHUB_FIREWALL_EXCLUSIONS):
- * they are usage-basis telemetry rows riding the showback view, and a usage-basis
- * figure must never surface inside a billed-basis element. Σ cells == the
- * window's GitHub-excluded showback total, cent-exact (test-pinned). NOT
- * zero-filled (the client's week axis zero-fills); NEVER summed with §A usage.
+ * The whole-company canonical §A USAGE weekly lane series over the window
+ * (`v_complete_usage` GROUP BY `date_trunc('week', ts_event)` × tool, tools
+ * mapped to registry lane ids via `toolToVendor`) — the "Where the AI spend
+ * goes" hero + its pinned "Spend by surface" donut (requirement 1). REPLACES
+ * the former billed-showback-basis fetcher (`v_finance_bill_showback`) that fed
+ * this same hero while it was still labelled "usage" — the exact mixed-lens
+ * defect this restores. EVERY §A surface rides this cell natively, including
+ * `copilot`/`copilot-agent` (no GitHub firewall — that firewall existed only to
+ * keep usage-basis rows out of a BILLED view; this view IS the usage basis). Σ
+ * cells over this window == `fetchAcrossKpis(...).genuineUsd` for the SAME
+ * window, cent-exact (test-pinned) — the sum-back this requirement restores.
+ * NOT zero-filled (the client's week axis zero-fills); NEVER summed with any
+ * §B chargeback figure.
  */
-export async function fetchAcrossShowbackWeeklyLanes(
+export async function fetchAcrossUsageWeeklyLanes(
   tx: Tx,
   window: UsageWindow,
-): Promise<ShowbackWeeklyLaneCell[]> {
-  const startDate = window.startIso.slice(0, 10)
-  const endDate = window.endIso.slice(0, 10)
-  const rows = await tx.execute<{ week_start: string; tool: string | null; usd: string }>(sql`
-    SELECT date_trunc('week', period_date)::date::text AS week_start, tool,
-           COALESCE(SUM(bill_usd), 0)::text AS usd
-    FROM v_finance_bill_showback
-    WHERE period_date >= ${startDate}::date AND period_date < ${endDate}::date
-      AND (tool NOT IN (${laneListSql(GITHUB_FIREWALL_EXCLUSIONS)}) OR tool IS NULL)
-    GROUP BY 1, tool
-    ORDER BY 1`)
-  return mergeWeeklyLaneRows(rows)
+): Promise<UsageSurfaceWeeklyCell[]> {
+  return fetchUsageWeeklyLanes(tx, wholeCompanyUsage, window)
 }
 
 // ── §B chargeback lane totals (bill lane — the split-donut operand, lane-visuals V2) ─
@@ -497,37 +316,7 @@ export async function fetchAcrossChargebackLanes(
   window: UsageWindow,
   opts: { copilotChargeback: boolean },
 ): Promise<ChargebackLaneRow[]> {
-  const startDate = window.startIso.slice(0, 10)
-  const endDate = window.endIso.slice(0, 10)
-  const byLane = new Map<Vendor, number>()
-
-  const anthropicRows = await tx.execute<{ tool: string | null; charge: string }>(sql`
-    SELECT tool, SUM(bill_usd)::text AS charge
-    FROM v_finance_bill_chargeback
-    WHERE period_date >= ${startDate}::date AND period_date < ${endDate}::date
-    GROUP BY tool`)
-  for (const r of anthropicRows) {
-    const lane = chargeToVendor(r.tool)
-    byLane.set(lane, (byLane.get(lane) ?? 0) + Number(r.charge))
-  }
-
-  // Copilot pooled lanes: month-grained, so only over a month-aligned window and
-  // only once chargeback mode is validated (the KPI's exact gate).
-  if (opts.copilotChargeback && isMonthAlignedWindow(window)) {
-    const poolRows = await tx.execute<{ tool: string | null; charge: string }>(sql`
-      SELECT tool, SUM(charge_usd)::text AS charge
-      FROM v_finance_copilot_pool_chargeback
-      WHERE period_month >= ${startDate}::date AND period_month < ${endDate}::date
-      GROUP BY tool`)
-    for (const r of poolRows) {
-      const lane = chargeToVendor(r.tool)
-      byLane.set(lane, (byLane.get(lane) ?? 0) + Number(r.charge))
-    }
-  }
-
-  return [...byLane.entries()]
-    .sort(([a], [b]) => (LANE_ORDER.get(a) ?? 99) - (LANE_ORDER.get(b) ?? 99))
-    .map(([lane, chargeUsd]) => ({ lane, chargeUsd }))
+  return fetchChargebackLanes(tx, wholeCompanyFinance, window, opts)
 }
 
 // ── §B chargeback day-of-week (bill lane — "when spend happens", whole-company) ─
@@ -729,9 +518,9 @@ export async function fetchAcrossChargebackByRegion(
  * catch-all (everything else incl. NULL tool). `spendUsd` sums back to the
  * genuine headline (every record lands in exactly one bucket); `activeUsers` is
  * `COUNT(DISTINCT teammate_id)` per bucket (NOT additive — a teammate active in
- * two vendors is counted in both). `copilot-agent` is structurally absent from
- * `v_complete_usage` today (mig 0086), so its bucket reads 0 until the owner
- * follow-up lands the non-taggable completeness feed.
+ * two vendors is counted in both). `copilot-agent` is a real, live
+ * `v_complete_usage` lane (migration 0101's ingest-only completeness arm,
+ * Workstream A), so its bucket carries genuine spend once the coding agent is used.
  */
 export async function fetchProviderSplit(tx: Tx, window: UsageWindow): Promise<ProviderSplit> {
   const [row] = [
@@ -772,9 +561,9 @@ export async function fetchProviderSplit(tx: Tx, window: UsageWindow): Promise<P
  * the Regional trend one tier up). One point per (day, vendor) with a positive
  * cost; `key` is the `tool` id — the three named §A lanes (`claude-code` /
  * `copilot-cli` / `copilot-agent`, registry-driven via SECTION_A_USAGE_TOOLS)
- * plus the live `other` catch-all. `copilot-agent` is structurally absent from
- * `v_complete_usage` today (mig 0086), so its points only appear once the owner
- * follow-up lands the non-taggable completeness feed.
+ * plus the live `other` catch-all. `copilot-agent` is a real, live
+ * `v_complete_usage` lane (migration 0101's ingest-only completeness arm), so
+ * its points appear on any day the coding agent is used.
  */
 export async function fetchAcrossTrend(tx: Tx, window: UsageWindow): Promise<AcrossTrendPoint[]> {
   const rows = await tx.execute<{
@@ -805,185 +594,48 @@ export async function fetchAcrossTrend(tx: Tx, window: UsageWindow): Promise<Acr
 
 // ── Drivers (axis-switchable, whole-company) ─────────────────────────────────
 /**
- * Ranked drivers for one axis over the WHOLE company, summing back to the
- * genuine headline (build-design §7(4)). The NULL bucket (unassigned region /
- * no-practice / unattributed model) is always present so the sum-back holds.
+ * Ranked drivers for one axis over the WHOLE company, with in-scope denominators
+ * that sum back to the genuine headline (build-design §7(4)).
+ *
+ * `wholeCompanyUsage` is a written declaration that this table really is every
+ * region (engine/scope.ts), not a clamp someone forgot to pass. ACROSS_DRIVER_AXES
+ * is what gates the axis a request may name, and it is the only one of the two
+ * scopes that offers `region` — a region ranking needs every region in the scan.
  */
 export async function fetchAcrossDrivers(
   tx: Tx,
   range: UsageWindow,
   axis: AcrossDriverAxis,
-): Promise<{ rows: DriverRow[]; headlineUsd: number }> {
-  const window = sql`u.ts_event >= ${range.startIso}::timestamptz AND u.ts_event < ${range.endIso}::timestamptz`
-
-  interface Raw extends Record<string, unknown> {
-    key: string | null
-    label: string | null
-    value: string
-    pooled: boolean
-  }
-  let raws: Raw[]
-  if (axis === 'region') {
-    raws = [
-      ...(await tx.execute<Raw>(sql`
-        SELECT u.region_id::text AS key, r.display_name AS label,
-               COALESCE(SUM(u.cost_usd), 0)::text AS value, FALSE AS pooled
-        FROM v_complete_usage u LEFT JOIN region r ON r.id = u.region_id
-        WHERE ${window}
-        GROUP BY u.region_id, r.display_name
-        ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)),
-    ]
-  } else if (axis === 'teammate') {
-    raws = [
-      ...(await tx.execute<Raw>(sql`
-        SELECT u.teammate_id::text AS key,
-               COALESCE(t.display_name, t.email) AS label,
-               COALESCE(SUM(u.cost_usd), 0)::text AS value,
-               -- A teammate whose entire usage is Copilot is pooled-usage (never a
-               -- per-user charge); mixed/Claude users are indicative (build-design §5).
-               (COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool = 'copilot-cli'), 0)
-                 = COALESCE(SUM(u.cost_usd), 0) AND COALESCE(SUM(u.cost_usd), 0) > 0) AS pooled
-        FROM v_complete_usage u JOIN teammate t ON t.id = u.teammate_id
-        WHERE ${window}
-        GROUP BY u.teammate_id, t.display_name, t.email
-        ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)),
-    ]
-  } else if (axis === 'model') {
-    raws = [
-      ...(await tx.execute<Raw>(sql`
-        SELECT u.model AS key, u.model AS label, COALESCE(SUM(u.cost_usd), 0)::text AS value, FALSE AS pooled
-        FROM v_complete_usage u
-        WHERE ${window}
-        GROUP BY u.model
-        ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)),
-    ]
-  } else {
-    // practice — the nearest cost-owning ancestor of each record's emit-home unit.
-    raws = [
-      ...(await tx.execute<Raw>(sql`
-        SELECT cou.id::text AS key, cou.display_name AS label, COALESCE(SUM(u.cost_usd), 0)::text AS value, FALSE AS pooled
-        FROM v_complete_usage u
-        LEFT JOIN LATERAL (
-          SELECT anc.id, anc.display_name
-          FROM org_unit home JOIN org_unit anc ON home.path <@ anc.path
-          WHERE home.id = u.org_unit_id AND anc.is_cost_owning_unit = TRUE AND anc.retired_at IS NULL
-          ORDER BY nlevel(anc.path) DESC LIMIT 1
-        ) cou ON TRUE
-        WHERE ${window}
-        GROUP BY cou.id, cou.display_name
-        ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)),
-    ]
-  }
-
-  const headlineUsd = raws.reduce((a, r) => a + Number(r.value), 0)
-  const nullLabel = axis === 'region' ? 'Unassigned' : 'Unattributed'
-  const rows: DriverRow[] = raws.map((r) => {
-    const usd = Number(r.value)
-    return {
-      key: r.key ?? `__null_${axis}`,
-      label: r.label ?? nullLabel,
-      usd,
-      sharePct: headlineUsd > 0 ? usd / headlineUsd : 0,
-      spendClass: r.pooled ? 'pooled-usage' : 'indicative',
-    }
+  lens: SpendLens = 'usage',
+  /** `copilotChargebackEnabled()` — gates the POOLED Copilot chargeback arm. */
+  opts: { copilotChargeback?: boolean } = {},
+): Promise<DriversResult> {
+  return fetchDrivers(tx, wholeCompanyUsage, range, axis, lens, {
+    // Unclamped on the §B lane too — the whole-company chargeback really is
+    // every cost centre, and `wholeCompanyFinance` is the written declaration of
+    // that rather than a clamp someone forgot (engine/scope.ts).
+    financeScope: wholeCompanyFinance,
+    copilotChargeback: opts.copilotChargeback ?? false,
+    // This scope's OWN gate, so a "break down by …" gap sentence can only name a
+    // pivot this reader actually has — region is rankable and no longer offered.
+    offeredAxes: ACROSS_DRIVER_AXES,
   })
-  return { rows, headlineUsd }
 }
 
 // ── Concentration + segments (build-design §5, AEUF cut-points) ───────────────
-export type ConcentrationSegmentKey = 'power' | 'heavy' | 'typical' | 'light'
-
-export interface ConcentrationSegmentStat {
-  key: ConcentrationSegmentKey
-  label: string
-  /** Users in the segment. */
-  count: number
-  /** Σ cost held by the segment. */
-  totalUsd: number
-  /** Segment total ÷ company total, a FRACTION in [0,1]. */
-  sharePct: number
-  /** totalUsd ÷ count. */
-  avgUsd: number
-  /** The segment's median per-teammate cost. */
-  medianUsd: number
-}
-
-export interface ConcentrationStats {
-  activeUsers: number
-  totalUsd: number
-  /** Share of company spend held by the top 1% of teammates, a FRACTION in [0,1]. */
-  top1: number
-  /** Top 5% cohort share. */
-  top5: number
-  /** Top 10% cohort share. */
-  top10: number
-  segments: ConcentrationSegmentStat[]
-}
-
-const SEGMENT_LABELS: Record<ConcentrationSegmentKey, string> = {
-  power: 'Power users',
-  heavy: 'Heavy users',
-  typical: 'Typical users',
-  light: 'Light users',
-}
-
-/**
- * PURE concentration/segment math over a DESCENDING array of per-teammate month
- * costs (build-design §5). Concentration cohorts use `k = max(1, round(N×p))`
- * for p ∈ {0.01, 0.05, 0.10}. Segments use the AEUF cut-points — top 5% (power),
- * next 15% (heavy), middle 55% (typical), bottom 25% (light) — sized by the SAME
- * `max(1, round(N×p))` guard, with avg + median per segment. Median mirrors AEUF
- * exactly: the segment's costs sorted ASC, index `floor(len/2)`.
+/*
+ * The MATHS moved to shared/reports/concentration.ts, because the Region width
+ * computes the same statistic client-side from its own driver rows and was
+ * cutting the cohorts with a different rounding rule. Re-exported here so every
+ * existing importer of this module is unaffected.
  */
-export function computeConcentration(costsDesc: number[]): ConcentrationStats {
-  const n = costsDesc.length
-  const total = costsDesc.reduce((a, c) => a + c, 0)
-  if (n === 0 || total <= 0) {
-    return { activeUsers: n, totalUsd: total, top1: 0, top5: 0, top10: 0, segments: [] }
-  }
-
-  const topShare = (p: number): number => {
-    const k = Math.max(1, Math.round(n * p))
-    const s = costsDesc.slice(0, k).reduce((a, c) => a + c, 0)
-    return s / total
-  }
-
-  const nPower = Math.max(1, Math.round(n * 0.05))
-  const nHeavy = Math.max(1, Math.round(n * 0.15))
-  const nLight = Math.max(1, Math.round(n * 0.25))
-  const typicalEnd = n - nLight
-  const slices: { key: ConcentrationSegmentKey; rows: number[] }[] = [
-    { key: 'power', rows: costsDesc.slice(0, nPower) },
-    { key: 'heavy', rows: costsDesc.slice(nPower, nPower + nHeavy) },
-    { key: 'typical', rows: costsDesc.slice(nPower + nHeavy, typicalEnd) },
-    { key: 'light', rows: costsDesc.slice(typicalEnd) },
-  ]
-
-  const segments: ConcentrationSegmentStat[] = slices.map((s) => {
-    const count = s.rows.length
-    const sum = s.rows.reduce((a, c) => a + c, 0)
-    const asc = [...s.rows].sort((a, b) => a - b)
-    const medianUsd = count > 0 ? asc[Math.floor(count / 2)]! : 0
-    return {
-      key: s.key,
-      label: SEGMENT_LABELS[s.key],
-      count,
-      totalUsd: sum,
-      sharePct: total > 0 ? sum / total : 0,
-      avgUsd: count > 0 ? sum / count : 0,
-      medianUsd,
-    }
-  })
-
-  return {
-    activeUsers: n,
-    totalUsd: total,
-    top1: topShare(0.01),
-    top5: topShare(0.05),
-    top10: topShare(0.1),
-    segments,
-  }
-}
+export {
+  computeConcentration,
+  type ConcentrationSegmentKey,
+  type ConcentrationSegmentStat,
+  type ConcentrationCohortStat,
+  type ConcentrationStats,
+} from '../../shared/reports/concentration'
 
 /**
  * Company-wide spend concentration for the month — one ranked query (per-teammate
@@ -1003,6 +655,25 @@ export async function fetchConcentration(
     HAVING COALESCE(SUM(cost_usd), 0) > 0
     ORDER BY SUM(cost_usd) DESC`)
   return computeConcentration([...rows].map((r) => Number(r.cost)))
+}
+
+// ── Per-person KPI (the "Median per person" tile and its percentiles) ────────
+/*
+ * The cohort query, its shape and its MoM pacing now live in
+ * engine/per-person.ts, clamped by a `UsageScope` like every other engine read —
+ * because the Region width publishes the same tile and must not compute it from a
+ * second query. `AcrossPerPerson` is retained as this scope's name for the shape
+ * (the route and the client type both spell it that way).
+ */
+export type AcrossPerPerson = PerPersonKpi
+
+/** The whole-company per-person cohort: the shared engine read with NO clamp. */
+export async function fetchAcrossPerPerson(
+  tx: Tx,
+  window: UsageWindow,
+  opts: { momMonthRange?: MonthRangeUtc | null; asOfDate?: string | null } = {},
+): Promise<AcrossPerPerson> {
+  return fetchPerPerson(tx, wholeCompanyUsage, window, opts)
 }
 
 // ── Seasonality (day-of-week × ISO-week heatmap, whole-company) ───────────────
@@ -1064,15 +735,26 @@ function usd(n: number): string {
 /** Drivers CSV — one row per driver, plus a leading provenance stamp (asOf). */
 export function acrossDriversToCsv(
   rows: DriverRow[],
-  meta: { month: string; asOfDate: string | null; axis: string },
+  /** `lane` / `billedLane` / `chargebackCoverage` — see the identical notes on
+   *  regional `driversToCsv`. */
+  meta: {
+    month: string
+    asOfDate: string | null
+    axis: string
+    lane: MeasureLane
+    billedLane?: BilledLaneMeta
+    chargebackCoverage?: ChargebackCoverage
+  },
 ): string {
   const lines = [
-    `# tokenscope across-regions drivers · axis=${meta.axis} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=whole-company`,
-    'driver,spend_usd,share_pct,spend_class',
+    `# tokenscope across-regions drivers · axis=${meta.axis} · lane=${meta.lane} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=whole-company`,
+    'driver,spend_usd,share_pct,spend_class,otel_emitted_usd,api_reconciled_usd,provider_usage_usd,surface_mix',
     ...rows.map(
       (r) =>
-        `${csvEscape(r.label)},${usd(r.usd)},${(r.sharePct * 100).toFixed(1)},${csvEscape(r.spendClass)}`,
+        `${csvEscape(r.label)},${usd(r.usd)},${(r.sharePct * 100).toFixed(1)},${csvEscape(r.spendClass)},` +
+        `${driverProvenanceCsvCells(r).join(',')},${csvEscape(driverSurfaceMixCsvCell(r))}`,
     ),
+    ...driverArmCsvLines(meta.billedLane, meta.chargebackCoverage),
   ]
   return lines.join('\n') + '\n'
 }

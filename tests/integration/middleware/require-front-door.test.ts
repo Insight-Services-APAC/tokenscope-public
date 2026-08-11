@@ -17,6 +17,10 @@
  *   3. AZURE_FRONT_DOOR_ID set + wrong header → throws 403
  *   4. AZURE_FRONT_DOOR_ID set + no header → throws 403
  *   5. /api/health bypasses the check regardless of env / header
+ *   6. AZURE_FRONT_DOOR_REQUIRED truth table (code-half only; inert until
+ *      an operator/UF-4 wires it): REQUIRED unset + ID empty → allow;
+ *      REQUIRED=true + ID empty → deny (except /api/health, still allowed);
+ *      REQUIRED=true + ID set + matching header → allow; mismatched → 403.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createEvent, type H3Event } from 'h3'
@@ -77,10 +81,12 @@ describe('require-front-door middleware', () => {
   let warnSpy: ReturnType<typeof vi.spyOn>
   beforeEach(() => {
     delete process.env.AZURE_FRONT_DOOR_ID
+    delete process.env.AZURE_FRONT_DOOR_REQUIRED
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
   })
   afterEach(() => {
     delete process.env.AZURE_FRONT_DOOR_ID
+    delete process.env.AZURE_FRONT_DOOR_REQUIRED
     warnSpy.mockRestore()
   })
 
@@ -173,5 +179,61 @@ describe('require-front-door middleware', () => {
         expect(String(arg)).not.toContain(FDID)
       }
     }
+  })
+
+  // ── AZURE_FRONT_DOOR_REQUIRED truth table (code-half only) ─────────
+  describe('AZURE_FRONT_DOOR_REQUIRED', () => {
+    it('REQUIRED unset + ID empty → allow (the existing three-phase no-op, unchanged)', async () => {
+      // AZURE_FRONT_DOOR_ID already deleted in the outer beforeEach.
+      const event = makeEvent({ path: '/api/v1/me' })
+      const result = await invoke(event)
+      expect(result.ok).toBe(true)
+    })
+
+    it('REQUIRED=true + ID empty → deny (operator has explicitly closed the pre-AFD window)', async () => {
+      process.env.AZURE_FRONT_DOOR_REQUIRED = 'true'
+      const event = makeEvent({ path: '/api/v1/me' })
+      const result = await invoke(event)
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.err.statusCode).toBe(403)
+    })
+
+    it('REQUIRED=true + ID empty → /api/health is STILL allowed (never lets the probe fail closed)', async () => {
+      process.env.AZURE_FRONT_DOOR_REQUIRED = 'true'
+      const event = makeEvent({ path: '/api/health' })
+      const result = await invoke(event)
+      expect(result.ok).toBe(true)
+    })
+
+    it('REQUIRED=true + ID set + matching header → allow', async () => {
+      process.env.AZURE_FRONT_DOOR_REQUIRED = 'true'
+      process.env.AZURE_FRONT_DOOR_ID = FDID
+      const event = makeEvent({ path: '/api/v1/me', headers: { 'x-azure-fdid': FDID } })
+      const result = await invoke(event)
+      expect(result.ok).toBe(true)
+    })
+
+    it('REQUIRED=true + ID set + mismatched header → 403', async () => {
+      process.env.AZURE_FRONT_DOOR_REQUIRED = 'true'
+      process.env.AZURE_FRONT_DOOR_ID = FDID
+      const event = makeEvent({
+        path: '/api/v1/me',
+        headers: { 'x-azure-fdid': 'attacker-supplied-value' },
+      })
+      const result = await invoke(event)
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.err.statusCode).toBe(403)
+    })
+
+    it('REQUIRED unset (falsy/absent) never infers "this looks like production" — ID empty still no-ops even with an unrelated truthy-ish value unset', async () => {
+      // Explicitly NOT setting AZURE_FRONT_DOOR_REQUIRED at all — the flag
+      // must never be inferred, only read literally as the string 'true'.
+      delete process.env.AZURE_FRONT_DOOR_REQUIRED
+      const event = makeEvent({ path: '/api/v1/me' })
+      const result = await invoke(event)
+      expect(result.ok).toBe(true)
+    })
   })
 })

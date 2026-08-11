@@ -11,6 +11,7 @@ import {
   uuid,
   text,
   boolean,
+  numeric,
   jsonb,
   timestamp,
   uniqueIndex,
@@ -142,6 +143,13 @@ export const directoryRegionRule = pgTable(
     regionId: uuid('region_id')
       .notNull()
       .references(() => region.id),
+    // mig 0112: NULL = a region rule (the original shape); NOT NULL = a UNIT
+    // rule — matching teammates are placed into this cost-owning unit and
+    // region_id is that unit's own region. The composite FK
+    // (org_unit_id, region_id) → org_unit(id, region_id) lives in the migration
+    // (Drizzle cannot render a composite FK against a non-PK unique), and it is
+    // what stops a rule naming a unit and a region that disagree.
+    orgUnitId: uuid('org_unit_id'),
     createdBy: uuid('created_by').references(() => teammate.id),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }),
@@ -189,6 +197,22 @@ export const teammateIdentityMap = pgTable('teammate_identity_map', {
   source: text('source').notNull().default('manual'),
   isPinned: boolean('is_pinned').notNull().default(true),
   lastSyncAt: timestamp('last_sync_at', { withTimezone: true }),
+  // ── Subscription facts (mig 0119) ─────────────────────────────────────────
+  // EXACTLY ONE of these three does work. `isEnterprise` puts this address into
+  // the teammate's enterprise address set, so emissions under it stamp
+  // `provider-billed`; the other two are display + migration planning.
+  //
+  // FUTURE WRITES ONLY. Setting `isEnterprise` never re-stamps an existing
+  // attribution_record — the stamp is immutable with no exceptions (design §3).
+  // The unrepaired window costs a bounded §A overstatement (showback, never
+  // money) and is loud, because the teammate's shown usage roughly doubles.
+  isEnterprise: boolean('is_enterprise').notNull().default(false),
+  // Display only (e.g. 'Max 20'). Never decides a lane.
+  subscriptionType: text('subscription_type'),
+  // Display + migration planning. A self-billed Claude session's emitted
+  // cost_usd IS the equivalent usage-based cost, so this compares a plan's
+  // monthly price against what enterprise would have charged for the same work.
+  monthlyCostUsd: numeric('monthly_cost_usd', { precision: 10, scale: 2 }),
 }, (t) => [
   // Authoritative key is (system, COALESCE(enterprise_slug,''), lower(identifier))
   // in 0038 — case-insensitive per 0012 (anti-claim-jacking), enterprise-qualified.

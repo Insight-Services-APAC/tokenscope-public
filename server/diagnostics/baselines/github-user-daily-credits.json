@@ -1,0 +1,17 @@
+{
+  "endpoint": "github-user-daily-credits",
+  "provenance": "schema-derived",
+  "capturedAt": null,
+  "note": "Transcribed from MetricsReportSchema (the report envelope) and UserMetricsRecordSchema (one NDJSON line) in server/reconciliation/adapters/github-client.ts. This records what TokenScope ASSUMES, not what has been observed. `ndjson_records` is NOT a key GitHub sends: it is the probe's own name for the downloaded NDJSON file's lines, which arrive as a separate HTTP response and have no place in the envelope. UserMetricsRecordSchema declares four fields — user_login, user_id, day, ai_credits_used — and no model dimension, so none is declared here; whether one arrives is answered by the undeclared-paths section of a live run, not by this file. Copilot meters in AI credits rather than tokens, so a model dimension may or may not exist on this surface; the baseline takes no position either way. The record schema is .passthrough(), so every field the wire carries beyond these four survives into the report as undeclared.",
+  "paths": [
+    { "path": "download_links", "types": ["array"], "presentRate": null, "defaulted": true },
+    { "path": "download_links[]", "types": ["string"], "presentRate": null },
+    { "path": "ndjson_records", "types": ["array"], "presentRate": null },
+    { "path": "ndjson_records[]", "types": ["object"], "presentRate": 1 },
+    { "path": "ndjson_records[].ai_credits_used", "types": ["number", "null"], "presentRate": null },
+    { "path": "ndjson_records[].day", "types": ["string", "null"], "presentRate": null },
+    { "path": "ndjson_records[].user_id", "types": ["number", "null"], "presentRate": null },
+    { "path": "ndjson_records[].user_login", "types": ["string", "null"], "presentRate": null },
+    { "path": "report_day", "types": ["string"], "presentRate": null }
+  ]
+}

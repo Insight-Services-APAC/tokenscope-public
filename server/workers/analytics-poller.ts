@@ -31,6 +31,20 @@ import {
 } from '../anthropic/enterprise-client'
 import { readSecret } from '../reconciliation/credentials'
 import { enqueueOwedBill } from '../reconciliation/placement-store'
+import {
+  teammateDimensionSnapshotSql,
+  DIMENSION_SOURCE_INGEST_SNAPSHOT,
+} from '../reconciliation/dimension-snapshot'
+import {
+  resolveAnthropicGovernanceKey,
+  createGovernanceKeyCache,
+  type GovernanceKeyRef,
+} from '../reconciliation/governance-keys'
+import {
+  loadGovernanceResolutionContext,
+  resolveAnthropicVerdict,
+  type Verdict,
+} from '../governance/verdict'
 import { recordAuditEvent } from '../db/audit'
 import {
   mapProductToTool,
@@ -63,7 +77,11 @@ function accumulateOwed(m: Map<string, OwedAgg>, email: string, date: string, to
   if (Number.isFinite(cost)) a.costUsd += cost
   m.set(key, a)
 }
-async function flushOwed(db: PostgresJsDatabase<typeof schema>, m: Map<string, OwedAgg>, args: { source: string }): Promise<void> {
+async function flushOwed(
+  db: PostgresJsDatabase<typeof schema>,
+  m: Map<string, OwedAgg>,
+  args: { source: string; governanceKey: GovernanceKeyRef },
+): Promise<void> {
   for (const a of m.values()) {
     await enqueueOwedBill(db, {
       provider: 'anthropic',
@@ -74,6 +92,8 @@ async function flushOwed(db: PostgresJsDatabase<typeof schema>, m: Map<string, O
       costUsd: a.costUsd,
       inputTokens: a.inputTokens,
       outputTokens: a.outputTokens,
+      providerOrgId: args.governanceKey.providerOrgId,
+      providerEnterpriseId: args.governanceKey.providerEnterpriseId,
     })
   }
 }
@@ -91,6 +111,21 @@ export interface PollResult {
   rowsByTool?: Record<string, number>
   unknownProducts?: Record<string, number>
   staleRowsDeleted?: number
+  /*
+   * The largest single (day, report) row count seen this run — the number that
+   * actually sits against the client's ceiling of PAGE_LIMIT (1000) x MAX_PAGES
+   * (100) = 100k rows per report per day, past which pages() throws.
+   *
+   * Recorded because adding a group_by dimension MULTIPLIES rows, and the
+   * honest way to decide whether the next dimension is affordable is to read
+   * what the last one cost rather than to argue about sparsity.
+   *
+   * rows/PAGE_LIMIT is a LOWER BOUND on pages, not a page count: the client
+   * does not report how many it followed, and a short page costs the same page
+   * budget as a full one. Good enough to see an order-of-magnitude move; not
+   * good enough to sit close to the ceiling on. Absent on the Admin path.
+   */
+  peakRowsPerDayReport?: number
 }
 
 export interface PollOptions {
@@ -106,7 +141,9 @@ export interface PollOptions {
   externalOrgId?: string
 }
 
-const SOURCE_PREFIX = 'anthropic-analytics-api'
+// Exported so server/reconciliation/source-org-ref.ts can parse this exact
+// convention back apart without duplicating (and risking drift on) the literal.
+export const SOURCE_PREFIX = 'anthropic-analytics-api'
 export function sourceForOrg(externalOrgId?: string): string {
   return externalOrgId ? `${SOURCE_PREFIX}:${externalOrgId}` : SOURCE_PREFIX
 }
@@ -137,28 +174,68 @@ interface ActualSpendAgg {
  * Returns true if a row was written/updated (always, given RETURNING id).
  * costUsd is fixed to 6 dp for the PG numeric; callers must pre-filter
  * non-finite cost so a single 'NaN' can't poison the column.
+ *
+ * Historical-homing dimension snapshot (mig 0101, design §3.1): stamped on
+ * INSERT only, at the teammate's CURRENT placement — and deliberately absent
+ * from the ON CONFLICT SET list, so a re-poll of an already-written day
+ * refreshes cost/tokens/raw_payload but never re-homes it against a
+ * post-reorg placement (server/reconciliation/dimension-snapshot.ts).
+ *
+ * Governance key + verdict (mig 0103, Workstream B): `governance.key` is the
+ * SAME (provider_org_id, provider_enterprise_id) for the whole poll call (one
+ * Anthropic org per call — resolved ONCE by the caller, not per row).
+ * `governance.verdict` is likewise constant per call because only the provider
+ * billing unit can decide §B chargeability. The verdict is guarded behind
+ * governance_verdict_locked_at exactly like copilot-bill.ts's
+ * upsertCopilotBillRow — a closed period's frozen verdict never moves on a
+ * re-poll.
  */
-async function upsertActualSpend(
+/*
+ * Exported for tests, deliberately. Migration 0116's close guard interacts with
+ * the ON CONFLICT clause specifically -- a BEFORE INSERT trigger fires before
+ * Postgres resolves the conflict -- and that interaction was missed once
+ * already because the guard's tests used raw INSERT/UPDATE instead of the shape
+ * production actually issues. Re-implementing this statement in a test would
+ * duplicate the very SQL whose behaviour is under test, so the seam is here.
+ */
+export async function upsertActualSpend(
   db: PostgresJsDatabase<typeof schema>,
   agg: ActualSpendAgg,
   source: string,
+  governance: { key: GovernanceKeyRef; verdict: Verdict },
 ): Promise<boolean> {
+  const teammateIdSql = sql`${agg.teammateId}::uuid`
+  const dims = teammateDimensionSnapshotSql(teammateIdSql)
   const result = await db.execute<{ id: string }>(
     sql`
       INSERT INTO actual_spend
-        (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source, raw_payload)
+        (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source, raw_payload,
+         region_id, org_unit_id, cost_owning_unit_id, dimension_source,
+         provider_org_id, provider_enterprise_id, governance_key_status,
+         chargeback_exempt, governance_verdict_source)
       VALUES
         (${agg.teammateId}::uuid, ${agg.date}::date, ${agg.tool},
          ${agg.inputTokens}::bigint, ${agg.outputTokens}::bigint,
          ${agg.costUsd.toFixed(6)}::numeric, ${source},
-         ${JSON.stringify(agg.rawPayload)}::jsonb)
+         ${JSON.stringify(agg.rawPayload)}::jsonb,
+         ${dims.regionId}, ${dims.orgUnitId}, ${dims.costOwningUnitId}, ${DIMENSION_SOURCE_INGEST_SNAPSHOT},
+         ${governance.key.providerOrgId}::uuid, ${governance.key.providerEnterpriseId}::uuid,
+         ${governance.key.providerOrgId ? 'resolved' : 'unresolved'},
+         ${governance.verdict.exempt}, ${governance.verdict.source})
       ON CONFLICT (teammate_id, date, tool, source)
       DO UPDATE SET
         input_tokens = EXCLUDED.input_tokens,
         output_tokens = EXCLUDED.output_tokens,
         cost_usd = EXCLUDED.cost_usd,
         raw_payload = EXCLUDED.raw_payload,
-        pulled_at = NOW()
+        pulled_at = NOW(),
+        provider_org_id = EXCLUDED.provider_org_id,
+        provider_enterprise_id = EXCLUDED.provider_enterprise_id,
+        governance_key_status = EXCLUDED.governance_key_status,
+        chargeback_exempt = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
+          THEN EXCLUDED.chargeback_exempt ELSE actual_spend.chargeback_exempt END,
+        governance_verdict_source = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
+          THEN EXCLUDED.governance_verdict_source ELSE actual_spend.governance_verdict_source END
       RETURNING id::text AS id
     `,
   )
@@ -209,6 +286,12 @@ export async function runAnalyticsPoll(
   let total = 0
   let upserted = 0
   let skipped = 0
+
+  // Governance key + base verdict (mig 0103): resolved ONCE for this org — every
+  // aggregate this call writes belongs to the SAME Anthropic provider_org.
+  const governanceKey = await resolveAnthropicGovernanceKey(db, createGovernanceKeyCache(), opts.externalOrgId)
+  const governanceCtx = await loadGovernanceResolutionContext(db)
+  const verdict = resolveAnthropicVerdict(governanceCtx, { providerOrgId: governanceKey.providerOrgId })
 
   // ING-4: the upsert key is (teammate_id, date, tool, source) but the API can
   // yield >1 record per actor-day (e.g. API + subscription, per subscription_type)
@@ -274,11 +357,11 @@ export async function runAnalyticsPoll(
     }
     for (const agg of aggs.values()) {
       agg.rawPayload = agg.recs.length === 1 ? agg.recs[0] : agg.recs
-      if (await upsertActualSpend(db, agg, source)) upserted += 1
+      if (await upsertActualSpend(db, agg, source, { key: governanceKey, verdict })) upserted += 1
     }
   }
 
-  await flushOwed(db, owed, { source })
+  await flushOwed(db, owed, { source, governanceKey })
   return {
     daysPulled,
     recordsTotal: total,
@@ -337,6 +420,11 @@ export async function runEnterpriseAnalyticsPoll(
 ): Promise<PollResult> {
   const source = sourceForOrg(opts.externalOrgId)
   let daysPulled = 0
+  let peakRowsPerDayReport = 0
+  /* Rows that ATTEMPTED identity resolution — the prune guard's denominator.
+   * Distinct from `total` (reported as recordsTotal): org-grain tool rows are
+   * counted there but never here, because they never try to bind a teammate. */
+  let identityEligible = 0
   let total = 0
   let upserted = 0
   let skipped = 0
@@ -346,6 +434,12 @@ export async function runEnterpriseAnalyticsPoll(
     const key = product ?? '(null)'
     unknownProducts[key] = (unknownProducts[key] ?? 0) + 1
   }
+
+  // Governance key + base verdict (mig 0103): resolved ONCE for this org — see
+  // the identical comment in runAnalyticsPoll above.
+  const governanceKey = await resolveAnthropicGovernanceKey(db, createGovernanceKeyCache(), opts.externalOrgId)
+  const governanceCtx = await loadGovernanceResolutionContext(db)
+  const verdict = resolveAnthropicVerdict(governanceCtx, { providerOrgId: governanceKey.providerOrgId })
 
   const teammateCache = new Map<string, string | null>()
   const owed = new Map<string, OwedAgg>() // unknown-email bills → placement queue
@@ -373,12 +467,36 @@ export async function runEnterpriseAnalyticsPoll(
     next.setUTCDate(next.getUTCDate() + 1)
     const endingAt = next.toISOString().replace(/\.\d{3}Z$/, 'Z')
 
-    const groupBy = ['product', 'model']
+    /*
+     * TWO arrays, not one. `group_by[]` applies to whichever report it is sent
+     * to, and `cost_type` exists only on CostRow -- UsageRow has no such field
+     * (enterprise-client.ts). Sending it to the usage report would fragment
+     * those rows by a dimension we cannot read back, multiplying rows against
+     * the 100-page ceiling for zero benefit.
+     *
+     * cost_type on the COST report is what makes the web_search /
+     * code_execution exclusion below reachable at all: the field is null on
+     * every row until it is grouped, so the filter that reads it has never
+     * once fired.
+     */
+    /*
+     * `context_window` rides BOTH reports, per the canon clause: "Add
+     * `context_window` and `speed` to both reports or neither: the usage and
+     * cost reports are at different grains and a dimension on one side only
+     * makes the join harder" (target-state-data-architecture.md; W0a D3).
+     * `speed` is deliberately NOT taken — no card needs it. The dimension is a
+     * GRAIN member on provider_usage_fact (mig 0127), so history heals exactly
+     * as far as this poller's trailing window re-polls; older raw cannot heal
+     * even by re-transform, because raw stores only what group_by asked.
+     */
+    const usageGroupBy = ['product', 'model', 'context_window']
+    const costGroupBy = ['product', 'model', 'cost_type', 'context_window']
     // SERIALIZE (NOT Promise.all): 60 RPM org-wide cap shared with reconciliation-sync.
     // A concurrent usage+cost burst per day makes 429s more likely; resilientFetch
     // honors retry-after and serializing bounds the burst.
-    const usage = await client.getUserUsageReport({ startingAt, endingAt, groupBy })
-    const cost = await client.getUserCostReport({ startingAt, endingAt, groupBy })
+    const usage = await client.getUserUsageReport({ startingAt, endingAt, groupBy: usageGroupBy })
+    const cost = await client.getUserCostReport({ startingAt, endingAt, groupBy: costGroupBy })
+    peakRowsPerDayReport = Math.max(peakRowsPerDayReport, usage.data.length, cost.data.length)
 
     const aggs = new Map<string, EntDayAgg>()
     const getAgg = (teammateId: string, tool: string): EntDayAgg => {
@@ -415,6 +533,7 @@ export async function runEnterpriseAnalyticsPoll(
     // --- usage: Σ uncached_input / output tokens per (teammate, day, surface) ---
     for (const row of usage.data) {
       total += 1
+      identityEligible += 1
       const tool = rowTool(row.product)
       const email = actorEmail(row.actor)
       const teammateId = email ? await resolveTeammateId(db, teammateCache, email) : null
@@ -431,13 +550,34 @@ export async function runEnterpriseAnalyticsPoll(
 
     // --- cost: Σ TOKEN cost per (teammate, day, surface); EXCLUDE org-grain tool costs ---
     for (const row of cost.data) {
-      total += 1
       // web_search / code_execution are ORG-GRAIN (emitted by the reconciliation
       // adapter at the cost-owning unit) — they NEVER fold into per-teammate
       // actual_spend. Only token cost (cost_type 'tokens' or null) belongs here.
+      //
+      total += 1
       if (row.cost_type === 'web_search' || row.cost_type === 'code_execution') {
         continue
       }
+      /*
+       * COUNTED SEPARATELY from `total`, because the two answer different
+       * questions and only one of them is a safety guard.
+       *
+       * `total` is reported as recordsTotal: how many source rows this run
+       * considered. `identityEligible` is the DENOMINATOR of the stale-prune
+       * guard (skipped/eligible <= PRUNE_MAX_SKIP_RATIO), which refuses to
+       * prune when an outsized share of rows failed to bind a teammate —
+       * because that is OUR failure, not a provider revision, and pruning then
+       * erases rows a broken run merely failed to re-assert.
+       *
+       * Org-grain tool rows never attempt identity resolution, so counting them
+       * in the guard DILUTES it: one unbindable token row beside two tool rows
+       * reads as 1/3 = 0.33, under the 0.5 threshold, when it is really 1/1 —
+       * and the guard waves through a prune that deletes valid spend. Before
+       * cost_type was requested these rows could not appear at all (the field
+       * was null on every row), so this only became load-bearing when the
+       * group_by widened.
+       */
+      identityEligible += 1
       const tool = rowTool(row.product)
       const usd = centsStringToUsd(row.amount) // fractional cents string -> USD
       const email = actorEmail(row.actor)
@@ -459,7 +599,7 @@ export async function runEnterpriseAnalyticsPoll(
     for (const agg of aggs.values()) {
       // raw_payload: the teammate-day-surface's usage + cost rows (the verbatim source).
       agg.rawPayload = { day, usage: agg.usageRows, cost: agg.costRows }
-      if (await upsertActualSpend(db, agg, source)) {
+      if (await upsertActualSpend(db, agg, source, { key: governanceKey, verdict })) {
         upserted += 1
         rowsByTool[agg.tool] = (rowsByTool[agg.tool] ?? 0) + 1
       }
@@ -476,7 +616,11 @@ export async function runEnterpriseAnalyticsPoll(
   // resolution regression), not a provider revision — pruning then would erase
   // rows the broken run merely failed to re-assert. Healthy runs always skip a
   // FEW rows (api_actors, not-yet-provisioned users → owed queue), so the guard
-  // is a ratio: prune only while skipped/total ≤ PRUNE_MAX_SKIP_RATIO. A
+  // is a ratio: prune only while skipped/identityEligible ≤ PRUNE_MAX_SKIP_RATIO.
+  // The denominator is IDENTITY-ELIGIBLE rows, not every row considered: org-grain
+  // tool rows (web_search / code_execution) never attempt to bind a teammate, so
+  // counting them would dilute the guard into waving through the very prune it
+  // exists to refuse. They still count toward the reported recordsTotal. A
   // genuinely quiet window — zero API rows — DOES prune (clears revised-away
   // days). Partially-skipped spend is never lost either way: it is queued as an
   // owed bill and placement-sync replays it into actual_spend.
@@ -492,7 +636,7 @@ export async function runEnterpriseAnalyticsPoll(
   // bounded and self-healing, so no advisory lock is taken.
   const PRUNE_MAX_SKIP_RATIO = 0.5
   let staleRowsDeleted = 0
-  const skipRatio = total > 0 ? skipped / total : 0
+  const skipRatio = identityEligible > 0 ? skipped / identityEligible : 0
   if (skipRatio <= PRUNE_MAX_SKIP_RATIO) {
     const lanedList = sql.join(
       CLAUDE_FAMILY_TOOLS.map((t) => sql`${t}`),
@@ -512,11 +656,11 @@ export async function runEnterpriseAnalyticsPoll(
     staleRowsDeleted = pruned.length
   } else {
     consola.warn(
-      `[enterprise-analytics-poll] skipping stale-row prune: ${skipped}/${total} API rows failed to bind a teammate (ratio ${skipRatio.toFixed(2)} > ${PRUNE_MAX_SKIP_RATIO}) — identity resolution looks broken`,
+      `[enterprise-analytics-poll] skipping stale-row prune: ${skipped}/${identityEligible} identity-eligible API rows failed to bind a teammate (ratio ${skipRatio.toFixed(2)} > ${PRUNE_MAX_SKIP_RATIO}) — identity resolution looks broken`,
     )
   }
 
-  await flushOwed(db, owed, { source })
+  await flushOwed(db, owed, { source, governanceKey })
 
   if (staleRowsDeleted > 0 || Object.keys(unknownProducts).length > 0) {
     // Money rows vanishing (prune) or a surface we don't recognise (drift) are
@@ -540,6 +684,10 @@ export async function runEnterpriseAnalyticsPoll(
         staleRowsDeleted,
         unknownProducts,
         rowsByTool,
+        // On the audit payload, not just the return value, so the trend is
+        // readable after the fact -- which is when the "can we afford another
+        // group_by dimension" question actually gets asked.
+        peakRowsPerDayReport,
       },
     })
   }
@@ -547,6 +695,7 @@ export async function runEnterpriseAnalyticsPoll(
   return {
     daysPulled,
     recordsTotal: total,
+    peakRowsPerDayReport,
     recordsUpserted: upserted,
     recordsSkippedUnknownUser: skipped,
     rowsByTool,

@@ -15,7 +15,9 @@
 
 // Half-open [from, to): every CLI with from <= v < to is affected. #72671 was
 // the 2.1.191–2.1.211 span, fixed in 2.1.212. Append a new entry here if a
-// future CLI re-regresses — re-validate first with retest-72671.sh.
+// future CLI re-regresses — re-validate first with tools/otlp-72671/retest-72671.sh
+// (relocated there from plugin/scripts/ — a dev-only harness, not part of the
+// shipped plugin distribution).
 export const OTLP_BROKEN_RANGES = [
   { from: [2, 1, 191], to: [2, 1, 212], issue: 'anthropics/claude-code#72671' },
 ]

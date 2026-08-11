@@ -13,10 +13,12 @@
  *
  * The inline error surfaces `err.data.data.detail` (409 dup, 422 bad parent).
  */
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import UiButton from '../ui/Button.vue'
 import { useModalA11y } from '../../composables/useModalA11y'
 import { apiErrorDetail } from '../../composables/useApiError'
+// `#shared`, never a relative path — see the note in app/pages/admin/regions/[id].vue.
+import { HOLDING_UNIT_TYPE } from '#shared/placement/holding-nodes'
 import type { OrgNode } from './OrgTree.vue'
 
 const props = defineProps<{
@@ -39,6 +41,21 @@ const dialogEl = ref<HTMLElement | null>(null)
 const titleId = 'org-unit-dialog-title'
 
 const UNIT_TYPES = ['bu', 'practice', 'team']
+
+/*
+ * The per-region Unplaced node. Editing it must NOT offer the cost-owning
+ * toggle: it is the one control on that screen that moves the unplaced count,
+ * and it moves it to zero by homing everyone's spend to a bucket nobody owns
+ * (server/db/org-units.ts holds the enforcing rule — this only removes the
+ * accident). Keyed on unit_type, the classification key, so a second holding
+ * node under another code is covered too.
+ *
+ * Create mode can never be a holding node: the type select offers bu/practice/
+ * team only.
+ */
+const isHoldingNode = computed(
+  () => props.mode === 'edit' && props.node?.unit_type === HOLDING_UNIT_TYPE,
+)
 
 function seedForm() {
   if (props.mode === 'edit' && props.node) {
@@ -191,9 +208,13 @@ async function save() {
           data-testid="oud-name"
         >
 
-        <!-- Unit type -->
+        <!-- Unit type. Read-only on a holding node: its type IS its identity —
+             every reader classifies "not a real placement" on it, and the type
+             select does not offer it, so a live select would silently re-type the
+             node the first time the field was touched. -->
         <label for="oud-type" class="text-[12px] font-semibold text-carbon">Unit type</label>
         <select
+          v-if="!isHoldingNode"
           id="oud-type"
           v-model="unitType"
           class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
@@ -201,18 +222,38 @@ async function save() {
         >
           <option v-for="t in UNIT_TYPES" :key="t" :value="t">{{ t }}</option>
         </select>
+        <div
+          v-else
+          class="mt-1 mb-3 px-3 py-2 text-sm text-carbon-2 bg-calm/40 rounded-md"
+          data-testid="oud-type-readonly"
+        >
+          {{ unitType }}
+        </div>
 
-        <!-- Cost-owning unit -->
-        <label class="flex items-center gap-2 text-[12px] font-semibold text-carbon mb-1 cursor-pointer">
-          <input
-            v-model="isCou"
-            type="checkbox"
-            class="w-4 h-4 accent-brand-harmony"
-            data-testid="oud-cou"
-          >
-          Cost-owning unit
-        </label>
-        <p class="text-[11px] text-carbon-3 mb-2">Projects bill to the nearest cost-owning ancestor.</p>
+        <!-- Cost-owning unit. NOT offered on a holding node — see isHoldingNode. -->
+        <template v-if="!isHoldingNode">
+          <label class="flex items-center gap-2 text-[12px] font-semibold text-carbon mb-1 cursor-pointer">
+            <input
+              v-model="isCou"
+              type="checkbox"
+              class="w-4 h-4 accent-brand-harmony"
+              data-testid="oud-cou"
+            >
+            Cost-owning unit
+          </label>
+          <p class="text-[11px] text-carbon-3 mb-2">Projects bill to the nearest cost-owning ancestor.</p>
+        </template>
+        <div
+          v-else
+          class="mt-1 mb-2 p-3 rounded-md bg-brand-vision-lite/60 border border-brand-vision/30 text-[11px] text-[#1f4ea3] leading-relaxed"
+          data-testid="oud-holding-note"
+        >
+          <span class="font-bold">This is the holding node for teammates with no cost centre.</span>
+          It cannot be made cost-owning: that would home every unplaced teammate's
+          spend to a bucket nobody owns, dropping the unhomed figure to zero
+          without placing a single person. Place them into real cost centres from
+          the Teammates tab instead.
+        </div>
 
         <p v-if="error" class="text-xs text-rag-red mt-3" data-testid="oud-error" role="alert">{{ error }}</p>
 

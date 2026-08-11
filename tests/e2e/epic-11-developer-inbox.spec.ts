@@ -37,32 +37,32 @@ test.describe('Developer view', () => {
     // replaced by the Tagged-spend (spill) card; inbox access moved to
     // the bell + the "Alerts →" link on the buckets card.
     await expect(page.locator('[data-testid="spill-card"]')).toBeVisible()
-    await expect(page.locator('[data-testid="recent-sessions"]')).toBeVisible()
+    await expect(page.locator('[data-testid="activity-card"]')).toBeVisible()
     await expect(page.locator('[data-testid="export-csv"]')).toBeVisible()
   })
 
-  test('period switcher renders all 4 options; non-MTD are disabled with a coming-soon tooltip', async ({
-    page,
-  }) => {
+  test('recent-spend switcher renders rolling 7/30/90-day windows', async ({ page }) => {
     await signInAsDeveloper(page)
-    const mtd = page.getByRole('tab', { name: 'MTD' })
     const seven = page.getByRole('tab', { name: 'Last 7 days' })
-    await expect(mtd).toBeVisible()
-    await expect(mtd).toHaveAttribute('aria-selected', 'true')
+    const thirty = page.getByRole('tab', { name: 'Last 30 days' })
+    const ninety = page.getByRole('tab', { name: 'Last 90 days' })
     await expect(seven).toBeVisible()
-    await expect(seven).toBeDisabled()
-    // Tooltip copy was de-jargonised ("Epic 12" → plain "Coming soon").
-    await expect(seven).toHaveAttribute('title', /Coming soon/)
+    await expect(thirty).toHaveAttribute('aria-selected', 'true')
+    await expect(ninety).toBeVisible()
+    await seven.click()
+    await expect(seven).toHaveAttribute('aria-selected', 'true')
   })
 
-  test('Export CSV button triggers a download of the recent-sessions CSV', async ({ page }) => {
+  test('Export CSV button triggers a download of the Activity CSV', async ({ page }) => {
     await signInAsDeveloper(page)
 
     const [download] = await Promise.all([
       page.waitForEvent('download'),
       page.locator('[data-testid="export-csv"]').click(),
     ])
-    expect(download.suggestedFilename()).toMatch(/^tokenscope-recent-sessions-/)
+    // No date in the filename: the server owns the clock, and this route is not
+    // a windowing path (§F4).
+    expect(download.suggestedFilename()).toBe('tokenscope-activity.csv')
   })
 })
 

@@ -26,6 +26,10 @@ describe('variantForCategory', () => {
     expect(variantForCategory('untagged-backlog')).toBe('untagged')
   })
 
+  it('routes personal-subscription prompts to the declaration guidance body', () => {
+    expect(variantForCategory('personal-subscription-prompt')).toBe('personal-subscription')
+  })
+
   it('falls back to generic for unknown categories', () => {
     expect(variantForCategory('connector-health')).toBe('generic')
     expect(variantForCategory('unknown')).toBe('generic')

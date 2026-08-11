@@ -8,6 +8,13 @@
  * 'copilot-agent' (OTel-invisible / ingest_only → usage DISPLAY only: never a taggable
  * unaccounted record, never OTel-joined).
  *
+ * Mig 0101 (Workstream A, §3.1 A3) adds v_complete_usage's third, ingest-only completeness
+ * arm, so 'copilot-agent' is NOW also visible through v_complete_usage (Across/Regional/
+ * Cost-Centre usage cards, velocity-watch) — closing the divergence this file used to pin as
+ * deliberate ("an owner follow-up, deliberately not done here", mig 0086's own header). It
+ * remains permanently absent from unaccounted_usage (the needs-tagging worklist): visible ≠
+ * taggable, and that distinction is what mig 0101 generalises rather than removes.
+ *
  * This is the correction to the earlier wrong call that Copilot had "no per-day usage truth": it
  * always did — the §A readers just weren't reading reconciliation_record. The Copilot per-cost-centre
  * POOLED bill (§B) is a different axis and is deliberately NOT the §A usage source.
@@ -95,7 +102,7 @@ describe('Copilot §A usage completeness', () => {
     for (const r of rows) expect(r.tokens).toBeNull() // credits-metered, both lanes
   })
 
-  it('INTENTIONAL surface divergence (r1-F5, owner decision): copilot-agent rows exist in v_teammate_usage_daily while v_complete_usage carries NONE for the same fixture', async () => {
+  it('RESOLVED surface divergence (mig 0101, A3): copilot-agent is now visible in v_complete_usage too, via the ingest-only completeness arm — still never taggable', async () => {
     await copApiUsage('20.00', { category: 'copilot_interactive' })
     await copApiUsage('14.00', { category: 'copilot_coding_agent' })
     await otelCop('cop-div', '19.00')
@@ -107,15 +114,53 @@ describe('Copilot §A usage completeness', () => {
       WHERE teammate_id = ${teammateId}::uuid AND day = ${DAY}::date AND tool = 'copilot-agent'`
     expect(lane).toHaveLength(1)
     expect(Number(lane[0]!.usd)).toBe(14)
-    // Completeness lane (v_complete_usage = attribution ∪ unaccounted): NO copilot-agent
-    // row — the lane is OTel-invisible (no attribution rows) AND ingest_only-excluded
-    // from unaccounted_usage, so the completeness rollups (Across/Regional/Cost-Centre
-    // usage cards) deliberately omit it. Folding it in would need a NON-TAGGABLE
-    // completeness feed — an owner follow-up (mig 0086 header +
-    // server/usage/unaccounted-reconciliation.ts document the decision).
-    const [complete] = await t.client<{ n: string }[]>`
-      SELECT count(*)::text AS n FROM v_complete_usage WHERE tool = 'copilot-agent'`
-    expect(Number(complete!.n)).toBe(0)
+    /*
+     * Completeness lane (v_complete_usage = attribution ∪ unaccounted ∪
+     * ingest-only, mig 0101 A3): the coding-agent row is now PRESENT, through
+     * the THIRD arm — reading v_teammate_usage_daily filtered to
+     * INGEST_ONLY_USAGE_TOOLS, never through arm 1 (still OTel-invisible: no
+     * attribution row) or arm 2 (still ingest_only-excluded from
+     * unaccounted_usage: the `reconcileUnaccountedUsage` call above produced no
+     * copilot-agent row, asserted by the next test). This resolves the
+     * divergence the mig 0086 header and this test used to document as an
+     * intentional, deliberately-unclosed gap ("an owner follow-up") — the
+     * follow-up is migration 0101. Reads 0 rows if arm 3 regresses (the
+     * completeness rollups would go blind to coding-agent spend again); reads
+     * >1 row if the lane somehow ALSO reaches arm 1 or arm 2 (a double-count —
+     * see tests/integration/reports/complete-usage-view.test.ts's disjointness
+     * assertions for the general case).
+     */
+    const complete = await t.client<{ cost: string; model: string | null; provenance: string; identity_state: string; project_id: string | null }[]>`
+      SELECT cost_usd::text AS cost, model, usage_provenance AS provenance, identity_state, project_id::text AS project_id
+      FROM v_complete_usage WHERE teammate_id = ${teammateId}::uuid AND tool = 'copilot-agent'`
+    expect(complete).toHaveLength(1)
+    expect(Number(complete[0]!.cost)).toBe(14)
+    // model is NULL for a STRUCTURAL reason (no source API exposes a model split
+    // for this surface), not an attribution failure — usage_provenance carries
+    // that distinction (R1-M3; shared/reports/model-attribution.ts).
+    expect(complete[0]!.model).toBeNull()
+    expect(complete[0]!.provenance).toBe('provider-usage')
+    expect(complete[0]!.identity_state).toBe('confirmed') // bill-anchored, never provisional
+    expect(complete[0]!.project_id).toBeNull() // untaggable by construction
+  })
+
+  it('coding-agent still NEVER reaches v_complete_usage via arm 1 or arm 2 — only via arm 3 (worklist safety survives A3)', async () => {
+    await copApiUsage('14.00', { category: 'copilot_coding_agent' })
+    await reconcileUnaccountedUsage(t.db, WINDOW)
+    // No unaccounted_usage row for copilot-agent: A2 (INGEST_ONLY_USAGE_TOOLS in
+    // reconcileUnaccountedUsage) still excludes it from the needs-tagging worklist.
+    const uu = await t.client<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM unaccounted_usage WHERE teammate_id = ${teammateId}::uuid AND tool = 'copilot-agent'`
+    expect(Number(uu[0]!.n)).toBe(0)
+    // No attribution_record row either — the lane is OTel-invisible by nature,
+    // not by a filter, so there is nothing for arm 1 to carry.
+    const ar = await t.client<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM attribution_record WHERE teammate_id = ${teammateId}::uuid AND tool = 'copilot-agent'`
+    expect(Number(ar[0]!.n)).toBe(0)
+    // Exactly one v_complete_usage row (arm 3 only).
+    const complete = await t.client<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM v_complete_usage WHERE teammate_id = ${teammateId}::uuid AND tool = 'copilot-agent'`
+    expect(Number(complete[0]!.n)).toBe(1)
   })
 
   it('coding-agent usage NEVER becomes a taggable unaccounted record (display-only lane, D4); copilot-cli reconciles against interactive ONLY', async () => {

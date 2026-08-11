@@ -1,0 +1,33 @@
+{
+  "endpoint": "anthropic-enterprise-user-usage",
+  "provenance": "schema-derived",
+  "capturedAt": null,
+  "note": "Transcribed from the Zod schemas in server/anthropic/enterprise-client.ts (UsageReport / UsageRow / Actor). This records what TokenScope ASSUMES, not what has been observed: no live capture has ever been taken. presentRate is 1 only where the schema makes the field REQUIRED, and null everywhere the schema is optional — asserting a rate we have no evidence for would manufacture false drift. Paths reported as added against this baseline are fields we receive and never declared. Replace this file with a live capture (provenance 'live-capture') once a probe run is trusted. `data[].context_window` is DECLARED since W0a (mig 0127): the poller requests it in group_by on both reports, UsageRow declares it nullish (string band, no enum -- the vocabulary is the provider's to extend), and it is listed below so a run no longer reports it as undeclared. `data[].speed` stays undeclared on purpose: not requested, not taken.",
+  "paths": [
+    { "path": "data", "types": ["array"], "presentRate": 1 },
+    { "path": "data[]", "types": ["object"], "presentRate": 1 },
+    { "path": "data[].actor", "types": ["object"], "presentRate": 1 },
+    { "path": "data[].actor.deleted", "types": ["boolean"], "presentRate": null, "defaulted": true },
+    { "path": "data[].actor.email", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].actor.name", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].actor.type", "types": ["string"], "presentRate": 1 },
+    { "path": "data[].actor.user_id", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].cache_creation", "types": ["object"], "presentRate": null, "defaulted": true },
+    { "path": "data[].cache_creation.ephemeral_1h_input_tokens", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "data[].cache_creation.ephemeral_5m_input_tokens", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "data[].cache_read_input_tokens", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "data[].context_window", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].model", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].output_tokens", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "data[].product", "types": ["string", "null"], "presentRate": null },
+    { "path": "data[].requests", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "data[].server_tool_use", "types": ["object", "null"], "presentRate": null },
+    { "path": "data[].server_tool_use.web_search_requests", "types": ["number", "null"], "presentRate": null },
+    { "path": "data[].total_tokens", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "data[].uncached_input_tokens", "types": ["number"], "presentRate": null, "defaulted": true },
+    { "path": "data_refreshed_at", "types": ["string", "null"], "presentRate": null },
+    { "path": "has_more", "types": ["boolean"], "presentRate": null, "defaulted": true },
+    { "path": "next_page", "types": ["string", "null"], "presentRate": null },
+    { "path": "organization_id", "types": ["string", "null"], "presentRate": null }
+  ]
+}

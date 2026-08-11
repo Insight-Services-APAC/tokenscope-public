@@ -13,6 +13,7 @@ import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { runAggregateRollup } from '../../../server/workers/aggregate-rollup'
 import { runArchiveLedger, type PartitionExporter } from '../../../server/workers/archive-ledger'
 import * as schema from '../../../drizzle/schema'
+import { archiveWindow } from '../helpers/archive-window'
 
 let t: TestDb
 let regionId = ''
@@ -20,8 +21,12 @@ let bu = ''
 let proj = ''
 let tm = ''
 
-const COLD = '2026-04-15T12:00:00.000Z'
-const HOT = '2026-06-10T12:00:00.000Z'
+// Clock-RELATIVE — see tests/integration/helpers/archive-window.ts. The absolute
+// constants these replace only classified correctly inside a narrow real-clock
+// window and inverted silently once it passed.
+const W = archiveWindow()
+const COLD = W.cold
+const HOT = W.hot
 
 const okExporter: PartitionExporter = async (_db, part) => ({ rowsExported: part.rows })
 
@@ -87,10 +92,10 @@ describe('v_effective_spend cold-fallback', () => {
     const tokensBefore = Number((await effectiveTokens())[0]!.v)
 
     const r = await runArchiveLedger(t.db, { enabled: true, hotDays: 30, exporter: okExporter })
-    expect(r.archived).toContain('attribution_record_2026_04')
+    expect(r.archived).toContain(W.coldPartition)
 
     // raw cold is gone...
-    const rawCold = await t.client<{ v: string }[]>`SELECT count(*)::text AS v FROM attribution_record WHERE ts_event < '2026-05-01'`
+    const rawCold = await t.client<{ v: string }[]>`SELECT count(*)::text AS v FROM attribution_record WHERE ts_event < ${W.coldMonthEnd}::date`
     expect(Number(rawCold[0]!.v)).toBe(0)
 
     // ...but finance totals are unchanged (cold 20 now served from the rollup)
@@ -101,7 +106,7 @@ describe('v_effective_spend cold-fallback', () => {
 
     // the cold rows are now sourced from the rollup; hot stays raw
     expect(Number((await coldFromRollup())[0]!.v)).toBeGreaterThan(0)
-    const hotRollup = await t.client<{ v: string }[]>`SELECT count(*)::text AS v FROM v_effective_spend WHERE source = 'rollup' AND occurred_at >= '2026-06-01'`
+    const hotRollup = await t.client<{ v: string }[]>`SELECT count(*)::text AS v FROM v_effective_spend WHERE source = 'rollup' AND occurred_at >= ${W.hotMonthStart}::date`
     expect(Number(hotRollup[0]!.v)).toBe(0)
 
     // the advisory 7 is in effective but NOT in finance-reportable, even cold
@@ -110,7 +115,7 @@ describe('v_effective_spend cold-fallback', () => {
 
     // the worker advanced the archive watermark to the dropped month's end
     const wm = await t.client<{ v: string | null }[]>`SELECT to_char(archived_through AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS v FROM ledger_archive_state WHERE id = 'singleton'`
-    expect(wm[0]!.v).toBe('2026-05-01')
+    expect(wm[0]!.v).toBe(W.coldMonthEnd)
   })
 
   it('C1 regression: a stray row for the dropped month does not make it vanish', async () => {
@@ -124,7 +129,7 @@ describe('v_effective_spend cold-fallback', () => {
     expect(Number((await finance())[0]!.v)).toBe(25)
     expect(Number((await effective())[0]!.v)).toBe(32)
     // and the raw cold row exists physically (in DEFAULT) but is filtered out
-    const rawCold = await t.client<{ v: string }[]>`SELECT count(*)::text AS v FROM attribution_record WHERE ts_event < '2026-05-01'`
+    const rawCold = await t.client<{ v: string }[]>`SELECT count(*)::text AS v FROM attribution_record WHERE ts_event < ${W.coldMonthEnd}::date`
     expect(Number(rawCold[0]!.v)).toBe(1)
   })
 })

@@ -20,8 +20,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
 import type { Session } from '../../../server/utils/auth'
-import regionalHandler from '../../../server/api/v1/reports/regional/index.get'
-import trendHandler from '../../../server/api/v1/reports/regional/trend.get'
+import regionalHandler from '../../../server/api/v1/reports/region/index.get'
+import trendHandler from '../../../server/api/v1/reports/region/trend.get'
 
 let t: TestDb
 let regionA = ''

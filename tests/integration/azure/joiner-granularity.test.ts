@@ -6,10 +6,18 @@
  *     never defaulted to 'main')
  *   - lawCostUsd lands in metadata.law_cost_usd, MERGED with the backfill
  *     flag (not clobbering it)
- *   - v_cost_drift compares SUM(rate-card cost) vs MAX(law cost) per span
+ *   - v_cost_drift compares SUM(our cost) vs MAX(law cost) per span
  *     (the KQL mv-expand duplicates the per-event cost onto all four
  *     token-type rows — the view must not 4× it)
  *   - dedup/idempotency is byte-identical to pre-0045 behaviour
+ *
+ * UPDATED for docs/design/provider-cost-precedence.md. The "never 4× the law
+ * cost" property this file has always pinned is now MORE load-bearing, not
+ * less: the law cost is no longer a belt-and-braces cross-check, it IS the
+ * cost. So the span-level assertion is tightened from "the view does not
+ * multiply it" to "SUM(cost_usd) equals the provider figure EXACTLY, and the
+ * drift is exactly zero" — which is only true if the joiner takes MAX per span
+ * (never SUM) and groups spans the same way v_cost_drift does.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
@@ -95,6 +103,9 @@ describe('runReadJoiner — mig 0045 granularity capture', () => {
     const reader = new StubReader(new Map([[INSTANCE, fullSpan]])) as unknown as TelemetryReader
     const result = await runReadJoiner(t.db, reader, { sessionIds: [INSTANCE] })
     expect(result.attributionRowsWritten).toBe(4)
+    // ONE span (four token-type rows of the same api_request), priced by the
+    // provider and sliced by the rate card.
+    expect(result.costingRungs).toEqual({ provider: 1, rateCard: 0, carrier: 0, skipped: 0 })
 
     const rows = await t.client<
       { token_type: string; query_source: string | null; law_cost: string | null }[]
@@ -117,34 +128,98 @@ describe('runReadJoiner — mig 0045 granularity capture', () => {
     expect(result.attributionRowsWritten).toBe(0)
   })
 
-  it('v_cost_drift: one row per span — SUM(rate-card cost) vs MAX(law cost), never 4× the law cost', async () => {
-    const drift = await t.client<
-      {
-        span_key: string
-        model: string
-        rate_card_cost_usd: string
-        law_cost_usd: string
-        drift_usd: string
-      }[]
-    >`
-      SELECT span_key, model, rate_card_cost_usd, law_cost_usd, drift_usd
-      FROM v_cost_drift
-      WHERE instance_id = ${INSTANCE}::uuid
-    `
-    expect(drift).toHaveLength(1)
-    expect(drift[0]!.span_key).toBe('req_gran_1')
-    expect(drift[0]!.model).toBe('claude-fable-5')
-    // law cost appears ONCE (MAX), not summed across the 4 duplicated rows.
-    expect(Number(drift[0]!.law_cost_usd)).toBeCloseTo(LAW_COST, 9)
-
-    // rate_card_cost_usd must equal the SUM of the stored per-type costs —
-    // derived from the ledger, not from hardcoded rate-card numbers.
+  it('the span total is the PROVIDER figure, exactly — sliced across the 4 rows, never 4× it', async () => {
+    // The whole point of provider-cost-precedence: the four rows of one span
+    // carry the provider's single figure between them. Asserted as an EXACT
+    // string comparison on the numeric column, not toBeCloseTo — "close" is
+    // precisely what this design exists to stop being good enough.
     const [sum] = await t.client<{ total: string }[]>`
       SELECT SUM(cost_usd)::text AS total FROM attribution_record
-      WHERE instance_id = ${INSTANCE}::uuid
+      WHERE instance_id = ${INSTANCE}::uuid AND source_run_id = 'req_gran_1'
     `
-    expect(Number(drift[0]!.rate_card_cost_usd)).toBeCloseTo(Number(sum!.total), 6)
-    expect(Number(drift[0]!.drift_usd)).toBeCloseTo(Number(sum!.total) - LAW_COST, 6)
+    expect(sum!.total).toBe(LAW_COST.toFixed(6))
+
+    // Provenance: the provider priced it, so the rate card is NOT pinned (mig
+    // 0036 semantics) and cost_basis names the rung.
+    const rows = await t.client<
+      { cost_basis: string; rate_card_id: string | null; rate_card_version: number | null }[]
+    >`
+      SELECT cost_basis, rate_card_id::text AS rate_card_id, rate_card_version
+      FROM attribution_record
+      WHERE instance_id = ${INSTANCE}::uuid AND source_run_id = 'req_gran_1'
+    `
+    expect(rows).toHaveLength(4)
+    for (const r of rows) {
+      expect(r.cost_basis).toBe('provider-reported')
+      expect(r.rate_card_id).toBeNull()
+      expect(r.rate_card_version).toBeNull()
+    }
+  })
+
+  it('never 1-4× the law cost: it appears ONCE per span (MAX), not once per token-type row', async () => {
+    // The property this file has always pinned, restated on the axis that now
+    // matters. The provider's figure is duplicated onto all four rows by the KQL
+    // mv-expand; the span-level view must MAX it, and the joiner must take MAX
+    // when it costs the span. If either summed, this would read 4 × LAW_COST.
+    const drift = await t.client<{ span_key: string; model: string; law_cost_usd: string }[]>`
+      SELECT span_key, model, law_cost_usd
+      FROM v_cost_drift
+      WHERE instance_id = ${INSTANCE}::uuid AND span_key = 'req_gran_1'
+    `
+    expect(drift).toHaveLength(1)
+    expect(drift[0]!.model).toBe('claude-fable-5')
+    expect(Number(drift[0]!.law_cost_usd)).toBeCloseTo(LAW_COST, 9)
+
+    // …and the ledger side of the same property, asserted EXACTLY. This is what
+    // catches a slicing-residue bug: a lost or duplicated micro-dollar in the
+    // largest-remainder allocation shows up here and nowhere else.
+    const [sum] = await t.client<{ total: string }[]>`
+      SELECT SUM(cost_usd)::text AS total FROM attribution_record
+      WHERE instance_id = ${INSTANCE}::uuid AND source_run_id = 'req_gran_1'
+    `
+    expect(sum!.total).toBe(LAW_COST.toFixed(6))
+
+    // NOTE the assertion that is deliberately NOT here: `rate_card_cost_usd ==
+    // SUM(cost_usd)` held only while cost_usd WAS the rate-card estimate. Now
+    // that the provider's figure lives there, the view (mig 0091) reads the
+    // estimate from metadata.rate_card_cost_usd instead — pinned in the next
+    // test. Asserting the old equality would pin a tautology.
+  })
+
+  it('the displaced rate-card estimate is persisted PER ROW as metadata.rate_card_cost_usd', async () => {
+    // rate_card_id is NULL on a provider-priced row, so nothing can re-derive
+    // the estimate afterwards; if the joiner did not persist it, the cost-drift
+    // diagnostic would compare the provider against itself and print ~0 forever
+    // — going green exactly when the rate card is most wrong.
+    //
+    // claude-fable-5 has no model-specific lines (mig 0061 covers opus/sonnet/
+    // haiku), so it falls back to the seeded wildcard placeholders: input $3,
+    // output $15, cache-read $0.30, cache-write $3.75 per 1M.
+    const rows = await t.client<{ token_type: string; est: string | null }[]>`
+      SELECT token_type, metadata->>'rate_card_cost_usd' AS est
+      FROM attribution_record
+      WHERE instance_id = ${INSTANCE}::uuid AND source_run_id = 'req_gran_1'
+      ORDER BY token_type
+    `
+    expect(rows.map((r) => [r.token_type, r.est])).toEqual([
+      ['cache-read', '0.015000'], //  50,000 × $0.30/1M
+      ['cache-write', '0.015000'], //  4,000 × $3.75/1M
+      ['input', '0.003000'], //        1,000 × $3.00/1M
+      ['output', '0.003000'], //         200 × $15.00/1M
+    ])
+    // PER ROW, SUMmed — the mirror image of law_cost_usd, which is span-
+    // duplicated and MAXed. Writing a span total into this key would 4× the
+    // estimate and manufacture drift out of nothing.
+    const [est] = await t.client<{ total: string }[]>`
+      SELECT SUM((metadata->>'rate_card_cost_usd')::numeric)::text AS total
+      FROM attribution_record
+      WHERE instance_id = ${INSTANCE}::uuid AND source_run_id = 'req_gran_1'
+    `
+    expect(est!.total).toBe('0.036000')
+    // The estimate and the provider figure genuinely differ (here the card
+    // over-prices ~3×), which is the whole point: the diagnostic stays a
+    // diagnostic instead of collapsing to a tautological zero.
+    expect(Number(est!.total)).toBeGreaterThan(LAW_COST)
   })
 
   it('legacy records (no querySource/lawCostUsd) → NULL query_source, NULL metadata, no drift row', async () => {
@@ -162,15 +237,23 @@ describe('runReadJoiner — mig 0045 granularity capture', () => {
     const reader = new StubReader(new Map([[INSTANCE, legacy]])) as unknown as TelemetryReader
     const result = await runReadJoiner(t.db, reader, { sessionIds: [INSTANCE] })
     expect(result.attributionRowsWritten).toBe(1)
+    // No provider cost → rung 2. This is the case the design ALERTS on, and the
+    // counter is what makes the alert possible.
+    expect(result.costingRungs).toEqual({ provider: 0, rateCard: 1, carrier: 0, skipped: 0 })
 
     const [row] = await t.client<
-      { query_source: string | null; metadata: unknown }[]
+      { query_source: string | null; metadata: unknown; cost_basis: string; rate_card_id: string | null }[]
     >`
-      SELECT query_source, metadata FROM attribution_record
+      SELECT query_source, metadata, cost_basis, rate_card_id::text AS rate_card_id
+      FROM attribution_record
       WHERE instance_id = ${INSTANCE}::uuid AND source_run_id = 'req_legacy_1'
     `
     expect(row!.query_source).toBeNull()
     expect(row!.metadata).toBeNull()
+    // Rate-card-priced rows keep 'estimated' and the pinned card, exactly as
+    // before the design — history keeps behaving as it always has.
+    expect(row!.cost_basis).toBe('estimated')
+    expect(row!.rate_card_id).not.toBeNull()
 
     const drift = await t.client<{ span_key: string }[]>`
       SELECT span_key FROM v_cost_drift
@@ -199,16 +282,28 @@ describe('runReadJoiner — mig 0045 granularity capture', () => {
     expect(result.attributionRowsWritten).toBe(1)
 
     const [row] = await t.client<
-      { backfill: string | null; law_cost: string | null; fidelity_tier: string; cost_basis: string }[]
+      {
+        backfill: string | null
+        law_cost: string | null
+        fidelity_tier: string
+        cost_basis: string
+        cost_usd: string
+      }[]
     >`
       SELECT metadata->>'backfill' AS backfill, metadata->>'law_cost_usd' AS law_cost,
-             fidelity_tier, cost_basis
+             fidelity_tier, cost_basis, cost_usd::text AS cost_usd
       FROM attribution_record
       WHERE instance_id = ${INSTANCE}::uuid AND source_run_id = 'req_bf_1'
     `
     expect(row!.backfill).toBe('true')
     expect(Number(row!.law_cost)).toBeCloseTo(0.002, 9)
-    // Backfill provenance class unchanged by the merge.
+    // The provider still priced it (single-row span → the whole figure).
+    expect(row!.cost_usd).toBe('0.002000')
+    // Backfill provenance class unchanged by the merge — and it OUTRANKS the
+    // rung literal. 'telemetry-only' answers "is this reconcilable?" (no), which
+    // every reconciliation query keys on; 'provider-reported' only answers "which
+    // rung priced it?". Promoting this row would walk a non-reconcilable
+    // re-emission into the reconcilable lane.
     expect(row!.fidelity_tier).toBe('tier-2')
     expect(row!.cost_basis).toBe('telemetry-only')
   })

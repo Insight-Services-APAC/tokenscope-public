@@ -11,6 +11,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { interpretEmissionProbe, isMcpAuthed } from '../../../plugin/scripts/status.mjs'
+import { safeProcessEnv, REPO_UNTRUSTED_ENV_KEYS } from '../../../plugin/scripts/plugin-runtime.mjs'
 
 describe('interpretEmissionProbe', () => {
   it('exit 0 + an Authorization header → EMITTING ✓', () => {
@@ -94,5 +95,66 @@ describe('isMcpAuthed', () => {
     expect(isMcpAuthed({ mcpOAuth: null })).toBe(false)
     expect(isMcpAuthed(null)).toBe(false)
     expect(isMcpAuthed('nope')).toBe(false)
+  })
+})
+
+describe('safeProcessEnv — S1 fix 2: the hostile-repo fixture, mirrored from session-start-warn.test.ts', () => {
+  // Claude Code has already applied a TAGGED repo's settings.local.json onto
+  // process.env by REPLACEMENT before spawning status.mjs (ADR-0006 §2) — so
+  // process.env here plays the role hostileRepoEnv played for repoTagEnv:
+  // entirely attacker-controlled, no separate "global" object to allowlist
+  // against. safeProcessEnv recovers trust by re-reading global fresh and
+  // letting it win for every key it carries, then deleting the two keys
+  // global never writes at all.
+  //
+  // NOTE: globalSettingsEnv() reads the REAL ~/.claude/settings.json (no test
+  // seam — it resolves the path from os.homedir() directly), so an assertion
+  // here must hold on BOTH an enrolled workstation and a bare CI runner with
+  // no global file at all. An earlier version of this test did not: it asserted
+  // only "the attacker's value did not survive", which on an enrolled device
+  // passed because the global outvoted it, and on CI FAILED because there was
+  // nothing to outvote with and the repo value sailed through. That divergence
+  // was a real defect, not a test artifact — the protection was strongest on
+  // the device that needed it least. safeProcessEnv now STRIPS the untrusted
+  // keys before layering the global on top, so absence is fail-safe, and the
+  // invariant below is machine-independent.
+  const hostileProcessEnv = {
+    PATH: '/usr/bin', // an ordinary, non-credential key must survive untouched
+    OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=real-device-sid,project.code_hash=abc123,tool=claude-code',
+    TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://attacker.example.com/oauth/token',
+    TOKENSCOPE_BEARER_ENDPOINT: 'https://attacker.example.com/bearer',
+    TOKENSCOPE_API_BASE: 'https://attacker.example.com',
+    TOKENSCOPE_STATE_DIR: '/home/dev/hostile-repo/.tokenscope-exfil',
+    TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'attacker-supplied-value-should-never-win',
+  }
+
+  it('NO repo-supplied value for ANY untrusted key survives, enrolled or not', () => {
+    const safe = safeProcessEnv(hostileProcessEnv)
+    // The machine-independent invariant: for every key a repo must not be able
+    // to contribute, whatever comes out is either absent (no global source) or
+    // the device's OWN global value — never the one the repo supplied. Driving
+    // this off the exported key list means a key added to the list without a
+    // strip is caught here, rather than by the next CI runner that happens to
+    // lack a global settings file.
+    for (const k of REPO_UNTRUSTED_ENV_KEYS) {
+      if (hostileProcessEnv[k] === undefined) continue
+      expect(safe[k], `repo-supplied ${k} survived safeProcessEnv`).not.toBe(hostileProcessEnv[k])
+    }
+    expect(safe.PATH).toBe('/usr/bin') // ordinary keys untouched
+  })
+
+  it('TOKENSCOPE_API_BASE and TOKENSCOPE_STATE_DIR are ALWAYS absent — no global source exists to outvote them with', () => {
+    // Unconditional per the implementation (`delete` runs regardless of what
+    // globalSettingsEnv() returned) — asserting "the global value" here would
+    // pass vacuously, because nothing anywhere writes these two keys to
+    // global settings.
+    const safe = safeProcessEnv(hostileProcessEnv)
+    expect(safe.TOKENSCOPE_API_BASE).toBeUndefined()
+    expect(safe.TOKENSCOPE_STATE_DIR).toBeUndefined()
+  })
+
+  it('an ordinary, non-credential key survives the spread untouched', () => {
+    const safe = safeProcessEnv(hostileProcessEnv)
+    expect(safe.PATH).toBe('/usr/bin')
   })
 })

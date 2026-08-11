@@ -334,8 +334,8 @@ export function transcodeChatSpans(spans, opts = {}) {
     const attrs = span.attributes
     const model = String(
       resolveAttr(attrs, 'gen_ai.request.model') ??
-      resolveAttr(attrs, 'gen_ai.response.model') ??
-      'unknown',
+        resolveAttr(attrs, 'gen_ai.response.model') ??
+        'unknown',
     )
     const sessionId = String(resolveAttr(attrs, 'gen_ai.conversation.id') ?? '')
     const spanId = String(span.spanId ?? '')
@@ -348,12 +348,12 @@ export function transcodeChatSpans(spans, opts = {}) {
     const cacheCreationTokens = resolveTokenCount(
       attrs,
       'gen_ai.usage.cache_creation_input_tokens', // CLI flat (VERIFIED)
-      'gen_ai.usage.cache_creation.input_tokens',  // VS Code nested
+      'gen_ai.usage.cache_creation.input_tokens', // VS Code nested
     )
     const cacheReadTokens = resolveTokenCount(
       attrs,
       'gen_ai.usage.cache_read_input_tokens', // CLI flat (INFERRED — VERIFY)
-      'gen_ai.usage.cache_read.input_tokens',  // VS Code nested
+      'gen_ai.usage.cache_read.input_tokens', // VS Code nested
     )
 
     // AI credit value — carry for server-side pricing (never convert on client).
@@ -383,8 +383,7 @@ export function transcodeChatSpans(spans, opts = {}) {
     // is then correctly inert for that record rather than silently missing the
     // field.
     const initiator = resolveAttr(attrs, 'github.copilot.initiator')
-    const querySource =
-      initiator == null || String(initiator) === 'user' ? 'main' : 'auto'
+    const querySource = initiator == null || String(initiator) === 'user' ? 'main' : 'auto'
 
     // Timestamp: use span endTime (∥ startTime ∥ now) → unix nanos.
     // Using endTime ensures re-forwards produce the SAME ts_event → the
@@ -395,7 +394,7 @@ export function transcodeChatSpans(spans, opts = {}) {
 
     const logAttrs = [
       KV('event.name', 'api_request'),
-      KV('request_id', spanId),          // stable span id → dedup key
+      KV('request_id', spanId), // stable span id → dedup key
       KV('model', model),
       KV('session.id', sessionId),
       KV('input_tokens', inputTokens, 'intValue'),
@@ -503,7 +502,11 @@ export function transcodeSignalSpans(spans, opts = {}) {
       if (toolCount != null) sigAttrs.push(KV('sig.tool_count', String(toolCount), 'intValue'))
 
       const used = safeNonNegNumber(
-        resolveEventAttr(span, 'github.copilot.session.usage_info', 'github.copilot.current_tokens'),
+        resolveEventAttr(
+          span,
+          'github.copilot.session.usage_info',
+          'github.copilot.current_tokens',
+        ),
       )
       const limit = safeNonNegNumber(
         resolveEventAttr(span, 'github.copilot.session.usage_info', 'github.copilot.token_limit'),
@@ -572,10 +575,7 @@ export function transcodeSignalSpans(spans, opts = {}) {
  * @returns OTLP logs payload object suitable for encodeExportLogsServiceRequest()
  */
 export function buildCopilotOtlpPayload(logRecords, instanceId, projectCodeHash, opts = {}) {
-  const resourceAttrs = [
-    KV('tokenscope.instance_id', instanceId),
-    KV('tool', 'copilot-cli'),
-  ]
+  const resourceAttrs = [KV('tokenscope.instance_id', instanceId), KV('tool', 'copilot-cli')]
   if (projectCodeHash) resourceAttrs.push(KV('project.code_hash', projectCodeHash))
   // Org stamp for F2 org→enterprise keying. Emitted as `github.org`; mirror it as
   // `github.repository` (the value is the org, the closest field name the joiner can

@@ -99,6 +99,18 @@ then run the setup prompt:
      OAuth `tokenscope.emit` access token (refresh-token grant) and presents THAT to
      `TOKENSCOPE_BEARER_ENDPOINT` to mint a fresh Azure token. The bearer is never a
      static header.
+
+     Since **0.1.27** that same request also states what the device is running:
+     `X-TokenScope-Plugin-Version` (read from the `plugin.json` beside the helper,
+     so it is the version that actually ran) and `X-TokenScope-Client-Version`
+     (the CLI version, from `CLAUDE_CODE_EXECPATH` / `AI_AGENT`). The server
+     records both on `instance_attestation` as **client-asserted diagnostic
+     hints** — never an authorisation or costing input — so an operator can answer
+     "does this device need to update?" from data instead of asking the human. A
+     value that cannot be determined is **omitted**, not guessed: the resulting
+     NULL means "running a build older than the one that reports", which is the
+     signal you want during a rollout. Reporting is never load-bearing — if it
+     fails for any reason the mint still succeeds.
    - `env` — `CLAUDE_CODE_ENABLE_TELEMETRY=1`, logs-only OTLP config
      (`OTEL_LOGS_EXPORTER=otlp`, `OTEL_METRICS_EXPORTER=none`,
      `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/protobuf`),
@@ -117,18 +129,31 @@ you pick one, and it:
 
 - writes a committable `./.tokenscope` (`project.code: <code>`, preserving any
   existing fields) so the tag travels with the repo, then
-- writes the **repo-local** `./.claude/settings.local.json` (mode 0600), overriding
-  just `OTEL_RESOURCE_ATTRIBUTES` with
+- writes the **repo-local** `./.claude/settings.local.json` (mode 0600): a FULL
+  copy of the device's current global `env`, with `OTEL_RESOURCE_ATTRIBUTES`
+  overridden to
   `tokenscope.instance_id=<DEVICE_SID>,project.code_hash=<sha256(code)>,tool=claude-code`.
+  This is mandatory, not a leak (ADR-0006 §2): Claude Code applies the
+  highest-precedence `env` block by **replacement, not key-merge**, so a
+  repo-local block carrying only the resource attrs would drop the
+  endpoint/bearer. The durable OAuth **refresh token** specifically is excluded
+  from the copy — the one credential a hostile repo could otherwise exfiltrate
+  merely by being cloned and opened — and `otel-headers-helper.sh` falls back to
+  the device's own state-dir credential store for it.
 
-The device session id + helper + OTLP config are reused from the global config
-(Claude merges global + repo settings, repo taking precedence). Commit the
-`.tokenscope`; teammates who clone it just run the `project` prompt with no project
-(or let the SessionStart hook auto-apply it). Restart `claude` in the repo — OTel
-resource attrs are read at startup, so the **next** session is tagged.
+The device session id + helper + OTLP config are reused from the global config,
+copied wholesale into the repo file on **every** `claude` launch in that repo —
+not merged by Claude, restated by us each time (ADR-0006's self-heal), which is
+what lets a plugin upgrade or re-enrol reach every tagged repo automatically.
+Commit the `.tokenscope`; teammates who clone it just run the `project` prompt
+with no project (or let the SessionStart hook auto-apply it). Restart `claude`
+in the repo — OTel resource attrs are read at startup, so the **next** session
+is tagged.
 
-Only the `code_hash` (SHA-256 of the canonical code) is emitted — the project
-name/code never crosses any Foundry boundary.
+The project name/code is not emitted; the hash is a stable identifier, not a
+secret. (The full repo-local copy above — minus the refresh token — still sits
+at rest in the tagged repo's `settings.local.json`; that residual is accepted
+and documented in ADR-0006 §Risk accepted.)
 
 ## `.tokenscope` file
 
@@ -202,8 +227,12 @@ Claude-specific surface.
 
 - Block Claude — TokenScope never enforces. Over-budget yields an off-channel
   notification (Teams / email), not a hard stop.
-- Send your project name to any AI coach — only the `code_hash` crosses any
-  Foundry boundary.
+- Send your project name to any AI coach — the project name/code is not
+  emitted; the hash is a stable identifier, not a secret.
 - The durable OAuth emit **refresh token** lives in `~/.claude/settings.json` on
   your machine (never commit it); the server stores only its HMAC. It auto-refreshes
-  short-lived access tokens — there is no legacy session token.
+  short-lived access tokens — there is no legacy session token. It is deliberately
+  **excluded** from every per-repo `settings.local.json` copy (see "Tag a repo"
+  above) — a tagged repo's session mints its bearer from the device's own
+  state-dir credential store instead, so a hostile cloned repo cannot walk off
+  with it merely by existing on disk.

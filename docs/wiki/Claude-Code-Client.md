@@ -75,11 +75,15 @@ flowchart TD
   file (the project code). The `project` MCP prompt (or the `SessionStart` hook)
   resolves it and injects `project.code_hash = sha256(code)` (with the DEVICE_SID)
   into the **repo-local** settings, so the project rides along with the repo
-  across every ephemeral session — no per-repo token, no re-provision.
+  across every ephemeral session — no per-repo token, no re-provision. The
+  repo-local block is written with the endpoints and exporter config the device
+  needs but **without the durable OAuth refresh token** — the emit helper falls
+  back to the device credential store (0700 state dir) for that, so the durable
+  credential is not planted in every tagged working tree.
 - **Membership-gated attribution.** The joiner resolves the **teammate from the
   attestation by DEVICE_SID** (unspoofable per-event) and takes the **project
   from the emitted `code_hash` claim**, billing it only if that teammate is a
-  *current* member of the project; otherwise the spend spills to untagged + an
+  _current_ member of the project; otherwise the spend spills to untagged + an
   `attribution-spill-unauthorized` audit ([ADR-0004](../decisions/0004-attribution-trust-model.md)).
 - **Untagged-first.** A device with no repo `.tokenscope` (or an
   unrecognised/unauthorised code) emits without a `project.code_hash` claim, so it
@@ -112,21 +116,82 @@ for the private repo). A lighter terminal-CLI alternative
 (`claude plugin marketplace add … --sparse .claude-plugin plugin`)
 sparse-checks-out only those two dirs but requires the standalone `claude` CLI.
 
-| Command | What it does | Backing |
-|---|---|---|
-| `/tokenscope:setup` | Set up TokenScope on this device — connect + provision emitting in one OAuth consent. The **local counterpart** to the `tokenscope-setup` MCP prompt: it calls `provision_emit`/`my_usage` and runs the local redeem helper, so the durable emit credential is redeemed process→process, never via chat. | `provision_emit` + `my_usage` (MCP) + `Bash(node:*)` local redeem |
-| `/tokenscope:status` | Report whether your sessions are emitting **and** whether the MCP is connected — the 3-state verdict (🟢 emit+MCP / 🟡 emit-only / 🔴 not emitting). | local emit probe (`otel-headers-helper.sh` → `/bearer`) + MCP-auth probe |
-| `/tokenscope:statusline [on\|off]` | Install/remove the status line (emission health + MCP-connection state + session id). | local-only |
-| `/tokenscope:backfill` | Re-emit recent local Claude usage that may have been dropped (short emission-gap catch-up). | local-only |
+| Command                            | What it does                                                                                                                                                                                                                                                                                             | Backing                                                                  |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `/tokenscope:setup`                | Set up TokenScope on this device — connect + provision emitting in one OAuth consent. The **local counterpart** to the `tokenscope-setup` MCP prompt: it calls `provision_emit`/`my_usage` and runs the local redeem helper, so the durable emit credential is redeemed process→process, never via chat. | `provision_emit` + `my_usage` (MCP) + `Bash(node:*)` local redeem        |
+| `/tokenscope:status`               | Report whether your sessions are emitting **and** whether the MCP is connected — the 3-state verdict (🟢 emit+MCP / 🟡 emit-only / 🔴 not emitting).                                                                                                                                                     | local emit probe (`otel-headers-helper.sh` → `/bearer`) + MCP-auth probe |
+| `/tokenscope:statusline [on\|off]` | Install/remove the status line (emission health + MCP-connection state + session id).                                                                                                                                                                                                                    | local-only                                                               |
+| `/tokenscope:backfill`             | Re-emit recent local Claude usage that may have been dropped (short emission-gap catch-up).                                                                                                                                                                                                              | local-only                                                               |
 
 Each script resolves the API base via `api-base.mjs` — `TOKENSCOPE_API_BASE`
-env as an override, else the **baked deployment default** (the API base is part
-of the plugin, since the marketplace ships it per-deployment); `plugin/.mcp.json`
-reads the same base for the MCP server. `status` (emission probe) invokes the
+env as an override, else the MCP server's **registered origin** (discovered from
+configuration the user wrote, never from the repository), else the **baked
+deployment default** (the API base is part of the plugin, since the marketplace
+ships it per-deployment); `plugin/.mcp.json` reads the same base for the MCP
+server.
+
+**The redeem helpers are the exception, deliberately.** They resolve with
+`trustEnv: false`, so `TOKENSCOPE_API_BASE` does not participate there at all.
+Claude Code merges a project's `.claude/settings.local.json` env over the global
+one, which makes that variable something a cloned repository can set — and the
+redeem request carries a live single-use handoff code whose response is a
+durable emit credential. There is no way to distinguish a shell-exported value
+from a repo-injected one, so the credential-bearing path does not consult it and
+relies on discovery instead. Local dev against `http://localhost:3450` still
+works: whoever registered the MCP server there is discovered from their own
+configuration. `status` (emission probe) invokes the
 real emit path (`otel-headers-helper.sh`). Reads and tagging are now over MCP and
 authenticate with the connection's **`tokenscope.read`/`tag` OAuth** grant — a
 client authenticates as itself, never via a borrowed browser cookie. The old
 `TOKENSCOPE_AUTH_COOKIE` crutch is gone.
+
+The published versions are declared in three places that must move
+together, and this page deliberately does NOT restate the numbers: a literal
+version in prose drifts the moment a plugin is bumped, and it drifted exactly
+that way (this paragraph said 0.1.28 / 0.1.7 while the manifests had moved on).
+Read them from `.claude-plugin/marketplace.json` (both entries) and each plugin's own
+manifest. Claude Code caches an installed plugin **by version** and re-installs
+only when the number **increases** — a fix shipped without a bump reaches no
+device, however many restarts the fleet does. A CI check fails the build on a
+plugin-code change with no version bump, and a sync-manifest guard keeps the
+vendored `copilot-plugin/` copies byte-identical to their sources.
+
+## Plugin trust boundary
+
+Claude Code merges a repository's `.claude/settings.local.json` over the device's
+global `~/.claude/settings.json`, and it applies the highest-precedence `env`
+block by **replacement, not key-merge**
+([ADR-0006](../decisions/0006-project-pin-must-not-freeze-upgradeable-client-state.md) §2).
+Any cloned repository therefore gets a vote on the environment the plugin's own
+scripts run under — which is fine for a project claim and not fine for anything
+that carries a credential.
+
+- **The repo may supply `OTEL_RESOURCE_ATTRIBUTES`, and nothing else.**
+  `repoTagEnv(globalEnv, repoEnv)` in `plugin-runtime.mjs` is a **positive
+  allowlist**: the resource attributes come from the repo-local file, every other
+  key comes from the device's global settings. A deny-list would have missed
+  `TOKENSCOPE_STATE_DIR`, which is credential-bearing — the bearer helper writes
+  the freshly minted emit access token into that directory, so a repo-steered
+  state dir drops a live token inside the attacker's working tree with no network
+  call to catch.
+- **The two keys with no legitimate global source are deleted, not outvoted.**
+  `TOKENSCOPE_STATE_DIR` and `TOKENSCOPE_API_BASE` are never written to global
+  settings, so spreading the global block last cannot overrule a repo-supplied
+  value. Every env handed to a child process or used for a fetch removes them
+  outright, and `stateDir()` reads the override from `process.env` only. The
+  direct readers (`landed-check.mjs`, `project-check.mjs`) route through the same
+  helper so one deletion covers them all.
+- **One endpoint validator, shared.** `assertSafeEndpoint()` in
+  `endpoint-guard.mjs` is the single validator every credential-bearing call
+  routes through — redeem, enrol, status, backfill, the landed check, the project
+  check, the bearer helper and the OTLP forwarder. It requires an absolute
+  `https:` URL for any off-box host (loopback is exempt only when the caller
+  explicitly opts in, for the local dev override and the forwarder's own on-box
+  relay) and rejects a value beginning with `-`, which a shell interpolation would
+  otherwise read as a flag. `isUsableDce()` lives beside it and rejects loopback
+  unconditionally, so the forwarder's own address can never masquerade as the real
+  DCE. The file is dependency-free precisely so it can be vendored verbatim into
+  the Copilot plugin rather than reimplemented there.
 
 ## Telemetry contract
 
@@ -209,22 +274,22 @@ fleet emits **directly** with no forwarder in the path:
 
 ## Key files
 
-| Concern | Path |
-|---|---|
-| MCP server config | `plugin/.mcp.json` |
-| MCP tools + prompts (server) | `server/utils/mcp.ts` |
-| MCP endpoint | `server/api/v1/mcp/[...].ts` |
-| Local commands | `plugin/commands/{setup,status,statusline,backfill}.md` |
-| Local scripts | `plugin/scripts/{status,statusline,statusline-toggle,backfill,tag-repo}.mjs` |
-| OTel env/settings builder | `plugin/scripts/env-builder.mjs` |
-| Bearer-refresh helper | `plugin/scripts/otel-headers-helper.sh` |
-| Emit-handoff redeem | `server/api/v1/setup/redeem.post.ts` |
-| OAuth 2.1 routes | `server/api/v1/oauth/*.ts` |
-| Retroactive assign | `server/api/v1/me/sessions/[sid]/assign` |
-| Telemetry reader | `server/azure/reader.ts` |
-| Telemetry contract (full recipe) | `docs/development/claude-code-telemetry-contract.md` |
-| MCP-first client backbone (design) | `docs/design/mcp-client-backbone.md` |
-| Plugin user guide | `plugin/README.md` |
+| Concern                            | Path                                                                         |
+| ---------------------------------- | ---------------------------------------------------------------------------- |
+| MCP server config                  | `plugin/.mcp.json`                                                           |
+| MCP tools + prompts (server)       | `server/utils/mcp.ts`                                                        |
+| MCP endpoint                       | `server/api/v1/mcp/[...].ts`                                                 |
+| Local commands                     | `plugin/commands/{setup,status,statusline,backfill}.md`                      |
+| Local scripts                      | `plugin/scripts/{status,statusline,statusline-toggle,backfill,tag-repo}.mjs` |
+| OTel env/settings builder          | `plugin/scripts/env-builder.mjs`                                             |
+| Bearer-refresh helper              | `plugin/scripts/otel-headers-helper.sh`                                      |
+| Emit-handoff redeem                | `server/api/v1/setup/redeem.post.ts`                                         |
+| OAuth 2.1 routes                   | `server/api/v1/oauth/*.ts`                                                   |
+| Retroactive assign                 | `server/api/v1/me/sessions/[sid]/assign`                                     |
+| Telemetry reader                   | `server/azure/reader.ts`                                                     |
+| Telemetry contract (full recipe)   | `docs/development/claude-code-telemetry-contract.md`                         |
+| MCP-first client backbone (design) | `docs/design/mcp-client-backbone.md`                                         |
+| Plugin user guide                  | `plugin/README.md`                                                           |
 
 > [VERIFY] `claude plugin marketplace add` / `claude plugin install` verb names
 > against live `code.claude.com` docs at install time.

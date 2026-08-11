@@ -14,6 +14,19 @@ import type * as schema from '../../drizzle/schema'
 import type { PlacementStore } from './placement-service'
 import type { OwnedUnit, RegionRuleSet } from './region-derivation'
 import type { RegionAttributeKey } from '../../shared/placement/region-attributes'
+import { unplacedOrgUnitIdForRegion as placementHomeForRegion } from '../auth/placement-home'
+import {
+  UNASSIGNED_REGION_CODE,
+  UNPLACED_UNIT_CODE,
+  HOLDING_UNIT_TYPE,
+} from '../../shared/placement/holding-nodes'
+import { teammateDimensionSnapshotSql, DIMENSION_SOURCE_INGEST_SNAPSHOT } from './dimension-snapshot'
+import { captureDirectorySnapshot } from './directory-snapshot'
+import { PLACED_VIA_MANAGER_CHAIN, stripProvenanceKeys } from './placement-provenance'
+import { rehomeSafePredicate } from './rehome-safety'
+import { eligibleUnitOwnerPredicate } from './unit-owner-eligibility'
+import { parseActualSpendSourceOrgRef } from './source-org-ref'
+import { loadGovernanceResolutionContext, resolveAnthropicVerdict, resolveGithubVerdict } from '../governance/verdict'
 
 type Db = PostgresJsDatabase<typeof schema>
 
@@ -21,9 +34,15 @@ export function makePlacementStore(db: Db): PlacementStore {
   return {
     async findTeammateByEmail(email) {
       // Join the home unit so the caller can tell a deliberately-placed teammate
-      // (real node) from one still on __UNPLACED__ — only the latter may be re-homed
+      // (real node) from one still on a HOLDING node — only the latter may be re-homed
       // by the bill path (see provisionAndPlace). org_unit_id is NOT NULL, so the
       // join never drops the row.
+      //
+      // on_unplaced is keyed on unit_type, the classification key
+      // (shared/placement/holding-nodes.ts), for the same reason the worklist and
+      // region-reenrichment are: a teammate parked on a SECOND holding node has no
+      // genuine placement either, and keyed on the code this lane would have read
+      // them as deliberately placed and refused to re-home them.
       //
       // rehome_safe (mig-0068 cross-region safety): a (re)home can move the teammate to
       // a DIFFERENT region (cost-centre match or derived region), which changes their RLS
@@ -35,7 +54,7 @@ export function makePlacementStore(db: Db): PlacementStore {
       // both). Anything with a real oid or a live credential is left for the admin worklist.
       const rows = await db.execute<{ id: string; on_unplaced: boolean; rehome_safe: boolean }>(sql`
         SELECT t.id::text AS id,
-               (ou.code = '__UNPLACED__') AS on_unplaced,
+               (ou.unit_type = ${HOLDING_UNIT_TYPE}) AS on_unplaced,
                (t.entra_oid LIKE 'bill:%'
                 AND NOT EXISTS (
                   SELECT 1 FROM instance_attestation ia
@@ -65,69 +84,86 @@ export function makePlacementStore(db: Db): PlacementStore {
       // `SELECT ... FROM region/org_unit LIMIT 1` fixtures). Idempotent.
       await db.execute(sql`
         INSERT INTO region (id, code, display_name)
-        VALUES (gen_random_uuid(), '__unassigned__', 'Unassigned')
+        VALUES (gen_random_uuid(), ${UNASSIGNED_REGION_CODE}, 'Unassigned')
         ON CONFLICT (code) DO NOTHING`)
       await db.execute(sql`
         INSERT INTO org_unit (id, region_id, path, code, display_name, unit_type, is_cost_owning_unit)
-        SELECT gen_random_uuid(), r.id, 'unassigned'::ltree, '__UNPLACED__', 'Unplaced', 'holding', false
-        FROM region r WHERE r.code = '__unassigned__'
+        SELECT gen_random_uuid(), r.id, 'unassigned'::ltree, ${UNPLACED_UNIT_CODE}, 'Unplaced', ${HOLDING_UNIT_TYPE}, false
+        FROM region r WHERE r.code = ${UNASSIGNED_REGION_CODE}
         ON CONFLICT (region_id, code) DO NOTHING`)
       const rows = await db.execute<{ id: string }>(sql`
         SELECT ou.id::text AS id
         FROM org_unit ou JOIN region r ON r.id = ou.region_id
-        WHERE r.code = '__unassigned__' AND ou.code = '__UNPLACED__' LIMIT 1`)
+        WHERE r.code = ${UNASSIGNED_REGION_CODE} AND ou.code = ${UNPLACED_UNIT_CODE} LIMIT 1`)
       const id = rows[0]?.id
-      if (!id) throw new Error('placement: failed to create __UNPLACED__ holding node')
+      if (!id) throw new Error(`placement: failed to create ${UNPLACED_UNIT_CODE} holding node`)
       return id
     },
 
     async unplacedOrgUnitIdForRegion(regionId) {
-      // Per-region __UNPLACED__ holding node (mig 0068), create-on-demand + idempotent.
-      // Same code '__UNPLACED__' as the global node but a distinct region — the
-      // (region_id, code) unique lets per-region holding nodes coexist. The ltree path
-      // is a single sanitised label (hyphens → _) so codes like 'north-america' are valid
-      // ltree. The finance rollup anchors on teammate.region_id (trigger-derived), so a
-      // user homed here rolls up to THIS region's report.
-      await db.execute(sql`
-        INSERT INTO org_unit (id, region_id, path, code, display_name, unit_type, is_cost_owning_unit)
-        SELECT gen_random_uuid(), r.id,
-               (regexp_replace(r.code, '[^a-z0-9]', '_', 'g') || '_unplaced')::ltree,
-               '__UNPLACED__', 'Unplaced', 'holding', false
-        FROM region r WHERE r.id = ${regionId}::uuid
-        ON CONFLICT (region_id, code) DO NOTHING`)
-      const rows = await db.execute<{ id: string }>(sql`
-        SELECT id::text AS id FROM org_unit
-        WHERE region_id = ${regionId}::uuid AND code = '__UNPLACED__' LIMIT 1`)
-      const id = rows[0]?.id
-      if (!id) throw new Error(`placement: failed to create __UNPLACED__ holding node for region ${regionId}`)
-      return id
+      // S3: lifted into server/auth/placement-home.ts (the shared "no genuine
+      // placement" destination — the SSO/directory/enroll placement writers now
+      // call it too, instead of each hand-rolling their own "first unit in the
+      // region" query). This adapter method is kept so PlacementStore callers
+      // (the bill-driven lane) are unaffected; it now delegates rather than
+      // duplicating the SQL. The cast matches the pattern used across the
+      // codebase (e.g. server/db/request-rls.ts) for a schema-typed db passed to
+      // a Record<string, unknown>-typed shared helper.
+      return placementHomeForRegion(db as unknown as PostgresJsDatabase<Record<string, unknown>>, regionId)
     },
 
     async loadDirectoryRegionRules(): Promise<RegionRuleSet> {
-      // Curated (attribute, match_value, match_mode) → region rules. Cached per run
+      // Curated (attribute, match_value, match_mode) → target rules. Cached per run
       // by the caller; small table. Exact rules → a keyed map (O(1)); prefix rules →
       // a list scanned longest-first so the most specific prefix wins.
+      //
+      // A rule's target is the UNIT when org_unit_id is set (mig 0112) and the region
+      // otherwise. The unit is filtered to one that can actually receive a placement —
+      // active and cost-owning — for the same reason the bulk action refuses anything
+      // else: a rule pointing at a retired or non-cost-owning unit would silently home
+      // spend somewhere it still reaches no cost centre.
+      //
+      // A UNIT RULE WHOSE TARGET IS NO LONGER VALID IS DROPPED, NOT DEGRADED, and the
+      // difference is a privilege boundary rather than a nicety. Degrading it to
+      // `{ orgUnitId: null, regionId }` produces a REGION rule — the exact artefact a
+      // region admin is forbidden to author (directory-region-rules.post.ts: a region
+      // rule is org-wide placement configuration and takes global finance access).
+      // Retiring the unit would then hand its author org-wide config they could not
+      // have written: the degraded rule decides which REGION every matching person
+      // lands in, including people whose own chain resolves elsewhere, because an
+      // attribute region rule outranks a chain region leader. So an invalid unit rule
+      // places NOBODY until its target is fixed or the rule is re-pointed; the admin
+      // list already reports it as `target_placeable: false` so it is visible rather
+      // than mysteriously inert.
       const rows = await db.execute<{
         attribute: string
         match_value: string
         match_mode: string
         region_id: string
+        org_unit_id: string | null
+        target_dead: boolean
       }>(sql`
-        SELECT attribute, match_value, match_mode, region_id::text AS region_id
-        FROM directory_region_rule`)
+        SELECT d.attribute, d.match_value, d.match_mode, d.region_id::text AS region_id,
+               CASE WHEN ou.id IS NOT NULL THEN ou.id::text END AS org_unit_id,
+               (d.org_unit_id IS NOT NULL AND ou.id IS NULL) AS target_dead
+        FROM directory_region_rule d
+        LEFT JOIN org_unit ou
+          ON ou.id = d.org_unit_id AND ou.retired_at IS NULL AND ou.is_cost_owning_unit`)
       const exact: RegionRuleSet['exact'] = new Map()
       const prefix: RegionRuleSet['prefix'] = []
       for (const r of rows) {
+        if (r.target_dead) continue
         const attr = r.attribute as RegionAttributeKey
+        const target = { regionId: r.region_id, orgUnitId: r.org_unit_id }
         if (r.match_mode === 'prefix') {
-          prefix.push({ attribute: attr, value: r.match_value, regionId: r.region_id })
+          prefix.push({ attribute: attr, value: r.match_value, target })
         } else {
           let m = exact.get(attr)
           if (!m) {
             m = new Map()
             exact.set(attr, m)
           }
-          m.set(r.match_value, r.region_id)
+          m.set(r.match_value, target)
         }
       }
       prefix.sort((a, b) => b.value.length - a.value.length)
@@ -148,14 +184,15 @@ export function makePlacementStore(db: Db): PlacementStore {
       // (bill:/provisional: placeholders can't appear in a chain). An owner may own >1 unit
       // (the resolver treats that as ambiguous). The target is the OWNED unit, independent
       // of where the owner teammate is themselves homed.
+      // The eligibility clause is eligibleUnitOwnerPredicate — the SAME expression
+      // the C9 catch-all warning tests occupants against. Two copies of it is how
+      // the warning ends up suppressing exactly the people this walk cannot place.
       const rows = await db.execute<{ owner_oid: string; org_unit_id: string; region_id: string }>(sql`
         SELECT t.entra_oid AS owner_oid, ou.id::text AS org_unit_id, ou.region_id::text AS region_id
         FROM cou_owner co
         JOIN teammate t ON t.id = co.teammate_id
         JOIN org_unit ou ON ou.id = co.org_unit_id
-        WHERE co.revoked_at IS NULL
-          AND t.entra_oid NOT LIKE 'bill:%' AND t.entra_oid NOT LIKE 'provisional:%'
-          AND ou.is_cost_owning_unit AND ou.retired_at IS NULL`)
+        WHERE ${eligibleUnitOwnerPredicate(sql`co`, sql`t`, sql`ou`)}`)
       const map = new Map<string, OwnedUnit[]>()
       for (const r of rows) {
         const arr = map.get(r.owner_oid) ?? []
@@ -185,46 +222,186 @@ export function makePlacementStore(db: Db): PlacementStore {
         WHERE id = ${teammateId}::uuid`)
     },
 
+    async homeTeammateIfStillDerivable(teammateId, orgUnitId, regionId) {
+      /*
+       * THE SAME WRITE, WITH ITS PRECONDITIONS RE-ASSERTED AT WRITE TIME.
+       *
+       * The region re-resolve chooses a candidate from a query and then awaits the
+       * directory and a manager chain before writing. Every fact that made the move
+       * legal is re-readable and re-writable during those awaits:
+       *
+       *   - the SAFETY predicate. `rehomeSafePredicate` is the control that keeps an
+       *     automatic lane off anyone with a live session to re-scope. Evaluated only
+       *     as a candidate filter, an emit instance or an OAuth token created during
+       *     the awaits is re-scoped with no revoke cascade — precisely what the
+       *     predicate exists to prevent.
+       *   - the DESTINATION. It can be retired, un-flagged as cost-owning, or moved to
+       *     another region in the same window, so "an active cost-owning unit in this
+       *     region" is a fact about the preview, not about the write.
+       *
+       * So both are conditions of the UPDATE itself, and RETURNING reports whether the
+       * row actually moved. A false here is a SKIP, never a move.
+       *
+       * ORDER OF LOCKS, and why the plain conditional UPDATE is not enough on its own.
+       * A no-key UPDATE takes FOR NO KEY UPDATE, which does NOT conflict with the
+       * FOR KEY SHARE an instance_attestation / oauth_token INSERT takes on its parent
+       * teammate row — so a concurrent credential insert neither blocks nor is seen.
+       * The explicit `FOR UPDATE` does conflict with it: an insert already in flight
+       * makes us wait and is then visible to the UPDATE's own (fresh, READ COMMITTED)
+       * snapshot, and one starting after us waits for our commit. The destination is
+       * pinned FOR SHARE second — the same lock, in the same order, as
+       * server/db/place-teammate.ts, so the two placement writers cannot deadlock
+       * against each other.
+       *
+       * Wrapped in its own transaction so the lock and the write are atomic on a
+       * worker's pooled handle too; inside the endpoint's request transaction this is
+       * a savepoint, and the locks are held to the outer commit either way.
+       */
+      return await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT 1 FROM teammate WHERE id = ${teammateId}::uuid FOR UPDATE`)
+        await tx.execute(sql`SELECT 1 FROM org_unit WHERE id = ${orgUnitId}::uuid FOR SHARE`)
+        const moved = await tx.execute<{ id: string }>(sql`
+          UPDATE teammate t
+          SET org_unit_id = ${orgUnitId}::uuid, last_sync_at = now()
+          WHERE t.id = ${teammateId}::uuid
+            AND t.is_active = TRUE
+            AND t.region_id = ${regionId}::uuid
+            AND t.org_unit_id <> ${orgUnitId}::uuid
+            AND ${rehomeSafePredicate(sql`t`)}
+            AND EXISTS (
+              SELECT 1 FROM org_unit ou
+              WHERE ou.id = ${orgUnitId}::uuid
+                AND ou.region_id = ${regionId}::uuid
+                AND ou.retired_at IS NULL
+                AND ou.is_cost_owning_unit
+            )
+          RETURNING t.id::text AS id`)
+        return [...moved].length > 0
+      })
+    },
+
+    async stampPlacementAttempt(teammateIds) {
+      if (teammateIds.length === 0) return
+      // The batching cursor. A pass that leaves an unresolved / errored /
+      // out-of-region / already-correct row untouched leaves it at the FRONT of
+      // `ORDER BY last_sync_at NULLS FIRST` for ever, so every limited pass re-reads
+      // the same head while `remaining` keeps telling the admin to run again and the
+      // tail is never reached. Stamping what was LOOKED AT (which is what a sync
+      // timestamp means — the directory was read for this row) is what advances it.
+      await db.execute(sql`
+        UPDATE teammate SET last_sync_at = now()
+        WHERE id IN (${sql.join(teammateIds.map((id) => sql`${id}::uuid`), sql`, `)})`)
+    },
+
     async setPlacementProvenance(teammateId, prov) {
-      // Manager-chain unit-placement provenance on teammate.metadata. Set so re-enrichment
-      // can re-derive the person when their Entra manager changes; cleared on a non-unit
-      // home. Merge/strip only the placed* keys (preserve other metadata).
+      // DERIVED-placement provenance on teammate.metadata. Set so a later pass can
+      // re-derive the person when the thing that derived them changes — their Entra
+      // manager, or the curated rule that named the unit; cleared on a non-unit home.
+      // Merge/strip only the keys in PLACEMENT_PROVENANCE_KEYS (preserve other metadata).
       if (prov) {
         await db.execute(sql`
           UPDATE teammate
-          SET metadata = coalesce(metadata, '{}'::jsonb)
-            || jsonb_build_object('placedVia', 'manager-chain', 'placedOwnerOid', ${prov.ownerOid}::text, 'placedAt', now())
+          SET metadata = (coalesce(metadata, '{}'::jsonb) ${stripProvenanceKeys()})
+            || jsonb_build_object(
+                 'placedVia', ${prov.via}::text,
+                 ${prov.via === PLACED_VIA_MANAGER_CHAIN ? sql`'placedOwnerOid', ${prov.ownerOid}::text,` : sql`'placedAttribute', ${prov.attribute}::text,`}
+                 'placedAt', now())
           WHERE id = ${teammateId}::uuid`)
       } else {
         await db.execute(sql`
           UPDATE teammate
-          SET metadata = (coalesce(metadata, '{}'::jsonb) - 'placedVia' - 'placedOwnerOid' - 'placedAt')
+          SET metadata = (coalesce(metadata, '{}'::jsonb) ${stripProvenanceKeys()})
           WHERE id = ${teammateId}::uuid
             AND metadata ? 'placedVia'`)
       }
     },
 
+    async captureDirectorySnapshot(teammateId, snap) {
+      await captureDirectorySnapshot(
+        db as unknown as PostgresJsDatabase<Record<string, never>>,
+        teammateId,
+        snap,
+      )
+    },
+
     async replayOwedBills(teammateId, email) {
-      // One statement: lock the owed rows, upsert them into actual_spend, mark them
-      // placed. Idempotent — a re-run sees placed_at IS NOT NULL and is a no-op.
-      const rows = await db.execute<{ cnt: string }>(sql`
-        WITH owed AS (
-          SELECT id, actual_source, tool, date, cost_usd, input_tokens, output_tokens, raw_payload
+      // Dimension snapshot (mig 0101): the teammate is only just now being placed
+      // (that's what triggers a replay), so "at replay time" = "now" is the
+      // earliest and only evidence available — stamped on INSERT, omitted from
+      // the ON CONFLICT SET list so a later re-poll of the same day cannot
+      // re-home it (server/reconciliation/dimension-snapshot.ts).
+      const teammateIdSql = sql`${teammateId}::uuid`
+      const dims = teammateDimensionSnapshotSql(teammateIdSql)
+
+      // Governance verdict (mig 0103, Workstream B): each owed row already carries
+      // its governance key (resolved at ENQUEUE time — see enqueueOwedBill); the
+      // verdict itself is computed HERE, at replay, from CURRENT governance (never
+      // stale-cached from enqueue time, which could predate a billing edit).
+      // Wrapped in one transaction with the placement update below so a crash
+      // mid-replay cannot leave rows selected-but-unplaced.
+      return await db.transaction(async (tx) => {
+        const owed = await tx.execute<{
+          id: string
+          actual_source: string
+          tool: string
+          date: string
+          cost_usd: string
+          input_tokens: string
+          output_tokens: string
+          raw_payload: unknown
+          provider: string
+          provider_org_id: string | null
+          provider_enterprise_id: string | null
+        }>(sql`
+          SELECT id::text AS id, actual_source, tool, date::text AS date, cost_usd::text AS cost_usd,
+                 input_tokens::text AS input_tokens, output_tokens::text AS output_tokens, raw_payload,
+                 provider, provider_org_id::text AS provider_org_id, provider_enterprise_id::text AS provider_enterprise_id
           FROM pending_placement
           WHERE lower(identity_email) = lower(${email}) AND placed_at IS NULL
           FOR UPDATE
-        ), ins AS (
-          INSERT INTO actual_spend (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source, raw_payload)
-          SELECT ${teammateId}::uuid, o.date, o.tool, o.input_tokens, o.output_tokens, o.cost_usd, o.actual_source, o.raw_payload
-          FROM owed o
-          ON CONFLICT (teammate_id, date, tool, source) DO UPDATE SET
-            cost_usd = EXCLUDED.cost_usd, input_tokens = EXCLUDED.input_tokens,
-            output_tokens = EXCLUDED.output_tokens, raw_payload = EXCLUDED.raw_payload, pulled_at = now()
-        ), upd AS (
-          UPDATE pending_placement SET placed_at = now() WHERE id IN (SELECT id FROM owed) RETURNING 1
-        )
-        SELECT count(*)::text AS cnt FROM owed`)
-      return Number(rows[0]?.cnt ?? 0)
+        `)
+        if (owed.length === 0) return 0
+
+        const ctx = await loadGovernanceResolutionContext(tx)
+        for (const o of owed) {
+          const verdict =
+            o.provider === 'anthropic'
+              ? resolveAnthropicVerdict(ctx, { providerOrgId: o.provider_org_id })
+              : resolveGithubVerdict(ctx, {
+                  providerEnterpriseId: o.provider_enterprise_id,
+                  enterpriseSlug: '',
+                  licenseOrg: parseActualSpendSourceOrgRef(o.actual_source).externalOrgId,
+                })
+
+          await tx.execute(sql`
+            INSERT INTO actual_spend (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source, raw_payload,
+              region_id, org_unit_id, cost_owning_unit_id, dimension_source,
+              provider_org_id, provider_enterprise_id, governance_key_status,
+              chargeback_exempt, governance_verdict_source)
+            VALUES (${teammateId}::uuid, ${o.date}::date, ${o.tool}, ${o.input_tokens}::bigint, ${o.output_tokens}::bigint,
+              ${o.cost_usd}::numeric, ${o.actual_source}, ${JSON.stringify(o.raw_payload)}::jsonb,
+              ${dims.regionId}, ${dims.orgUnitId}, ${dims.costOwningUnitId}, ${DIMENSION_SOURCE_INGEST_SNAPSHOT},
+              ${o.provider_org_id}::uuid, ${o.provider_enterprise_id}::uuid,
+              ${o.provider_org_id || o.provider_enterprise_id ? 'resolved' : 'unresolved'},
+              ${verdict.exempt}, ${verdict.source})
+            ON CONFLICT (teammate_id, date, tool, source) DO UPDATE SET
+              cost_usd = EXCLUDED.cost_usd, input_tokens = EXCLUDED.input_tokens,
+              output_tokens = EXCLUDED.output_tokens, raw_payload = EXCLUDED.raw_payload, pulled_at = now(),
+              provider_org_id = EXCLUDED.provider_org_id, provider_enterprise_id = EXCLUDED.provider_enterprise_id,
+              governance_key_status = EXCLUDED.governance_key_status,
+              chargeback_exempt = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
+                THEN EXCLUDED.chargeback_exempt ELSE actual_spend.chargeback_exempt END,
+              governance_verdict_source = CASE WHEN actual_spend.governance_verdict_locked_at IS NULL
+                THEN EXCLUDED.governance_verdict_source ELSE actual_spend.governance_verdict_source END
+          `)
+        }
+
+        await tx.execute(sql`
+          UPDATE pending_placement SET placed_at = now()
+          WHERE id IN (${sql.join(owed.map((o) => sql`${o.id}::uuid`), sql`, `)})
+        `)
+        return owed.length
+      })
     },
   }
 }
@@ -244,15 +421,23 @@ export async function enqueueOwedBill(
     inputTokens?: number
     outputTokens?: number
     raw?: unknown
+    /** Governance key (mig 0103), resolved ONCE by the caller — carried
+     *  unchanged into actual_spend by replayOwedBills below (no re-resolution
+     *  at replay time). Omitted/null = unresolved (governance-unresolved). */
+    providerOrgId?: string | null
+    providerEnterpriseId?: string | null
   },
 ): Promise<void> {
   await db.execute(sql`
     INSERT INTO pending_placement
-      (provider, actual_source, identity_email, tool, date, cost_usd, input_tokens, output_tokens, raw_payload)
+      (provider, actual_source, identity_email, tool, date, cost_usd, input_tokens, output_tokens, raw_payload,
+       provider_org_id, provider_enterprise_id)
     VALUES (${o.provider}, ${o.actualSource}, lower(${o.email}), ${o.tool}, ${o.date}::date,
             ${o.costUsd.toFixed(6)}::numeric, ${o.inputTokens ?? 0}::bigint, ${o.outputTokens ?? 0}::bigint,
-            ${o.raw === undefined ? null : JSON.stringify(o.raw)}::jsonb)
+            ${o.raw === undefined ? null : JSON.stringify(o.raw)}::jsonb,
+            ${o.providerOrgId ?? null}::uuid, ${o.providerEnterpriseId ?? null}::uuid)
     ON CONFLICT (provider, actual_source, identity_email, tool, date) DO UPDATE SET
       cost_usd = EXCLUDED.cost_usd, input_tokens = EXCLUDED.input_tokens,
-      output_tokens = EXCLUDED.output_tokens, raw_payload = EXCLUDED.raw_payload, last_seen_at = now()`)
+      output_tokens = EXCLUDED.output_tokens, raw_payload = EXCLUDED.raw_payload, last_seen_at = now(),
+      provider_org_id = EXCLUDED.provider_org_id, provider_enterprise_id = EXCLUDED.provider_enterprise_id`)
 }

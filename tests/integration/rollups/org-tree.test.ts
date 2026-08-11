@@ -58,8 +58,21 @@ beforeAll(async () => {
     const [r] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM org_unit WHERE region_id=${region}::uuid AND code=${code}`
     return r!.id
   }
-  // Region A is a FOREST (no single root, like real Insight): apps + data are both top-level.
-  appsId = await ou(regionA, 'apps', 'apps', null, 'bu', true)
+  // Region A is a FOREST (no single root, like real Insight): apps + data are both top-level
+  // BY PATH (neither is a descendant of the other — that's what the admin "synthetic region
+  // root" tests below validate, and it is UNCHANGED by parent_id). 'apps' additionally gets a
+  // parent_id (S3 part a) because a MANAGER is placed there below and the security clamp now
+  // requires the caller's OWN home to look genuinely placed (parent_id IS NOT NULL) — this is
+  // the org-units.post.ts-legitimate "admin-created root-level BU" case org-subtree-scope.ts's
+  // own docs name as the accepted false positive of that structural test; without SOME parent
+  // link here the manager subtree-rollup test below would degrade to an (equally valid, but
+  // untestable) empty tree instead of exercising the rollup it exists to validate.
+  // unit_type 'holding' so it is excluded from BOTH the admin org-wide listing and the
+  // unplaced-spend sum (org-tree.get.ts filters unit_type <> 'holding' for the tree, and
+  // sums unit_type = 'holding' spend separately) — it exists ONLY as a parent_id target,
+  // invisible everywhere else, so it cannot perturb any other assertion in this file.
+  const s3ManagerRootId = await ou(regionA, 'ota_root', '__s3_root__', null, 'holding', false)
+  appsId = await ou(regionA, 'apps', 'apps', s3ManagerRootId, 'bu', true)
   dataId = await ou(regionA, 'data', 'data', null, 'bu', true)
   t1Id = await ou(regionA, 'apps.t1', 't1', appsId, 'bu', true)
   holdAId = await ou(regionA, 'ota_unplaced', '__UNPLACED__', null, 'holding', false)

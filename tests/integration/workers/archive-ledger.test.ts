@@ -9,6 +9,7 @@ import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { runAggregateRollup } from '../../../server/workers/aggregate-rollup'
 import { runArchiveLedger, type PartitionExporter } from '../../../server/workers/archive-ledger'
 import * as schema from '../../../drizzle/schema'
+import { archiveWindow } from '../helpers/archive-window'
 
 let t: TestDb
 let regionId = ''
@@ -16,10 +17,12 @@ let bu = ''
 let proj = ''
 let tm = ''
 
-// 2026-04 is cold (>30d before the real clock used by the worker) but within the
-// rollup's 90-day backfill; 2026-06-10 is hot. (Test relies on now() > ~2026-06.)
-const COLD = '2026-04-15T12:00:00.000Z'
-const HOT = '2026-06-10T12:00:00.000Z'
+// Clock-RELATIVE: the previous absolute constants only classified correctly
+// while the wall clock sat in a narrow window, and silently inverted once it
+// passed. See tests/integration/helpers/archive-window.ts.
+const W = archiveWindow()
+const COLD = W.cold
+const HOT = W.hot
 
 async function emit(day: string, cost: string): Promise<void> {
   const instanceId = crypto.randomUUID()
@@ -71,7 +74,7 @@ describe('runArchiveLedger', () => {
     const r = await runArchiveLedger(t.db)
     expect(r.enabled).toBe(false)
     expect(r.archived).toEqual([])
-    expect(await partExists('attribution_record_2026_04')).toBe(true)
+    expect(await partExists(W.coldPartition)).toBe(true)
   })
 
   it('skips (does NOT drop) when the export fails', async () => {
@@ -80,17 +83,17 @@ describe('runArchiveLedger', () => {
     }
     const r = await runArchiveLedger(t.db, { enabled: true, hotDays: 30, exporter: failing })
     expect(r.archived).toEqual([])
-    expect(r.skipped.some((s) => s.name === 'attribution_record_2026_04')).toBe(true)
-    expect(await partExists('attribution_record_2026_04')).toBe(true) // not dropped
+    expect(r.skipped.some((s) => s.name === W.coldPartition)).toBe(true)
+    expect(await partExists(W.coldPartition)).toBe(true) // not dropped
   })
 
   it('skips when the rollup does not reconcile (measure mismatch — review M3)', async () => {
     // Corrupt the rollup coverage for the cold month, then archive: must skip.
-    await t.client`DELETE FROM spend_rollup_daily WHERE period_start >= '2026-04-01' AND period_start < '2026-05-01'`
+    await t.client`DELETE FROM spend_rollup_daily WHERE period_start >= ${W.coldMonthStart}::date AND period_start < ${W.coldMonthEnd}::date`
     const r = await runArchiveLedger(t.db, { enabled: true, hotDays: 30, exporter: okExporter })
     expect(r.archived).toEqual([])
-    expect(r.skipped.some((s) => s.name === 'attribution_record_2026_04' && /mismatch/.test(s.reason))).toBe(true)
-    expect(await partExists('attribution_record_2026_04')).toBe(true)
+    expect(r.skipped.some((s) => s.name === W.coldPartition && /mismatch/.test(s.reason))).toBe(true)
+    expect(await partExists(W.coldPartition)).toBe(true)
   })
 
   it('fail-closed: the env-driven path refuses a freeze-floor SMALLER than the hot window', async () => {
@@ -114,21 +117,21 @@ describe('runArchiveLedger', () => {
   })
 
   it('archives a verified cold partition: raw dropped, rollup survives, hot untouched', async () => {
-    const coldRollupBefore = await t.client<{ v: string }[]>`SELECT round(sum(total_cost_usd),2)::text AS v FROM spend_rollup_daily WHERE period_start >= '2026-04-01' AND period_start < '2026-05-01'`
+    const coldRollupBefore = await t.client<{ v: string }[]>`SELECT round(sum(total_cost_usd),2)::text AS v FROM spend_rollup_daily WHERE period_start >= ${W.coldMonthStart}::date AND period_start < ${W.coldMonthEnd}::date`
     expect(Number(coldRollupBefore[0]!.v)).toBe(20)
 
     const r = await runArchiveLedger(t.db, { enabled: true, hotDays: 30, exporter: okExporter })
-    expect(r.archived).toContain('attribution_record_2026_04')
+    expect(r.archived).toContain(W.coldPartition)
 
     // raw cold partition is gone
-    expect(await partExists('attribution_record_2026_04')).toBe(false)
-    const rawCold = await t.client<{ v: string }[]>`SELECT count(*)::text AS v FROM attribution_record WHERE ts_event >= '2026-04-01' AND ts_event < '2026-05-01'`
+    expect(await partExists(W.coldPartition)).toBe(false)
+    const rawCold = await t.client<{ v: string }[]>`SELECT count(*)::text AS v FROM attribution_record WHERE ts_event >= ${W.coldMonthStart}::date AND ts_event < ${W.coldMonthEnd}::date`
     expect(Number(rawCold[0]!.v)).toBe(0)
     // durable rollup SURVIVES the raw drop
-    const coldRollupAfter = await t.client<{ v: string }[]>`SELECT round(sum(total_cost_usd),2)::text AS v FROM spend_rollup_daily WHERE period_start >= '2026-04-01' AND period_start < '2026-05-01'`
+    const coldRollupAfter = await t.client<{ v: string }[]>`SELECT round(sum(total_cost_usd),2)::text AS v FROM spend_rollup_daily WHERE period_start >= ${W.coldMonthStart}::date AND period_start < ${W.coldMonthEnd}::date`
     expect(Number(coldRollupAfter[0]!.v)).toBe(20)
     // hot data untouched
-    const rawHot = await t.client<{ v: string }[]>`SELECT round(sum(cost_usd),2)::text AS v FROM attribution_record WHERE ts_event >= '2026-06-01'`
+    const rawHot = await t.client<{ v: string }[]>`SELECT round(sum(cost_usd),2)::text AS v FROM attribution_record WHERE ts_event >= ${W.hotMonthStart}::date`
     expect(Number(rawHot[0]!.v)).toBe(5)
   })
 })

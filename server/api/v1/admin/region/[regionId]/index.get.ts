@@ -14,6 +14,7 @@ import { sql } from 'drizzle-orm'
 import { requireRole, requireRegionScope } from '../../../../../auth/rbac'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { requireUuidParam } from '../../../../../utils/require-uuid-param'
+import { HOLDING_UNIT_TYPE } from '../../../../../../shared/placement/holding-nodes'
 
 interface CountRow extends Record<string, unknown> {
   entity: string
@@ -47,6 +48,16 @@ export default defineEventHandler(async (event) => {
       SELECT 'bus' AS entity, COUNT(*)::text AS count FROM org_unit WHERE region_id = ${regionId}::uuid AND unit_type = 'bu'
       UNION ALL
       SELECT 'teammates' AS entity, COUNT(*)::text AS count FROM teammate WHERE region_id = ${regionId}::uuid AND is_active = TRUE
+      UNION ALL
+      -- C6: teammates still on a HOLDING node — region known, cost centre not, so
+      -- their spend reaches the region and stops there. Keyed on unit_type, not on
+      -- the holding-node CODE, per shared/placement/holding-nodes.ts: a holding
+      -- node is defined by BEING one, and a second holding node under a different
+      -- code must still count.
+      SELECT 'teammates_unplaced' AS entity, COUNT(*)::text AS count
+        FROM teammate t JOIN org_unit ou ON ou.id = t.org_unit_id
+       WHERE t.region_id = ${regionId}::uuid AND t.is_active = TRUE
+         AND ou.unit_type = ${HOLDING_UNIT_TYPE}
       UNION ALL
       SELECT 'projects' AS entity, COUNT(*)::text AS count FROM project WHERE region_id = ${regionId}::uuid
       UNION ALL
@@ -89,6 +100,8 @@ export default defineEventHandler(async (event) => {
     // comes from the counts query above).
     const reposMapped = counters.repos_mapped ?? 0
     const adminCount = counters.admins ?? 0
+    const totalTeammates = counters.teammates ?? 0
+    const unplacedTeammates = counters.teammates_unplaced ?? 0
     const checklist = [
       {
         key: 'org-units',
@@ -132,6 +145,37 @@ export default defineEventHandler(async (event) => {
               ? 'in_progress'
               : 'todo',
         sub: `${counters.cous_with_owner ?? 0} of ${counters.cous ?? 0} cost-owning units have an owner`,
+      },
+      /*
+       * C6 — the largest attribution defect in the product, stated as a checklist
+       * item because the Cost centres tab shows the count and offers no action
+       * that changes it.
+       *
+       * The three states are about PEOPLE, not about whether the tree exists:
+       *   done        — nobody is on the holding node. Includes a region with no
+       *                 teammates at all: there is nothing to place, which is
+       *                 genuinely done, not "todo".
+       *   in_progress — some placed, some not.
+       *   todo        — every teammate in the region is unplaced. Nothing has
+       *                 started.
+       * The sub-label carries both counts because "290" alone does not say
+       * whether that is most of the region or a handful.
+       */
+      {
+        key: 'teammates-placed',
+        label: 'Place teammates in cost centres',
+        status:
+          unplacedTeammates === 0
+            ? 'done'
+            : unplacedTeammates >= totalTeammates
+              ? 'todo'
+              : 'in_progress',
+        sub:
+          unplacedTeammates === 0
+            ? totalTeammates === 0
+              ? 'No teammates in this region yet'
+              : `All ${totalTeammates} teammates are in a cost centre`
+            : `${unplacedTeammates} of ${totalTeammates} teammates are not in a cost centre — their spend reaches the region and stops there`,
       },
       {
         key: 'project-pms',

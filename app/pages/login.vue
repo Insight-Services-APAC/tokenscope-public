@@ -100,8 +100,12 @@ function signInWithEntra() {
           you steer it.
         </p>
       </div>
-      <div class="text-[11px] text-white/70 font-mono">
-        APAC · v0.1.0 · MVP-Lite first slice
+      <!-- What this instance actually is, fetched not typed. The literal that
+           used to sit here ("APAC · v0.1.0 · MVP-Lite first slice") was wrong
+           on every field: dev is a global instance, not APAC; the version had
+           moved; the slice was long finished. -->
+      <div class="text-[11px] text-white/70">
+        <UiBuildStamp />
       </div>
     </aside>
 

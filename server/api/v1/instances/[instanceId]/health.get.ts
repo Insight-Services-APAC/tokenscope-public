@@ -30,8 +30,10 @@ export default defineEventHandler(async (event) => {
   const sid = parsed.data
   const db = getDb()
 
-  // Same auth as /bearer — the emit credential, scope-checked + revocation-checked.
-  const teammate = await requireOAuthBearer(event, 'tokenscope.emit', db as never)
+  // Same auth as /bearer — the emit credential, scope-checked + revocation-
+  // checked, AND now instance-bound (a different instance's emit credential
+  // 401s here instead of degrading to a per-teammate check).
+  const teammate = await requireOAuthBearer(event, 'tokenscope.emit', db as never, sid)
 
   const [row] = await db
     .select({
@@ -44,15 +46,11 @@ export default defineEventHandler(async (event) => {
     .where(eq(schema.instanceAttestation.instanceId, sid))
     .limit(1)
 
-  if (!row) {
-    throw createError({ statusCode: 404, statusMessage: 'Session not found' })
-  }
-  // Ownership: the bound teammate MUST own this instance (mirrors /bearer).
-  if (!row.teammateId || row.teammateId !== teammate.teammateId) {
-    throw createError({
-      statusCode: 403,
-      statusMessage: 'This credential does not own the requested instance',
-    })
+  // Not-found AND not-owned collapse to the SAME 404 (mirrors /bearer and
+  // me/instances/[instanceId]/revoke.post.ts) — don't let a 403 distinguish
+  // "exists but isn't yours" from "doesn't exist".
+  if (!row || !row.teammateId || row.teammateId !== teammate.teammateId) {
+    throw createError({ statusCode: 404, statusMessage: 'Instance not found' })
   }
 
   // last_emission = MAX(attribution_record.ts_event) for THIS instance — the same

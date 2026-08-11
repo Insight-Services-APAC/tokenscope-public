@@ -11,8 +11,15 @@ import { injectTestSession, type Session } from '../../helpers/auth'
 import discoverOrgs from '../../../server/api/v1/admin/reconciliation/github/discover-orgs.post'
 import * as schema from '../../../drizzle/schema'
 
-// Mutable seat roster + optional failure, shared with the hoisted mock.
-const stub = vi.hoisted(() => ({ seats: [] as Array<{ assignee: { login: string }; organization: { login: string } | null }>, fail: null as unknown }))
+// Mutable seat roster + optional failure, shared with the hoisted mock. withPatCalls /
+// withAppCalls record every construction so S9's credential-branch fix can be asserted
+// on the CONSTRUCTED client kind, not merely a successful run (Must-not-break).
+const stub = vi.hoisted(() => ({
+  seats: [] as Array<{ assignee: { login: string }; organization: { login: string } | null }>,
+  fail: null as unknown,
+  withPatCalls: [] as unknown[][],
+  withAppCalls: [] as unknown[][],
+}))
 // vitest hoists vi.mock above all imports, so the discoverOrgs import above still binds
 // to this stubbed client despite appearing first in source order.
 vi.mock('../../../server/reconciliation/adapters/github-client', () => {
@@ -21,13 +28,31 @@ vi.mock('../../../server/reconciliation/adapters/github-client', () => {
       if (stub.fail) throw stub.fail
       return stub.seats
     }
-    // The endpoint now constructs via the PAT factory static (App-mode split, mig 0078);
-    // the mock mirrors it so discover-orgs still resolves to this stub.
-    static withPat() {
+    // S9: the endpoint now branches credential.kind exactly like the five correct
+    // sibling call sites — the mock mirrors BOTH factory statics so the test can prove
+    // which one was actually invoked.
+    static withPat(...args: unknown[]) {
+      stub.withPatCalls.push(args)
+      return new GithubCopilotClient()
+    }
+    static withApp(...args: unknown[]) {
+      stub.withAppCalls.push(args)
       return new GithubCopilotClient()
     }
   }
   return { GithubCopilotClient }
+})
+// The App-mode branch constructs `new GithubAppAuth(appId, value)` — stub it too so the
+// real class's PEM-parsing constructor (which would reject a non-PEM stub value) never
+// runs; this test only needs to prove which STATIC was called, not exercise App auth.
+vi.mock('../../../server/reconciliation/adapters/github-app-auth', () => {
+  class GithubAppAuth {
+    constructor(
+      public appId: string,
+      public value: string,
+    ) {}
+  }
+  return { GithubAppAuth }
 })
 
 let t: TestDb
@@ -89,6 +114,8 @@ beforeEach(async () => {
   await t.client`DELETE FROM provider_enterprise WHERE provider = 'github'`
   stub.seats = []
   stub.fail = null
+  stub.withPatCalls = []
+  stub.withAppCalls = []
   const [e] = await t.db.insert(schema.providerEnterprise).values({
     provider: 'github', externalId: 'disc-ent', displayName: 'Disc Ent', reconciliationMode: 'reconciled', credentialSecretName: 'disc',
   }).returning()
@@ -109,6 +136,27 @@ describe('github discover-orgs', () => {
     expect(rows.every((r) => r.provider_enterprise_id === entId)).toBe(true)
     const audits = await t.client<{ n: string }[]>`SELECT COUNT(*)::text AS n FROM audit_event WHERE event_type = 'provider-org-discovered'`
     expect(Number(audits[0]!.n)).toBe(2)
+    // PAT-mode enterprise (no github_app_id) — regression pin: withPat, never withApp.
+    expect(stub.withPatCalls).toHaveLength(1)
+    expect(stub.withAppCalls).toHaveLength(0)
+  })
+
+  it('S9 App mode: a github_app_id-configured enterprise constructs via withApp, never withPat', async () => {
+    await t.client`UPDATE provider_enterprise SET github_app_id = '424242' WHERE id = ${entId}::uuid`
+    process.env.NUXT_GITHUB_APP_KEY_DISC = 'stub-app-key-mocked-auth-never-parses-it'
+    stub.seats = [{ assignee: { login: 'u1' }, organization: { login: 'acme-eng' } }]
+
+    const res = (await discoverOrgs(ev({ session: admin(), body: { enterpriseId: entId } }))) as { discovered: number; created: number }
+    expect(res).toMatchObject({ discovered: 1, created: 1 })
+
+    // Asserted on the CONSTRUCTED client kind, not merely a successful run.
+    expect(stub.withAppCalls).toHaveLength(1)
+    expect(stub.withPatCalls).toHaveLength(0)
+    const [enterpriseArg, appAuthArg] = stub.withAppCalls[0] as [string, { appId: string; value: string }]
+    expect(enterpriseArg).toBe('disc-ent')
+    expect(appAuthArg.appId).toBe('424242')
+
+    delete process.env.NUXT_GITHUB_APP_KEY_DISC
   })
 
   it('is idempotent — a second run creates nothing (alreadyLinked)', async () => {

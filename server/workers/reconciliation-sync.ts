@@ -14,7 +14,8 @@ import type * as schema from '../../drizzle/schema'
 import { runReconcileEngine } from '../reconciliation/engine'
 import { ADAPTER_FACTORIES } from '../reconciliation/adapters/registry'
 import { resolveOrgCredential, resolveEnterpriseCredential } from '../reconciliation/credentials'
-import { runCopilotBillWriter } from './copilot-bill'
+import { runCopilotBillWriter, monthStartIso } from './copilot-bill'
+import { resolveCopilotRatePlan } from '../governance/copilot-rate-plan'
 import {
   GOV_RECONCILIATION_EPSILON_USD,
   GOV_RECONCILIATION_LAG_BUFFER_HOURS,
@@ -45,6 +46,27 @@ export interface ReconcileSyncResult {
   matched: number
   skippedInvalid: number
   skippedUnresolved: number
+  // S9: seat-convergence prune rows deleted this run, summed across every github
+  // enterprise scope (see copilot-bill.ts's CopilotBillResult.prunedRows).
+  copilotSeatRowsPruned: number
+  // S9: which credential kind resolveEnterpriseCredential selected for each github
+  // scope this run — persisted on worker_run.result so a PAT-mode downgrade (an
+  // App-opted enterprise that fell back, or an App key sitting unused because
+  // github_app_id was never flipped) is visible in operator surfaces, not silent.
+  githubAppCredentialScopes: number
+  githubPatCredentialScopes: number
+  githubCredentialMirrorWarnings: number
+  // R2: seat-roster truncation, summed across github enterprise scopes. COUNTS, not
+  // the per-enterprise booleans CopilotBillResult carries, because one tick spans
+  // several enterprises (same shape as githubCredentialMirrorWarnings above).
+  //
+  // These MUST be aggregated here to be worth anything: copilot-bill is not its own
+  // registry worker, so CopilotBillResult never becomes a worker_run.result — only
+  // THIS object is persisted. deriveRunWarnings probing the booleans directly was
+  // dead code, and the unit test hid that by hand-building a result object with the
+  // keys already present instead of asserting what runReconciliationSync returns.
+  copilotSeatPagesCapped: number
+  copilotSeatPageShort: number
 }
 
 function utcDay(d: Date): string {
@@ -86,6 +108,12 @@ export async function runReconciliationSync(
     matched: 0,
     skippedInvalid: 0,
     skippedUnresolved: 0,
+    copilotSeatRowsPruned: 0,
+    githubAppCredentialScopes: 0,
+    githubPatCredentialScopes: 0,
+    githubCredentialMirrorWarnings: 0,
+    copilotSeatPagesCapped: 0,
+    copilotSeatPageShort: 0,
   }
 
   // Anthropic — credential grain is the org.
@@ -137,13 +165,15 @@ export async function runReconciliationSync(
   }
 
   // GitHub — credential grain is the enterprise (one PAT reads all child orgs).
-  // flat_seat_price_usd / included_allowance_usd (ADR-0010 D1/D2) drive the bill writer.
+  // Workstream C: the flat-seat showback writer resolves its price from the
+  // effective-dated rate plan (server/governance/copilot-rate-plan.ts) keyed on
+  // THIS run's write month, not the raw provider_enterprise scalar — a later
+  // rate-plan change must never re-cost a month whose showback row already wrote.
   const ents = await db.execute<{
+    id: string
     external_id: string
-    flat_seat_price_usd: string | null
-    included_allowance_usd: string | null
   }>(sql`
-    SELECT external_id, flat_seat_price_usd, included_allowance_usd FROM provider_enterprise
+    SELECT id::text AS id, external_id FROM provider_enterprise
     WHERE provider = 'github' AND reconciliation_mode = 'reconciled'
     ORDER BY external_id
   `)
@@ -162,6 +192,13 @@ export async function runReconciliationSync(
       result.scopesSkippedNoCredential += 1
       continue
     }
+    // S9: record the SELECTED credential kind on worker_run.result so a downgrade
+    // (an App-opted enterprise that fell back to PAT, or a PAT enterprise sitting on
+    // an unused App key — credentials.ts's silent-mirror warning) is visible in
+    // operator surfaces rather than only a console line.
+    if (credential.kind === 'github-app') result.githubAppCredentialScopes += 1
+    else result.githubPatCredentialScopes += 1
+    if (credential.appKeyMirrorWarning) result.githubCredentialMirrorWarnings += 1
     try {
       const adapter = factory(db, { externalRef: e.external_id, credential })
       const lines = await adapter.pull({ startDate, endDate })
@@ -181,16 +218,29 @@ export async function runReconciliationSync(
       // upserted, so re-runs refresh idempotently. (The per-user overage charge was removed —
       // WRONG model #1; overageRowsWritten is always 0.)
       try {
+        const ratePlan = await resolveCopilotRatePlan(db, {
+          providerEnterpriseId: e.id,
+          periodMonth: monthStartIso(now),
+        })
         const bill = await runCopilotBillWriter(db, {
           enterpriseSlug: e.external_id,
-          credential: credential.value,
+          // S9: pass the WHOLE resolved credential — copilot-bill.ts branches on
+          // .kind exactly like copilot-pool-bill.ts does. Flattening to .value here
+          // (the old shape) fed the GitHub App private key to withPat as a Bearer
+          // token whenever this enterprise was App-mode.
+          credential,
           now,
-          flatSeatPriceUsd: e.flat_seat_price_usd != null ? Number(e.flat_seat_price_usd) : null,
+          // Workstream C: period-aware (design C3 — closed-month recompute
+          // stability), never the raw provider_enterprise scalar directly.
+          flatSeatPriceUsd: ratePlan.flatSeatPriceUsd,
         })
+        result.copilotSeatRowsPruned += bill.prunedRows
         result.rowsWritten += bill.flatRowsWritten + bill.overageRowsWritten
         result.copilotFlatRows += bill.flatRowsWritten
         result.copilotOverageRows += bill.overageRowsWritten
         result.copilotSeatsCarriedUnmapped += bill.seatsCarriedUnmapped
+        if (bill.seatPagesCapped) result.copilotSeatPagesCapped += 1
+        if (bill.seatPageShort) result.copilotSeatPageShort += 1
       } catch (err) {
         console.warn(`[reconciliation-sync] copilot bill writer ${e.external_id} failed: ${String(err)}`)
       }

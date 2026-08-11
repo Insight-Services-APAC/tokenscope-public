@@ -127,29 +127,55 @@ watch(() => route.fullPath, () => {
 // Developer-first ordering; Admin always last. Inbox lives in the bell, not the
 // nav. `disabled` marks signposted-but-unbuilt items per the
 // "disabled-with-tooltip > silent placeholder" lesson (none currently —
-// My projects / My consumption shipped in the consumption sprint).
+// My projects / My usage shipped in the consumption sprint).
+//
+// ONE WORD, ONE MEANING. The nav used to read "My usage · My projects · My
+// consumption": two English synonyms naming two different pages, so nothing in
+// the nav said which held budgets and which held the model mix. The dashboard is
+// now "Home"; "My usage" names the usage-detail page (`/usage`), and the word
+// "consumption" is not a nav label at all.
 const NAV_BY_ROLE: Record<string, Array<{ to: string; label: string; disabled?: boolean }>> = {
   developer: [
-    { to: '/', label: 'My usage' },
+    { to: '/', label: 'Home' },
     { to: '/projects', label: 'My projects' },
-    { to: '/consumption', label: 'My consumption' },
+    { to: '/usage', label: 'My usage' },
   ],
   // Team / Practices / Finance collapsed into the consolidated Reporting entry
   // (spliced in navLinks below) at the reporting cutover.
-  manager: [{ to: '/', label: 'My usage' }],
+  /*
+   * EVERY ROLE HAS PERSONAL SPEND. Manager, admin and global-finops used to get
+   * "Home" (plus Reporting/Admin) and nothing else — no "My usage", no "My
+   * projects" — while `platform-admin` got both. That was never an access
+   * boundary: the pages RENDER for these roles today (a Global-finance capture
+   * of /usage returns a full page), so the effect was simply that a manager
+   * could not reach their own untagged days without typing the URL.
+   *
+   * A manager incurs spend, has days needing a decision, and has a budget to
+   * learn from — which is the product's whole premise. Reporting answers "how is
+   * my org doing"; it has never answered "what did I spend".
+   */
+  manager: [
+    { to: '/', label: 'Home' },
+    { to: '/projects', label: 'My projects' },
+    { to: '/usage', label: 'My usage' },
+  ],
   admin: [
-    { to: '/', label: 'My usage' },
+    { to: '/', label: 'Home' },
+    { to: '/projects', label: 'My projects' },
+    { to: '/usage', label: 'My usage' },
     { to: '/admin', label: 'Admin' },
   ],
   'global-finops': [
-    { to: '/', label: 'My usage' },
+    { to: '/', label: 'Home' },
+    { to: '/projects', label: 'My projects' },
+    { to: '/usage', label: 'My usage' },
     { to: '/admin', label: 'Admin' },
   ],
   // Cross-region super-admin sees everything.
   'platform-admin': [
-    { to: '/', label: 'My usage' },
+    { to: '/', label: 'Home' },
     { to: '/projects', label: 'My projects' },
-    { to: '/consumption', label: 'My consumption' },
+    { to: '/usage', label: 'My usage' },
     { to: '/admin', label: 'Admin' },
   ],
 }

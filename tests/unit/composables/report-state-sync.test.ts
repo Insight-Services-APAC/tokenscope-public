@@ -33,15 +33,15 @@ afterEach(() => vi.unstubAllGlobals())
 
 describe('useReportState — scope-tab URL sync (the shell tabModel)', () => {
   it('writing `scope` shallow-routes `?scope=` into the URL', () => {
-    const rs = useReportState({ scope: 'regional' })
-    expect(rs.scope.value).toBe('regional') // default from meta
+    const rs = useReportState({ scope: 'region' })
+    expect(rs.scope.value).toBe('region') // default from meta
     rs.scope.value = 'finance'
     expect(route.query.scope).toBe('finance')
     expect(rs.scope.value).toBe('finance')
   })
 
   it('switching scope via patch DROPS the previous scope\'s ou/cc drill', () => {
-    route.query = { scope: 'regional', region: 'r1', ou: 'o1', cc: 'c1' }
+    route.query = { scope: 'region', region: 'r1', ou: 'o1', cc: 'c1' }
     const rs = useReportState()
     // The shell's tabModel setter: patch scope + clear ou/cc.
     rs.patch({ scope: 'finance', ou: null, cc: null })
@@ -52,7 +52,7 @@ describe('useReportState — scope-tab URL sync (the shell tabModel)', () => {
   })
 
   it('month/region writes round-trip through the URL', () => {
-    const rs = useReportState({ scope: 'regional' })
+    const rs = useReportState({ scope: 'region' })
     rs.month.value = '2026-05'
     rs.region.value = 'r2'
     expect(route.query.month).toBe('2026-05')
@@ -64,7 +64,7 @@ describe('useReportState — scope-tab URL sync (the shell tabModel)', () => {
 
   it('an invalid `?scope=` falls back to the provided default (client gating is UX only)', () => {
     route.query = { scope: 'bogus' }
-    const rs = useReportState({ scope: 'regional' })
-    expect(rs.scope.value).toBe('regional')
+    const rs = useReportState({ scope: 'region' })
+    expect(rs.scope.value).toBe('region')
   })
 })

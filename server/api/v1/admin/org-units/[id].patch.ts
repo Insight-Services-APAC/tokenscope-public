@@ -20,6 +20,7 @@ import { requireRole, requireRegionScope } from '../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../auth/csrf'
 import { withRequestRls } from '../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../db/audit'
+import { assertHoldingNodeNotCostOwning, assertHoldingNodeTypeImmutable } from '../../../../db/org-units'
 
 const Body = z
   .object({
@@ -60,6 +61,31 @@ export default defineEventHandler(async (event) => {
 
     // Region admin is bound to the unit's region.
     await requireRegionScope(event, existing.region_id)
+
+    /*
+     * Guard rail, in TWO parts, because the effective-value check alone has a
+     * bypass that defeats it:
+     *
+     *   1. an existing holding node's TYPE cannot be changed at all. Without
+     *      this, `{ unit_type: 'team', is_cost_owning_unit: true }` produces an
+     *      effective row that is no longer a holding node, so (2) passes and the
+     *      node becomes a cost centre with all 290 people still on it — the exact
+     *      outcome (2) exists to prevent, reached by relabelling. The two-step
+     *      (retype, then enable) needs the same first step, so this refusal kills
+     *      that path too.
+     *   2. a holding node may never become cost-owning — evaluated against the
+     *      EFFECTIVE values this PATCH would produce, not the submitted ones: a
+     *      body that only sets is_cost_owning_unit leaves unit_type at its
+     *      existing value, and checking the body alone would wave it through.
+     */
+    assertHoldingNodeTypeImmutable({
+      existingUnitType: existing.unit_type,
+      requestedUnitType: body.unit_type,
+    })
+    assertHoldingNodeNotCostOwning({
+      unitType: body.unit_type ?? existing.unit_type,
+      isCostOwningUnit: body.is_cost_owning_unit ?? existing.is_cost_owning_unit,
+    })
 
     // Build the dynamic SET list from only the provided fields.
     const sets: SQL[] = []

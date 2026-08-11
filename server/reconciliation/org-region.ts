@@ -13,9 +13,12 @@
  */
 import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
-import type * as schema from '../../drizzle/schema'
-
-type Db = PostgresJsDatabase<typeof schema>
+/* Widened to the generic row type so this works with BOTH a pool handle (getDb(), the worker
+ * callers) and a request TRANSACTION handle. A request handler must not check out a second
+ * connection while holding one: with a bounded pool that deadlocks under concurrency instead of
+ * queueing. Only raw `execute` is used here, so the schema generic buys nothing. Mirrors
+ * server/utils/directory-exclusions.ts, which is called from both surfaces for the same reason. */
+type Db = PostgresJsDatabase<Record<string, unknown>>
 
 export async function regionForLicenseOrg(
   db: Db,

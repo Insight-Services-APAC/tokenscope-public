@@ -19,22 +19,24 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type * as schema from '../../drizzle/schema'
 import { runAggregateRollup } from './aggregate-rollup'
 import { runArchiveLedger } from './archive-ledger'
-import { runAnalyticsPollReconciledOrgs } from './analytics-poller'
+import { runAnalyticsPollReconciledOrgs, sourceForOrg } from './analytics-poller'
 import { runPlacementSync } from './placement-sync'
 import { runRegionReenrichment } from './region-reenrichment'
 import { runPrivilegedIdentityCleanup } from './privileged-identity-cleanup'
 import { runPendingPlacementGc } from './pending-placement-gc'
-import { runReadJoiner, selectRecentJoinableSessionIds, shouldDeepRescan } from './azure-monitor-reader'
+import { runReadJoiner, selectJoinableInstances, shouldDeepRescan } from './azure-monitor-reader'
 import { runBudgetAlert } from './budget-alert'
 import { runConnectorHealth } from './connector-health'
 import { runEndingSoon } from './ending-soon'
 import { runHeartbeatCoverage } from './heartbeat-coverage'
+import { runAttributionGap } from './attribution-gap'
 import { runMitigationQuery } from './mitigation-query'
 import { runReconciliation } from './reconciliation'
 import { runCopilotPoolBill } from './copilot-pool-bill'
 import { runReconciliationGap } from './reconciliation-gap'
 import { runReconciliationSync } from './reconciliation-sync'
 import { runReconciliationBackfill } from './reconciliation-backfill'
+import { runTelemetryRecovery } from './telemetry-recovery'
 import { runIdentitySync } from './identity-sync'
 import { runUsageReconciliation } from './usage-reconciliation'
 import { runSessionGc } from './session-gc'
@@ -42,6 +44,10 @@ import { runSoftPurge } from './soft-purge'
 import { runVelocityWatch } from './velocity-watch'
 import { runWentSilent } from './went-silent'
 import { runReadPathHealth } from './read-path-health'
+import { runGovernanceKeyBackfill } from './governance-key-backfill'
+import { runGovernanceRecompute } from './governance-recompute'
+import { runGithubCoverageSweep } from './github-coverage-sweep'
+import { runProviderTransform } from './provider-transform'
 import { getTelemetryReader } from '../azure/reader'
 import { UI_TRIGGERABLE_WORKER_NAMES } from '../../shared/workers/ui-triggerable'
 
@@ -64,6 +70,14 @@ export interface WorkerRunContext {
    */
   opts?: {
     deepRescan?: boolean
+    // azure-monitor-read: widen the reader's OUTER scan bound past the 7-day
+    // default (max 90). The recovery lever for a backlog older than a week —
+    // without it a signed re-run recovers only the last 7 days and reports
+    // success indistinguishably from a full recovery.
+    lookbackDays?: number
+    // azure-monitor-read: scope a recovery re-run to specific instance ids
+    // instead of the scheduled selection.
+    sessionIds?: string[]
     // privileged-identity-cleanup: destructive apply gate (default report-only).
     // Only reachable via the signed HMAC worker body, never the UI trigger.
     apply?: boolean
@@ -83,8 +97,14 @@ export interface WorkerEntry {
   name: string
   run: (db: Db, ctx?: WorkerRunContext) => Promise<unknown>
   /*
-   * Recommended external cron cadence (informational; the scheduler is
-   * external). Used to populate docs.
+   * The cron cadence this worker runs on. Named "recommended" from when the
+   * scheduler was external and this was informational — it is NOT informational
+   * any more: the admin worker-controls card shows it to operators as the live
+   * schedule, and worker-schedule-lockstep asserts it EQUALS the deployed cron in
+   * infra/modules/worker-jobs.bicep. Change one, change both, or CI fails.
+   *
+   * Meaningless for workers in UNSCHEDULED_WORKERS (they have no job at all); the
+   * enablement API suppresses it for those rather than imply a schedule.
    */
   recommendedCron: string
   description: string
@@ -190,7 +210,14 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
        * own 24h default; explicit sessionIds keep us safe on production-scale
        * tables (per R1 sweep F2).
        */
-      const sessionIds = await selectRecentJoinableSessionIds(db)
+      // RECOVERY override: an operator may scope a signed re-run to specific
+      // instances (ctx.opts.sessionIds) instead of the scheduled selection. A
+      // targeted pass then pairs with lookbackDays below to reach a backlog older
+      // than the reader's 7-day default. No selection ran, so there is no cap to
+      // report.
+      const override = ctx?.opts?.sessionIds
+      const { ids: sessionIds, capHit } =
+        override && override.length > 0 ? { ids: override, capHit: null } : await selectJoinableInstances(db)
       // ING-1: once per ~24h, ignore the per-instance watermark and re-read the
       // full reader window — recovers telemetry that arrived later than the
       // 5-minute lookback (OTLP batching, laptop suspends, ingestion latency).
@@ -204,17 +231,37 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
           sessionsProcessed: 0,
           attributionRowsWritten: 0,
           spansSkippedNoRateCard: 0,
+          // No spans were considered, so every rung is zero (never omit the
+          // object — a consumer reading result.costingRungs.provider must not
+          // have to special-case the empty tick).
+          costingRungs: { provider: 0, rateCard: 0, carrier: 0, skipped: 0 },
           spansSpilledUnauthorized: 0,
           spansSpilledEnded: 0,
           errors: 0,
           // A zero-session tick must NOT claim the daily deep pass happened.
           deepRescan: false,
           signalRowsWritten: 0,
+          // An empty selection cannot have hit the cap.
+          selectionCapHit: null,
+          // No reader was constructed and no query ran, so there is no applied window.
+          lookbackDaysApplied: null,
+          scoped: false,
           signalErrors: 0,
         }
       }
-      const reader = getTelemetryReader()
-      return runReadJoiner(db, reader, { sessionIds, deepRescan })
+      // lookbackDays widens the reader's OUTER scan bound (default 7d). Without
+      // it, a "recovery" re-run silently reaches back only a week and reports
+      // success — the failure mode that made a weeks-long backlog look
+      // unrecoverable after the dead-zone incident.
+      const reader = getTelemetryReader({ lookbackDays: ctx?.opts?.lookbackDays })
+      return runReadJoiner(db, reader, {
+        sessionIds,
+        deepRescan,
+        selectionCapHit: capHit,
+        // lookbackDaysApplied is read back from the reader inside runReadJoiner —
+        // recomputing it here would let the reported and applied windows diverge.
+        scoped: Boolean(override && override.length > 0),
+      })
     },
     recommendedCron: '*/5 * * * *',
     description: 'Join recent OTel spans into attribution_record',
@@ -267,6 +314,16 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
       'Drain the admin backfill queue: pull a historical window for one credential scope + run §A reconcile so older days surface as unaccounted usage (provider-billing-attribution-model.md §A)',
   },
   {
+    name: 'telemetry-recovery',
+    run: (db, ctx) => runTelemetryRecovery(db, { runId: ctx?.runId ?? null }),
+    // Every 5 minutes, matching azure-monitor-read: a recovery campaign is drained
+    // one budgeted slice per tick, so the cadence IS the drain rate. At rest the
+    // tick is a single indexed SELECT that claims nothing.
+    recommendedCron: '*/5 * * * *',
+    description:
+      'Drain the admin widened-read queue (mig 0093): re-read scoped instances at a wider reader lookback + deepRescan, in resumable slices, to recover a backlog older than the 7-day default',
+  },
+  {
     name: 'copilot-pool-bill',
     run: (db) => runCopilotPoolBill(db),
     recommendedCron: '0 5 * * *', // daily — Copilot is month-grain + settles slowly; a daily re-read
@@ -312,7 +369,13 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
   {
     name: 'velocity-watch',
     run: (db) => runVelocityWatch(db),
-    recommendedCron: '0 9 * * 1', // Monday 9am UTC
+    // Sunday 23:50 UTC — the last 10 minutes of the ISO week, NOT Monday morning.
+    // The worker compares the week CONTAINING `now` against the 4 full trailing
+    // weeks, so at Monday 09:00 the "current week" is 9 hours old and a dev would
+    // have to burn 1.25 weeks of spend before lunch to clear mean x threshold: the
+    // job would run green and structurally never fire. Evaluate the week when it
+    // is complete.
+    recommendedCron: '50 23 * * 0',
     description: 'Detect per-teammate weekly velocity above 25% over 4-week trailing mean',
   },
   {
@@ -324,8 +387,12 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
   {
     name: 'budget-alert',
     run: (db) => runBudgetAlert(db),
-    recommendedCron: '*/15 * * * *',
-    description: 'Scan attribution vs allocation, emit over-budget inbox items',
+    // HOURLY, not */15: the threshold it evaluates is month-grain, so a quarter-hour
+    // cadence buys nothing and costs 4x the dispatches
+    // (docs/design/stranded-workers-lifecycle.md). Asserted equal to the deployed
+    // cron by worker-schedule-lockstep — admins are shown this as the live schedule.
+    recommendedCron: '0 * * * *',
+    description: 'Scan complete spend (Claude + Copilot) vs allocation, emit over-budget inbox items',
   },
   {
     name: 'went-silent',
@@ -347,11 +414,102 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
       'Alert admins when the OTel read path (azure-monitor-read) has silently stalled/failed while clients still emit; auto-resolve on recovery',
   },
   {
+    name: 'attribution-gap',
+    run: (db) => runAttributionGap(db),
+    // Every ~30 min. The PER-INSTANCE counterpart to read-path-health: that
+    // worker gates on FLEET-wide signals (a zero-write streak, MAX(last_bearer_at)
+    // across every instance), so a SINGLE starved instance never moves it. The
+    // 2026-07-24 dead-zone outage was invisible to every existing alarm for 19
+    // days because of exactly that gap.
+    recommendedCron: '*/30 * * * *',
+    description:
+      'Alert admins when an individual device is minting ingest credentials (so it is emitting) while its attribution has fallen days behind — the silent "spend goes nowhere" outage class; auto-resolves when the gap closes',
+  },
+  {
     name: 'heartbeat-coverage',
     run: (db) => runHeartbeatCoverage(db),
     recommendedCron: '*/30 * * * *', // every 30 min — the EARLY detection leg before reconciliation (~1h+)
     description:
       'Quarantine "unverified spend" — sessions whose claimed instance has no covering /bearer heartbeat (cross-instance-spoof signal). Informational only; never auto-revokes (MCP backbone §heartbeat-coverage)',
+  },
+  {
+    name: 'governance-key-backfill',
+    run: (db) => runGovernanceKeyBackfill(db),
+    // Bounded/resumable historical backfill (design §8.4) — money-adjacent bulk
+    // UPDATE, so cron/HMAC-only (NOT in UI_TRIGGERABLE_WORKER_NAMES). Hourly is
+    // plenty; the backlog converges to empty after the first few runs post-deploy.
+    recommendedCron: '0 * * * *',
+    description:
+      'Resolve provider_org_id/provider_enterprise_id governance keys on historical actual_spend/reconciliation_record/pending_placement rows the ingest-time writers could not stamp; parks truly-unresolvable rows for operator review (docs/design/usage-completeness-and-provider-governance.md §8.4)',
+  },
+  {
+    name: 'governance-recompute',
+    run: (db) => runGovernanceRecompute(db),
+    // Periodic catch-up for the open-period chargeback verdict (design §4.1).
+    // Money-adjacent bulk UPDATE — cron/HMAC-only.
+    recommendedCron: '*/15 * * * *',
+    description:
+      'Recompute actual_spend.chargeback_exempt for OPEN-period rows from authoritative provider_org/provider_enterprise.billing; personal declarations never participate and closed periods are structurally untouched (docs/design/usage-completeness-and-provider-governance.md §4.1/§8.4)',
+  },
+  {
+    name: 'github-coverage-sweep',
+    run: (db) => runGithubCoverageSweep(db),
+    // Hourly — comfortably inside the persisted-observation TTL (3h,
+    // coverage-store.ts's DEFAULT_COVERAGE_OBSERVATION_TTL_MS), so a single missed
+    // tick never flips the UI to "unknown" while a genuinely-stalled sweep still does
+    // within a business day. Read-mostly (a live App-mode probe + an upsert into the
+    // two observation tables) and idempotent — safe for UI_TRIGGERABLE_WORKER_NAMES
+    // (an admin who just fixed a permission grant has a real reason to force a
+    // same-second recheck rather than wait up to an hour).
+    recommendedCron: '0 * * * *',
+    description:
+      'Compute + persist GitHub enterprise-org coverage (mislinked/coverage-unknown/stale/not-installed/suspended/not-onboarded/connected) for every registered GitHub enterprise, dispatching a deduplicated admin inbox alert on a transition into a non-connected state or a capability loss (docs/design/usage-completeness-and-provider-governance.md §6)',
+  },
+  {
+    name: 'provider-transform',
+    run: (db, ctx) => {
+      /*
+       * Derive the BILLED lane (provider_usage_fact) from the provider's own
+       * captured payloads — target-state-data-architecture.md §6, stage T0.
+       *
+       * WINDOW: the SAME trailing 30-day window the poller re-polls
+       * (analyticsPollWindow). That is precisely the set of days Anthropic may
+       * still restate, so it is the set whose derived facts may still move.
+       * Deriving a narrower window would leave a revision landing in
+       * actual_spend and never reaching the fact table; a wider one re-derives
+       * days that cannot have changed.
+       *
+       * A signed { startingAt, endingAt } body overrides it — the backfill
+       * lever for history older than the revision window (the design's "bounded
+       * backfill from actual_spend.raw_payload so the current quarter is
+       * coherent"). Honoured only as a PAIR forming a valid span, matching
+       * analytics-poll's fail-soft treatment of the same opts. { externalOrgId }
+       * scopes the run to one provider org's source.
+       */
+      const { startingAt, endingAt, externalOrgId } = ctx?.opts ?? {}
+      const window =
+        startingAt && endingAt && startingAt <= endingAt
+          ? { startingAt, endingAt }
+          : analyticsPollWindow(new Date())
+      return runProviderTransform(db, {
+        ...window,
+        source: externalOrgId ? sourceForOrg(externalOrgId) : undefined,
+      })
+    },
+    /*
+     * HOURLY, not the poller's quarter-hourly tick. The fact table is DAY-grain
+     * and nothing reads it at T0, so sub-hourly freshness buys nothing; meanwhile
+     * each tick re-derives a 30-day window across every source. Deliberately NOT in
+     * UI_TRIGGERABLE_WORKER_NAMES — it is a bulk money-adjacent derive, which
+     * that file's contract keeps cron/HMAC-only.
+     *
+     * SCHEDULED, not parked in UNSCHEDULED_WORKERS: an inert table is the
+     * POINT of T0, but an unpopulated one is the silent-no-op trap. T2 repoints
+     * the model axis at this table and would find it empty.
+     */
+    recommendedCron: '0 * * * *',
+    description:
+      'Derive the normalised provider layer (provider_usage_fact -- NOT billed-only; §B is a read-time filter over it) at teammate/day/tool/model/cost_type grain from actual_spend.raw_payload; upsert-then-guarded-prune, homing stamped once and never refreshed (docs/design/target-state-data-architecture.md §6, T0)',
   },
 ]
 

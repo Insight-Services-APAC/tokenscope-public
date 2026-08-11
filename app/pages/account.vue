@@ -6,6 +6,11 @@
  * another teammate or already linked (server-enforced); links are unverified +
  * audited. See docs/design/client-attribution-auth-spec.md §2.
  */
+// Render-boundary sanitizer for a self-registered client_name — see S6: names
+// registered before the bounds fix shipped may still carry control/bidi
+// characters, so this strips them defensively wherever the name is displayed.
+import { sanitizeClientNameForDisplay } from '#shared/schemas/oauth'
+
 interface Identity {
   id: string
   system: string
@@ -180,7 +185,9 @@ async function confirmInstance(id: string) {
 // device emitting (the server cascades ts_actual_end). Owner-scoped server-side.
 interface Grant {
   id: string
+  client_id: string
   client_name: string
+  client_registered_at: string
   scopes: string[]
   scope_labels: string[]
   state: 'active' | 'inactive' | 'revoked' | 'expired'
@@ -228,6 +235,69 @@ async function revokeGrant(g: Grant) {
     const next = new Set(revokingGrant.value)
     next.delete(g.id)
     revokingGrant.value = next
+  }
+}
+
+// ── Personal subscription declaration (ADR-0011 D3/D4) ──
+// A teammate-level attribute, not an org one — see docs/design/
+// usage-completeness-and-provider-governance.md §4.3. Declaring a tool as
+// personal exempts ITS usage from the "no bill to corroborate" suspicion and
+// from chargeback; it never auto-classifies (only this form ever creates one).
+interface PersonalSubscriptionDeclaration {
+  id: string
+  tool: string
+  subscriptionType: string
+  monthlyCostUsd: number
+  declaredAt: string
+}
+const { data: subsData, refresh: refreshSubs } = await useFetch<{ declarations: PersonalSubscriptionDeclaration[] }>(
+  '/api/v1/me/personal-subscription',
+  { default: () => ({ declarations: [] }) },
+)
+const PERSONAL_SUB_TOOLS = [
+  { value: 'claude-code', label: 'Claude Code' },
+  { value: 'claude-ai', label: 'Claude Chat' },
+  { value: 'claude-cowork', label: 'Claude Cowork' },
+  { value: 'claude-office', label: 'Claude for Office' },
+  { value: 'claude-chrome', label: 'Claude for Chrome' },
+  { value: 'claude-design', label: 'Claude for Design' },
+  { value: 'claude-slack', label: 'Claude for Slack' },
+]
+const newSubTool = ref('claude-code')
+const newSubType = ref('')
+const newSubCost = ref<number | null>(null)
+const subBusy = ref(false)
+const subError = ref<string | null>(null)
+
+async function declarePersonalSubscription() {
+  if (!newSubType.value.trim() || newSubCost.value == null) return
+  subBusy.value = true
+  subError.value = null
+  try {
+    await $fetch('/api/v1/me/personal-subscription', {
+      method: 'PUT',
+      body: { tool: newSubTool.value, subscriptionType: newSubType.value.trim(), monthlyCostUsd: newSubCost.value },
+    })
+    newSubType.value = ''
+    newSubCost.value = null
+    await refreshSubs()
+  } catch (e: unknown) {
+    subError.value = apiErrorDetail(e, 'Failed to declare personal subscription')
+  } finally {
+    subBusy.value = false
+  }
+}
+
+async function revokePersonalSubscription(tool: string) {
+  subBusy.value = true
+  subError.value = null
+  try {
+    await $fetch(`/api/v1/me/personal-subscription/${tool}`, { method: 'DELETE' })
+    await refreshSubs()
+  } catch (e: unknown) {
+    subError.value = apiErrorDetail(e, 'Failed to revoke')
+  } finally {
+    subBusy.value = false
   }
 }
 </script>
@@ -460,7 +530,12 @@ async function revokeGrant(g: Grant) {
         >
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-2">
-              <span class="text-sm font-medium text-carbon truncate">{{ g.client_name }}</span>
+              <span class="text-sm font-medium text-carbon truncate">{{ sanitizeClientNameForDisplay(g.client_name) }}</span>
+              <code
+                class="text-[10px] bg-calm/40 px-1 rounded text-carbon-3"
+                :title="`Client registered ${fmtTs(g.client_registered_at)}`"
+                :data-testid="`grant-client-id-${g.id}`"
+              >{{ g.client_id.slice(0, 8) }}</code>
               <UiBadge
                 :kind="grantBadge(g).kind"
                 :data-testid="`grant-state-${g.id}`"
@@ -548,6 +623,65 @@ async function revokeGrant(g: Grant) {
           SessionStart hook auto-apply it).
         </p>
       </div>
+    </UiCard>
+    <UiCard id="personal-subscription" class="mt-5" data-testid="personal-subscription">
+      <UiEyebrow>Personal subscription</UiEyebrow>
+      <p class="text-sm text-carbon-2 mt-1">
+        If you pay for your own Claude subscription personally (not through Insight), declare it here.
+        Declared usage stays visible in your usage (showback) but is <strong>never</strong> charged back,
+        and is never flagged as suspicious for having no Insight bill behind it. Scoped exactly to the
+        tool you declare — nothing is ever auto-classified.
+      </p>
+
+      <ul v-if="subsData?.declarations?.length" class="mt-3 divide-y divide-calm-2" data-testid="personal-subscription-list">
+        <li v-for="d in subsData.declarations" :key="d.id" class="py-2 flex items-center justify-between gap-2">
+          <div>
+            <p class="text-[13px] font-semibold text-carbon">{{ d.tool }} — {{ d.subscriptionType }}</p>
+            <p class="text-[12px] text-carbon-3">${{ d.monthlyCostUsd.toFixed(2) }}/mo · declared {{ new Date(d.declaredAt).toLocaleDateString() }}</p>
+          </div>
+          <UiButton
+            kind="ghost"
+            size="sm"
+            :disabled="subBusy"
+            :data-testid="`revoke-personal-subscription-${d.tool}`"
+            @click="revokePersonalSubscription(d.tool)"
+          >
+            Revoke
+          </UiButton>
+        </li>
+      </ul>
+
+      <div class="mt-3 flex flex-wrap items-end gap-2">
+        <select v-model="newSubTool" class="text-sm border border-calm-2 rounded-md px-2 py-2 bg-white" data-testid="new-sub-tool">
+          <option v-for="t in PERSONAL_SUB_TOOLS" :key="t.value" :value="t.value">{{ t.label }}</option>
+        </select>
+        <input
+          v-model="newSubType"
+          type="text"
+          placeholder="e.g. Claude Max"
+          class="flex-1 min-w-[10rem] border border-calm-2 rounded-md px-2 py-2 text-sm"
+          data-testid="new-sub-type"
+        >
+        <input
+          v-model.number="newSubCost"
+          type="number"
+          min="0"
+          step="0.01"
+          placeholder="Monthly cost ($)"
+          class="w-40 border border-calm-2 rounded-md px-2 py-2 text-sm"
+          data-testid="new-sub-cost"
+        >
+        <UiButton
+          kind="primary"
+          size="sm"
+          :disabled="subBusy || !newSubType.trim() || newSubCost == null"
+          data-testid="declare-personal-subscription"
+          @click="declarePersonalSubscription"
+        >
+          Declare
+        </UiButton>
+      </div>
+      <p v-if="subError" class="text-xs text-rag-red mt-2" data-testid="personal-subscription-error">{{ subError }}</p>
     </UiCard>
   </div>
 </template>

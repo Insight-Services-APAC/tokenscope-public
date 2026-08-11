@@ -1,9 +1,9 @@
 #!/usr/bin/env node
- 
+
 /**
  * sync-copilot-plugin.mjs
  *
- * Copies the four shared scripts from plugin/scripts/ into copilot-plugin/scripts/,
+ * Copies the shared scripts from plugin/scripts/ into copilot-plugin/scripts/,
  * prepending a one-line SYNC NOTE so maintainers know the file is auto-generated.
  *
  * This script IS the source-of-truth mechanism for the vendored copies —
@@ -24,14 +24,40 @@ const root = resolve(__dir, '..')
 
 const FILES = [
   { name: 'copilot-forwarder.mjs', type: 'js' },
-  { name: 'otlp-logs.mjs',         type: 'js' },
-  { name: 'copilot-redeem.mjs',    type: 'js' },
+  { name: 'otlp-logs.mjs', type: 'js' },
+  { name: 'copilot-redeem.mjs', type: 'js' },
   // tokenscope-project.mjs — the client-neutral resolver/hasher the forwarder
   // reuses so Copilot + Claude hash an identical `.tokenscope` to the same
   // project.code_hash. MUST stay gated by check-copilot-plugin-sync.mjs: an
   // un-gated extracted module drifts silently → split attribution (P0-2).
   { name: 'tokenscope-project.mjs', type: 'js' },
   { name: 'otel-headers-helper.sh', type: 'sh' },
+  // endpoint-guard.mjs (S1) — the ONE endpoint validator (assertSafeEndpoint /
+  // isUsableDce). Dependency-free by design so it vendors verbatim; MUST stay
+  // gated the same way tokenscope-project.mjs is — a second, un-gated guard
+  // is exactly what this epic's opening principle forbids.
+  { name: 'endpoint-guard.mjs', type: 'js' },
+  // mcp-origin.mjs — the ONE resolver for "where is the MCP server actually
+  // registered", used by BOTH redeem helpers so a handoff is always redeemed at
+  // the server that minted it. Gated for the same reason endpoint-guard.mjs is:
+  // a drifted second copy would send one client's single-use credential to a
+  // host the other client never talked to.
+  { name: 'mcp-origin.mjs', type: 'js' },
+  // real-home.mjs — the ONE answer to "where is the account's home", used by
+  // mcp-origin.mjs to decide which config names the redeem host and by
+  // claude-redeem.mjs to decide where the durable credential is written. Gated
+  // for the same reason endpoint-guard.mjs is, and more sharply: a drifted copy
+  // that fell back to os.homedir() would silently restore the $HOME trust
+  // boundary this module exists to remove, on one client only.
+  { name: 'real-home.mjs', type: 'js' },
+  // managed-telemetry.mjs (Workstream D §10.1) — the ONE detector for GitHub
+  // Copilot CLI's enterprise-managed `telemetry` block (hostile/benign/none/
+  // unknown). Copilot's own status/setup/enroll are the primary consumers;
+  // gated the same way as the others — a drifted second copy on the Copilot
+  // side is exactly the failure class this whole vendoring mechanism exists to
+  // prevent, and here it would mean the two clients disagree about whether a
+  // credential-valid probe is actually emission-healthy.
+  { name: 'managed-telemetry.mjs', type: 'js' },
 ]
 
 // Single-line SYNC NOTE markers — the parity check strips lines starting with these.

@@ -26,7 +26,7 @@ import {
 import { consola } from 'consola'
 import { requireAuth } from '../../../auth/rbac'
 import { assertSameOrigin } from '../../../auth/csrf'
-import { getClient, issueAuthCode, INTERACTIVE_GRANTABLE_SCOPES } from '../../../auth/oauth'
+import { getClient, issueAuthCode, computeGrantedScopes, INTERACTIVE_GRANTABLE_SCOPES } from '../../../auth/oauth'
 import { recordAuditEvent } from '../../../db/audit'
 import { getDb } from '../../../db'
 import { authorizeBodySchema } from '../../../../shared/schemas/oauth'
@@ -75,12 +75,13 @@ export default defineEventHandler(async (event) => {
     return redirectResult(event, url.toString())
   }
 
-  // Approve. Filter requested scopes to the INTERACTIVE-grantable set (read+tag).
-  // tokenscope.emit is NOT grantable here — the durable emit credential must never
-  // be issued over the client channel (R1 F1). Default to read if none requested.
-  const granted = body.scope
-    ? body.scope.split(' ').filter((s) => s && INTERACTIVE_GRANTABLE_SCOPES.includes(s))
-    : ['tokenscope.read']
+  // Approve. Filter requested scopes to the INTERACTIVE-grantable set (read+tag) —
+  // computeGrantedScopes is the SAME function the consent page's info fetch
+  // (authorize.get.ts) uses to RENDER the permission list, so what the user saw
+  // and what gets granted here can never drift (S6 Consent (b)). tokenscope.emit
+  // is NOT grantable here — the durable emit credential must never be issued
+  // over the client channel (R1 F1). Defaults to read if none requested.
+  const granted = computeGrantedScopes(body.scope)
   if (granted.length === 0) {
     const url = new URL(body.redirect_uri)
     url.searchParams.set('error', 'invalid_scope')

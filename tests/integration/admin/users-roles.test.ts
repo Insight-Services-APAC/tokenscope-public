@@ -629,13 +629,16 @@ describe('GET /api/v1/admin/settings', () => {
       initialSession: adminASession(),
     })
     const result = (await handler(ev as never)) as {
-      auth: { devMode: boolean; allowPersonaOverride: boolean; bootstrapAdminEmail: string }
+      auth: { devMode: boolean; allowPersonaOverride: boolean; bootstrapAdminConfigured: boolean }
       entra: { tenantId: string; clientId: string }
       features: Record<string, boolean>
       region: { id: string } | null
     }
     expect(result.auth.devMode).toBe(true)
-    expect(result.auth.bootstrapAdminEmail).toBe('bootstrap@wvi.test')
+    // S8: the boolean, not the address. The operational question is whether a
+    // bootstrap admin is configured; the address itself is an account
+    // identifier this tier has no reason to read.
+    expect(result.auth.bootstrapAdminConfigured).toBe(true)
     expect(result.entra.tenantId).toBe('tenant-abc')
     expect(result.region?.id).toBe(regionAId)
 
@@ -644,6 +647,27 @@ describe('GET /api/v1/admin/settings', () => {
     const serialised = JSON.stringify(result)
     for (const banned of ['clientSecret', 'CLIENT_SECRET', 'SESSION_SECRET', 'HMAC_SESSION_KEY', 'sessionSecret']) {
       expect(serialised).not.toContain(banned)
+    }
+    // S8: nor the bootstrap address itself, in any field. Asserting the
+    // configured-boolean alone would still pass if the address leaked
+    // somewhere else in the payload.
+    expect(serialised).not.toContain('bootstrap@wvi.test')
+    expect(serialised).not.toContain('@')
+  })
+
+  it('admin → settings never carries connection detail from a probe error', async () => {
+    // S8 redacts probe errors to a reason enum. This asserts the payload
+    // carries no host/port/database substring from a postgres-js style error,
+    // which is what the raw driver message used to embed.
+    process.env.NUXT_OIDC_AUTH_DEV_MODE = 'true'
+    const handler = await loadHandler()
+    const ev = makeEvent({
+      path: `/api/v1/admin/settings`,
+      initialSession: adminASession(),
+    })
+    const serialised = JSON.stringify(await handler(ev as never))
+    for (const banned of ['.postgres.database.azure.com', ':5432', 'password=', 'sslmode=']) {
+      expect(serialised, `settings payload leaked ${banned}`).not.toContain(banned)
     }
   })
 

@@ -20,6 +20,11 @@ export function handleProtectedResourceMetadata(event: H3Event) {
   setResponseHeaders(event, {
     'Content-Type': 'application/json',
     'Cache-Control': 'public, max-age=3600',
+    // Same reasoning as the AS metadata handler: `resource` and
+    // `authorization_servers` are resolved from the forwarded host/proto,
+    // so a shared cache MUST key on them too, or one caller's resolved
+    // origin can be served to another — cache poisoning.
+    Vary: 'X-Forwarded-Host, X-Forwarded-Proto, Host',
     'Access-Control-Allow-Origin': '*',
   })
 

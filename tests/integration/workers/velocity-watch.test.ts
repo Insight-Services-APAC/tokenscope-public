@@ -161,6 +161,36 @@ async function emit(
   })
 }
 
+/** Copilot §A usage — lands in unaccounted_usage, never attribution_record. */
+async function emitCopilot(teammateId: string, when: Date, costUsd: number): Promise<void> {
+  await t.db.insert(schema.unaccountedUsage).values({
+    teammateId,
+    regionId,
+    orgUnitId: buId,
+    projectId,
+    day: when.toISOString().slice(0, 10),
+    tool: 'copilot-cli',
+    costUsd: costUsd.toFixed(6),
+    tokens: 0n,
+  })
+}
+
+/** Ingest-only §A usage (mig 0101, A3) — a non-Code Claude surface, landing in
+ *  actual_spend and reaching v_complete_usage ONLY through the third,
+ *  non-taggable completeness arm (never attribution_record, never
+ *  unaccounted_usage). */
+async function emitIngestOnly(teammateId: string, when: Date, costUsd: number): Promise<void> {
+  await t.db.insert(schema.actualSpend).values({
+    teammateId,
+    date: when.toISOString().slice(0, 10),
+    tool: 'claude-ai',
+    inputTokens: 0n,
+    outputTokens: 0n,
+    costUsd: costUsd.toFixed(6),
+    source: 'anthropic-analytics-api',
+  })
+}
+
 describe('runVelocityWatch', () => {
   it('dispatches a velocity-warning when current week is >25% over 4-week mean', async () => {
     const teammateId = await createTeammate('happy')
@@ -379,5 +409,96 @@ describe('runVelocityWatch', () => {
     expect(rows.length).toBe(1)
     expect(rows[0]!.body.deltaPct).toBeCloseTo(0.1, 2)
   })
+
+  it('SCHEDULE: fires on the end-of-week clock it is actually cronned at (Sun 23:50)', async () => {
+    // The worker evaluates the week CONTAINING `now` against 4 full trailing
+    // weeks. Cronned at Monday 09:00 the current week was 9 hours old, so a spike
+    // could not clear mean x threshold and the job would run green forever
+    // without firing — the silent-no-op trap, inside the PR that exists to close
+    // it. Every other test here uses a mid-week clock and could not see it.
+    // Cron is now '50 23 * * 0'; this pins that a run at that instant DOES fire.
+    const teammateId = await createTeammate('sunday-night')
+    const sundayNight = new Date(Date.UTC(2026, 5, 21, 23, 50, 0)) // Sun 21-Jun-2026
+    const currentWeek = isoWeekStartUtc(sundayNight)
+    for (let i = 4; i >= 1; i--) {
+      const midWeek = new Date(currentWeek.getTime() - i * 7 * 86_400_000 + 2 * 86_400_000)
+      await emit(teammateId, midWeek, 100)
+    }
+    await emit(teammateId, new Date(currentWeek.getTime() + 2 * 86_400_000), 145)
+
+    const res = await runVelocityWatch(t.db, { now: sundayNight })
+    expect(res.alertsDispatched).toBeGreaterThanOrEqual(1)
+    const rows = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'velocity-warning' AND recipient_teammate_id = ${teammateId}::uuid`
+    expect(Number(rows[0]!.c)).toBeGreaterThanOrEqual(1)
+  })
+
+  it('COPILOT-ONLY teammate is scanned and can spike (was invisible before)', async () => {
+    // A teammate whose spend is entirely Copilot has ZERO attribution_record rows,
+    // so the old worker never even scanned them — they could never trip a spike
+    // no matter how sharply their burn rose.
+    const teammateId = await createTeammate('copilot-only')
+    const currentWeek = isoWeekStartUtc(NOW)
+    for (let i = 4; i >= 1; i--) {
+      const midWeek = new Date(currentWeek.getTime() - i * 7 * 86_400_000 + 2 * 86_400_000)
+      await emitCopilot(teammateId, midWeek, 100)
+    }
+    await emitCopilot(teammateId, new Date(currentWeek.getTime() + 2 * 86_400_000), 145)
+
+    const res = await runVelocityWatch(t.db, { now: NOW })
+    expect(res.alertsDispatched).toBeGreaterThanOrEqual(1)
+    const rows = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'velocity-warning' AND recipient_teammate_id = ${teammateId}::uuid`
+    expect(Number(rows[0]!.c)).toBeGreaterThanOrEqual(1)
+  })
+
+  it('a claude->copilot TOOL SWITCH is not read as a velocity drop', async () => {
+    // Same total burn, different tool: prior weeks claude, current week copilot.
+    // Reading attribution_record alone showed the current week as ~0 (a spurious
+    // drop); the complete lane sees flat spend and correctly does NOT fire.
+    const teammateId = await createTeammate('switcher')
+    const currentWeek = isoWeekStartUtc(NOW)
+    for (let i = 4; i >= 1; i--) {
+      const midWeek = new Date(currentWeek.getTime() - i * 7 * 86_400_000 + 2 * 86_400_000)
+      await emit(teammateId, midWeek, 100)
+    }
+    await emitCopilot(teammateId, new Date(currentWeek.getTime() + 2 * 86_400_000), 100)
+
+    await runVelocityWatch(t.db, { now: NOW })
+    const rows = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'velocity-warning' AND recipient_teammate_id = ${teammateId}::uuid`
+    expect(Number(rows[0]!.c)).toBe(0) // flat, not a spike
+  })
+
+  it('an INGEST-ONLY-only teammate (non-Code Claude surfaces) is scanned and can spike (mig 0101, A3 — untaggable provider-only spend is velocity-eligible)', async () => {
+    /*
+     * design §3.1 "Safety — worklist yes, alerts no (R1-M2)": untaggable
+     * provider-only spend (the non-Code Claude surfaces, copilot-agent) is
+     * VELOCITY-eligible — it is real spend by a real person — even though it
+     * can never belong to a project budget. Before migration 0101 these
+     * surfaces had ZERO v_complete_usage rows (excluded from both arms), so a
+     * teammate whose ENTIRE spend was e.g. Claude Chat could never trip a
+     * spike, mirroring the pre-fix Copilot-only blind spot above. Arm 3 fixes
+     * this the same way arm 2 fixed Copilot.
+     */
+    const teammateId = await createTeammate('ingest-only')
+    const currentWeek = isoWeekStartUtc(NOW)
+    for (let i = 4; i >= 1; i--) {
+      const midWeek = new Date(currentWeek.getTime() - i * 7 * 86_400_000 + 2 * 86_400_000)
+      await emitIngestOnly(teammateId, midWeek, 100)
+    }
+    await emitIngestOnly(teammateId, new Date(currentWeek.getTime() + 2 * 86_400_000), 145)
+
+    const res = await runVelocityWatch(t.db, { now: NOW })
+    expect(res.alertsDispatched).toBeGreaterThanOrEqual(1)
+    const rows = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'velocity-warning' AND recipient_teammate_id = ${teammateId}::uuid`
+    expect(Number(rows[0]!.c)).toBeGreaterThanOrEqual(1)
+  })
+
 })
 
