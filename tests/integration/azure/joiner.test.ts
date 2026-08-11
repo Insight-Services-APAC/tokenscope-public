@@ -46,7 +46,7 @@ beforeAll(async () => {
       VALUES ('33333333-3333-3333-3333-333333333333', 'oid', 'dev@i.com',
               '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222');
     INSERT INTO project (id, code, code_hash, display_name, type, region_id, cost_owning_unit_id)
-      VALUES ('44444444-4444-4444-4444-444444444444', 'AFL-AII', 'h-afl-aii', 'AFL · AI Insights',
+      VALUES ('44444444-4444-4444-4444-444444444444', 'CSL-AII', 'h-afl-aii', 'Contoso League · AI Insights',
               'billable', '11111111-1111-1111-1111-111111111111',
               '22222222-2222-2222-2222-222222222222');
     INSERT INTO project_assignment (project_id, teammate_id, effective)
@@ -61,7 +61,7 @@ beforeAll(async () => {
        region_id, org_unit_id, cost_owning_unit_id)
     VALUES
       ('66666666-6666-6666-6666-666666666666', 'oid', 'dev@i.com',
-       '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+       '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
        'claude-code', 'hashS', '2026-05-24 09:00:00+00', '2026-05-24 09:30:00+00',
        '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
        '22222222-2222-2222-2222-222222222222');
@@ -142,7 +142,7 @@ describe('runReadJoiner', () => {
          region_id, org_unit_id, cost_owning_unit_id, identity_state, claimed_email)
       VALUES
         ('99999999-9999-9999-9999-999999999999', 'oid', 'dev@i.com',
-         '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hashP', '2026-05-24 10:00:00+00', '2026-05-24 10:30:00+00',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
          '22222222-2222-2222-2222-222222222222', 'provisional', 'dev@i.com');
@@ -227,7 +227,7 @@ describe('runReadJoiner', () => {
     // provisional record bound to this teammate+project still counts toward their
     // own /me/usage total (the bill-anchored model — provisional spend is included,
     // just labeled; it's only excluded from human-paging alerts and money gates).
-    expect(rows.find((r) => r.project_code === 'AFL-AII')!.tokens).toBe('3100')
+    expect(rows.find((r) => r.project_code === 'CSL-AII')!.tokens).toBe('3100')
   })
 })
 
@@ -402,7 +402,7 @@ describe('runReadJoiner — session_assignment fallback (§13)', () => {
          NULL, NULL, 'claude-code', 'hashD', '2026-05-24 16:00:00+00', '2026-05-24 16:30:00+00',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
          NULL, 'unassigned');
-      -- Assign ONLY convX to AFL-AII (the teammate IS a member).
+      -- Assign ONLY convX to CSL-AII (the teammate IS a member).
       INSERT INTO session_assignment (claude_session_id, teammate_id, project_id, source)
       VALUES ('${CONV_X}', '33333333-3333-3333-3333-333333333333',
               '44444444-4444-4444-4444-444444444444', 'manual');
@@ -460,7 +460,7 @@ describe('runReadJoiner — session_assignment fallback (§13)', () => {
   })
 
   it('emitted hash still WINS over the assignment (B′ precedence)', async () => {
-    // convX is assigned to AFL-AII, but this record EMITS h-bhp-anl — B′ wins.
+    // convX is assigned to CSL-AII, but this record EMITS h-bhp-anl — B′ wins.
     const reader = new StubReader(
       new Map([[INST, [
         { tokens: 1500, tokenType: 'input', model: 'claude-sonnet-4-7', tsEvent: '2026-05-24T16:04:00Z', claudeSessionId: CONV_X, projectCodeHash: 'h-bhp-anl' },
@@ -471,11 +471,11 @@ describe('runReadJoiner — session_assignment fallback (§13)', () => {
     const r = await t.client<{ project_id: string }[]>`
       SELECT project_id::text AS project_id FROM attribution_record
       WHERE instance_id = ${INST}::uuid AND tokens = 1500`
-    expect(r[0]!.project_id).toBe('99999999-9999-9999-9999-999999999999') // BHP-ANL, not AFL-AII
+    expect(r[0]!.project_id).toBe('99999999-9999-9999-9999-999999999999') // BHP-ANL, not CSL-AII
   })
 
   it('stamps the conversation activity onto newly-joined rows (mig 0020)', async () => {
-    // Tag convX's activity (the AFL-AII project assignment from beforeAll stays —
+    // Tag convX's activity (the CSL-AII project assignment from beforeAll stays —
     // activity is orthogonal to project).
     await t.client.unsafe(`
       UPDATE session_assignment SET activity = 'testing'
@@ -539,7 +539,7 @@ describe('assign re-point: already-attributed rows move to the new project (F1)'
   const INST_Z = 'eeeeeeee-0000-0000-0000-00000000000e'
   const CONV_Z = 'conv-z-3333'
   const TEAM = '33333333-3333-3333-3333-333333333333'
-  const PROJ_A = '44444444-4444-4444-4444-444444444444' // AFL-AII (member)
+  const PROJ_A = '44444444-4444-4444-4444-444444444444' // CSL-AII (member)
   const PROJ_B = '99999999-9999-9999-9999-999999999999' // BHP-ANL (member)
 
   beforeAll(async () => {
@@ -553,7 +553,7 @@ describe('assign re-point: already-attributed rows move to the new project (F1)'
          NULL, NULL, 'claude-code', 'hashZ', '2026-05-24 17:00:00+00', '2026-05-24 17:30:00+00',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
          NULL, 'unassigned');
-      -- First assign: convZ → AFL-AII (project A, member).
+      -- First assign: convZ → CSL-AII (project A, member).
       INSERT INTO session_assignment (claude_session_id, teammate_id, project_id, source)
       VALUES ('${CONV_Z}', '${TEAM}', '${PROJ_A}', 'manual');
     `)
@@ -645,9 +645,9 @@ describe('runReadJoiner — org lanes (provider_org §2.1)', () => {
         (instance_id, principal_oid, principal_email, teammate_id, project_code_hash, raw_project_code,
          tool, session_token_hash, ts_start, ts_actual_end, region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('aaaaaaaa-0000-0000-0000-000000000001', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII', 'claude-code', 'hA', '2026-05-24 13:00:00+00', '2026-05-24 13:30:00+00', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
-        ('aaaaaaaa-0000-0000-0000-000000000002', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII', 'claude-code', 'hB', '2026-05-24 13:00:00+00', '2026-05-24 13:30:00+00', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
-        ('aaaaaaaa-0000-0000-0000-000000000003', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII', 'claude-code', 'hC', '2026-05-24 13:00:00+00', '2026-05-24 13:30:00+00', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
+        ('aaaaaaaa-0000-0000-0000-000000000001', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII', 'claude-code', 'hA', '2026-05-24 13:00:00+00', '2026-05-24 13:30:00+00', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
+        ('aaaaaaaa-0000-0000-0000-000000000002', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII', 'claude-code', 'hB', '2026-05-24 13:00:00+00', '2026-05-24 13:30:00+00', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
+        ('aaaaaaaa-0000-0000-0000-000000000003', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII', 'claude-code', 'hC', '2026-05-24 13:00:00+00', '2026-05-24 13:30:00+00', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
     `)
   }, 30_000)
 
@@ -714,7 +714,7 @@ describe('runReadJoiner — org lanes (provider_org §2.1)', () => {
         (instance_id, principal_oid, principal_email, teammate_id, project_code_hash, raw_project_code,
          tool, session_token_hash, ts_start, ts_actual_end, region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('${sid}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${sid}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hD', '2026-05-24 13:00:00+00', '2026-05-24 13:30:00+00',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
          '22222222-2222-2222-2222-222222222222');
@@ -741,7 +741,7 @@ describe('runMitigationQuery', () => {
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
         ('77777777-7777-7777-7777-777777777777', 'oid', 'dev@i.com',
-         '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+         '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hashT', '2026-05-24 11:00:00+00', '2026-05-24 11:30:00+00',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
          '22222222-2222-2222-2222-222222222222');
@@ -799,19 +799,19 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
          raw_project_code, tool, session_token_hash, ts_start, ts_actual_end,
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('${ACTIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${ACTIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hActive', NOW() - INTERVAL '1 hour', NULL,
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
-        ('${LONG_ACTIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${LONG_ACTIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hLong', NOW() - INTERVAL '10 days', NULL,
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
-        ('${DEAD_ACTIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${DEAD_ACTIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hDead', NOW() - INTERVAL '40 days', NULL,
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
-        ('${ENDED_UNATTRIB}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${ENDED_UNATTRIB}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hEndU', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '1 hour',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
-        ('${ENDED_OLD}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${ENDED_OLD}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hEndO', NOW() - INTERVAL '48 hours', NOW() - INTERVAL '47 hours',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
 
@@ -826,13 +826,13 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
          raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('${AGED_LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${AGED_LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hAgedLive', NOW() - INTERVAL '40 days', NULL, NOW() - INTERVAL '1 hour',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
-        ('${AGED_DORMANT}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${AGED_DORMANT}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hAgedDorm', NOW() - INTERVAL '40 days', NULL, NOW() - INTERVAL '30 days',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
-        ('${AGED_LIVE_REVOKED}', 'oid-revoked', 'revoked@i.com', '${REVOKED_TEAMMATE}', 'h-afl-aii', 'AFL-AII',
+        ('${AGED_LIVE_REVOKED}', 'oid-revoked', 'revoked@i.com', '${REVOKED_TEAMMATE}', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hAgedRev', NOW() - INTERVAL '40 days', NULL, NOW() - INTERVAL '1 hour',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
     `)
@@ -905,10 +905,10 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
          raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('${CAP_OLD_LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${CAP_OLD_LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hCapLive', NOW() - INTERVAL '50 days', NULL, NOW() - INTERVAL '5 minutes',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
-        ('${CAP_NEW_IDLE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${CAP_NEW_IDLE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hCapIdle', NOW() - INTERVAL '2 hours', NULL, NULL,
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
     `)
@@ -952,12 +952,12 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
          raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('${LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hCapL', NOW() - INTERVAL '50 days', NULL, NOW() - INTERVAL '2 minutes',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222'),
         ${closed
           .map(
-            (id, i) => `('${id}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+            (id, i) => `('${id}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hCapC${i}', NOW() - INTERVAL '3 hours', NOW() - INTERVAL '${i + 1} minutes', NOW() - INTERVAL '1 minute',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222')`,
           )
@@ -989,7 +989,7 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
          raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('${OLD_NEVER}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${OLD_NEVER}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hNever', NOW() - INTERVAL '10 minutes', NULL, NULL,
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
     `)
@@ -1059,7 +1059,7 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
          raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at, ts_purged,
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('${PURGED}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${PURGED}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hPurged', NOW() - INTERVAL '40 days', NULL, NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 day',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
     `)
@@ -1090,7 +1090,7 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
          raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('${WIN_LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${WIN_LIVE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hWinLive', NOW() - INTERVAL '60 days', NULL, NOW() - INTERVAL '10 minutes',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
     `)
@@ -1152,7 +1152,7 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
          raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('${CLAMP_PROBE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'AFL-AII',
+        ('${CLAMP_PROBE}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hClamp', NOW() - INTERVAL '80 days', NULL, NOW() - INTERVAL '30 days',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
     `)
@@ -1232,7 +1232,7 @@ describe('runReadJoiner — per-instance high-water-mark (incremental read)', ()
          raw_project_code, tool, session_token_hash, ts_start, ts_actual_end,
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('${INST_WM}', 'oid', 'dev@i.com', '${TEAM}', 'h-afl-aii', 'AFL-AII',
+        ('${INST_WM}', 'oid', 'dev@i.com', '${TEAM}', 'h-afl-aii', 'CSL-AII',
          'claude-code', 'hashWM', '2026-05-24 18:00:00+00', '2026-05-24 18:30:00+00',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
          '22222222-2222-2222-2222-222222222222');
@@ -1335,7 +1335,7 @@ describe('Copilot CLI money path — nano_aiu → cost_usd via joiner', () => {
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
         ('${INST_COP}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333',
-         'h-afl-aii', 'AFL-AII', 'copilot-cli', 'hashCOP1',
+         'h-afl-aii', 'CSL-AII', 'copilot-cli', 'hashCOP1',
          '2026-06-07 09:00:00+00', '2026-06-07 09:30:00+00',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
          '22222222-2222-2222-2222-222222222222');
@@ -1520,7 +1520,7 @@ describe('Dedup index mig 0035 — source_run_id COALESCE regression', () => {
          region_id, org_unit_id, cost_owning_unit_id)
       VALUES
         ('${INST_DEDUP}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333',
-         'h-afl-aii', 'AFL-AII', 'claude-code', 'hashDEDUP',
+         'h-afl-aii', 'CSL-AII', 'claude-code', 'hashDEDUP',
          '2026-05-30 09:00:00+00', '2026-05-30 09:30:00+00',
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
          '22222222-2222-2222-2222-222222222222');

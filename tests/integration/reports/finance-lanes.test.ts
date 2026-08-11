@@ -15,12 +15,19 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import indexHandler from '../../../server/api/v1/reports/finance/index.get'
 
 let t: TestDb
 let regionA = ''
 let ccA = ''
+/*
+ * mig 0129: a DEDICATED teammate for this file's 'global-finops' session —
+ * NEVER the shared sess() default sentinel, which the 'developer' 403 case
+ * below ALSO resolves to.
+ */
+let lanesElevatedId = ''
 
 const ev = (session: Session, query = '') => {
   const url = '/x' + (query ? `?${query}` : '')
@@ -55,9 +62,9 @@ const ev = (session: Session, query = '') => {
   return e as unknown as Parameters<typeof indexHandler>[0]
 }
 
-const sess = (role: string): Session =>
+const sess = (role: string, teammateId = '00000000-0000-0000-0000-000000000009'): Session =>
   ({
-    teammateId: '00000000-0000-0000-0000-000000000009',
+    teammateId,
     email: 'x@rl.test',
     displayName: 'X',
     role,
@@ -93,6 +100,13 @@ beforeAll(async () => {
   await asp('claude-code', 30)
   await asp('claude-ai', 12)
   await asp('claude-chrome', 6)
+
+  // A SEPARATE, DEDICATED teammate for this file's 'global-finops' session
+  // (mig 0129) — see the `lanesElevatedId` declaration above.
+  await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
+    VALUES ('oid-rl-gfo', 'gfo@rl.test', 'GFO', ${regionA}::uuid, ${ccA}::uuid, 'global-finops', true)`
+  ;[{ id: lanesElevatedId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='gfo@rl.test'`
+  await grantReportAccess(t.client, lanesElevatedId)
 }, 180_000)
 
 afterAll(async () => {
@@ -101,7 +115,7 @@ afterAll(async () => {
 
 describe('/reports/finance — per-CoU surface lanes (#142)', () => {
   it('each CoU row carries ordered, zero-elided lanes; Σ non-copilot lanes == anthropicUsd == the bill', async () => {
-    const res = await indexHandler(ev(sess('global-finops'), 'month=2026-05'))
+    const res = await indexHandler(ev(sess('global-finops', lanesElevatedId), 'month=2026-05'))
 
     const cou = res.cous.find((c) => c.code === 'rl-cc')
     expect(cou).toBeDefined()

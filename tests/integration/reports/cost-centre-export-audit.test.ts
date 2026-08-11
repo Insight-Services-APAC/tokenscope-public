@@ -35,6 +35,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import type { OverSoftCap } from '#shared/reports/types'
 import drillHandler from '../../../server/api/v1/reports/cost-centres/[ccId].get'
@@ -125,8 +126,14 @@ beforeAll(async () => {
 
   // The caller is a real teammate: audit_event.actor_teammate_id REFERENCES teammate(id),
   // so a synthetic session id would make every audit write a FK violation.
-  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, is_active)
-    VALUES (${CALLER}::uuid, 'oid-ccx-caller', 'caller@ccx.test', 'Caller', ${region}::uuid, ${root}::uuid, true)`
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
+    VALUES (${CALLER}::uuid, 'oid-ccx-caller', 'caller@ccx.test', 'Caller', ${region}::uuid, ${root}::uuid, 'global-finops', true)`
+  // mig 0129: CALLER is the file's ONLY persona (grepped — `gfo()` is the sole
+  // session builder), so a direct grant is safe. Needed for the drill gate
+  // (`resolveCostCentreDrill` + `costCentreScopeOpts`) — an ungranted global-finops
+  // holds no ownership on ccBig/ccSmall and would 403 on ownerOnly=false's own
+  // subtree/ownership disjunction.
+  await grantReportAccess(t.client, CALLER)
 
   /*
    * N teammates + one instance + one UNTAGGED attribution row each, in three

@@ -208,12 +208,12 @@ async function main() {
 
     // ── 8 projects (2-3 per team) ────────────────────────────────────
     const projectSeeds = [
-      { code: 'AFL-AII', displayName: 'AFL · AI Insights', cou: teamDelta.id, type: 'billable' },
-      { code: 'AFL-DRP', displayName: 'AFL · Data Replatform', cou: teamDelta.id, type: 'billable' },
-      { code: 'NAB-CIB', displayName: 'NAB · CIB Modernise', cou: teamEcho.id, type: 'billable' },
-      { code: 'NAB-RDM', displayName: 'NAB · Risk Data Mart', cou: teamEcho.id, type: 'billable' },
-      { code: 'CBA-PMG', displayName: 'CBA · Payments Migration', cou: teamFoxtrot.id, type: 'billable' },
-      { code: 'CBA-AGT', displayName: 'CBA · Agent Pilot', cou: teamFoxtrot.id, type: 'pursuit' },
+      { code: 'CSL-AII', displayName: 'Contoso League · AI Insights', cou: teamDelta.id, type: 'billable' },
+      { code: 'CSL-DRP', displayName: 'Contoso League · Data Replatform', cou: teamDelta.id, type: 'billable' },
+      { code: 'NWB-CIB', displayName: 'Northwind Bank · CIB Modernise', cou: teamEcho.id, type: 'billable' },
+      { code: 'NWB-RDM', displayName: 'Northwind Bank · Risk Data Mart', cou: teamEcho.id, type: 'billable' },
+      { code: 'WGB-PMG', displayName: 'Woodgrove Bank · Payments Migration', cou: teamFoxtrot.id, type: 'billable' },
+      { code: 'WGB-AGT', displayName: 'Woodgrove Bank · Agent Pilot', cou: teamFoxtrot.id, type: 'pursuit' },
       { code: 'INT-PLT', displayName: 'Internal · Platform Team', cou: bu.id, type: 'internal' },
       { code: 'INT-COE', displayName: 'Internal · AI CoE', cou: bu.id, type: 'internal' },
     ]
@@ -385,22 +385,22 @@ async function main() {
     // bucket UX.
     const assignmentSeeds: Array<{ projectCode: string; email: string; role?: 'manager' | 'member' }> = [
       // Priya (developer persona) — both Delta projects, so the bucket
-      // grid renders two cards on first login. PM of AFL-AII (J2): a
+      // grid renders two cards on first login. PM of CSL-AII (J2): a
       // developer-role PM proves budget authority flows from the
       // assignment role, not the org role.
-      { projectCode: 'AFL-AII', email: 'demo-priya.iyer@example.com', role: 'manager' },
-      { projectCode: 'AFL-DRP', email: 'demo-priya.iyer@example.com' },
+      { projectCode: 'CSL-AII', email: 'demo-priya.iyer@example.com', role: 'manager' },
+      { projectCode: 'CSL-DRP', email: 'demo-priya.iyer@example.com' },
       { projectCode: 'INT-PLT', email: 'demo-priya.iyer@example.com' },
       // Jason — second pair on Delta.
-      { projectCode: 'AFL-AII', email: 'demo-jason.wu@example.com' },
-      { projectCode: 'AFL-DRP', email: 'demo-jason.wu@example.com' },
+      { projectCode: 'CSL-AII', email: 'demo-jason.wu@example.com' },
+      { projectCode: 'CSL-DRP', email: 'demo-jason.wu@example.com' },
       // Anil (manager persona) + Mei — both Echo projects.
-      { projectCode: 'NAB-CIB', email: 'demo-anil.verma@example.com' },
-      { projectCode: 'NAB-RDM', email: 'demo-anil.verma@example.com' },
-      { projectCode: 'NAB-CIB', email: 'demo-mei.tanaka@example.com' },
+      { projectCode: 'NWB-CIB', email: 'demo-anil.verma@example.com' },
+      { projectCode: 'NWB-RDM', email: 'demo-anil.verma@example.com' },
+      { projectCode: 'NWB-CIB', email: 'demo-mei.tanaka@example.com' },
       // Foxtrot pair.
-      { projectCode: 'CBA-PMG', email: 'demo-liam.osullivan@example.com' },
-      { projectCode: 'CBA-AGT', email: 'demo-aarti.shah@example.com' },
+      { projectCode: 'WGB-PMG', email: 'demo-liam.osullivan@example.com' },
+      { projectCode: 'WGB-AGT', email: 'demo-aarti.shah@example.com' },
     ]
     const projectByCode = new Map(projects.map((p) => [p.code, p]))
     const teammateByEmail = new Map(teammates.map((t) => [t.email, t]))
@@ -427,12 +427,27 @@ async function main() {
     // ── CC ownership (J1, mig 0048) ──────────────────────────────────
     // Owen owns Practices Delta + Echo: multi-CC ownership, cross-CC
     // project membership visible from his "My cost centres" view (Delta's
-    // AFL-AII has members from Delta; Echo's NAB-CIB from Echo).
+    // CSL-AII has members from Delta; Echo's NWB-CIB from Echo).
     const owen = teammateByEmail.get('demo-owen.cole@example.com')
     if (owen) {
       await db.insert(schema.couOwner).values([
         { orgUnitId: teamDelta.id, teammateId: owen.id },
         { orgUnitId: teamEcho.id, teammateId: owen.id },
+      ])
+    }
+
+    // ── Report-access grants (mig 0129) ──────────────────────────────
+    // Roles no longer confer elevated report access on their own — Mara
+    // (global-finops, the ONLY seeded org-wide-role teammate; grep
+    // teammateSeeds above, no platform-admin demo row exists) needs BOTH
+    // permissions or her landing (/reporting?scope=finance) opens on a
+    // baseline 403 instead of real data. Lena (region admin) gets NOTHING —
+    // standard-mode parity: `admin` never held elevation, grant or no grant.
+    const mara = teammateByEmail.get('demo-mara.holloway@example.com')
+    if (mara) {
+      await db.insert(schema.reportAccessGrant).values([
+        { teammateId: mara.id, permission: 'operational', grantedBy: null },
+        { teammateId: mara.id, permission: 'finance', grantedBy: null },
       ])
     }
 
@@ -453,7 +468,7 @@ async function main() {
     const [proj1, proj2, proj3] = projects
     if (!proj1 || !proj2 || !proj3) throw new Error('seed: project rows missing')
 
-    // J5: AFL-AII also gets a CURRENT-month baseline so the PM journey
+    // J5: CSL-AII also gets a CURRENT-month baseline so the PM journey
     // (viewer.budget_allocation_id → /allocations/{id} editor) and the
     // allocation bars have a live budget. Derive the range from the real clock:
     // a hard-coded "current" month silently expires and makes the E2E fixture
@@ -527,10 +542,10 @@ async function main() {
     // the demo data still satisfies the producer thresholds.
     const currentWeekStart = isoWeekStartUtc(now)
 
-    // Priya's 5-week velocity ramp on AFL-DRP — 4 prior weeks of ~$100
+    // Priya's 5-week velocity ramp on CSL-DRP — 4 prior weeks of ~$100
     // each + a current-week spike to ~$145. Delta ≈ +45 % → over the
     // velocity-watch threshold (25 %), so runVelocityWatch will emit a
-    // velocity-warning to priya. AFL-DRP cap = $4,200 so this is well
+    // velocity-warning to priya. CSL-DRP cap = $4,200 so this is well
     // under-budget on its own.
     const priyaVelocityEvents: Array<{ when: Date; cost: number }> = [
       { when: addDaysUtc(addWeeksUtc(currentWeekStart, -4), 2), cost: 98 },
@@ -542,7 +557,7 @@ async function main() {
     for (const ev of priyaVelocityEvents) {
       await insertSpendRecord(db, {
         teammate: priya,
-        project: proj2, // AFL-DRP
+        project: proj2, // CSL-DRP
         regionId: demoRegion.id,
         orgUnitId: teamDelta.id,
         costOwningUnitId: teamDelta.id,
@@ -553,16 +568,16 @@ async function main() {
       })
     }
 
-    // Anil's AFL-AII spike — single concentrated event in the current
-    // month that pushes AFL-AII over its $12,500 cap by $210. The
-    // over-budget producer fires for AFL-AII; the dispatcher's
+    // Anil's CSL-AII spike — single concentrated event in the current
+    // month that pushes CSL-AII over its $12,500 cap by $210. The
+    // over-budget producer fires for CSL-AII; the dispatcher's
     // contributor-first rule routes the alert to anil (the actual
     // contributor) and NOT to priya, so:
-    //   - priya (developer persona) sees AFL-DRP $456 healthy + her
+    //   - priya (developer persona) sees CSL-DRP $456 healthy + her
     //     velocity-warning + her untagged-backlog. NO over-budget item.
-    //   - anil (manager persona) sees the AFL-AII over-budget item.
+    //   - anil (manager persona) sees the CSL-AII over-budget item.
     //     He's a manager who occasionally codes; his contribution
-    //     dominated AFL-AII this month, so he's the right recipient.
+    //     dominated CSL-AII this month, so he's the right recipient.
     //
     // Anil has no prior weekly attribution, so velocity-watch's "needs
     // 4 prior populated weeks" guard means he does NOT also receive a
@@ -570,7 +585,7 @@ async function main() {
     // narrative clean.
     await insertSpendRecord(db, {
       teammate: anil,
-      project: proj1, // AFL-AII
+      project: proj1, // CSL-AII
       regionId: demoRegion.id,
       // anil's home org_unit is teamEcho; for THIS particular spend
       // record we attribute it under the project's CoU (teamDelta).
@@ -587,7 +602,7 @@ async function main() {
     })
 
     // Connector-health source — one pending sync_conflict on proj3
-    // (NAB-CIB). runConnectorHealth picks it up and dispatches a
+    // (NWB-CIB). runConnectorHealth picks it up and dispatches a
     // sync-conflict inbox item to admins (lena.park per dispatch rule).
     await db.insert(schema.syncConflict).values({
       connectorId: 'PSR · APAC',
@@ -600,7 +615,7 @@ async function main() {
 
     // Reconciliation source — give priya actual_spend rows whose total
     // is > 10 % above her OTel attribution total ($554 from the velocity
-    // ramp; the AFL-AII spike now lives on jason). Picking $700 →
+    // ramp; the CSL-AII spike now lives on jason). Picking $700 →
     // gap ≈ 21 %, well over the 10 % threshold. runReconciliation
     // dispatches an untagged-backlog info item to priya. Source defaults
     // to 'anthropic-analytics-api' (the reconciliation worker filters

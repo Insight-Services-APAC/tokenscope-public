@@ -328,7 +328,7 @@ never by axis alone: see rule 8.
    Both rules read the `teammate` and `project` grant columns, which sit in the
    same WHO-SEES-WHAT matrix as every other scope and reach the client through
    `/reports/meta`'s `drill` leg — see
-   [Report-visibility policy](Authentication-and-Security.md#report-visibility-policy-report-scoping).
+   [Report access grants](Authentication-and-Security.md#report-access-grants).
 
    **Back restores the entry report exactly.** A drill link carries `?src=`
    (the entry scope token) plus the entry window in the report vocabulary
@@ -846,7 +846,7 @@ chargeback as a **charge** (`NUXT_COPILOT_CHARGEBACK_ENABLED`, default off →
 `pool-utilisation`, UI shows "Copilot pending"). This is a **rendering** gate
 only — `copilot-pool-bill` writes `copilot_pool_bill` regardless.
 
-Report visibility is layered on top by
+Report access grants are layered on top by
 [`shared/auth/report-visibility.ts`](../design/report-visibility-policy.md) — the
 documented exception to the "every handler has `requireRole`" rule.
 

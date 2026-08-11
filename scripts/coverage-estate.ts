@@ -58,8 +58,14 @@ import { currentServerDeployEnv } from '../shared/env/deploy-env'
 
 const sha256Hex = (s: string) => createHash('sha256').update(s).digest('hex')
 const MARK = 'coverage-estate'
-/** Emission window for the demo personas — the charts they render are 30-day. */
-const DEMO_DAYS = 30
+/*
+ * Emission window for the demo personas. The charts they render are 30-day,
+ * but the window reaches 42 days so the PREVIOUS month's same-day-count
+ * window also holds real spend — "vs last month" on the usage cards compares
+ * month-to-date against last month's first N days, and a window that starts
+ * mid-month makes that read as a four-digit percentage on a screenshot.
+ */
+const DEMO_DAYS = 42
 
 /**
  * THE COVERAGE MATRIX. One persona per shape the product must survive — not one
@@ -572,6 +578,28 @@ async function main() {
      * way: give the personas that CAN be assumed a real emission history,
      * through the same production path as everything else here.
      */
+    /*
+     * The demo personas tag their spend to the seeded BUDGETED project
+     * (CSL-AII carries a live current-month allocation), not the generic
+     * anchor: a developer hero card reading "2% of allocated" above an
+     * $800/month recent-spend strip is the incoherence screenshots exist to
+     * avoid. Falls back to the anchor when the demo grid isn't seeded.
+     */
+    const [demoBudgetProject] = await db.execute<{
+      project_id: string; project_code: string; project_code_hash: string
+    }>(sql`
+      SELECT id::text AS project_id, code AS project_code, code_hash AS project_code_hash
+      FROM project WHERE code = 'CSL-AII' LIMIT 1`)
+    const demoProject = demoBudgetProject ?? anchor
+    const ensureDemoMembership = async (teammateId: string) => {
+      await db.execute(sql`
+        INSERT INTO project_assignment (project_id, teammate_id, effective, source, is_pinned)
+        SELECT ${demoProject.project_id}::uuid, ${teammateId}::uuid, tstzrange(NOW() - interval '90 days', NULL), ${MARK}, true
+        WHERE NOT EXISTS (
+          SELECT 1 FROM project_assignment
+          WHERE project_id = ${demoProject.project_id}::uuid AND teammate_id = ${teammateId}::uuid)`)
+    }
+
     const demoTeammates = await db.execute<{ id: string; email: string }>(sql`
       SELECT id::text, email FROM teammate
        WHERE email LIKE 'demo-%' AND is_active AND NOT provisional
@@ -614,15 +642,20 @@ async function main() {
         for (let k = 0; k < perDay; k++, seq++) {
           const ts = new Date(ts0.getTime() + (9 + k * 3) * 60 * 60 * 1000)
           spans.push({
-            tokens: 900 + seq * 53 + n * 11,
+            // Magnitudes are calibrated to the owner's yardstick (2026-08-11):
+            // a normal Claude Code developer runs $500–1000/month — anything
+            // smaller makes the budget-splitting premise look pointless on a
+            // screenshot. ~$4–12 per span × 1–4 spans/day ≈ $650/month pace,
+            // with token counts kept coherent (~$5/M blended).
+            tokens: (900 + seq * 53 + n * 11) * 400,
             tokenType: LANES[seq % LANES.length],
             model: seq % 3 === 0 ? 'claude-sonnet-5' : 'claude-opus-4-5',
             tsEvent: ts.toISOString(),
             sourceRunId: `cov-demo-${n}-${seq}`,
             claudeSessionId: daySessions[k % daySessions.length]!,
-            projectCodeHash: anchor.project_code_hash,
+            projectCodeHash: demoProject.project_code_hash,
             // Amount varies by day and persona, so a trend line has shape.
-            lawCostUsd: Number((0.12 + n * 0.015 + ((d * 7 + n * 3) % 5) * 0.06).toFixed(4)),
+            lawCostUsd: Number((4.2 + n * 0.5 + ((d * 7 + n * 3) % 5) * 2.1).toFixed(4)),
           })
         }
       }
@@ -633,6 +666,7 @@ async function main() {
       if (!r.ok) throw new Error(`demo ingest failed for ${dt.email}: ${r.status}`)
       // Membership, or the joiner refuses the tag (tag proposes, membership disposes).
       await ensureMembership(dt.id)
+      await ensureDemoMembership(dt.id)
       await db.execute(sql`
         INSERT INTO instance_attestation
           (instance_id, principal_oid, principal_email, teammate_id, project_code_hash,

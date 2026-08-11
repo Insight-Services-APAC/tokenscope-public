@@ -20,6 +20,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import regionDrivers from '../../../server/api/v1/reports/region/drivers.get'
 import ccDrillHandler from '../../../server/api/v1/reports/cost-centres/[ccId].get'
@@ -88,6 +89,18 @@ beforeAll(async () => {
   alice = await mkTeammate('dtb-alice@x.test')
   bob = await mkTeammate('dtb-bob@x.test')
   carol = await mkTeammate('dtb-carol@x.test')
+
+  /*
+   * mig 0129: `gfo()` below resolves to this DEDICATED sentinel id — the ONLY
+   * place in this file that id appears (grep confirms no other role/persona
+   * shares it). A real backing row is required for the `report_access_grant`
+   * FK; both permissions are granted so the whole-company (`region=all`) width
+   * and the cost-centre drill the tests below exercise keep working under the
+   * new per-teammate grants model.
+   */
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, is_active)
+    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-dtb-finops', 'dtb-finops@x.test', 'DTB Finops', ${regionA}::uuid, ${unitA}::uuid, true)`
+  await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   const mkInstance = async (teammate: string) => {
     await t.client`INSERT INTO instance_attestation (instance_id, principal_oid, teammate_id, tool, region_id, org_unit_id, project_code_hash, raw_project_code)

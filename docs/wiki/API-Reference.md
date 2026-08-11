@@ -188,19 +188,20 @@ as `/api/v1/reports/finance`.)
 ## Reports (the reporting shell)
 
 The consolidated `/reporting` shell reads from `server/api/v1/reports/**`. Every
-route is `requireAuth` (identity), then **scoped by the report-visibility
-policy** — the granted scopes per persona are the RBAC default (`standard`)
-unless an admin has loosened the org-wide mode (see
-[Report-visibility policy](Authentication-and-Security.md#report-visibility-policy-report-scoping)).
+route is `requireAuth` (identity), then **scoped by report access grants** —
+each caller's granted scopes are their role-shaped baseline (§RBAC) UNION
+whichever permissions their ACTIVE `report_access_grant` rows buy (see
+[Report access grants](Authentication-and-Security.md#report-access-grants)).
 `GET /reports/meta` returns only the **granted** scopes and drives which tabs
-render. The region route resolves both of its widths through
+render, plus `permissions` (the caller's held permission names) when
+non-empty. The region route resolves both of its widths through
 `resolveRegionRequest` — `?region=all` (the whole-company answer) requires the
-`across` grant, a single region the `regional` scope (loosened modes flip a
-region admin / cost-centre owner's `403`→`200`); the finance routes enforce
-`requireReportScope('finance')`; the cost-centre routes take a policy-computed
-`crossRegion` / `unbounded` flag. All reads hit the lane views only (the lane
-firewall) — no `attribution_record`, no `attribution_aggregate`, no raw
-`actual_spend`.
+`across` grant (an active `operational` permission), a single region the
+`regional` scope; the finance routes enforce `requireReportScope('finance')`
+(an active `finance` permission); the cost-centre routes take a
+grant-computed `crossRegion` / `unbounded` flag. All reads hit the lane views
+only (the lane firewall) — no `attribution_record`, no `attribution_aggregate`,
+no raw `actual_spend`.
 
 | Method | Path | Auth gate | Purpose |
 |---|---|---|---|
@@ -258,8 +259,10 @@ and emit audit events.
 | DELETE | `/api/v1/admin/projects/{id}/assignments/{teammateId}` | `manager`/`admin`/`global-finops` + CSRF | End an assignment (closes the effective range, preserving history). |
 | GET | `/api/v1/admin/region/{regionId}` | `admin`/`global-finops` | Region-scoped admin landing payload. |
 | GET | `/api/v1/admin/regions` | `admin`/`global-finops` | Region list for admin pickers. |
-| GET | `/api/v1/admin/report-visibility` | `admin`/`global-finops` | The org-wide report-visibility policy: current mode + who set it & when, plus the three presets with the WHO-SEES-WHAT matrix. A region admin may **read** it. |
-| PUT | `/api/v1/admin/report-visibility` | `platform-admin`/`global-finops` + CSRF | Set the mode (org-wide config — the `admin`/`global-finops` gate is re-narrowed to `platform-admin`/`global-finops`; a region admin is 403'd). Before/after `report-visibility-changed` audit. |
+| GET | `/api/v1/admin/report-access` | `global-finops` | List report-access grants (active + expired-but-not-revoked, each carrying holder, permission, granted-by, and expiry). Org-wide only — no region-admin read, unlike the retired policy dial. |
+| POST | `/api/v1/admin/report-access` | `global-finops` + CSRF | Grant one permission (`operational`/`finance`) to one active, non-provisional teammate, with an optional future `expires_at`. `409` on a live duplicate for the same (teammate, permission); an expired-but-unrevoked blocker is superseded automatically first (its own audited revoke). |
+| DELETE | `/api/v1/admin/report-access/{id}` | `global-finops` + CSRF | Soft-revoke a grant (history preserved; a later re-grant is a new row). `404` if no active grant matches the id. |
+| GET | `/api/v1/admin/report-access/teammate-search` | `global-finops` | Company-wide typeahead over active, non-provisional teammates (`?q=` min 2 chars, `?limit=` max 25) for the grant dialog — the region-scoped `/admin/users` list cannot serve an org-wide picker. |
 | GET | `/api/v1/admin/repos` | `admin`/`global-finops` | Region-scoped repo-to-project mappings. |
 | GET | `/api/v1/admin/settings` | `admin`/`global-finops` | Read-only config summary (intentionally narrow). |
 | GET | `/api/v1/admin/teammates` | `admin`/`global-finops` | Region-scoped teammates grid (`region`, `limit`, `offset`). |
@@ -455,9 +458,44 @@ eligible for archiving, not that it was archived — and `v_complete_usage` read
 the rollup on the new Business Unit and every §A report on the old one. "All
 history" means all history.
 
-A `noop` (already in that unit) writes nothing and never re-homes. The response
-gains `rehomed` with a per-table count; the audit row records what actually
-moved, not what was asked for.
+**Already in the target unit** is not automatically a no-op. Without `rehome` it
+is — nothing is written, and crucially the manager-chain provenance is not
+stripped, so the person stays re-derivable. WITH `rehome` it is a **history-only
+repair**: the placement does not change and the stranded usage moves. That is
+the common case on an estate where `bulk-place` corrected hundreds of people and
+touched no spend row, and the alternative was moving somebody somewhere wrong and
+back — two false audit entries to fix one real problem.
+
+`outcome` is therefore `placed` | `noop` | `history-repaired`, and the bulk
+response counts `historyRepaired` separately from `placed`: those people did not
+move, so folding them together would report placements that never happened.
+
+The response gains `rehomed` with a per-table count; the audit row records what
+actually moved, not what was asked for, and marks a repair with
+`rehome.historyOnly`.
+
+**A history batch is capped at 50** (`BULK_REHOME_MAX`), refused by the schema
+before any row is touched. Placement-only batches stay at 200. Six tables per
+teammate in ONE transaction, with no `statement_timeout` anywhere, is a write
+that outlives the browser while still committing — the Migrate failure below, on
+a control that reaches it more easily.
+
+The admin UI reflects all of this. On **Admin → Teammates**:
+
+- The Business Unit picker opens a confirmation rather than applying on change —
+  the same control can restate months of reported usage, and a stray keystroke
+  on a focused select should not.
+- The repair has its **own "Repair history" control** on the row. It is not
+  reached by re-selecting the current unit in the picker: a `<select>` fires no
+  `change` event for the option already selected, so that path is unreachable by
+  hand (a synthetic `selectOption()` fires it, which is how two browser harnesses
+  once certified it).
+- Before applying, the confirmation names the amount, the Business Unit the
+  usage is LEAVING and its date range, and warns when several units of history
+  would collapse into one. Recorded days render in UTC and are never converted.
+- Afterwards a **persistent receipt** — dismissed by the operator, not on a timer
+  — gives the per-table counts and the figure that was approved. Any later
+  message replaces it, so a stale success can never mask a fresh failure.
 
 ## Migrate — re-homing a project's recorded spend
 

@@ -41,7 +41,7 @@ beforeAll(async () => {
               '11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222');
     -- Project ENDED 2026-06-01.
     INSERT INTO project (id, code, code_hash, display_name, type, region_id, cost_owning_unit_id, end_date)
-      VALUES ('${PROJECT}','AFL-AII','h-afl-aii','AFL','billable',
+      VALUES ('${PROJECT}','CSL-AII','h-afl-aii','Contoso League','billable',
               '11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222',
               '2026-06-01T00:00:00Z');
     INSERT INTO project_assignment (project_id, teammate_id, effective)
@@ -50,7 +50,7 @@ beforeAll(async () => {
       (instance_id, principal_oid, principal_email, teammate_id, project_code_hash, raw_project_code,
        tool, session_token_hash, ts_start, ts_actual_end, region_id, org_unit_id, cost_owning_unit_id)
     VALUES
-      ('${INSTANCE}','oid','dev@i.com','33333333-3333-3333-3333-333333333333','h-afl-aii','AFL-AII',
+      ('${INSTANCE}','oid','dev@i.com','33333333-3333-3333-3333-333333333333','h-afl-aii','CSL-AII',
        'claude-code','hashS','2026-05-31T22:00:00Z','2026-06-01T06:00:00Z',
        '11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222',
        '22222222-2222-2222-2222-222222222222');
@@ -105,7 +105,7 @@ describe('runReadJoiner — end_date spill', () => {
         (instance_id, principal_oid, principal_email, teammate_id, project_code_hash, raw_project_code,
          tool, session_token_hash, ts_start, ts_actual_end, region_id, org_unit_id, cost_owning_unit_id)
       VALUES
-        ('${inst2}','oid','dev@i.com','33333333-3333-3333-3333-333333333333','h-afl-aii','AFL-AII',
+        ('${inst2}','oid','dev@i.com','33333333-3333-3333-3333-333333333333','h-afl-aii','CSL-AII',
          'claude-code','hashS2','2026-05-31T22:00:00Z','2026-06-01T06:00:00Z',
          '11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222',
          '22222222-2222-2222-2222-222222222222')`)

@@ -1302,19 +1302,37 @@ admin (via `inbox_item`).
 | `audit_event_id` | UUID | |
 | `notes` | TEXT | |
 
-### report_visibility_setting
+### report_access_grant
 
-The single-row, admin-configurable report-visibility policy (mig 0087). One logical
-row (`key = 'policy'`); `mode` is one of the report-visibility modes. An absent row
-means `standard` (fail-closed on upgrade). Enforcement lives in
+A per-teammate, revocable, optionally-expiring reporting permission (mig 0129),
+replacing the single-row `report_visibility_setting` dial. A row means "this
+teammate holds this permission" — `operational` (whole-company reporting) or
+`finance` (the whole-company finance pack) — independent of the other and of
+the holder's platform role. Soft-revoked (`revoked_at`/`revoked_by`, the
+`cou_owner` shape, mig 0048): a revocation must carry its actor, an active row
+must not. A partial unique index on `(teammate_id, permission) WHERE
+revoked_at IS NULL` allows at most one **active** row per (teammate,
+permission); revoke-then-regrant is a new row, so history survives.
+`expires_at` is optional — active means `revoked_at IS NULL AND (expires_at IS
+NULL OR expires_at > now())`, checked at READ time (no worker, no expiry audit
+event); an expired-but-not-revoked row stays LISTED until an admin revokes it
+or a re-grant supersedes it with its own audited revoke
+(`context.reason = 'expired-superseded'`). `granted_by = NULL` means the row
+came from the migration's backfill (system), not an admin action — the
+backfill preserves every teammate's pre-migration access exactly, from
+(role × the retired mode × active `cou_owner` ownership). Enforcement lives in
 `shared/auth/report-visibility.ts` + `server/auth/report-scope.ts`.
 
 | Column | Type | Notes |
 |---|---|---|
-| `key` | TEXT PK = `policy` | single logical row; `key = 'policy'` CHECK in mig 0087 |
-| `mode` | TEXT NOT NULL | one of the report-visibility modes (`mode IN (...)` CHECK in mig 0087) |
-| `updated_by` | UUID → teammate | |
-| `updated_at` | TIMESTAMPTZ NOT NULL = now() | |
+| `id` | UUID PK | |
+| `teammate_id` | UUID NOT NULL → teammate | |
+| `permission` | TEXT NOT NULL | `permission IN ('operational','finance')` CHECK in mig 0129, pinned to `REPORT_ACCESS_PERMISSIONS` |
+| `granted_by` | UUID → teammate | NULL = system (migration backfill) |
+| `granted_at` | TIMESTAMPTZ NOT NULL = now() | |
+| `expires_at` | TIMESTAMPTZ | optional; NULL = open-ended |
+| `revoked_at` | TIMESTAMPTZ | soft-revoke; NULL = active |
+| `revoked_by` | UUID → teammate | required when `revoked_at` is set, absent otherwise (CHECK) |
 
 ### model_catalog — and where a model's TIER is read
 

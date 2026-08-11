@@ -28,6 +28,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import type { UsageBudgetCoverage } from '#shared/reports/types'
 import regionIndex from '../../../server/api/v1/reports/region/index.get'
@@ -220,6 +221,21 @@ beforeAll(async () => {
   const bob = await mkTeammate(regionB, unitB, 'bob@bc.test')
   const pat = await mkTeammate(regionC, unitCPlat, 'pat@bc.test')
   const sam = await mkTeammate(regionC, unitCSales, 'sam@bc.test')
+
+  /*
+   * mig 0129: `gfo()` below resolves to this DEDICATED sentinel id — the ONLY
+   * place in this file that id appears (grep confirms `subtreeCaller`/
+   * `regionAdmin` use SEPARATE ids '...000a'/'...000b', and neither needs a
+   * grant: their roles already hold report-scope access unconditionally via
+   * `baselineGrants`, so leaving them ungranted changes nothing about what they
+   * assert). A real backing row is required for the `report_access_grant` FK;
+   * both permissions are granted so the whole-company (`region=all`) width and
+   * the region-clamped calls the tests below exercise keep working under the
+   * new per-teammate grants model.
+   */
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, is_active)
+    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-bc-finops', 'bc-finops@x.test', 'BC Finops', ${regionA}::uuid, ${unitA}::uuid, true)`
+  await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   const mkInstance = async (teammate: string, region: string, unit: string) => {
     await t.client`INSERT INTO instance_attestation (instance_id, principal_oid, teammate_id, tool, region_id, org_unit_id, project_code_hash, raw_project_code)

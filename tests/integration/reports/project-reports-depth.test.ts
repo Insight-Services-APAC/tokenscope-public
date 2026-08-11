@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import { seedKnownOutcomeCompany, type KnownOutcomeIds } from '../helpers/known-outcome-fixture'
 import { resetReportCache, reportCacheStats } from '../../../server/reporting/report-cache'
 import type { Session } from '../../../server/utils/auth'
@@ -51,6 +52,17 @@ let ccOwner = ''
 let plainDev = ''
 /** The unauthenticated-enrol SHADOW: active, named, and unconfirmed (r3-H2). */
 let shadow = ''
+/*
+ * mig 0129: a DEDICATED teammate for `adminSess()` — NEVER `ccOwner`. The
+ * original `adminSess = () => sess(ccOwner, 'platform-admin', 'apac.delivery')`
+ * reuses the SAME id `ownerSess()` uses at role 'developer'. Granting
+ * 'operational' to `ccOwner` would widen `regional` to 'all-regions' for BOTH
+ * personas (report_access_grant is keyed on teammate_id, not role), which
+ * flips `projectDepthGrant` from 'member-in-scope' to 'region-wide' for
+ * `ownerSess()` too — breaking T34's `expect(body.admitted_by).toBe(
+ * 'member-in-scope')`. A fresh, unrelated id keeps `ownerSess()` untouched.
+ */
+let orgWideAdminId = ''
 
 interface NamedRow {
   teammate_id: string
@@ -134,7 +146,7 @@ const ownerSess = () => sess(ccOwner, 'developer', 'apac.delivery')
 /** No ownership — `project: 'membership'`: reports depth is not theirs. */
 const plainSess = () => sess(plainDev, 'developer', 'apac.cto')
 /** A platform-admin — holds `across`, so the whole-company FRAME resolves. */
-const adminSess = () => sess(ccOwner, 'platform-admin', 'apac.delivery')
+const adminSess = () => sess(orgWideAdminId, 'platform-admin', 'apac.delivery')
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -167,6 +179,21 @@ beforeAll(async () => {
     { id: string }[]
   >`SELECT id::text AS id FROM teammate WHERE email='pd2@ko.test'`
   plainDev = p!.id
+
+  // A SEPARATE, DEDICATED teammate for `adminSess()` (mig 0129) — see the
+  // `orgWideAdminId` declaration above for why it must not be `ccOwner`.
+  // `resolveProjectReportsAdmission` admits ANY project once `grants.project
+  // === 'region-wide'` (from an 'operational' grant's regional: 'all-regions')
+  // — no `cou_owner` / membership row is needed for this persona at all.
+  // Granted BOTH permissions; nothing in this file asserts a narrower scope
+  // for it.
+  await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, is_active)
+    VALUES ('oid-orgwideadmin', 'orgwideadmin@ko.test', 'Org Wide Admin', ${ids.regionApac}::uuid, ${ids.uApacDelivery}::uuid, true)`
+  const [oa] = await t.client<
+    { id: string }[]
+  >`SELECT id::text AS id FROM teammate WHERE email='orgwideadmin@ko.test'`
+  orgWideAdminId = oa!.id
+  await grantReportAccess(t.client, orgWideAdminId)
 
   /*
    * ── THE PROVISIONAL SHADOW (r3-H2) ────────────────────────────────────────

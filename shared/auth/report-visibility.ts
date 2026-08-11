@@ -1,55 +1,73 @@
 /*
- * report-visibility — the ONE source of truth for the admin-configurable
- * reporting-visibility policy (task #19).
+ * report-visibility — the ONE source of truth for report-ACCESS vocabulary:
+ * per-teammate GRANTS (`report_access_grant`, mig 0129) union a role-derived
+ * BASELINE. Replaces the three-mode admin dial (task #19, mig 0087,
+ * `REPORT_VISIBILITY_MODES`/`reportGrants`) — that dial could only say "every
+ * region admin" or "every cost-centre owner", org-wide; this says "this
+ * teammate, this permission, until <expiry>".
  *
- * Owner intent: keep the comprehensive RBAC; add ONE easy-to-understand knob that
- * an admin sets to loosen who sees which `/reports` SCOPES. Three named modes,
- * default = today's behaviour. READ-ONLY blast radius by construction — this module
- * is consumed only by the reporting read path (server/auth/report-scope.ts and the
- * endpoints under server/api/v1/reports/** + the finance rollups) and by the admin
- * pane preview. It never touches write endpoints, provisioning, or the GUC/RLS layer.
+ * Two PERMISSIONS ({@link REPORT_ACCESS_PERMISSIONS}) an admin grants
+ * per-teammate: 'operational' (every region + every Business Unit) and
+ * 'finance' (the whole-company finance pack). {@link baselineGrants} is what
+ * every caller holds with NO grant at all — role + cost-centre ownership,
+ * unchanged from the RBAC docs for the roles that never held elevation.
+ * {@link effectiveReportGrants} widens the baseline by whichever permissions
+ * the caller's ACTIVE grants (`server/auth/report-scope.ts::resolveReportPermissions`)
+ * return. `ReportScopeGrants` (the resolved per-scope object every reporting
+ * endpoint reads) keeps its SHAPE exactly as before — only what PRODUCES it
+ * changed — so `server/auth/report-scope.ts` and the `/reports/**` read path
+ * are untouched below the two producer functions.
  *
- * `reportGrants(mode, caller)` maps (policy mode × caller) → a per-scope grant object.
- * The regional / cost-centre grants are AUTHORIZATION LEVELS, never region-clamp
+ * READ-ONLY blast radius by construction, unchanged from the retired policy:
+ * this module is consumed only by the reporting read path
+ * (server/auth/report-scope.ts and the endpoints under server/api/v1/reports/**),
+ * the read-only diagnostics probe (admin/diagnostics/ab-decomposition.get.ts
+ * and its panel), and the client drill contract. It never touches write
+ * endpoints, provisioning, or the GUC/RLS layer.
+ *
+ * The regional / cost-centre grants stay AUTHORIZATION LEVELS, never region-clamp
  * bypasses: `'own-region'` still routes through the existing region clamp
  * (resolveRegionalScope); only `'all-regions'` widens. `finance` is a simple BOOLEAN —
  * the whole-company `/reports/finance` pack is the only consumer, and it is
  * region-unbounded by design (global finance is a global function), so there is no
- * region-clamp level to express. The static {@link WHO_SEES_WHAT} matrix is the same
- * object the admin pane renders and the unit tests pin `reportGrants` against — so
- * preview and enforcement can never drift.
+ * region-clamp level to express. The static {@link WHO_SEES_WHAT_BASELINE} /
+ * {@link WHO_SEES_WHAT_ELEVATED} tables are the SAME shape the admin pane can render
+ * and the unit tests pin the two producer functions against — so preview and
+ * enforcement can never drift.
  */
 import { consola } from 'consola'
 import type { Role } from './roles'
 
-/** The three named policy modes. Order = display order. */
-export const REPORT_VISIBILITY_MODES = [
-  'standard',
-  'region-admins-see-all',
-  'all-admins-see-all',
-] as const
-export type ReportVisibilityMode = (typeof REPORT_VISIBILITY_MODES)[number]
+/**
+ * The two permissions an admin grants per-teammate (`report_access_grant.permission`,
+ * mig 0129 — CHECK-pinned to this exact tuple, 0084-style, see the migration unit test).
+ */
+export const REPORT_ACCESS_PERMISSIONS = ['operational', 'finance'] as const
+export type ReportAccessPermission = (typeof REPORT_ACCESS_PERMISSIONS)[number]
 
-/** Fail-closed default: any unknown/absent DB value collapses to this (sg-M5/L11). */
-export const DEFAULT_REPORT_VISIBILITY_MODE: ReportVisibilityMode = 'standard'
-
-export function isReportVisibilityMode(v: string): v is ReportVisibilityMode {
-  return (REPORT_VISIBILITY_MODES as readonly string[]).includes(v)
+export function isReportAccessPermission(v: string): v is ReportAccessPermission {
+  return (REPORT_ACCESS_PERMISSIONS as readonly string[]).includes(v)
 }
 
-export const REPORT_VISIBILITY_LABELS: Record<ReportVisibilityMode, string> = {
-  standard: 'Standard (role-based)',
-  'region-admins-see-all': 'Region admins see all',
-  'all-admins-see-all': 'All admins see all',
+export const REPORT_ACCESS_PERMISSION_LABELS: Record<ReportAccessPermission, string> = {
+  operational: 'Operational reporting (whole company)',
+  finance: 'Finance reporting (whole company)',
 }
 
-export const REPORT_VISIBILITY_DESCRIPTIONS: Record<ReportVisibilityMode, string> = {
-  standard:
-    'Everyone sees only the reporting scopes their role grants today. Region admins stay bound to their own region; the whole-company and finance packs stay finance-only.',
-  'region-admins-see-all':
-    'Region admins additionally see every region — the across-regions rollup, the finance pack, all-region regional views, and every cost centre. Managers and developers are unchanged.',
-  'all-admins-see-all':
-    'As “Region admins see all”, plus any active cost-centre owner gets the same full report set. Managers and developers without ownership are unchanged.',
+/**
+ * Honest about MONEY (owner ruling, post external design review): 'operational'
+ * widens past a reporting shape into the BILLED-spend figures those wider views
+ * carry, and the copy must say so rather than reading as a scope-only toggle.
+ *
+ * Design-doc collision note: 'finance' names the PACK this permission unlocks
+ * (`/reporting?scope=finance`), NOT the retired `finance` role enum member
+ * (shared/auth/roles.ts's zombie — see ROLE_LABELS' "Finance (retired)"). Same
+ * word, two different things; this constant is the permission, never the role.
+ */
+export const REPORT_ACCESS_PERMISSION_DESCRIPTIONS: Record<ReportAccessPermission, string> = {
+  operational:
+    'Company-wide reporting: every region and Business Unit view, including their billed-spend figures.',
+  finance: 'The whole-company finance pack (month close, Business Unit invoices).',
 }
 
 /**
@@ -146,10 +164,10 @@ function projectDepthGrant(
 
 /**
  * Derive the two W4 columns from the four scope grants, in ONE place, so
- * {@link standardGrants} and {@link FULL_GRANTS} cannot state them differently.
- * {@link WHO_SEES_WHAT} stays a hand-written literal (see its own comment) — the
- * point of that table is to be an INDEPENDENT statement, so it is not derived
- * from this.
+ * {@link baselineGrants} and {@link effectiveReportGrants} cannot state them
+ * differently. {@link WHO_SEES_WHAT_BASELINE} / {@link WHO_SEES_WHAT_ELEVATED}
+ * stay hand-written literals (see their own comment) — the point of those
+ * tables is to be an INDEPENDENT statement, so they are not derived from this.
  */
 function withDrillGrants(
   g: Pick<ReportScopeGrants, 'across' | 'regional' | 'costCentre' | 'finance'>,
@@ -157,25 +175,33 @@ function withDrillGrants(
   return { ...g, teammate: peopleScopeGrant(g), project: projectDepthGrant(g) }
 }
 
-/** The full report set a loosened mode grants an elevated caller. */
-const FULL_GRANTS: ReportScopeGrants = withDrillGrants({
-  across: true,
-  regional: 'all-regions',
-  costCentre: 'all',
-  finance: true,
-})
-
 /**
- * Today's role-based grants — BYTE-IDENTICAL to meta.get.ts's map for every real
- * persona. The `finance` boolean is the whole-company `/reports/finance` gate:
- * cross-region roles (global-finops / platform-admin) ⇒ `true`, everyone else
- * (incl. a region admin) ⇒ `false`. A region admin reaches finance ONLY via a
- * loosened policy mode (FULL_GRANTS) — the old `'own-region'` finance level lived
- * solely on the retired `/rollups/finance*` surface. Exhaustive over all six role
- * literals incl. the zombie `'finance'` enum member, which gets developer-tier
- * grants (benign; no across/finance — sg-M7).
+ * The UNCONDITIONAL floor every teammate holds by role + cost-centre ownership
+ * alone — no explicit `report_access_grant` needed. Named `baselineGrants`
+ * (not `standardGrants`, the retired single-mode function it replaces) because
+ * the concept changed: that function was ONE OF THREE outcomes an admin-set
+ * mode selected; this is the ONE floor every caller starts from, widened only
+ * by {@link effectiveReportGrants}'s permission overlay.
+ *
+ * developer / manager / admin / cost-centre-owner are BYTE-IDENTICAL to
+ * today's retired `standardGrants` — the whole point of separating "floor"
+ * from "grant" is that a role which never held elevation keeps exactly what
+ * it had.
+ *
+ * global-finops / platform-admin are NOT unconditionally cross-region here —
+ * that used to be "standard" behaviour for these two roles, and it is now the
+ * thing an explicit 'operational' grant buys (via {@link OPERATIONAL_OVERLAY}
+ * in {@link effectiveReportGrants}). Their cost-centre floor stays
+ * ownership-conditional for a SECURITY reason, not a style one:
+ * `orgSubtreeScopePredicate`'s GUC arm is unconditionally TRUE for role
+ * 'global-finops' (server/auth/org-subtree-scope.ts:49; platform-admin maps to
+ * it at the RLS layer, request-rls.ts:33), so an unconditional
+ * 'owned-or-subtree' baseline would open the WHOLE Business-Unit list to an
+ * org-wide caller holding no grant at all — the resolvers refuse it BEFORE
+ * that predicate ever runs by making the floor `false` absent ownership (see
+ * `costCentreScopeOpts`'s `ownerOnly`, server/auth/report-scope.ts).
  */
-function standardGrants(role: Role, ownsCostCentre: boolean): ReportScopeGrants {
+export function baselineGrants(role: Role, ownsCostCentre: boolean): ReportScopeGrants {
   const devTier: ReportScopeGrants = withDrillGrants({
     across: false,
     regional: 'own-region',
@@ -187,16 +213,31 @@ function standardGrants(role: Role, ownsCostCentre: boolean): ReportScopeGrants 
     case 'finance': // zombie enum member — never minted; developer-tier keeps it benign.
       return devTier
     case 'manager':
-      return withDrillGrants({ across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false })
     case 'admin':
-      return withDrillGrants({ across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false })
+      // Unconditional 'owned-or-subtree' — byte-identical to today's grants for
+      // these two roles regardless of `ownsCostCentre` (their org-subtree
+      // ownership predicate is real either way; only the org-wide branch below
+      // needs the ownership-conditional treatment).
+      return withDrillGrants({
+        across: false,
+        regional: 'own-region',
+        costCentre: 'owned-or-subtree',
+        finance: false,
+      })
     case 'global-finops':
     case 'platform-admin':
-      return withDrillGrants({ across: true, regional: 'all-regions', costCentre: 'owned-or-subtree', finance: true })
+      // Ownership-conditional — see the function comment above for why this is
+      // NOT the same unconditional shape as manager/admin.
+      return withDrillGrants({
+        across: false,
+        regional: 'own-region',
+        costCentre: ownsCostCentre ? 'owned-or-subtree' : false,
+        finance: false,
+      })
     default: {
       // Unreachable for a valid Role; fail-closed to developer-tier rather than throw.
       consola.error(
-        `reportGrants: unrecognised role '${role as string}' — defaulting to developer-tier grants`,
+        `baselineGrants: unrecognised role '${role as string}' — defaulting to developer-tier grants`,
       )
       return devTier
     }
@@ -204,31 +245,95 @@ function standardGrants(role: Role, ownsCostCentre: boolean): ReportScopeGrants 
 }
 
 /**
- * The one enforcement primitive: (mode × caller) → per-scope grants. Exhaustive over
- * the mode literal; the `default` branch fails CLOSED to standard grants + logs
- * (sg-M5), so an unknown DB mode is never permissive and never throws.
+ * The overlay an ACTIVE 'operational' grant buys: whole-company across, every
+ * region, every Business Unit. `finance` is deliberately absent — the two
+ * permissions are independent (a caller can hold either, both, or neither),
+ * so 'operational' never implies the finance pack.
  */
-export function reportGrants(
-  mode: ReportVisibilityMode,
-  caller: { role: Role; ownsCostCentre: boolean },
-): ReportScopeGrants {
-  const { role, ownsCostCentre } = caller
-  switch (mode) {
-    case 'standard':
-      return standardGrants(role, ownsCostCentre)
-    case 'region-admins-see-all':
-      // A region `admin` additionally gets the full report set; everyone else standard.
-      return role === 'admin' ? { ...FULL_GRANTS } : standardGrants(role, ownsCostCentre)
-    case 'all-admins-see-all':
-      // Region admins AND any active cost-centre owner (any role) get the full set.
-      return role === 'admin' || ownsCostCentre ? { ...FULL_GRANTS } : standardGrants(role, ownsCostCentre)
-    default: {
-      consola.error(
-        `reportGrants: unrecognised mode '${mode as string}' — defaulting to standard grants`,
-      )
-      return standardGrants(role, ownsCostCentre)
-    }
+export const OPERATIONAL_OVERLAY: Pick<ReportScopeGrants, 'across' | 'regional' | 'costCentre'> = {
+  across: true,
+  regional: 'all-regions',
+  costCentre: 'all',
+}
+
+function regionalRank(v: ReportScopeGrants['regional']): 0 | 1 | 2 {
+  return v === 'all-regions' ? 2 : v === 'own-region' ? 1 : 0
+}
+function widerRegional(
+  a: ReportScopeGrants['regional'],
+  b: ReportScopeGrants['regional'],
+): ReportScopeGrants['regional'] {
+  return regionalRank(a) >= regionalRank(b) ? a : b
+}
+function costCentreRank(v: ReportScopeGrants['costCentre']): 0 | 1 | 2 {
+  return v === 'all' ? 2 : v === 'owned-or-subtree' ? 1 : 0
+}
+function widerCostCentre(
+  a: ReportScopeGrants['costCentre'],
+  b: ReportScopeGrants['costCentre'],
+): ReportScopeGrants['costCentre'] {
+  return costCentreRank(a) >= costCentreRank(b) ? a : b
+}
+
+/**
+ * Field-wise WIDEST of two (across/regional/costCentre/finance) grants — pure,
+ * total, and the ONLY place two grants combine. `regional` and `costCentre`
+ * are ORDERED SCALES (`false < 'own-region' < 'all-regions'`;
+ * `false < 'owned-or-subtree' < 'all'`); `across`/`finance` are booleans,
+ * widened by OR. Never narrows: the result is always ≥ both inputs on every
+ * field, which is what makes {@link effectiveReportGrants} monotone in the
+ * caller's held permissions.
+ */
+function unionGrants(
+  a: Pick<ReportScopeGrants, 'across' | 'regional' | 'costCentre' | 'finance'>,
+  b: Pick<ReportScopeGrants, 'across' | 'regional' | 'costCentre' | 'finance'>,
+): Pick<ReportScopeGrants, 'across' | 'regional' | 'costCentre' | 'finance'> {
+  return {
+    across: a.across || b.across,
+    regional: widerRegional(a.regional, b.regional),
+    costCentre: widerCostCentre(a.costCentre, b.costCentre),
+    finance: a.finance || b.finance,
   }
+}
+
+const NO_OVERLAY: Pick<ReportScopeGrants, 'across' | 'regional' | 'costCentre' | 'finance'> = {
+  across: false,
+  regional: false,
+  costCentre: false,
+  finance: false,
+}
+
+/**
+ * `permissions` → the OVERLAY they buy, BEFORE combining with the baseline. A
+ * permission the caller does not hold contributes nothing — {@link NO_OVERLAY}
+ * is the neutral element for {@link unionGrants}, never a narrowing.
+ */
+function permissionOverlay(
+  permissions: readonly ReportAccessPermission[],
+): Pick<ReportScopeGrants, 'across' | 'regional' | 'costCentre' | 'finance'> {
+  let out = NO_OVERLAY
+  if (permissions.includes('operational')) out = unionGrants(out, { ...OPERATIONAL_OVERLAY, finance: false })
+  if (permissions.includes('finance')) out = unionGrants(out, { ...NO_OVERLAY, finance: true })
+  return out
+}
+
+/**
+ * The ONE enforcement primitive: (role × ownership × held permissions) → the
+ * caller's effective per-scope grants. `baselineGrants(role, ownsCostCentre)`
+ * UNION `permissionOverlay(permissions)`, field-wise widest
+ * ({@link unionGrants}), then {@link withDrillGrants}. PURE and TOTAL — no DB
+ * handle, no throw: an empty `permissions` array degrades to exactly the
+ * baseline, and an unrecognised role still fails closed via
+ * {@link baselineGrants}'s own default arm.
+ */
+export function effectiveReportGrants(caller: {
+  role: Role
+  ownsCostCentre: boolean
+  permissions: readonly ReportAccessPermission[]
+}): ReportScopeGrants {
+  const base = baselineGrants(caller.role, caller.ownsCostCentre)
+  const overlay = permissionOverlay(caller.permissions)
+  return withDrillGrants(unionGrants(base, overlay))
 }
 
 /*
@@ -294,10 +399,10 @@ export function regionScopeGrant(g: ReportScopeGrants): RegionScopeGrant {
 
 /**
  * Render the per-scope grant object (the ENFORCEMENT type) as the human scope
- * list a surface shows. Lifted out of server/api/v1/admin/report-visibility.get.ts
- * so the policy pane and the diagnostics probe name the scopes with the SAME
- * words — a second copy of this wording is a second vocabulary, and the whole
- * point of showing resolved grants is that they are the ones in force.
+ * list a surface shows. Shared so the diagnostics probe and any admin surface
+ * name the scopes with the SAME words — a second copy of this wording is a
+ * second vocabulary, and the whole point of showing resolved grants is that
+ * they are the ones in force.
  *
  * ONE Region line, not two. Across-Regions is no longer a scope a caller is
  * granted separately; it is the "All regions" option of the Region selector, so
@@ -348,85 +453,70 @@ export const REPORT_VISIBILITY_PERSONAS = [
 export type ReportVisibilityPersonaKey = (typeof REPORT_VISIBILITY_PERSONAS)[number]['key']
 
 /**
- * The static (mode × persona → grants) matrix — the SAME object the admin pane
- * renders as its who-sees-what preview and the unit tests assert `reportGrants`
- * against. A hand-written literal (independent of `reportGrants`) so the assertion is
- * a real pin, not a tautology: change the semantics without updating this table and
- * the matrix test fails.
+ * The static (persona → grants) tables — the SAME shape the admin pane can render
+ * as a who-sees-what preview and the unit tests assert the two producer functions
+ * against. HAND-WRITTEN LITERALS (independent of `baselineGrants` /
+ * `effectiveReportGrants`) so the assertion is a real pin, not a tautology: change
+ * the semantics without updating these tables and the matrix test fails.
+ *
+ * `WHO_SEES_WHAT_BASELINE` — what each persona holds with NO report-access grant.
+ * `WHO_SEES_WHAT_ELEVATED` — what each persona holds with BOTH permissions
+ * ('operational' AND 'finance') actively granted. Every persona lands on the SAME
+ * object at full elevation (the whole-company set) — that identity is the point:
+ * the two permissions together buy everyone the full report set regardless of
+ * starting role, which is what "elevated" means.
  */
-export const WHO_SEES_WHAT: Record<
-  ReportVisibilityMode,
-  Record<ReportVisibilityPersonaKey, ReportScopeGrants>
-> = {
-  standard: {
-    developer: { across: false, regional: 'own-region', costCentre: false, finance: false, teammate: false, project: 'membership' },
-    manager: { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
-    admin: { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
-    'cost-centre-owner': { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
-    'global-finops': { across: true, regional: 'all-regions', costCentre: 'owned-or-subtree', finance: true, teammate: 'people-scope', project: 'region-wide' },
-    'platform-admin': { across: true, regional: 'all-regions', costCentre: 'owned-or-subtree', finance: true, teammate: 'people-scope', project: 'region-wide' },
-  },
-  'region-admins-see-all': {
-    developer: { across: false, regional: 'own-region', costCentre: false, finance: false, teammate: false, project: 'membership' },
-    manager: { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
-    admin: { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
-    'cost-centre-owner': { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
-    'global-finops': { across: true, regional: 'all-regions', costCentre: 'owned-or-subtree', finance: true, teammate: 'people-scope', project: 'region-wide' },
-    'platform-admin': { across: true, regional: 'all-regions', costCentre: 'owned-or-subtree', finance: true, teammate: 'people-scope', project: 'region-wide' },
-  },
-  'all-admins-see-all': {
-    developer: { across: false, regional: 'own-region', costCentre: false, finance: false, teammate: false, project: 'membership' },
-    manager: { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
-    admin: { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
-    'cost-centre-owner': { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
-    'global-finops': { across: true, regional: 'all-regions', costCentre: 'owned-or-subtree', finance: true, teammate: 'people-scope', project: 'region-wide' },
-    'platform-admin': { across: true, regional: 'all-regions', costCentre: 'owned-or-subtree', finance: true, teammate: 'people-scope', project: 'region-wide' },
-  },
+export const WHO_SEES_WHAT_BASELINE: Record<ReportVisibilityPersonaKey, ReportScopeGrants> = {
+  developer: { across: false, regional: 'own-region', costCentre: false, finance: false, teammate: false, project: 'membership' },
+  manager: { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
+  admin: { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
+  'cost-centre-owner': { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
+  'global-finops': { across: false, regional: 'own-region', costCentre: false, finance: false, teammate: false, project: 'membership' },
+  'platform-admin': { across: false, regional: 'own-region', costCentre: false, finance: false, teammate: false, project: 'membership' },
+}
+
+export const WHO_SEES_WHAT_ELEVATED: Record<ReportVisibilityPersonaKey, ReportScopeGrants> = {
+  developer: { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
+  manager: { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
+  admin: { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
+  'cost-centre-owner': { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
+  'global-finops': { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
+  'platform-admin': { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
 }
 
 /*
- * The §7 persona matrix's Region rows — one row per (mode × persona), replacing
- * the separate `across` and `regional` rows, and carrying the selector-visibility
- * column §6's grant table calls for.
+ * The §7 persona matrix's Region rows — BASELINE / ELEVATED counterparts of
+ * WHO_SEES_WHAT_BASELINE / WHO_SEES_WHAT_ELEVATED, carrying the
+ * selector-visibility column (§6's grant table) rather than the raw
+ * `across`/`regional` pair.
  *
- * HAND-WRITTEN, exactly like {@link WHO_SEES_WHAT} and for the same reason: the
- * test asserts `regionScopeGrant(reportGrants(mode, persona))` equals this table,
- * so the table has to be an independent statement of the intent. Deriving it would
- * make the assertion `f(x) === f(x)` — a tautology that passes through any change
- * to `f`, including one that strands a persona with no landing at all.
+ * HAND-WRITTEN, exactly like the tables above and for the same reason: the
+ * test asserts `regionScopeGrant(effectiveReportGrants(...))` equals this
+ * table, so the table has to be an independent statement of the intent.
+ * Deriving it would make the assertion `f(x) === f(x)` — a tautology that
+ * passes through any change to `f`, including one that strands a persona with
+ * no landing at all.
  *
- * Read the `landing` column as the acceptance criterion it encodes: EVERY cell
- * names exactly one landing, and none names null. A persona whose Region tab
- * disappeared would show `tab: false, landing: null` here, visible in the diff.
+ * Every persona lands on the SAME row within each table (baseline: own-region,
+ * no cross-region option; elevated: all-regions) — the same identity
+ * WHO_SEES_WHAT_BASELINE / _ELEVATED show, read through `regionScopeGrant`.
  */
-export const WHO_SEES_WHAT_REGION: Record<
-  ReportVisibilityMode,
-  Record<ReportVisibilityPersonaKey, RegionScopeGrant>
-> = {
-  standard: {
-    developer: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-    manager: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-    admin: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-    'cost-centre-owner': { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-    'global-finops': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
-    'platform-admin': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
-  },
-  'region-admins-see-all': {
-    developer: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-    manager: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-    admin: { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
-    'cost-centre-owner': { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-    'global-finops': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
-    'platform-admin': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
-  },
-  'all-admins-see-all': {
-    developer: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-    manager: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-    admin: { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
-    'cost-centre-owner': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
-    'global-finops': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
-    'platform-admin': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
-  },
+export const WHO_SEES_WHAT_REGION_BASELINE: Record<ReportVisibilityPersonaKey, RegionScopeGrant> = {
+  developer: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
+  manager: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
+  admin: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
+  'cost-centre-owner': { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
+  'global-finops': { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
+  'platform-admin': { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
+}
+
+export const WHO_SEES_WHAT_REGION_ELEVATED: Record<ReportVisibilityPersonaKey, RegionScopeGrant> = {
+  developer: { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
+  manager: { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
+  admin: { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
+  'cost-centre-owner': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
+  'global-finops': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
+  'platform-admin': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
 }
 
 /*

@@ -54,9 +54,9 @@ beforeAll(async () => {
   const [proj] = await t.db
     .insert(schema.project)
     .values({
-      code: 'AFL-AII-S',
+      code: 'CSL-AII-S',
       codeHash: 'h-afl-aii-s',
-      displayName: 'AFL · AI Insights',
+      displayName: 'Contoso League · AI Insights',
       type: 'billable',
       regionId,
       costOwningUnitId: orgUnitId,
@@ -77,7 +77,7 @@ beforeAll(async () => {
       principalOid: 'oid-priya-s',
       teammateId: priyaId,
       projectCodeHash: 'h-afl-aii-s',
-      rawProjectCode: 'AFL-AII-S',
+      rawProjectCode: 'CSL-AII-S',
       tool: 'claude-code',
       sessionTokenHash: 'tok-s-' + sid,
       tsStart: new Date(Date.now() - (i + 1) * 60 * 60_000),
@@ -140,7 +140,7 @@ describe('per-teammate session listing SQL contract', () => {
     expect(list.length).toBe(3)
     // Most-recent session is i=0 (1 hour ago); tokens = 1000*1*1 + 1000*1*2 = 3000.
     expect(Number(list[0]!.tokens)).toBe(3000)
-    expect(list[0]!.project_code).toBe('AFL-AII-S')
+    expect(list[0]!.project_code).toBe('CSL-AII-S')
     expect(list[0]!.tool).toBe('claude-code')
   })
 
@@ -172,7 +172,7 @@ describe('per-conversation grouping + dedup (claude_session_id, migration 0017)'
       principalOid: 'oid-conv',
       teammateId: priyaId,
       projectCodeHash: 'h-afl-aii-s',
-      rawProjectCode: 'AFL-AII-S',
+      rawProjectCode: 'CSL-AII-S',
       tool: 'claude-code',
       sessionTokenHash: 'tok-conv-' + inst,
       tsStart: new Date(),

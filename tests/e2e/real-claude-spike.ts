@@ -29,7 +29,7 @@ import { LocalCollectorReader } from '../../server/azure/reader'
 import { runReadJoiner } from '../../server/workers/azure-monitor-reader'
 
 const TEAMMATE_EMAIL = 'demo-priya.iyer@example.com'
-const PROJECT_CODE = 'AFL-AII'
+const PROJECT_CODE = 'CSL-AII'
 
 async function main() {
   const dbUrl = process.env.DATABASE_URL

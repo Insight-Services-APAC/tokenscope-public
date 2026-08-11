@@ -73,7 +73,7 @@ const bucket = (
 const BUCKETS = [
   bucket('apac-internal-projects', 'APAC Internal Projects', '362.03', '1000.00'),
   bucket('tokenscope-public', 'TokenScope Support', '358.46', '1000.00', { is_active_now: true }),
-  bucket('tuckwell-support', 'Tuckwell Scholarship Support', '101.71', '500.00'),
+  bucket('tuckwell-support', 'Foundation Scholarship Portal', '101.71', '500.00'),
   bucket('apac-q2-presales', 'APAC Q2 Solutions Presales', '0.00', '500.00'),
 ]
 

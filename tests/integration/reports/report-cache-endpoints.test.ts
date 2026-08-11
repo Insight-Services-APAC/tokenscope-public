@@ -22,6 +22,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import regionHandler from '../../../server/api/v1/reports/region/index.get'
 import driversHandler from '../../../server/api/v1/reports/region/drivers.get'
@@ -115,6 +116,18 @@ beforeAll(async () => {
   }
   tmOne = await mkTeammate('one@rcx.test', ccA)
   tmTwo = await mkTeammate('two@rcx.test', ccB)
+  /*
+   * mig 0129: `sess()` here takes teammateId as a PARAMETER (always with the
+   * hardcoded role 'global-finops') and every caller in this file passes
+   * either tmOne or tmTwo — two REAL, dedicated per-persona rows, never a
+   * shared sentinel and never reused for a role expected to stay unelevated.
+   * This file is about cache-key/coalescing behaviour, not RBAC narrowness, so
+   * granting both permissions directly to both is safe — needed for the
+   * `region=all&...` (whole-company) calls and the cross-ccId drill calls to
+   * reach 200 at all under the new grants model.
+   */
+  await grantReportAccess(c, tmOne)
+  await grantReportAccess(c, tmTwo)
   // A little spend so the composite has something to aggregate.
   await c`INSERT INTO actual_spend (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source,
       region_id, org_unit_id, cost_owning_unit_id, dimension_source)

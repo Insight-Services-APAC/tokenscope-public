@@ -26,8 +26,8 @@ const iso = (hoursAgo: number) => new Date(now.getTime() - hoursAgo * 3600_000).
 
 // Budgets + deterministic spend per project (drives the RAG variety).
 const PROJECT_PLAN: Record<string, { budget: number; spend: number }> = {
-  'AFL-DRP': { budget: 1000, spend: 740 }, // 74% — amber/watch
-  'AFL-AII': { budget: 500, spend: 145 }, //  29% — green/healthy
+  'CSL-DRP': { budget: 1000, spend: 740 }, // 74% — amber/watch
+  'CSL-AII': { budget: 500, spend: 145 }, //  29% — green/healthy
   'INT-PLT': { budget: 300, spend: 330 }, // 110% — red/over
 }
 

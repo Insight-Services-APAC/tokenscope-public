@@ -41,7 +41,7 @@
 import { defineEventHandler } from 'h3'
 import { z } from 'zod'
 import { requireAuth } from '../../../../auth/rbac'
-import { requireReportScope } from '../../../../auth/report-scope'
+import { requireReportScope, costCentreScopeOpts } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import {
   withReportCache,
@@ -127,8 +127,9 @@ export default defineEventHandler(async (event) => {
   // resolve LIVE, then the connection is released; the compute tx below runs
   // only for a cache-miss leader.
   //
-  // A loosened policy mode (reportGrants.costCentre === 'all') lets the caller drill
-  // ANY existing cost centre; non-elevated callers keep the owner-OR-region gate.
+  // An ACTIVE 'operational' report-access grant (grants.costCentre === 'all')
+  // lets the caller drill ANY existing cost centre; non-elevated callers keep
+  // the owner-OR-region gate.
   //
   // S3(e) collapsed resolveCostCentreDrill's outcomes to ONE status: absent,
   // retired, non-cost-owning, foreign-region and unowned all raise the same 403.
@@ -147,9 +148,7 @@ export default defineEventHandler(async (event) => {
      * did, and the /trend route inherited the omission by being modelled on it.
      */
     const { grants } = await requireReportScope(event, tx, 'cost-centre')
-    const cc = await resolveCostCentreDrill(tx, session, ccId, {
-      unbounded: grants.costCentre === 'all',
-    })
+    const cc = await resolveCostCentreDrill(tx, session, ccId, costCentreScopeOpts(session, grants))
     return { grants, cc }
   })
 

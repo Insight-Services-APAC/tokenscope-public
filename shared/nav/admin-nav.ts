@@ -86,7 +86,7 @@ export const ADMIN_NAV: AdminNavGroup[] = [
   {
     label: 'Policies',
     items: [
-      { label: 'Report visibility', to: '/admin/policies/report-visibility', access: 'admin', icon: 'sliders', testid: 'report-visibility' },
+      { label: 'Report access', to: '/admin/policies/report-access', access: 'org-wide', icon: 'sliders', testid: 'report-access' },
       { label: 'Detection thresholds', to: '/admin/policies/detection-thresholds', access: 'admin', icon: 'pulse', testid: 'detection-thresholds' },
       { label: 'Project lifecycle', to: '/admin/policies/project-lifecycle', access: 'admin', icon: 'folder', testid: 'project-lifecycle' },
       { label: 'Directory exclusions', to: '/admin/policies/directory-exclusions', access: 'admin', icon: 'people', testid: 'directory-exclusions' },

@@ -60,7 +60,7 @@ const flagBadge = (v: boolean) =>
     <div class="mb-6 p-4 rounded-lg border border-calm-2 bg-calm-1/40" data-testid="system-policies-links">
       <p class="text-xs font-semibold text-carbon-2 mb-2">Editable settings live under <span class="text-carbon">Policies</span>:</p>
       <div class="flex flex-wrap gap-x-4 gap-y-1 text-sm">
-        <NuxtLink to="/admin/policies/report-visibility" class="text-brand-harmony hover:underline">Report visibility</NuxtLink>
+        <NuxtLink to="/admin/policies/report-access" class="text-brand-harmony hover:underline">Report access</NuxtLink>
         <NuxtLink to="/admin/policies/detection-thresholds" class="text-brand-harmony hover:underline">Detection thresholds</NuxtLink>
         <NuxtLink to="/admin/policies/project-lifecycle" class="text-brand-harmony hover:underline">Project lifecycle</NuxtLink>
         <NuxtLink to="/admin/policies/directory-exclusions" class="text-brand-harmony hover:underline">Directory exclusions</NuxtLink>

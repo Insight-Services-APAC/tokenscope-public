@@ -33,7 +33,7 @@
 import { defineEventHandler } from 'h3'
 import { z } from 'zod'
 import { requireAuth } from '../../../../../auth/rbac'
-import { requireReportScope } from '../../../../../auth/report-scope'
+import { requireReportScope, costCentreScopeOpts } from '../../../../../auth/report-scope'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { withReportCache, identityKey, normalizedQuery } from '../../../../../reporting/report-cache'
 import { resolveReportWindow, DATE_REGEX } from '../../../../../reporting/params'
@@ -87,9 +87,7 @@ export default defineEventHandler(async (event) => {
      * did, and the /trend route inherited the omission by being modelled on it.
      */
     const { grants } = await requireReportScope(event, tx, 'cost-centre')
-    const cc = await resolveCostCentreDrill(tx, session, ccId, {
-      unbounded: grants.costCentre === 'all',
-    })
+    const cc = await resolveCostCentreDrill(tx, session, ccId, costCentreScopeOpts(session, grants))
     return { grants, cc }
   })
 

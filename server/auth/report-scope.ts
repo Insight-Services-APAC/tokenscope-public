@@ -1,20 +1,25 @@
 /*
- * report-scope — the per-request enforcement layer for the report-visibility policy
- * (task #19). Reads the admin-configured mode, computes the caller's grants
- * (shared/auth/report-visibility.ts), and gates the report scopes.
+ * report-scope — the per-request enforcement layer for report ACCESS (mig 0129
+ * replaces the three-mode admin dial, task #19). Resolves the caller's ACTIVE
+ * `report_access_grant` permissions + cost-centre ownership, computes their
+ * grants (shared/auth/report-visibility.ts), and gates the report scopes.
  *
  * The security boundary is NOT an import invariant — it is "every report-data
- * endpoint enforces reportGrants" (sg-M6/M8). This module is the shared primitive
- * those endpoints call:
- *   - getReportVisibilityMode — one indexed single-row SELECT, memoised on the
- *     event, degrading to 'standard' when the value is absent / non-enum / the table
- *     is missing (upgrade/rollback safety — sg-L11), never throwing.
- *   - resolveReportGrants     — mode + ACTIVE cost-centre ownership → grants. Used by
- *     the regional / cost-centre endpoints, which thread the grant into their
- *     EXISTING region clamps (the grant is a level, never a bypass).
- *   - requireReportScope      — the hard 403 gate for the all-regions-required scopes
- *     (across + /reports/finance). It AUDITS every deny (sg-M4): those scopes have no
- *     in-query backstop, so the audit IS the forensic record.
+ * endpoint enforces effectiveReportGrants" (sg-M6/M8). This module is the shared
+ * primitive those endpoints call:
+ *   - resolveReportPermissions — this teammate's ACTIVE report_access_grant rows,
+ *     one indexed query, memoised on the event, degrading to `[]` when the
+ *     table is missing (upgrade/rollback safety — sg-L11), never throwing.
+ *   - resolveReportGrants      — permissions + ACTIVE cost-centre ownership →
+ *     grants. Used by the regional / cost-centre endpoints, which thread the
+ *     grant into their EXISTING region clamps (the grant is a level, never a
+ *     bypass).
+ *   - costCentreScopeOpts      — the org-wide "ownership arm only" seal (A3 —
+ *     see its own comment); server/reporting/cost-centres.ts's two resolvers
+ *     thread it.
+ *   - requireReportScope       — the hard 403 gate for the all-regions-required
+ *     scopes (across + /reports/finance). It AUDITS every deny (sg-M4): those
+ *     scopes have no in-query backstop, so the audit IS the forensic record.
  */
 import { createError, getRequestIP, getHeader, type H3Event } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -23,12 +28,12 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { requireAuth, type Session } from '../utils/auth'
 import { getDb } from '../db'
 import { recordAuditEvent } from '../db/audit'
+import { isOrgWideRole } from '../../shared/auth/roles'
 import {
-  reportGrants,
+  effectiveReportGrants,
   regionScopeGrant,
-  isReportVisibilityMode,
-  DEFAULT_REPORT_VISIBILITY_MODE,
-  type ReportVisibilityMode,
+  REPORT_ACCESS_PERMISSIONS,
+  type ReportAccessPermission,
   type ReportScopeGrants,
 } from '../../shared/auth/report-visibility'
 
@@ -57,37 +62,46 @@ function isUnclampedRequest(scope: ReportScopeName, opts?: ReportScopeOpts): boo
   return scope === 'finance' || (scope === 'region' && opts?.width === 'all-regions')
 }
 
-const MODE_CTX_KEY = '__tokenscope_report_visibility_mode'
+const PERMISSIONS_CTX_KEY = '__tokenscope_report_access_permissions'
 
 /**
- * The admin-configured mode, memoised on the event. Fail-closed to 'standard' on
- * EVERY unexpected shape — an absent row, a non-enum value, or a MISSING table
- * (migration not yet applied / rolled back). The table-existence guard uses
- * `to_regclass` so a missing relation returns NULL instead of aborting the whole
- * request transaction (sg-L11 — /reports must still 200 as standard).
+ * This teammate's ACTIVE report-access permissions (`report_access_grant`,
+ * mig 0129), memoised on the event. Fail-closed to `[]` on EVERY unexpected
+ * shape — a MISSING table (migration not yet applied / rolled back) — the
+ * SAME to_regclass table-existence guard `getReportVisibilityMode` used to run
+ * (sg-L11 — /reports must still 200 at baseline, never throw). An unknown
+ * literal (a permission this build does not know) is filtered out by the
+ * declaration-order intersection, never passed through permissively.
  */
-export async function getReportVisibilityMode(event: H3Event, tx: Tx): Promise<ReportVisibilityMode> {
+export async function resolveReportPermissions(
+  event: H3Event,
+  tx: Tx,
+  teammateId: string,
+): Promise<ReportAccessPermission[]> {
   if (!event.context) event.context = {} as H3Event['context']
-  const cached = event.context[MODE_CTX_KEY] as ReportVisibilityMode | undefined
+  const cached = event.context[PERMISSIONS_CTX_KEY] as ReportAccessPermission[] | undefined
   if (cached) return cached
 
-  let mode: ReportVisibilityMode = DEFAULT_REPORT_VISIBILITY_MODE
+  let permissions: ReportAccessPermission[] = []
   const [present] = [
     ...(await tx.execute<{ present: boolean }>(sql`
-      SELECT to_regclass('report_visibility_setting') IS NOT NULL AS present`)),
+      SELECT to_regclass('report_access_grant') IS NOT NULL AS present`)),
   ]
   if (present?.present) {
-    const [row] = [
-      ...(await tx.execute<{ mode: string | null }>(sql`
-        SELECT mode FROM report_visibility_setting WHERE key = 'policy' LIMIT 1`)),
-    ]
-    const raw = row?.mode
-    if (raw && isReportVisibilityMode(raw)) mode = raw
-    // else: absent row OR any non-enum value ⇒ 'standard' (never throw, never permissive).
+    const rows = await tx.execute<{ permission: string }>(sql`
+      SELECT DISTINCT permission FROM report_access_grant
+      WHERE teammate_id = ${teammateId}::uuid AND revoked_at IS NULL
+        AND (expires_at IS NULL OR expires_at > now())`)
+    // Canonical declaration order, not DB order: /reports/meta exposes this
+    // array verbatim, so a nondeterministic DISTINCT would make the chip's
+    // label order flap between requests. Unknown literals still drop out.
+    const held = new Set([...rows].map((r) => r.permission))
+    permissions = REPORT_ACCESS_PERMISSIONS.filter((p) => held.has(p))
+    // else: absent table ⇒ [] (never throw, never permissive).
   }
 
-  event.context[MODE_CTX_KEY] = mode
-  return mode
+  event.context[PERMISSIONS_CTX_KEY] = permissions
+  return permissions
 }
 
 /**
@@ -106,15 +120,46 @@ export async function computeOwnsCostCentre(tx: Tx, teammateId: string): Promise
   return Number(own?.n ?? 0) > 0
 }
 
-/** mode + ACTIVE ownership → the caller's per-scope grants. */
+/** ACTIVE permissions + ACTIVE ownership → the caller's per-scope grants. */
 export async function resolveReportGrants(
   event: H3Event,
   tx: Tx,
   session: Session,
 ): Promise<ReportScopeGrants> {
-  const mode = await getReportVisibilityMode(event, tx)
   const ownsCostCentre = await computeOwnsCostCentre(tx, session.teammateId)
-  return reportGrants(mode, { role: session.role, ownsCostCentre })
+  const permissions = await resolveReportPermissions(event, tx, session.teammateId)
+  return effectiveReportGrants({ role: session.role, ownsCostCentre, permissions })
+}
+
+/**
+ * SEALS THE BU-LIST SEAM (A3): what `fetchVisibleCostCentres` /
+ * `resolveCostCentreDrill` (server/reporting/cost-centres.ts) may widen their
+ * in-query scope clause to, for THIS caller.
+ *
+ *   - `unbounded` — `grants.costCentre === 'all'` (an 'operational' grant):
+ *     every Business Unit is visible.
+ *   - `ownerOnly` — an ORG-WIDE role (`isOrgWideRole`) holding costCentre ONLY
+ *     via its baseline ('owned-or-subtree', not elevated to 'all'). An
+ *     org-wide role at baseline holds cost-centre visibility SOLELY through an
+ *     active `cou_owner` row (`baselineGrants`'s own comment) — but
+ *     `orgSubtreeScopePredicate`'s GUC arm is UNCONDITIONALLY TRUE for
+ *     'global-finops' (org-subtree-scope.ts:49; platform-admin maps to it at
+ *     the RLS layer, request-rls.ts:33), so passing that predicate through
+ *     unmodified would silently widen an UNGRANTED org-wide caller to EVERY
+ *     Business Unit. `ownerOnly: true` tells the resolvers to use the
+ *     ownership arm ALONE — never the subtree predicate — for this one class.
+ *     manager / admin / developer callers: always `false` (their
+ *     'owned-or-subtree' comes from a real org subtree, which the predicate
+ *     scopes correctly).
+ */
+export function costCentreScopeOpts(
+  session: Pick<Session, 'role'>,
+  grants: Pick<ReportScopeGrants, 'costCentre'>,
+): { unbounded: boolean; ownerOnly: boolean } {
+  return {
+    unbounded: grants.costCentre === 'all',
+    ownerOnly: isOrgWideRole(session.role) && grants.costCentre === 'owned-or-subtree',
+  }
 }
 
 function scopePermitted(
@@ -161,9 +206,9 @@ export async function requireReportScope(
   opts?: ReportScopeOpts,
 ): Promise<{ session: Session; grants: ReportScopeGrants }> {
   const session = await requireAuth(event)
-  const mode = await getReportVisibilityMode(event, tx)
   const ownsCostCentre = await computeOwnsCostCentre(tx, session.teammateId)
-  const grants = reportGrants(mode, { role: session.role, ownsCostCentre })
+  const permissions = await resolveReportPermissions(event, tx, session.teammateId)
+  const grants = effectiveReportGrants({ role: session.role, ownsCostCentre, permissions })
 
   if (!scopePermitted(scope, grants, opts)) {
     if (isUnclampedRequest(scope, opts)) {
@@ -179,7 +224,7 @@ export async function requireReportScope(
             // across/regional merged: both widths of `region` now arrive under one
             // scope name, and only the unclamped one is the escalation attempt.
             ...(opts?.width ? { width: opts.width } : {}),
-            mode,
+            permissions,
             role: session.role,
             ownsCostCentre,
             grants,
@@ -215,8 +260,10 @@ export async function requireReportScope(
         status: 403,
         detail:
           scope === 'region' && opts?.width === 'all-regions'
-            ? "Your role does not grant the whole-company ('All regions') width of the 'region' report scope under the current report-visibility policy."
-            : `Your role does not grant the '${scope}' report scope under the current report-visibility policy.`,
+            ? "The whole-company ('All regions') width of the 'region' report scope requires an active 'operational' report access grant, which you do not hold."
+            : scope === 'finance'
+              ? "The 'finance' report scope requires an active 'finance' report access grant, which you do not hold."
+              : `Your report access does not include the '${scope}' scope.`,
       },
     })
   }

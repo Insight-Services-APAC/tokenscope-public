@@ -45,7 +45,11 @@ yarn-debug.log*
 yarn-error.log*
 
 # ── cw worker-local auto-managed files ───────────────────────────────
-.claude/
+# Everything in .claude/ is machine-local (cw-managed CLAUDE.md, worktrees,
+# settings.local.json) EXCEPT settings.json — the team-shared hooks
+# (release-notes gate, wiki gate) ride the repo.
+.claude/*
+!.claude/settings.json
 
 # ── TokenScope plugin session env (never commit; carries session_token) ──
 .tokenscope.env

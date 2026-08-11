@@ -85,7 +85,7 @@ const quickActions = computed(() => {
     { key: 'reconciliation', label: 'Review reconciliation', sub: 'Runs, deltas and provider onboarding', to: '/admin/reconciliation', accent: 'harmony' as const },
   ]
   if (isOrgWide.value) {
-    actions.push({ key: 'report-visibility', label: 'Report visibility', sub: 'Who sees which reports, org-wide', to: '/admin/policies/report-visibility', accent: 'vision' as const })
+    actions.push({ key: 'report-access', label: 'Report access', sub: 'Grant a teammate company-wide reporting access', to: '/admin/policies/report-access', accent: 'vision' as const })
   }
   return actions
 })

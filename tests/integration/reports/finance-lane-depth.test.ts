@@ -18,6 +18,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import indexHandler from '../../../server/api/v1/reports/finance/index.get'
 import drillHandler from '../../../server/api/v1/reports/finance/[couId].get'
@@ -68,6 +69,16 @@ beforeAll(async () => {
   }
   alice = await mkTeammate('alice@a.test')
   bob = await mkTeammate('bob@a.test')
+
+  /*
+   * gfo()'s teammateId (mig 0129) — hardcoded inline in this file, and used by
+   * NO other persona (this file exercises only the global-finops session), so a
+   * real backing row + a direct grant is safe: there is no admin/manager/
+   * developer/403 case sharing this id to silently elevate.
+   */
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
+    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-gfo', 'gfo@a.test', 'GFO', ${regionA}::uuid, ${ccA}::uuid, 'global-finops', true)`
+  await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   // Anthropic bill (actual_spend): cent-odd figures so conservation is genuinely
   // CENT-exact. alice spans TWO surfaces (claude + claude-ai); bob one.

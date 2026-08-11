@@ -5,7 +5,7 @@
  * policy rather than 404-ing.
  */
 definePageMeta({ middleware: 'admin' })
-await navigateTo('/admin/policies/report-visibility', { redirectCode: 302, replace: true })
+await navigateTo('/admin/policies/report-access', { redirectCode: 302, replace: true })
 </script>
 
 <template>

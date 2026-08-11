@@ -13,7 +13,7 @@ import {
 
 describe('settingsRedirectFor', () => {
   it('maps each known anchor to a Policies page', () => {
-    expect(settingsRedirectFor('#report-visibility')).toBe('/admin/policies/report-visibility')
+    expect(settingsRedirectFor('#report-visibility')).toBe('/admin/policies/report-access')
     expect(settingsRedirectFor('#governance')).toBe('/admin/policies/detection-thresholds')
     expect(settingsRedirectFor('#detection-thresholds')).toBe('/admin/policies/detection-thresholds')
     expect(settingsRedirectFor('#lifecycle')).toBe('/admin/policies/project-lifecycle')
@@ -21,7 +21,7 @@ describe('settingsRedirectFor', () => {
   })
 
   it('is case-insensitive and tolerates a missing #', () => {
-    expect(settingsRedirectFor('Report-Visibility')).toBe('/admin/policies/report-visibility')
+    expect(settingsRedirectFor('Report-Visibility')).toBe('/admin/policies/report-access')
     expect(settingsRedirectFor('#DIRECTORY')).toBe('/admin/policies/directory-exclusions')
   })
 

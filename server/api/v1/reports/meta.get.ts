@@ -18,8 +18,8 @@ import { defineEventHandler, setHeader } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireAuth } from '../../../auth/rbac'
 import { withRequestRls } from '../../../db/request-rls'
-import { computeOwnsCostCentre, getReportVisibilityMode } from '../../../auth/report-scope'
-import { reportGrants, regionScopeGrant } from '../../../../shared/auth/report-visibility'
+import { resolveReportGrants, resolveReportPermissions } from '../../../auth/report-scope'
+import { regionScopeGrant } from '../../../../shared/auth/report-visibility'
 import { providerStatesForMonth } from '../../../reports/settling'
 import { copilotFinanceMode } from '../../../reports/copilot-mode'
 import { monthKeyUtc } from '../../../utils/period'
@@ -37,13 +37,14 @@ export default defineEventHandler(async (event) => {
   const currentMonth = monthKeyUtc(now)
 
   return await withRequestRls(event, async (tx) => {
-    // The granted tabs now come from the ONE source of truth (reportGrants), so the
-    // shell can never light up a tab the endpoint would 403. CC ownership (a
-    // RELATIONSHIP, not a role) still feeds the cost-centre grant. Byte-identical to
-    // the old inline map under the default 'standard' policy.
-    const mode = await getReportVisibilityMode(event, tx)
-    const ownsCostCentre = await computeOwnsCostCentre(tx, session.teammateId)
-    const g = reportGrants(mode, { role: session.role, ownsCostCentre })
+    // The granted tabs now come from the ONE source of truth
+    // (effectiveReportGrants, via resolveReportGrants), so the shell can never
+    // light up a tab the endpoint would 403. CC ownership (a RELATIONSHIP, not
+    // a role) still feeds the cost-centre grant. Byte-identical to the old
+    // inline map for a caller with no report-access grants at all (the
+    // baseline).
+    const g = await resolveReportGrants(event, tx, session)
+    const permissions = await resolveReportPermissions(event, tx, session.teammateId)
 
     /*
      * Map the per-scope grant object onto the tab booleans, in REPORT_SCOPES order
@@ -145,8 +146,9 @@ export default defineEventHandler(async (event) => {
        * The client needs them BEFORE it can render a single reports row: every
        * teammate/project name is a link or plain text BY GRANT, and a name that
        * renders as a link and then 403s is the live-looking dead button the
-       * contract exists to remove. Two enum values, from the SAME `reportGrants`
-       * the endpoints enforce — never a second client-side reading of the role.
+       * contract exists to remove. Two enum values, from the SAME
+       * `effectiveReportGrants` the endpoints enforce — never a second
+       * client-side reading of the role.
        *
        * The rest of the grant object stays server-side: the client's job is to
        * decide link-or-text, not to hold the policy.
@@ -154,13 +156,14 @@ export default defineEventHandler(async (event) => {
       drill: { teammate: g.teammate, project: g.project },
       providerStates: providerStatesForMonth(currentMonth, now),
       copilotMode: copilotFinanceMode(),
-      // The active report-visibility policy mode — drives the "Visibility:
-      // <label> · admin-configured" chip on the reports header. Only included
-      // when NON-standard: the default 'standard' state is not signalled to
-      // anyone (so an admin-configuration value never leaks by default), while a
-      // loosened policy IS signalled by design (the chip shows for everyone). The
-      // Vue chip reads `meta.value?.mode` optionally, so absence ⇒ no chip.
-      ...(mode !== 'standard' ? { mode } : {}),
+      // The caller's ACTIVE report-access permissions (mig 0129) — drives the
+      // "Visibility: ... · admin-configured" chip on the reports header. Only
+      // included when NON-EMPTY: a caller with no explicit grant at all is not
+      // signalled (so an admin-granted permission never leaks by default),
+      // while ANY held permission IS signalled by design (the chip shows for
+      // everyone who holds one). The Vue chip reads `meta.value?.permissions`
+      // optionally, so absence ⇒ no chip.
+      ...(permissions.length ? { permissions } : {}),
     }
   })
 })

@@ -10,8 +10,8 @@
  *
  * LTREE care: the path is built from a derived label (the code, lowercased
  * with any non [a-z0-9_] char folded to '_') because LTREE labels accept
- * only [A-Za-z0-9_] — a code like 'AFL-DRP' would be an illegal label, so
- * it becomes 'afl_drp'. Two distinct codes can fold to the same label, so
+ * only [A-Za-z0-9_] — a code like 'CSL-DRP' would be an illegal label, so
+ * it becomes 'csl_drp'. Two distinct codes can fold to the same label, so
  * we guard the derived path for uniqueness in the region as well as the
  * (region_id, code) UNIQUE constraint. The path is written via raw sql
  * with a ::ltree cast (Drizzle's customType can't parameterise the cast).
@@ -41,7 +41,7 @@ const Body = z.object({
 
 /*
  * Derive a legal LTREE label from a code: lowercase, then fold any char
- * outside [a-z0-9_] to '_'. 'AFL-DRP' → 'afl_drp', 'as.svc' → 'as_svc'.
+ * outside [a-z0-9_] to '_'. 'CSL-DRP' → 'csl_drp', 'as.svc' → 'as_svc'.
  */
 function deriveLabel(code: string): string {
   return code.toLowerCase().replace(/[^a-z0-9_]/g, '_')

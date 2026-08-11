@@ -33,7 +33,7 @@ import { defineEventHandler, getValidatedQuery, getQuery, setHeader, createError
 import { z } from 'zod'
 import { parseSpendLens } from '../../../../shared/usage/lens'
 import { requireRole, requireAuth } from '../../../auth/rbac'
-import { requireReportScope } from '../../../auth/report-scope'
+import { requireReportScope, costCentreScopeOpts } from '../../../auth/report-scope'
 import { withRequestRls } from '../../../db/request-rls'
 import { recordAuditEvent } from '../../../db/audit'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
@@ -539,18 +539,21 @@ async function costCentreExport(event: H3Event): Promise<string> {
 
   const { csv, filename } = await withRequestRls(event, async (tx) => {
     // S3 part (d): the missing deny arm — WITHOUT this, a caller whose
-    // reportGrants.costCentre === false (denied entirely, not just un-elevated)
-    // fell through to fetchVisibleCostCentres' owner/subtree predicate and got a
+    // grants.costCentre === false (denied entirely, not just un-elevated) fell
+    // through to fetchVisibleCostCentres' owner/subtree predicate and got a
     // silent EMPTY 200 instead of an explicit 403. requireReportScope resolves
     // the SAME grants resolveReportGrants would, so this replaces (not
     // duplicates) that call.
     const { grants } = await requireReportScope(event, tx, 'cost-centre')
-    // A loosened policy mode (reportGrants.costCentre === 'all') unbounds the visible
-    // set + the drill; non-elevated callers keep the owner/subtree predicate.
-    const unbounded = grants.costCentre === 'all'
+    // An ACTIVE 'operational' report-access grant (grants.costCentre === 'all')
+    // unbounds the visible set + the drill; `costCentreScopeOpts` also seals the
+    // org-wide-baseline seam (A3, mig 0129) — see its own comment in
+    // server/auth/report-scope.ts. Non-elevated callers keep the owner/subtree
+    // predicate, unchanged.
+    const ccOpts = costCentreScopeOpts(session, grants)
 
     if (query.report === 'cards') {
-      const ccs = await fetchVisibleCostCentres(tx, { unbounded })
+      const ccs = await fetchVisibleCostCentres(tx, ccOpts)
       const { cards, asOfDate } = await fetchCostCentreCards(tx, ccs, win, monthCtx, {
         copilotChargeback: copilotChargebackEnabled(),
       })
@@ -563,7 +566,7 @@ async function costCentreExport(event: H3Event): Promise<string> {
     // Both DRILL reports need a cc, resolved + authorised the same way (anti-IDOR).
     // The drill reports — resolve + authorise the CC first (anti-IDOR).
     if (!query.cc) throw createError({ statusCode: 400, statusMessage: 'cc required for this report' })
-    const cc = await resolveCostCentreDrill(tx, session, query.cc, { unbounded })
+    const cc = await resolveCostCentreDrill(tx, session, query.cc, ccOpts)
     const slug = cc.code.replace(/[^a-z0-9-]/gi, '')
 
     /*

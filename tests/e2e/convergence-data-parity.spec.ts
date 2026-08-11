@@ -7,11 +7,11 @@
  * contracts so a future regression fails at E2E time, not at demo time.
  *
  * Covers:
- *   - Manager's bucket card lists AFL-AII with `Contributed` chip + Over
+ *   - Manager's bucket card lists CSL-AII with `Contributed` chip + Over
  *     status, dollar values matching the inbox over-budget alert exactly
  *     ($12,710 / $12,500, $210 over).
  *   - Developer's bucket card does NOT include the over-budget alert
- *     (she didn't contribute to AFL-AII).
+ *     (she didn't contribute to CSL-AII).
  *   - "Open project" link from the over-budget drawer lands on the
  *     project's allocator without auto-focusing the top-up form.
  *   - "Add top-up" link lands on the SAME allocator URL plus
@@ -26,7 +26,7 @@ import { test, expect } from '@playwright/test'
 import { baseUrl, signInAs } from './helpers'
 
 test.describe('Convergence — data parity across surfaces', () => {
-  test('manager sees AFL-AII with Contributed chip + Over status + matching dollars', async ({
+  test('manager sees CSL-AII with Contributed chip + Over status + matching dollars', async ({
     page,
   }) => {
     await signInAs(page, 'manager')
@@ -34,7 +34,7 @@ test.describe('Convergence — data parity across surfaces', () => {
     await page.waitForLoadState('networkidle')
 
     // Two-lane hero (homepage redesign): the Budgeted lane carries the
-    // parity numbers — Anil's $12,710 AFL-AII spike (seed, always
+    // parity numbers — Anil's $12,710 CSL-AII spike (seed, always
     // current-month) against the $12,500 current-month baseline
     // allocation. Anil's other buckets have no current allocation, so
     // these two figures are his whole Budgeted lane.
@@ -49,8 +49,8 @@ test.describe('Convergence — data parity across surfaces', () => {
     // the convergence epic).
     await expect(page.locator('main')).not.toContainText('vs last month')
 
-    // AFL-AII bucket: Contributed chip + Over status + correct dollars.
-    const aflRow = page.locator('[data-testid="project-bucket-list"] li').filter({ hasText: 'AFL-AII' })
+    // CSL-AII bucket: Contributed chip + Over status + correct dollars.
+    const aflRow = page.locator('[data-testid="project-bucket-list"] li').filter({ hasText: 'CSL-AII' })
     await expect(aflRow.locator('[data-testid="contributed-badge"]')).toBeVisible()
     await expect(aflRow).toContainText('$12,710.00')
     await expect(aflRow).toContainText('$12,500.00')
@@ -61,15 +61,15 @@ test.describe('Convergence — data parity across surfaces', () => {
     await expect(aflRow).toContainText('Over')
 
     // Assigned-only buckets must NOT carry the contributed chip.
-    const nabRow = page.locator('[data-testid="project-bucket-list"] li').filter({ hasText: 'NAB-CIB' })
+    const nabRow = page.locator('[data-testid="project-bucket-list"] li').filter({ hasText: 'NWB-CIB' })
     await expect(nabRow.locator('[data-testid="contributed-badge"]')).toHaveCount(0)
   })
 
-  test("developer's bucket card does NOT include AFL-AII as over-budget", async ({ page }) => {
+  test("developer's bucket card does NOT include CSL-AII as over-budget", async ({ page }) => {
     await signInAs(page, 'developer')
-    // Priya is assigned to AFL-AII but didn't contribute. Bucket should
+    // Priya is assigned to CSL-AII but didn't contribute. Bucket should
     // show $0.00 — NOT $12,710 — and status Healthy, NOT Over.
-    const aflRow = page.locator('[data-testid="project-bucket-list"] li').filter({ hasText: 'AFL-AII' })
+    const aflRow = page.locator('[data-testid="project-bucket-list"] li').filter({ hasText: 'CSL-AII' })
     await expect(aflRow).toContainText('$0.00')
     await expect(aflRow).toContainText('Healthy')
     // No Contributed chip for priya (she's assigned, not contributor-only).
@@ -103,7 +103,7 @@ test.describe('Convergence — data parity across surfaces', () => {
    * PMs + CC owners, dispatch.ts) in addition to contributors, and the
    * inbox read path emits the editor deep-link ONLY when the recipient
    * passes the editor's own dual gate (honourable-links rule,
-   * me/inbox/index.get.ts). Priya — developer role, PM of AFL-AII —
+   * me/inbox/index.get.ts). Priya — developer role, PM of CSL-AII —
    * exercises the working-links path; Anil — manager role, cross-CoU
    * contributor with no authority over delta — exercises the
    * links-withheld path below.
@@ -129,7 +129,7 @@ test.describe('Convergence — data parity across surfaces', () => {
     await page.waitForURL(/\/allocations\/[0-9a-f-]+$/)
     // Top-up form should NOT be pre-expanded.
     await expect(page.locator('[data-testid="topup-form"]')).toHaveCount(0)
-    // Allocator should render the AFL-AII budget (PM admitted via the
+    // Allocator should render the CSL-AII budget (PM admitted via the
     // relationship arm — Priya's org role is developer).
     await expect(page.locator('[data-testid="alloc-budget"]')).toHaveValue('12500.00')
   })
@@ -173,7 +173,7 @@ test.describe('Convergence — data parity across surfaces', () => {
   test('contributor without editor authority gets the alert with links WITHHELD', async ({
     page,
   }) => {
-    // Anil: manager role, but AFL-AII's CoU (delta) is outside his org
+    // Anil: manager role, but CSL-AII's CoU (delta) is outside his org
     // subtree (echo) and he is not its PM — the honourable-links rule
     // keeps the alert (awareness) and drops the dead editor buttons.
     await signInAs(page, 'manager')
@@ -193,7 +193,7 @@ test.describe('Convergence — data parity across surfaces', () => {
   }) => {
     /*
      * Priya has 3 unread items (velocity + untagged + over-budget,
-     * as AFL-AII's PM). Pre-fix the
+     * as CSL-AII's PM). Pre-fix the
      * /api/v1/me/inbox endpoint returned `total = rows.length`
      * (bounded by limit=1 from AppHeader) → badge maxed at "1". Post
      * fix uses COUNT(*) OVER () so total reflects the real unread

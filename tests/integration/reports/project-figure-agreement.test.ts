@@ -23,6 +23,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import { PROJECT_AXIS_ROW_CAP } from '../../../server/usage/complete-spend'
 import meHandler from '../../../server/api/v1/me/cost-centres.get'
@@ -124,6 +125,20 @@ beforeAll(async () => {
     VALUES ('oid-p', 'pat@p.test', 'Pat', ${regionId}::uuid, ${ccP}::uuid, true)`
   ;[{ id: patId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='pat@p.test'`
   await t.client`INSERT INTO cou_owner (org_unit_id, teammate_id) VALUES (${ccP}::uuid, ${patId}::uuid)`
+  /*
+   * mig 0129: `patId` is a REAL, dedicated row used ONLY by `patSession()` (any
+   * role label it is called with still resolves to this same id) — no other
+   * persona in this file shares it, and nothing here asserts a 403 or a
+   * narrower scope for it, so a direct grant is safe. Granted BOTH permissions
+   * to restore the pre-mig-0129 unconditional org-wide reach the default
+   * 'global-finops' `patSession()` used to get from its role alone (needed for
+   * the whole-company `region=all` drivers calls below). `/me/cost-centres`
+   * (meHandler) is unaffected — it is grants-free by design (project-depth.ts's
+   * own comment), and `resolveCostCentreDrill`'s unbounded/owner-only arms both
+   * admit the SAME already-owned `ccP`, so the owner-table/drill agreement this
+   * file exists to prove is untouched by the elevation.
+   */
+  await grantReportAccess(t.client, patId)
   await t.client`INSERT INTO instance_attestation (instance_id, principal_oid, teammate_id, tool, region_id, org_unit_id, project_code_hash, raw_project_code)
     VALUES (gen_random_uuid(), 'p', ${patId}::uuid, 'claude-code', ${regionId}::uuid, ${ccP}::uuid, 'h', 'P')`
   const [{ id: inst }] = await t.client<{ id: string }[]>`SELECT instance_id::text AS id FROM instance_attestation WHERE teammate_id=${patId}::uuid LIMIT 1`

@@ -41,6 +41,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import regionHandler from '../../../server/api/v1/reports/region/index.get'
 import { resolveServerClock } from '../../../shared/reports/clock'
@@ -160,10 +161,23 @@ beforeAll(async () => {
 
   // The caller `sess()` builds every request from — seeded so it exists in
   // `teammate` (audit FKs are real). Carries NO usage and NO bill, so it is
-  // invisible to every figure below.
-  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, is_active)
+  // invisible to every figure below. `sess()` is the ONLY persona this file
+  // ever builds (grepped — no other role/id shares this row), so granting it
+  // directly is safe: no unelevated persona to accidentally widen.
+  //
+  // mig 0129: `report(region, query)` passes an EXPLICIT `?region=` naming
+  // regionAhead/regionQuiet, which `resolveRegionalScope` only HONOURS for a
+  // cross-region caller (`isCrossRegion` from an active 'operational' grant) —
+  // an ungranted org-wide caller silently ignores the param and is clamped to
+  // its OWN region (`caller.regionId` = regionNear) instead, exactly like
+  // `admin`. Without this grant every `report(regionAhead, …)` / `report(
+  // regionQuiet, …)` call in this file would silently read regionNear's dates
+  // instead — the file's whole point (a pinned clock + three regions with
+  // different frontiers) depends on the region actually asked for being served.
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
     VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-fc-caller', 'x@fc.test', 'X',
-            ${regionNear}::uuid, ${unitNear}::uuid, true)`
+            ${regionNear}::uuid, ${unitNear}::uuid, 'global-finops', true)`
+  await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   const mkTeammate = async (region: string, unit: string, email: string) => {
     await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, is_active)

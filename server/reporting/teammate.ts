@@ -41,6 +41,7 @@ import type { H3Event } from 'h3'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { getDb } from '../db'
 import { recordAuditEvent } from '../db/audit'
+import { costCentreScopeOpts } from '../auth/report-scope'
 import { csvEscape } from '../utils/csv-escape'
 import { isUuid } from '../utils/uuid'
 import type { Session } from '../utils/auth'
@@ -161,9 +162,7 @@ export async function resolveDrillScope(
     // Anti-IDOR, unchanged: absent / retired / non-cost-owning / foreign / unowned
     // all raise the SAME 403 (cost-centres.ts:183 — an existence oracle over other
     // regions' cost-centre ids is the failure this collapse exists to prevent).
-    const cc = await resolveCostCentreDrill(tx, session, ccId, {
-      unbounded: grants.costCentre === 'all',
-    })
+    const cc = await resolveCostCentreDrill(tx, session, ccId, costCentreScopeOpts(session, grants))
     return {
       token: src,
       label: `Business Unit · ${cc.displayName}`,

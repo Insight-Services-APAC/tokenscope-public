@@ -279,11 +279,23 @@ describe('unhomed cause-split panel', () => {
       expect(PANEL, `scope name hard-coded in the template: ${scope}`).not.toContain(scope)
     }
     expect(PANEL).toContain('p.scopes')
-    // …and it shows the ACTIVE mode only, with a link to the page that owns the
-    // comparison — not a second copy of the three-mode matrix (PB-2).
-    expect(PANEL).toContain('abData.visibility.label')
-    expect(PANEL).toContain('/admin/policies/report-visibility')
+    // The three-mode dial is gone (mig 0129: per-teammate grants replace it) — no
+    // mode/label/description/isDefault left to render, and no second copy of a
+    // matrix that no longer exists.
+    expect(PANEL).not.toContain('abData.visibility.label')
+    expect(PANEL).not.toContain('abData.visibility.mode')
+    expect(PANEL).not.toContain('abData.visibility.description')
+    expect(PANEL).not.toContain('visibility.isDefault')
     expect(PANEL).not.toContain('visibility.modes')
+    // …and it shows the ONE live fact the probe adds — how many teammates hold an
+    // ACTIVE grant right now — with a link to the admin surface that owns the real
+    // grant list, never a second render of it inside a diagnostics card.
+    expect(says(PANEL, 'teammates hold elevated grants')).toBe(true)
+    expect(PANEL).toContain('abData.visibility.elevated.teammates')
+    expect(PANEL).toContain('abData.visibility.elevated.operational')
+    expect(PANEL).toContain('abData.visibility.elevated.finance')
+    expect(PANEL).toContain('/admin/policies/report-access')
+    expect(PANEL).not.toContain('/admin/policies/report-visibility')
   })
 
   it('says who owns each fix, and that two of them cannot read this page', () => {

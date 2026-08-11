@@ -30,8 +30,8 @@ Call the **`my_usage`** tool. It returns this shape:
   "total_quota_usd": "70.00",
   "buckets": [
     {
-      "project_code": "AFL-AII",
-      "display_name": "AFL · AI Insights",
+      "project_code": "CSL-AII",
+      "display_name": "Contoso League · AI Insights",
       "cost_usd": "9.11",
       "tokens": 32400000,
       "allocation_total_usd": "50.00",

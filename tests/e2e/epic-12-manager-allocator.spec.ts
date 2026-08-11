@@ -7,7 +7,7 @@
  *     audit logged" flashes → back to rollups → callout cleared.
  *   - manager + admin reach allocator editor; finance does NOT (RLS).
  *
- * The seed has an over-budget project (AFL-AII: $12,500 baseline, with
+ * The seed has an over-budget project (CSL-AII: $12,500 baseline, with
  * the emitter running it sits well into the amber range). The E2E
  * doesn't depend on "over" status — instead it verifies the click
  * path manager → allocations list → editor → top-up flow.

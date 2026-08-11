@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import {
   seedKnownOutcomeCompany,
   type KnownOutcomeIds,
@@ -39,6 +40,18 @@ let ids: KnownOutcomeIds
 let ccOwner = ''
 /** A plain developer with no ownership — grants: teammate false. */
 let plainDev = ''
+/*
+ * mig 0129: a DEDICATED teammate for `adminSess()` — NEVER `ccOwner`. Before
+ * this trap was spotted, `adminSess` was `{ ...sess(ccOwner, ...), role:
+ * 'platform-admin' }` — the SAME id `ownerSess()` uses at role 'developer'.
+ * report_access_grant is keyed on teammate_id alone, so granting `ccOwner`
+ * 'operational' would ALSO widen `ownerSess()`'s costCentre from
+ * 'owned-or-subtree' to 'all', which flips T29's "a src naming a scope the
+ * caller does not hold is a 403" (apac.delivery, which the owner does NOT
+ * own) into a pass — an unbounded costCentre grant admits ANY cc: frame in
+ * `resolveDrillScope`. A fresh, unrelated id keeps `ownerSess()` untouched.
+ */
+let orgWideAdminId = ''
 
 const MONTH = 'month=2026-05'
 
@@ -99,7 +112,7 @@ const ownerSess = () => sess(ccOwner, ids.regionApac, 'apac.cto')
 /** A platform-admin — holds `across`, so the whole-company FRAME resolves. */
 const adminSess = (): Session =>
   ({
-    ...sess(ccOwner, ids.regionApac, 'apac.cto'),
+    ...sess(orgWideAdminId, ids.regionApac, 'apac.cto'),
     role: 'platform-admin',
   }) as unknown as Session
 const plainSess = () => sess(plainDev, ids.regionApac, 'apac.cto')
@@ -139,6 +152,20 @@ beforeAll(async () => {
     { id: string }[]
   >`SELECT id::text AS id FROM teammate WHERE email='plaindev@ko.test'`
   plainDev = p!.id
+
+  // A SEPARATE, DEDICATED teammate for `adminSess()` (mig 0129) — see the
+  // `orgWideAdminId` declaration above for why it must NOT be `ccOwner`.
+  // Granted BOTH permissions: 'operational' gives `across`/`regional:
+  // all-regions` (what `src=across` and the region-frame tests need), and
+  // there is no test in this file asserting a NARROWER scope for this
+  // persona, so 'finance' costs nothing extra.
+  await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, is_active)
+    VALUES ('oid-orgwideadmin', 'orgwideadmin@ko.test', 'Org Wide Admin', ${ids.regionApac}::uuid, ${ids.uApacCto}::uuid, true)`
+  const [a] = await t.client<
+    { id: string }[]
+  >`SELECT id::text AS id FROM teammate WHERE email='orgwideadmin@ko.test'`
+  orgWideAdminId = a!.id
+  await grantReportAccess(t.client, orgWideAdminId)
 }, 180_000)
 
 afterAll(async () => {

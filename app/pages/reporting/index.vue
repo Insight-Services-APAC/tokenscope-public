@@ -15,25 +15,16 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import type { ReportScope } from '#shared/reports/types'
 import { BU_LABEL_PLURAL } from '#shared/reports/vocabulary'
+import { REPORT_ACCESS_PERMISSION_LABELS, type ReportAccessPermission } from '#shared/auth/report-visibility'
 
 interface ReportMetaResp {
   scopes: ReportScope[]
   defaultScope: ReportScope | null
   monthFloors: { usage: string | null; bill: string | null; reconciliation: string | null; overall: string }
   copilotMode: 'pool-utilisation' | 'chargeback'
-  // Report-visibility policy (#19). Optional: present once meta.get.ts threads
-  // the active mode through (the core agent's change). When absent or 'standard'
-  // the chip is not shown — this stays non-blocking until that field lands.
-  mode?: string
-}
-
-// Short labels for the non-standard visibility modes — a subtle chip on the
-// reports header makes an admin-loosened policy visible rather than silent.
-// Kept local (not imported from shared/auth) so this page has no hard dependency
-// on the policy module; the values mirror REPORT_VISIBILITY_MODE_LABELS.
-const VISIBILITY_MODE_LABEL: Record<string, string> = {
-  'region-admins-see-all': 'Region admins see all',
-  'all-admins-see-all': 'All admins see all',
+  // The caller's ACTIVE report-access permissions (mig 0129) — drives the chip
+  // below. Only present when non-empty (meta.get.ts), so absence ⇒ no chip.
+  permissions?: ReportAccessPermission[]
 }
 
 const SCOPE_LABEL: Record<ReportScope, string> = {
@@ -106,12 +97,16 @@ const activeScope = computed<ReportScope>(() =>
   granted.value.includes(rs.scope.value) ? rs.scope.value : bestScope.value,
 )
 
-// Visibility-mode chip: shown only when an admin has loosened the org-wide
-// policy beyond 'standard' (and meta actually carries the mode). Read-only.
+// Elevated-access chip: shown for every viewer who holds ≥1 active
+// report-access grant (mig 0129) — an admin-granted permission is never
+// silent. Labels come ONLY from the shared vocabulary (#shared/auth/
+// report-visibility) so this chip and the admin grant pane can never name the
+// same permission two different ways. Read-only.
 const visibilityChip = computed<string | null>(() => {
-  const mode = meta.value?.mode
-  if (!mode || mode === 'standard') return null
-  return `Visibility: ${VISIBILITY_MODE_LABEL[mode] ?? mode} · admin-configured`
+  const permissions = meta.value?.permissions
+  if (!permissions?.length) return null
+  const labels = permissions.map((p) => REPORT_ACCESS_PERMISSION_LABELS[p] ?? p)
+  return `Elevated access: ${labels.join(', ')} · granted`
 })
 
 const tabs = computed(() => granted.value.map((s) => ({ key: s, label: SCOPE_LABEL[s] })))

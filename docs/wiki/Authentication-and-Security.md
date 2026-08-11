@@ -156,7 +156,7 @@ Per-resource scope helpers (the *live* boundary while RLS is inert):
 | `allocationScopePredicate(tableRef)` | SQL predicate: `global-finops` unbounded; otherwise the project must sit in the caller's region, and an `admin` is bound to that region while a `manager`/`developer` additionally needs the project's cost-owning unit inside their `app.user_org_path` subtree. The region clamp **wraps** the role split rather than sitting beside it. Used by every allocation read and the two allocation writes. |
 | `assertProjectScope(event, project)` | Write-side mirror: `admin` bound to project region; `manager` needs project cost-owning unit in org subtree; `global-finops` unbounded. |
 | `placedBelowRegionRootPredicate()` | The org-placement clamp, ANDed onto every subtree arm above. See below. |
-| `requireReportScope(event, tx, scope)` | The `/reports/*` read gate. Resolves caller + active cost-centre ownership, evaluates the admin-configurable **report-visibility policy** (`reportGrants`), and throws the same RFC-9457 `403` as `requireRole`. `requireAuth`-based (identity + an in-query/JS-computed scope) rather than a fixed-role gate — a documented exception to "every gate is `requireRole`". See [Report-visibility policy](#report-visibility-policy-report-scoping). |
+| `requireReportScope(event, tx, scope)` | The `/reports/*` read gate. Resolves caller + active cost-centre ownership + active **report-access grants**, evaluates `effectiveReportGrants`, and throws the same RFC-9457 `403` as `requireRole`. `requireAuth`-based (identity + an in-query/JS-computed scope) rather than a fixed-role gate — a documented exception to "every gate is `requireRole`". See [Report access grants](#report-access-grants). |
 
 Admin mutations (`server/auth/admin-guards.ts`): `evaluateRoleChange` blocks self-role-change, same-role no-ops, and enforces last-admin-per-region protection; `evaluateRevokeSessions` is always positive (revoking just forces re-sign-in).
 
@@ -201,24 +201,51 @@ Two halves close that:
 > plus an explicit `(all other)` remainder row, so the totals still reconcile but a
 > finance user exporting for every name will not get every name.
 
-### Report-visibility policy (report scoping)
+### Report access grants
 
-The full RBAC above still decides *what a role can ever see*. On top of it,
-**one org-wide, admin-configurable knob** decides which `/reports/*` scopes each
-persona actually sees — a single named mode, default = today's behaviour.
+The full RBAC above still decides *what a role can ever see*. On top of it, an
+admin can hand a **named teammate** company-wide reporting access without
+touching their role — a per-teammate, revocable, optionally-expiring grant
+(`report_access_grant`, mig 0129), replacing a retired org-wide three-mode dial.
 Design: [`docs/design/report-visibility-policy.md`](../design/report-visibility-policy.md).
 
-- **Modes** (`shared/auth/report-visibility.ts`, `REPORT_VISIBILITY_MODES`):
-  - `standard` — **byte-identical to today's RBAC** (the default; no seed row ⇒
-    `standard`, so an upgrade changes nothing).
-  - `region-admins-see-all` — a region `admin` additionally sees the org-wide
-    reports (across, finance, all regions, all cost centres).
-  - `all-admins-see-all` — as above **plus** any caller with an active
-    `cou_owner` row (a cost-centre owner) gets the same full report set.
-  - Managers and developers are **unchanged in every mode**.
-- **One source of truth.** `reportGrants(mode, caller)` returns the per-scope
-  grant; a static **WHO-SEES-WHAT matrix** export drives both the admin-pane
-  preview and the tests, so the preview can never drift from the gate.
+**To grant report access** (requires Global finance or Platform admin — the
+roster is org-wide only): **Admin → Policies → Report access** → search the
+teammate by name or email → pick the permission (*Operational reporting* or
+*Finance reporting*, table below) → optionally set an expiry → confirm. The
+grant is enforced on the teammate's very next report request; the *Reporting*
+entry appears in their navigation on their next page load (the shell caches
+report metadata for up to an hour). Revoke from the same roster — one click;
+an expired grant stays listed as *Expired* until revoked or superseded by a
+re-grant. Granting and revoking are both audited (`report-access-granted` /
+`report-access-revoked`). On a fresh install nothing is pre-granted: the
+first platform admin opens the same page and grants themselves or others.
+
+- **Two permissions** (`shared/auth/report-visibility.ts`,
+  `REPORT_ACCESS_PERMISSIONS`):
+
+  | Permission | Grants |
+  |---|---|
+  | `operational` | The whole-company reporting surface: cross-region access, every region, every Business Unit — including their billed-spend figures. |
+  | `finance` | The whole-company finance pack (`/reporting?scope=finance`) alone. Names the PACK, not the retired `finance` role. |
+
+  The two are independent — a caller can hold either, both, or neither; a grant
+  never implies its counterpart, and neither changes the holder's platform
+  role.
+- **Baseline + grant, unioned.** `effectiveReportGrants(role, ownsCostCentre,
+  permissions)` is a role-shaped **baseline** (`developer`/`finance` own-region
+  only, Business Unit tab via ownership; `manager`/`admin` own-region + subtree
+  Business Units unconditionally — byte-identical to the retired `standard`
+  mode; `global-finops`/`platform-admin` own-region, Business Unit tab via
+  ownership only) widened **field-wise** by whichever permissions the caller's
+  active grants buy, never narrowed. A static **WHO-SEES-WHAT matrix** export
+  (baseline and fully-elevated, per persona) drives both the admin-pane preview
+  and the tests, so the preview can never drift from the gate.
+- **`global-finops`/`platform-admin` are no longer unconditionally cross-region
+  by role.** That reach now comes ONLY from an active `operational` grant — the
+  central behaviour change from the retired dial, proven per endpoint as "the
+  disconnect": an ungranted org-wide caller is 403 on every whole-company width
+  that used to be an unconditional 200.
 - **Two further grant columns — the DRILL contract.** `ReportScopeGrants` also
   carries `teammate` (`'people-scope' | false`) and `project`
   (`'membership' | 'member-in-scope' | 'region-wide' | false`), in the same
@@ -230,40 +257,48 @@ Design: [`docs/design/report-visibility-policy.md`](../design/report-visibility-
   emit-time homing evidence inside the caller's own frame plus
   `teammate.is_active`, resolved per request.
 - **Enforcement is `requireReportScope`** (the scope-helper row above), applied
-  to the across-regions and finance report routes; the `regional` and
-  `cost-centre` resolvers take a policy-computed `crossRegion` / `unbounded`
-  flag. `finance` is a plain **boolean** grant — `true` sees the whole-company
-  `/reports/finance` pack (region-unbounded by design), granted under `standard`
-  to `global-finops` / `platform-admin` only; a region admin or cost-centre owner
-  reaches it only under a loosened mode. (The tri-state finance grant and its
-  `financeRegionFilter` clamp existed only for the retired `/rollups/finance*`
-  surface.)
-- **Pure app gate — RLS-inert.** Like every scope helper, `requireReportScope`
-  is the *live* boundary; the GUC/RLS layer is untouched by this feature and
-  inert at runtime (see caveat below). The loosened grants are threaded as
-  explicit JS-computed scope arguments, not GUC changes.
-- **Read-only blast radius.** On the server the policy module is imported **only**
-  by `/api/v1/reports/**` (+ `meta`, the reporting scope resolvers, and the
-  admin-pane endpoints), and enforcement is pinned per LITERAL endpoint by the
-  200/403 integration suite rather than by an import scan. It never touches
-  write endpoints, `rollups` mutation paths, `me/*`, or provisioning. Every deny
-  on an `all-regions`-required scope (across + `/reports/finance`) is audited
-  (`report-scope-denied`) — those have no in-query backstop, so the audit *is*
-  the record. Opening a NAMED individual's reports-depth page is audited on
-  every request (`report-teammate-viewed`; its CSV export writes the distinct
+  to the whole-company region width and the finance report routes; the
+  `regional` and `cost-centre` resolvers take a grant-computed `crossRegion` /
+  `unbounded` flag. `finance` is a plain **boolean** grant — `true` sees the
+  whole-company `/reports/finance` pack (region-unbounded by design), held by
+  baseline for no one; a caller reaches it only via an active `finance` grant.
+- **Pure app gate — RLS-inert for report enforcement.** Like every scope
+  helper, `requireReportScope` is the *live* boundary; the GUC/RLS layer is
+  untouched by this feature and inert at runtime (see caveat below), and stays
+  purely role-shaped for surfaces this feature does not touch (`/rollups/*`,
+  `me/*`). The grant is threaded as an explicit JS-computed scope argument, not
+  a GUC change. Three seams widen or refuse deliberately on top of the existing
+  GUC arms rather than changing them (the `orgSubtreeScopePredicate` GUC arm is
+  unconditionally true for `global-finops`, so for the ungranted org-wide class
+  it is bypassed rather than trusted): the `?ou=` drill is clamped to the
+  caller's own region; the Business Unit list and drill are clamped to the
+  ownership arm alone; and project reports-depth applies the same
+  ownership-arm-only people scope, so a project outside the owned Business Unit
+  refuses. All three are sealed, not merely known gaps — see the design doc.
+- **Read-only blast radius.** On the server the grant module is imported
+  **only** by the reporting query layer, `/api/v1/reports/**` (+ `meta` and a
+  read-only admin diagnostics preview), and the grant CRUD under
+  `/api/v1/admin/report-access/**`; enforcement is pinned per LITERAL endpoint
+  by the 200/403 integration suite rather than by an import scan. It never
+  touches write endpoints, `rollups` mutation paths, `me/*`, or provisioning.
+  Every deny on an unclamped scope (the whole-company region width +
+  `/reports/finance`) is audited (`report-scope-denied`, payload now carrying
+  `permissions`) — those have no in-query backstop, so the audit *is* the
+  record. Opening a NAMED individual's reports-depth page is audited on every
+  request (`report-teammate-viewed`; its CSV export writes the distinct
   `report-teammate-export`), disclosed on the page itself, and served
   `Cache-Control: no-store` so a browser-cache hit can never absorb a view or a
-  download. The reporting **client** also imports the two drill rules, to decide
-  whether a name renders as a link or as plain text — a rendering decision only:
-  the server re-resolves the same rules per request, so a client that guessed
-  wrong gets a 403, never a door.
-- **The cost-centre scope block is the visibility gate's own output.** The
-  cost-centre report returns the centres a caller may look at, and it is exactly
-  the list `fetchVisibleCostCentres` produced: the org-subtree predicate OR an
-  active `cou_owner` row (or every centre under a loosened mode). Each option
-  reports `owned` — which arm admitted it — so the page can land the reader on
-  the centre they OWN rather than on whichever sorts first, without the browser
-  ever evaluating a grant.
+  download. The reporting **client** also imports the two drill rules, to
+  decide whether a name renders as a link or as plain text — a rendering
+  decision only: the server re-resolves the same rules per request, so a
+  client that guessed wrong gets a 403, never a door.
+- **The cost-centre scope block is the grant's own output.** The cost-centre
+  report returns the centres a caller may look at, and it is exactly the list
+  `fetchVisibleCostCentres` produced: the org-subtree predicate OR an active
+  `cou_owner` row (or every centre under an active `operational` grant). Each
+  option reports `owned` — which arm admitted it — so the page can land the
+  reader on the centre they OWN rather than on whichever sorts first, without
+  the browser ever evaluating a grant.
 
   **Two consequences worth stating.** The filter runs BEFORE the list is
   returned, so a caller cannot distinguish "this centre does not exist" from
@@ -288,11 +323,19 @@ Design: [`docs/design/report-visibility-policy.md`](../design/report-visibility-
   shipped listing is homing-derived. Widening it is a denominator decision, not
   a filter change, and it is open.
 
-- **Admin surface.** `GET/PUT /api/v1/admin/report-visibility` — GET is
-  `admin | global-finops` (read); PUT re-narrows to `platform-admin |
-  global-finops` (org-wide config, `assertSameOrigin`, before/after
-  `report-visibility-changed` audit). Editable at Admin → Settings → Report
-  visibility.
+- **Admin surface — org-wide only, end to end.** `GET/POST
+  /api/v1/admin/report-access` + `DELETE .../{id}` — every one is
+  `requireRole('global-finops')` (`platform-admin` passes any `requireRole`
+  gate) with **no region-admin read access at all**: a per-teammate grant
+  roster is company-wide PII, a narrower surface than the retired org-wide
+  dial (whose GET a region admin could read). POST is CSRF-protected, requires
+  an active non-provisional target, and 409s on a live duplicate; DELETE is a
+  soft revoke (history preserved). Editable at Admin → Policies → Report
+  access; the retired `/admin/policies/report-visibility` path redirects
+  there. A role demotion does **not** retract an already-active grant
+  (designed persistence — a grant is keyed on teammate id alone); the roster
+  shows each holder's current role so a stale grant is visible, and
+  revocation is one click.
 
 ## Row-Level Security (RLS)
 
@@ -520,7 +563,7 @@ environments that front the app with a per-app Azure Front Door:
 ## Audit logging
 
 - All security-relevant actions go through `recordAuditEvent` (`server/db/audit.ts`), the single allocation point for the **append-only** `audit_event` table. A DB trigger blocks `UPDATE`/`DELETE` — written rows are immutable. Handlers must never insert directly.
-- Events: `teammate-jit-created`, `session-attested`, `emit-handoff-minted`, `emit-provisioned`, `persona-impersonation`, `report-visibility-changed`, `report-scope-denied`, admin mutations (incl. grant revocation). Each row carries actor (teammate id or system), subject, payload, optional IP / user-agent.
+- Events: `teammate-jit-created`, `session-attested`, `emit-handoff-minted`, `emit-provisioned`, `persona-impersonation`, `report-access-granted`, `report-access-revoked` (incl. an `expired-superseded` reason on an automatic re-grant supersede), `report-scope-denied` (payload carries `permissions`), admin mutations (incl. grant revocation). Each row carries actor (teammate id or system), subject, payload, optional IP / user-agent.
 
 ## Known gaps
 

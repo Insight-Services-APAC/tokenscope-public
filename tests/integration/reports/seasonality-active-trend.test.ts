@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import regionSeasonality from '../../../server/api/v1/reports/region/seasonality.get'
 import regionActiveTrend from '../../../server/api/v1/reports/region/active-trend.get'
@@ -23,6 +24,16 @@ let regionA = ''
 let regionB = ''
 let unitA = ''
 let unitB = ''
+/*
+ * mig 0129: a DEDICATED teammate for the 'global-finops' session — NEVER the
+ * shared `sess()` default sentinel ('00000000-0000-0000-0000-000000000009'),
+ * which the 403-loop's admin/manager/developer sessions ALSO resolve to.
+ * report_access_grant is keyed on teammate_id alone, not on the `role` string
+ * handed to injectTestSession — so granting the shared sentinel would ALSO
+ * elevate those three roles, silently flipping their "FORBIDDEN — whole-company
+ * -only" assertions (same trap fixed in regional.test.ts / across-regions.test.ts).
+ */
+let finopsElevatedId = ''
 
 const ev = (session: Session, query = '') => {
   const url = '/x' + (query ? `?${query}` : '')
@@ -48,9 +59,9 @@ const ev = (session: Session, query = '') => {
 const evAll = (session: Session, query = '') =>
   ev(session, query ? `${query}&region=all` : 'region=all')
 
-const sess = (role: string, regionId: string, orgPath = 'a'): Session =>
-  ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role, regionId, orgPath, issuedAt: new Date().toISOString() } as unknown as Session)
-const gfo = () => sess('global-finops', regionA)
+const sess = (role: string, regionId: string, orgPath = 'a', teammateId = '00000000-0000-0000-0000-000000000009'): Session =>
+  ({ teammateId, email: 'x@x.test', displayName: 'X', role, regionId, orgPath, issuedAt: new Date().toISOString() } as unknown as Session)
+const gfo = () => sess('global-finops', regionA, 'a', finopsElevatedId)
 
 // ISO day-of-week, zero-based (Mon=0..Sun=6) from a YYYY-MM-DD string.
 const isoDow0 = (d: string) => (new Date(`${d}T00:00:00Z`).getUTCDay() + 6) % 7
@@ -115,6 +126,16 @@ beforeAll(async () => {
   await ar(aliceInst, alice, regionA, unitA, 10, '2026-07-06T00:00:00Z')
   await uu(dave, regionA, unitA, '2026-07-02', 5)
   await uu(dave, regionA, unitA, '2026-07-06', 30)
+
+  // A SEPARATE, DEDICATED teammate for this file's 'global-finops' session
+  // (mig 0129) — see the `finopsElevatedId` declaration above. Granted BOTH
+  // permissions so it keeps its pre-mig-0129 (unconditional org-wide) reach —
+  // this file's own point is the seasonality/active-trend mechanics, not the
+  // grants model itself.
+  await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
+    VALUES ('oid-finops-elevated', 'finops-elevated@a.test', 'Finops Elevated', ${regionA}::uuid, ${unitA}::uuid, 'global-finops', true)`
+  ;[{ id: finopsElevatedId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='finops-elevated@a.test'`
+  await grantReportAccess(t.client, finopsElevatedId)
 }, 180_000)
 
 afterAll(async () => {

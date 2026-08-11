@@ -315,7 +315,7 @@ describe('RLS drift guard', () => {
       'governance_setting',
       'cou_owner',
       'unaccounted_usage',
-      'report_visibility_setting',
+      'report_access_grant',
       'directory_exclusion_pattern',
       'over_emission',
       'org_unit',

@@ -44,13 +44,13 @@
  * be a separate slice with its own scoping argument.
  */
 import { defineEventHandler } from 'h3'
+import { sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { consola } from 'consola'
 import { requireRole } from '../../../../auth/rbac'
 import { withRequestRls } from '../../../../db/request-rls'
 import { getValidated } from '../../../../utils/validated-body'
 import { classifyProbeError } from '../../../../utils/redact-probe-error'
-import { getReportVisibilityMode } from '../../../../auth/report-scope'
 import {
   computeAbDecomposition,
   AB_DECOMPOSITION_TERMS,
@@ -63,11 +63,8 @@ import {
   type UnhomedProbeResult,
 } from '../../../../usage/unhomed-causes'
 import {
-  REPORT_VISIBILITY_LABELS,
-  REPORT_VISIBILITY_DESCRIPTIONS,
   REPORT_VISIBILITY_PERSONAS,
-  DEFAULT_REPORT_VISIBILITY_MODE,
-  reportGrants,
+  baselineGrants,
   grantsToScopes,
 } from '../../../../../shared/auth/report-visibility'
 
@@ -286,33 +283,55 @@ export default defineEventHandler(async (event) => {
       }
 
       /*
-       * The POLICY CAPABILITY MATRIX for the ACTIVE mode: what each persona in
-       * `REPORT_VISIBILITY_PERSONAS` WOULD be granted under the mode this
-       * instance currently runs. Six static personas through `reportGrants` —
-       * it reads no teammate, no ownership and no region, so it says nothing
-       * about who exists, who holds the role, or whether anyone is watching a
-       * given cost centre. The panel labels it as capability for that reason;
-       * an earlier version told the operator to judge "who would ever notice"
-       * from it, which this cannot answer.
+       * THE BASELINE CAPABILITY MATRIX: what each persona in
+       * `REPORT_VISIBILITY_PERSONAS` holds with NO report-access grant at all
+       * (`baselineGrants`, mig 0129). It reads no teammate row beyond the
+       * persona's own `ownsCostCentre` flag and no region, so it says nothing
+       * about who exists, who holds an active grant, or whether anyone is
+       * watching a given cost centre. The panel labels it a BASELINE for that
+       * reason; an earlier version told the operator to judge "who would ever
+       * notice" from the three-mode matrix this replaces, which this cannot
+       * answer either.
        *
-       * Deliberately NOT the three-mode matrix: /admin/policies/report-visibility
-       * already renders that, live from the same primitive, and a second copy
-       * inside a diagnostics card is a second thing to keep in step.
+       * `elevated` (A9) is the ONE live fact this probe adds: how many
+       * DISTINCT teammates, and how many of each permission, actually hold an
+       * ACTIVE grant right now — counted with the same active predicate
+       * `resolveReportPermissions` uses (revoked_at IS NULL AND (expires_at
+       * IS NULL OR expires_at > now())). Deliberately NOT a live persona×grant
+       * matrix: /admin/policies/report-access is the admin surface for the
+       * real grant list; a second render of every teammate's actual grants
+       * inside a diagnostics card is a second thing to keep in step with the
+       * real table. `to_regclass` guards a fresh upgrade where the migration
+       * has not yet applied — absent table ⇒ zero counts, never a throw
+       * (sg-L11's discipline, carried into this probe).
        */
-      const visibilityMode = await getReportVisibilityMode(event, db)
+      const [present] = [
+        ...(await db.execute<{ present: boolean }>(sql`
+          SELECT to_regclass('report_access_grant') IS NOT NULL AS present`)),
+      ]
+      let elevated = { teammates: 0, operational: 0, finance: 0 }
+      if (present?.present) {
+        const [counts] = [
+          ...(await db.execute<{ teammates: string; operational: string; finance: string }>(sql`
+            SELECT COUNT(DISTINCT teammate_id)::text AS teammates,
+                   COUNT(*) FILTER (WHERE permission = 'operational')::text AS operational,
+                   COUNT(*) FILTER (WHERE permission = 'finance')::text AS finance
+            FROM report_access_grant
+            WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())`)),
+        ]
+        elevated = {
+          teammates: Number(counts?.teammates ?? 0),
+          operational: Number(counts?.operational ?? 0),
+          finance: Number(counts?.finance ?? 0),
+        }
+      }
       const visibility = {
-        mode: visibilityMode,
-        label: REPORT_VISIBILITY_LABELS[visibilityMode],
-        description: REPORT_VISIBILITY_DESCRIPTIONS[visibilityMode],
-        isDefault: visibilityMode === DEFAULT_REPORT_VISIBILITY_MODE,
-        defaultMode: DEFAULT_REPORT_VISIBILITY_MODE,
         personas: REPORT_VISIBILITY_PERSONAS.map((p) => ({
           key: p.key,
           label: p.label,
-          scopes: grantsToScopes(
-            reportGrants(visibilityMode, { role: p.role, ownsCostCentre: p.ownsCostCentre }),
-          ),
+          scopes: grantsToScopes(baselineGrants(p.role, p.ownsCostCentre)),
         })),
+        elevated,
       }
 
       if (verdict === 'residual-non-zero') {

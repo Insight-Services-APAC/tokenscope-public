@@ -379,7 +379,7 @@ const PROJECTS: ProjectSpec[] = [
   { code: 'FX-AIP', name: 'APAC Internal Projects', cc: 'apac-aiad', type: 'internal', projTarget: 0.97 },
   { code: 'FX-CZ', name: 'Customer Zero', cc: 'apac-aiad', type: 'pursuit', projTarget: null },
   { code: 'FX-SBX', name: 'Sandbox Experiments', cc: 'apac-aiad', type: 'internal', projTarget: 0.44 },
-  { code: 'FX-TSC', name: 'Tuckwell Scholarship Support', cc: 'apac-ms', type: 'billable', projTarget: 0.71 },
+  { code: 'FX-FSP', name: 'Foundation Scholarship Portal', cc: 'apac-ms', type: 'billable', projTarget: 0.71 },
   { code: 'FX-Q2P', name: 'APAC Q2 Solutions Presales', cc: 'apac-presales', type: 'pursuit', projTarget: 1.06 },
   { code: 'FX-NFE', name: 'NA Field Enablement', cc: 'na-fieldeng', type: 'internal', projTarget: null },
   { code: 'FX-CXD', name: 'Client X Delivery', cc: 'na-fieldeng', type: 'billable', projTarget: 0.48 },
@@ -681,6 +681,27 @@ async function main(): Promise<void> {
     ownerRows.push([randomUUID(), unit.id, member.id])
   }
   await bulkInsert(sql, 'cou_owner', ['id', 'org_unit_id', 'teammate_id'], ['uuid', 'uuid', 'uuid'], ownerRows)
+
+  // Report-access grants (mig 0129): roles no longer confer elevated report
+  // access on their own, so the fixture's finance/across surfaces need real
+  // grant rows or the visual walk opens on a baseline 403. NEW fixture
+  // teammates (writeFixtureTeammates, below) are always plain 'developer' —
+  // this only ever touches EXISTING org-wide-role personas already in the base
+  // seed (Mara/global-finops today; a platform-admin demo row if one is ever
+  // added). ON CONFLICT against the partial active-grant index keeps this
+  // re-runnable, the same discipline the rate-card/governance-setting
+  // re-inserts above use for rows this script does not own the deletion of.
+  const orgWideExisting = await sql<{ id: string }[]>`
+    SELECT id::text AS id FROM teammate
+    WHERE role IN ('global-finops', 'platform-admin') AND source <> ${MARK}`
+  for (const person of orgWideExisting) {
+    for (const permission of ['operational', 'finance'] as const) {
+      await sql`
+        INSERT INTO report_access_grant (teammate_id, permission, granted_by)
+        VALUES (${person.id}::uuid, ${permission}, NULL)
+        ON CONFLICT (teammate_id, permission) WHERE revoked_at IS NULL DO NOTHING`
+    }
+  }
 
   // ────────────────────────────────────────────────────────────────── spend
   const gen = generateSpend(merged, days, projectIds, ghOrgs, ghEnterpriseId)

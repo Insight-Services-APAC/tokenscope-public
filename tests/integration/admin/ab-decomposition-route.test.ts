@@ -27,7 +27,7 @@ import {
 } from '../../../shared/usage/ab-decomposition-terms'
 import {
   REPORT_VISIBILITY_PERSONAS,
-  reportGrants,
+  baselineGrants,
   grantsToScopes,
 } from '../../../shared/auth/report-visibility'
 
@@ -299,59 +299,58 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
   })
 
   /*
-   * AC-5 / PB-2: the ACTIVE mode's column only — never the three-mode matrix,
-   * which /admin/policies/report-visibility already owns. What matters is that
-   * the card resolves grants LIVE from the same primitive enforcement uses, so
-   * an operator reasons against the grants in force rather than the defaults.
+   * AC-5 / PB-2 (mig 0129 successor): the BASELINE column only — the
+   * three-mode matrix /admin/policies/report-visibility used to render is
+   * retired along with the table it read. What matters is that the card
+   * resolves grants LIVE from the same primitive enforcement uses
+   * (`baselineGrants`), so an operator reasons against the SAME floor every
+   * caller starts from, plus `elevated` — the ONE live fact this probe adds:
+   * how many teammates currently hold an ACTIVE grant, counted with the same
+   * active predicate `resolveReportPermissions` uses.
    */
-  it('resolves the ACTIVE visibility mode’s grants and flags a non-default mode', async () => {
+  it('resolves the BASELINE grants per persona from the same primitive enforcement uses', async () => {
     type VisRes = {
       visibility: {
-        mode: string
-        label: string
-        isDefault: boolean
         personas: { key: string; label: string; scopes: string[] }[]
+        elevated: { teammates: number; operational: number; finance: number }
       }
     }
-    const std = (await handler(
+    const res = (await handler(
       ev({ session: sess('global-finops', adminId), query: { from: '2026-05' } }),
     )) as VisRes
 
-    expect(std.visibility.mode).toBe('standard')
-    expect(std.visibility.isDefault).toBe(true)
-    expect(std.visibility.personas.map((p) => p.key)).toEqual(
+    expect(res.visibility.personas.map((p) => p.key)).toEqual(
       REPORT_VISIBILITY_PERSONAS.map((p) => p.key),
     )
-    // Rendered from `reportGrants`, not from a second table invented for this
+    // Rendered from `baselineGrants`, not from a second table invented for this
     // card — so the preview and the gate cannot drift.
-    for (const p of std.visibility.personas) {
+    for (const p of res.visibility.personas) {
       const def = REPORT_VISIBILITY_PERSONAS.find((x) => x.key === p.key)!
-      expect(p.scopes).toEqual(
-        grantsToScopes(reportGrants('standard', { role: def.role, ownsCostCentre: def.ownsCostCentre })),
-      )
+      expect(p.scopes).toEqual(grantsToScopes(baselineGrants(def.role, def.ownsCostCentre)))
     }
-    // Under `standard`, a cost-centre owner sees only what they own.
-    expect(std.visibility.personas.find((p) => p.key === 'cost-centre-owner')!.scopes).not.toContain(
+    // BASELINE — no grant needed to see this: a cost-centre owner sees only
+    // what they own, and an org-wide role (mig 0129: no elevation by role
+    // alone) sees no wider a Region width than its own.
+    expect(res.visibility.personas.find((p) => p.key === 'cost-centre-owner')!.scopes).not.toContain(
       'Cost centres (all)',
     )
+    expect(res.visibility.personas.find((p) => p.key === 'global-finops')!.scopes).not.toContain(
+      'Region (all regions)',
+    )
+    // No grants seeded on this fixture yet.
+    expect(res.visibility.elevated).toEqual({ teammates: 0, operational: 0, finance: 0 })
+  })
 
-    await t.client`INSERT INTO report_visibility_setting (key, mode) VALUES ('policy', 'all-admins-see-all')
-      ON CONFLICT (key) DO UPDATE SET mode = 'all-admins-see-all'`
+  it('elevated counts ACTIVE grants live — the one fact baselineGrants cannot show', async () => {
+    await t.client`INSERT INTO report_access_grant (teammate_id, permission, granted_by)
+      VALUES (${adminId}::uuid, 'operational', NULL), (${adminId}::uuid, 'finance', NULL)`
     try {
-      const loose = (await handler(
+      const res = (await handler(
         ev({ session: sess('global-finops', adminId), query: { from: '2026-05' } }),
-      )) as VisRes
-      expect(loose.visibility.mode).toBe('all-admins-see-all')
-      // The panel must SAY this is not the defaults it would otherwise be read
-      // against — the whole reason for showing resolved grants at all.
-      expect(loose.visibility.isDefault).toBe(false)
-      // …and the grants genuinely change: any active cost-centre owner now sees
-      // every cost centre, which is exactly who would notice unhomed money.
-      expect(loose.visibility.personas.find((p) => p.key === 'cost-centre-owner')!.scopes).toContain(
-        'Cost centres (all)',
-      )
+      )) as { visibility: { elevated: { teammates: number; operational: number; finance: number } } }
+      expect(res.visibility.elevated).toEqual({ teammates: 1, operational: 1, finance: 1 })
     } finally {
-      await t.client`DELETE FROM report_visibility_setting WHERE key = 'policy'`
+      await t.client`DELETE FROM report_access_grant WHERE teammate_id = ${adminId}::uuid`
     }
   })
 

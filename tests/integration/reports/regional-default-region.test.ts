@@ -7,11 +7,17 @@
  * region under wrong name." Extended 2026-08-01, verbatim: "global-finops should
  * get alphabetical too, they have no region."
  *
- * So the rule splits on the ROLE's reach, not on where the caller's Entra record
- * sits (everyone has a home region): an ORG-WIDE role — global-finops or
- * platform-admin, `ORG_WIDE_ROLES` — answers for no single region and opens on the
- * first by (display_name, code); a REGION-BOUND role that the report-visibility
- * policy elevated to all-regions opens on its own region.
+ * mig 0129 made this GRANT-DRIVEN, uniformly: cross-region reach is now ALWAYS an
+ * ACTIVE 'operational' report-access grant, never a role. So the rule now splits on
+ * whether the grant is HELD, not on where the caller's Entra record sits: a caller
+ * holding an active 'operational' grant — region-bound (admin) or org-wide
+ * (global-finops/platform-admin) alike — answers for no single region and opens on
+ * the first by (display_name, code) (server/reporting/regional.ts's own comment on
+ * `ownRegionId`, which is now `undefined` whenever `isCrossRegion` is true, full
+ * stop). The OLD exception — an elevated region admin kept its own region — is
+ * gone; an UNGRANTED org-wide role is the new one, clamped to its own region
+ * exactly like `admin` (`resolveRegionalScope`'s `isOrgWide && !isCrossRegion`
+ * class) rather than by role alone.
  *
  * "Never a wrong region under a wrong name" is the load-bearing sentence, and it is
  * why the rule may not depend on spend, on the window, or on anything else a
@@ -34,8 +40,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
-import type { ReportVisibilityMode } from '../../../shared/auth/report-visibility'
 import regionalIndex from '../../../server/api/v1/reports/region/index.get'
 import regionalDrivers from '../../../server/api/v1/reports/region/drivers.get'
 import regionalTrend from '../../../server/api/v1/reports/region/trend.get'
@@ -91,9 +97,8 @@ let zebraAdminId = ''
 let zebraFinopsId = ''
 let zebraPlatformId = ''
 
-async function setMode(mode: ReportVisibilityMode | null): Promise<void> {
-  await t.client`DELETE FROM report_visibility_setting`
-  if (mode) await t.client`INSERT INTO report_visibility_setting (mode) VALUES (${mode})`
+async function clearGrants(): Promise<void> {
+  await t.client`DELETE FROM report_access_grant`
 }
 
 interface RegionRefLike {
@@ -235,62 +240,108 @@ afterAll(async () => {
   await stopTestDb(t)
 })
 
-describe('a caller who names NO region: region-bound → own region, org-wide → alphabetical', () => {
+describe('a caller who names NO region: ungranted → own region, operational-granted → alphabetical', () => {
   it('a region admin gets their own region — and no picker to get it wrong with', async () => {
-    await setMode(null)
+    await clearGrants()
     const r = await resolveEverywhere(sess('admin', zebraAdminId))
     expect(new Set(r.names)).toEqual(new Set(['Zebra Region']))
     expect(new Set(r.totals)).toEqual(new Set([ZEBRA_USD]))
-    // Standard mode hard-binds a region admin: there is no region list to pick from.
+    // No grant: there is no region list to pick from.
     expect(r.regionOptions).toEqual([])
   })
 
-  it('an admin ELEVATED to all-regions still opens on their own region', async () => {
-    // A REGION-BOUND role, widened by policy: it now HAS a picker and every region
-    // in it, and must still land on its own rather than on 'Aardvark Region' —
-    // which is both alphabetically first and the wrong answer for this caller.
-    // This is the one caller in the file whose default is NOT the alphabetical one.
-    await setMode('region-admins-see-all')
-    const r = await resolveEverywhere(sess('admin', zebraAdminId))
-    expect(new Set(r.names)).toEqual(new Set(['Zebra Region']))
-    expect(new Set(r.totals)).toEqual(new Set([ZEBRA_USD]))
-    expect(r.regionOptions).toEqual(['Aardvark Region', 'Zebra Region'])
-    await setMode(null)
+  it('an admin GRANTED operational now opens on the alphabetical-first region too', async () => {
+    // mig 0129 removed the old exception: cross-region reach is now ALWAYS an
+    // active 'operational' grant, and EVERY caller it admits — region-bound or
+    // org-wide alike — opens on `regionOptions[0]`. An admin who used to keep
+    // their own region under the retired 'region-admins-see-all' mode now lands
+    // on 'Aardvark Region' exactly like an org-wide grantee.
+    await clearGrants()
+    await grantReportAccess(t.client, zebraAdminId, 'operational')
+    try {
+      const r = await resolveEverywhere(sess('admin', zebraAdminId))
+      expect(new Set(r.names)).toEqual(new Set(['Aardvark Region']))
+      expect(new Set(r.totals)).toEqual(new Set([AARDVARK_USD]))
+      expect(r.regionOptions).toEqual(['Aardvark Region', 'Zebra Region'])
+    } finally {
+      await clearGrants()
+    }
   })
 
-  it('global finance — org-wide, so no region of its own — gets the first by display name', async () => {
-    // Homed in Zebra like every caller here, and that home is deliberately IGNORED:
-    // an org-wide role answers for no single region (owner, 2026-08-01). Zebra is
-    // what "own region" would have given, so the assertion tells the two apart.
-    const r = await resolveEverywhere(sess('global-finops', zebraFinopsId))
-    expect(new Set(r.names)).toEqual(new Set(['Aardvark Region']))
-    expect(new Set(r.totals)).toEqual(new Set([AARDVARK_USD]))
-    expect(r.regionOptions).toEqual(['Aardvark Region', 'Zebra Region'])
+  it('global finance, GRANTED operational, gets the first by display name', async () => {
+    // Homed in Zebra like every caller here, and that home is deliberately IGNORED
+    // once cross-region reach is held. Zebra is what "own region" would have given,
+    // so the assertion tells the two apart.
+    await clearGrants()
+    await grantReportAccess(t.client, zebraFinopsId, 'operational')
+    try {
+      const r = await resolveEverywhere(sess('global-finops', zebraFinopsId))
+      expect(new Set(r.names)).toEqual(new Set(['Aardvark Region']))
+      expect(new Set(r.totals)).toEqual(new Set([AARDVARK_USD]))
+      expect(r.regionOptions).toEqual(['Aardvark Region', 'Zebra Region'])
+    } finally {
+      await clearGrants()
+    }
   })
 
-  it('a platform admin — the other org-wide role — gets the same first-by-display-name', async () => {
-    // Homed in Zebra like everyone else here, so "own region" and "alphabetically
-    // first" give different answers and the assertion can tell them apart.
-    const r = await resolveEverywhere(sess('platform-admin', zebraPlatformId))
-    expect(new Set(r.names)).toEqual(new Set(['Aardvark Region']))
-    expect(new Set(r.totals)).toEqual(new Set([AARDVARK_USD]))
-    expect(r.regionOptions).toEqual(['Aardvark Region', 'Zebra Region'])
+  it('a platform admin, GRANTED operational, gets the same first-by-display-name', async () => {
+    await clearGrants()
+    await grantReportAccess(t.client, zebraPlatformId, 'operational')
+    try {
+      const r = await resolveEverywhere(sess('platform-admin', zebraPlatformId))
+      expect(new Set(r.names)).toEqual(new Set(['Aardvark Region']))
+      expect(new Set(r.totals)).toEqual(new Set([AARDVARK_USD]))
+      expect(r.regionOptions).toEqual(['Aardvark Region', 'Zebra Region'])
+    } finally {
+      await clearGrants()
+    }
+  })
+
+  it('an UNGRANTED org-wide role (global-finops / platform-admin) gets its OWN region, not alphabetical', async () => {
+    // mig 0129's disconnect: role alone no longer buys cross-region reach, so an
+    // org-wide caller with no active grant is clamped to its own region exactly
+    // like `admin` (resolveRegionalScope's `isOrgWide && !isCrossRegion` class) —
+    // the OPPOSITE of the pre-migration default this file used to pin.
+    await clearGrants()
+    const gfo = await resolveEverywhere(sess('global-finops', zebraFinopsId))
+    expect(new Set(gfo.names)).toEqual(new Set(['Zebra Region']))
+    expect(new Set(gfo.totals)).toEqual(new Set([ZEBRA_USD]))
+    expect(gfo.regionOptions).toEqual([])
+
+    const pa = await resolveEverywhere(sess('platform-admin', zebraPlatformId))
+    expect(new Set(pa.names)).toEqual(new Set(['Zebra Region']))
+    expect(new Set(pa.totals)).toEqual(new Set([ZEBRA_USD]))
+    expect(pa.regionOptions).toEqual([])
   })
 })
 
 describe('a named ?region still wins — the default is a default, not a clamp', () => {
-  it('global finance can open a region other than the default', async () => {
+  it('global finance, GRANTED operational, can open a region other than the default', async () => {
     // Zebra, NOT Aardvark: Aardvark is now this caller's default, so naming it
-    // would prove nothing about `?region` being honoured.
-    const r = await resolveEverywhere(sess('global-finops', zebraFinopsId), `${MONTH}&region=${zebraId}`)
-    expect(new Set(r.names)).toEqual(new Set(['Zebra Region']))
-    expect(new Set(r.totals)).toEqual(new Set([ZEBRA_USD]))
+    // would prove nothing about `?region` being honoured. The grant is load-bearing
+    // here too — an UNGRANTED org-wide caller has `?region=` ignored outright
+    // (resolveRegionalScope's non-cross-region branch never reads `params.region`).
+    await clearGrants()
+    await grantReportAccess(t.client, zebraFinopsId, 'operational')
+    try {
+      const r = await resolveEverywhere(sess('global-finops', zebraFinopsId), `${MONTH}&region=${zebraId}`)
+      expect(new Set(r.names)).toEqual(new Set(['Zebra Region']))
+      expect(new Set(r.totals)).toEqual(new Set([ZEBRA_USD]))
+    } finally {
+      await clearGrants()
+    }
   })
 
-  it('a platform admin can open a region other than the alphabetically-first', async () => {
-    const r = await resolveEverywhere(sess('platform-admin', zebraPlatformId), `${MONTH}&region=${zebraId}`)
-    expect(new Set(r.names)).toEqual(new Set(['Zebra Region']))
-    expect(new Set(r.totals)).toEqual(new Set([ZEBRA_USD]))
+  it('a platform admin, GRANTED operational, can open a region other than the alphabetically-first', async () => {
+    await clearGrants()
+    await grantReportAccess(t.client, zebraPlatformId, 'operational')
+    try {
+      const r = await resolveEverywhere(sess('platform-admin', zebraPlatformId), `${MONTH}&region=${zebraId}`)
+      expect(new Set(r.names)).toEqual(new Set(['Zebra Region']))
+      expect(new Set(r.totals)).toEqual(new Set([ZEBRA_USD]))
+    } finally {
+      await clearGrants()
+    }
   })
 })
 
@@ -306,25 +357,28 @@ describe('never a wrong region under a wrong name', () => {
     who: string
     role: string
     teammate: () => string
-    mode: ReportVisibilityMode | null
+    grant: boolean
     region: string
     usd: number
     users: number
   }[] = [
-    // The two ORG-WIDE roles: no region of their own → the alphabetical default.
-    { who: 'global finance', role: 'global-finops', teammate: () => zebraFinopsId, mode: null, region: 'Aardvark Region', usd: AARDVARK_USD, users: AARDVARK_USERS },
-    { who: 'a platform admin', role: 'platform-admin', teammate: () => zebraPlatformId, mode: null, region: 'Aardvark Region', usd: AARDVARK_USD, users: AARDVARK_USERS },
-    // A REGION-BOUND role elevated to all-regions — the one caller here whose
-    // default is NOT the alphabetical one. It is in the table so the invariant is
-    // asserted across two DIFFERENT answers: a rule that collapsed every
-    // cross-region caller onto `regionOptions[0]` would leave this row red.
-    { who: 'an elevated region admin', role: 'admin', teammate: () => zebraAdminId, mode: 'region-admins-see-all', region: 'Zebra Region', usd: ZEBRA_USD, users: ZEBRA_USERS },
+    // Three OPERATIONAL-GRANTED callers, one region-bound and two org-wide — all
+    // land on the SAME alphabetical default, proving the rule no longer varies
+    // with role once the grant is held.
+    { who: 'global finance (operational-granted)', role: 'global-finops', teammate: () => zebraFinopsId, grant: true, region: 'Aardvark Region', usd: AARDVARK_USD, users: AARDVARK_USERS },
+    { who: 'a platform admin (operational-granted)', role: 'platform-admin', teammate: () => zebraPlatformId, grant: true, region: 'Aardvark Region', usd: AARDVARK_USD, users: AARDVARK_USERS },
+    { who: 'an operational-granted region admin', role: 'admin', teammate: () => zebraAdminId, grant: true, region: 'Aardvark Region', usd: AARDVARK_USD, users: AARDVARK_USERS },
+    // The DIFFERENT-answer row, and the one mig 0129 introduced: NO grant at all.
+    // A rule that collapsed every org-wide caller onto `regionOptions[0]`
+    // regardless of grant state would leave this row red.
+    { who: 'an UNGRANTED global finance — own region, not alphabetical', role: 'global-finops', teammate: () => zebraFinopsId, grant: false, region: 'Zebra Region', usd: ZEBRA_USD, users: ZEBRA_USERS },
   ]
 
   it.each(CASES)(
     '$who: every Regional endpoint resolves the SAME default',
-    async ({ role, teammate, mode, region, usd, users }) => {
-      await setMode(mode)
+    async ({ role, teammate, grant, region, usd, users }) => {
+      await clearGrants()
+      if (grant) await grantReportAccess(t.client, teammate(), 'operational')
       try {
         const r = await resolveEverywhere(sess(role, teammate()))
 
@@ -339,19 +393,25 @@ describe('never a wrong region under a wrong name', () => {
         // …and the drivers rows name that region's project, not the other's.
         expect(r.driverLabels).toEqual([region === 'Zebra Region' ? 'Project Zebra' : 'Project Aardvark'])
       } finally {
-        await setMode(null)
+        await clearGrants()
       }
     },
   )
 
   it('holds for a NAMED region too, not just the default', async () => {
-    const r = await resolveEverywhere(
-      sess('platform-admin', zebraPlatformId),
-      `${MONTH}&region=${zebraId}`,
-    )
-    expect(new Set(r.names)).toEqual(new Set(['Zebra Region']))
-    expect(new Set(r.totals)).toEqual(new Set([ZEBRA_USD]))
-    expect(r.activeUsers).toBe(ZEBRA_USERS)
+    await clearGrants()
+    await grantReportAccess(t.client, zebraPlatformId, 'operational')
+    try {
+      const r = await resolveEverywhere(
+        sess('platform-admin', zebraPlatformId),
+        `${MONTH}&region=${zebraId}`,
+      )
+      expect(new Set(r.names)).toEqual(new Set(['Zebra Region']))
+      expect(new Set(r.totals)).toEqual(new Set([ZEBRA_USD]))
+      expect(r.activeUsers).toBe(ZEBRA_USERS)
+    } finally {
+      await clearGrants()
+    }
   })
 })
 
@@ -378,6 +438,10 @@ describe('two regions sharing a display name still resolve to ONE region', () =>
   const TWIN_B_USD = 5
 
   beforeAll(async () => {
+    // Every test in this block reads the platform-admin's CROSS-REGION default,
+    // which mig 0129 makes grant-driven — hold the grant for the rest of the file
+    // (the earlier describes each clean up their own via clearGrants()).
+    await grantReportAccess(t.client, zebraPlatformId, 'operational')
     const twinA = await mkRegion('dt-a', TWIN_NAME)
     const twinB = await mkRegion('dt-b', TWIN_NAME)
     const unitA = await mkUnit(twinA, 'ta', 'ta', 'Twin A BU')

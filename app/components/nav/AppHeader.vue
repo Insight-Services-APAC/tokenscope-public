@@ -196,21 +196,46 @@ const { data: myCcs } = useFetch<{ total: number }>('/api/v1/me/cost-centres?cou
 // It appears for the reporting roles PLUS any cou_owner (CC ownership is a RELATIONSHIP,
 // not a role — J3). No feature flag: at pilot scale we ship directly and git-revert.
 const REPORTING_ROLES = ['manager', 'admin', 'global-finops', 'platform-admin']
+const isReportingRole = computed(() => REPORTING_ROLES.includes(session.value?.role ?? ''))
+
+/*
+ * A GRANTED developer (report_access_grant, mig 0129) is not in REPORTING_ROLES
+ * and may hold no cou_owner row either, so neither existing check lit up the
+ * Reporting entry — a person an admin explicitly granted company-wide access
+ * had no way to reach it from the nav. Fetched on the SAME 'reports-meta' key
+ * /reporting itself uses (they dedupe), and kept LAZY: `immediate` snapshots
+ * `isReportingRole` at setup so a reporting-role viewer — who already gets the
+ * entry unconditionally — never pays for this fetch on first load.
+ */
+interface ReportsMetaForNav {
+  permissions?: string[]
+}
+const { data: reportsMetaForNav } = useFetch<ReportsMetaForNav>('/api/v1/reports/meta', {
+  key: 'reports-meta',
+  default: () => ({}),
+  immediate: !isReportingRole.value,
+  watch: [session],
+  retry: false,
+})
+const isGrantHolder = computed(() => (reportsMetaForNav.value?.permissions?.length ?? 0) > 0)
 
 const navLinks = computed(() => {
   const r = session.value?.role ?? 'developer'
   const base = NAV_BY_ROLE[r] ?? NAV_BY_ROLE.developer ?? []
   const isOwner = (myCcs.value?.total ?? 0) > 0
-  const isReportingRole = REPORTING_ROLES.includes(r)
+  const reportingRole = REPORTING_ROLES.includes(r)
+  const isGranted = isGrantHolder.value
 
   // Splice the single Reporting entry after the personal views, before Admin.
-  if (!(isReportingRole || isOwner)) return base
+  if (!(reportingRole || isOwner || isGranted)) return base
   // Reporting-roles open their default scope. A non-reporting-role owner (a plain developer
   // who holds cou_owner rows) is deep-linked to the cost-centre scope — that IS their P&L
   // view, the affordance the old "My cost centres" entry gave; a bare /reporting would open
-  // Regional (their defaultScope), not their P&L.
+  // Regional (their defaultScope), not their P&L. Owner deep-link behaviour is UNCHANGED by
+  // the grant check: a granted-but-not-owner developer lands on plain /reporting instead — the
+  // shell self-lands on its own meta defaultScope, so this must never hardcode one.
   const reporting: { to: string; label: string; disabled?: boolean } = {
-    to: isReportingRole ? '/reporting' : '/reporting?scope=cost-centre',
+    to: reportingRole ? '/reporting' : isOwner ? '/reporting?scope=cost-centre' : '/reporting',
     label: 'Reporting',
   }
   const adminIdx = base.findIndex((l) => l.to === '/admin')

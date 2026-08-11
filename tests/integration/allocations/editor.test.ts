@@ -65,9 +65,9 @@ beforeAll(async () => {
   const [proj] = await t.db
     .insert(schema.project)
     .values({
-      code: 'AFL-AII-E',
+      code: 'CSL-AII-E',
       codeHash: 'h-afl-aii-e',
-      displayName: 'AFL · AI Insights',
+      displayName: 'Contoso League · AI Insights',
       type: 'billable',
       regionId,
       costOwningUnitId: orgUnitId,
@@ -139,7 +139,7 @@ describe('GET /allocations/{id} read contract', () => {
       WHERE a.id = ${allocationId}::uuid
     `)
     const focused = [...focusedRows][0]
-    expect(focused?.project_code).toBe('AFL-AII-E')
+    expect(focused?.project_code).toBe('CSL-AII-E')
     expect(focused?.budget_usd).toBe('10000.00')
 
     const devs = await t.db.execute<{ email: string }>(sql`
@@ -254,7 +254,7 @@ describe('velocity worker SQL contract', () => {
         principalOid: 'oid-priya-e',
         teammateId: priyaId,
         projectCodeHash: 'h-afl-aii-e',
-        rawProjectCode: 'AFL-AII-E',
+        rawProjectCode: 'CSL-AII-E',
         tool: 'claude-code',
         sessionTokenHash: 'tok-vel-' + sessionId,
         tsStart: ts,

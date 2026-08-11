@@ -17,6 +17,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import indexHandler from '../../../server/api/v1/reports/finance/index.get'
 import drillHandler from '../../../server/api/v1/reports/finance/[couId].get'
@@ -32,6 +33,12 @@ let alice = ''
 let bob = ''
 let carol = ''
 let evan = '' // exempt Anthropic teammate (indicative usage, zero chargeback)
+/*
+ * mig 0129: a DEDICATED teammate for every 'global-finops' / 'platform-admin'
+ * session in this file — NEVER the shared sess() default sentinel, which the
+ * admin/manager/developer/finance 403 loop below ALSO resolves to.
+ */
+let financeElevatedId = ''
 
 const ev = (session: Session, query = '', params: Record<string, string> = {}) => {
   const url = '/x' + (query ? `?${query}` : '')
@@ -51,7 +58,7 @@ const ev = (session: Session, query = '', params: Record<string, string> = {}) =
 const sess = (role: string, orgPath: string, regionId: string, teammateId = '00000000-0000-0000-0000-000000000009'): Session =>
   ({ teammateId, email: 'x@x.test', displayName: 'X', role, regionId, orgPath, issuedAt: new Date().toISOString() } as unknown as Session)
 
-const gfo = () => sess('global-finops', 'a', regionA)
+const gfo = () => sess('global-finops', 'a', regionA, financeElevatedId)
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -87,6 +94,15 @@ beforeAll(async () => {
   carol = await mkTeammate(regionA, 'a.team', 'carol@a.test')
   evan = await mkTeammate(regionA, 'a.team', 'evan@a.test')
   const bianca = await mkTeammate(regionB, 'b', 'bianca@b.test')
+
+  // A SEPARATE, DEDICATED teammate for this file's 'global-finops'/'platform-admin'
+  // sessions (mig 0129) — see the `financeElevatedId` declaration above. Granted
+  // BOTH permissions so gfo()/the platform-admin session keep their pre-mig-0129
+  // (unconditional org-wide) reach.
+  await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
+    VALUES ('oid-finops-elevated', 'finops-elevated@a.test', 'Finops Elevated', ${regionA}::uuid, ${ccA}::uuid, 'global-finops', true)`
+  ;[{ id: financeElevatedId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='finops-elevated@a.test'`
+  await grantReportAccess(t.client, financeElevatedId)
 
   const mkInstance = async (teammateId: string, region: string, path: string) => {
     const [u] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM org_unit WHERE region_id=${region}::uuid AND path=${path}::ltree`
@@ -201,7 +217,7 @@ describe('GET /reports/finance — RBAC (global finance only)', () => {
   it('global-finops and platform-admin see the whole-company chargeback pack', async () => {
     const gf = (await indexHandler(ev(gfo(), 'month=2026-05'))) as unknown as IndexResp
     expect(gf.meta.scope).toBe('finance')
-    const pa = (await indexHandler(ev(sess('platform-admin', 'a', regionA), 'month=2026-05'))) as unknown as IndexResp
+    const pa = (await indexHandler(ev(sess('platform-admin', 'a', regionA, financeElevatedId), 'month=2026-05'))) as unknown as IndexResp
     expect(pa.meta.scope).toBe('finance')
   })
 

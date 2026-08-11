@@ -1,120 +1,273 @@
 // @vitest-environment node
 /*
- * report-visibility policy — the ONE source of truth (shared/auth/report-visibility.ts).
+ * report-visibility (mig 0129) — the ONE source of truth for report-ACCESS
+ * vocabulary. Replaces the retired three-mode `reportGrants` matrix test.
  *
- * Pins reportGrants against the static WHO-SEES-WHAT matrix (the SAME object the admin
- * pane renders), so preview and enforcement can never drift; the finance zombie role,
- * the garbage-mode fail-closed, and the revoked-owner (ownsCostCentre=false) cases; and
- * the migration-0087 CHECK literals against REPORT_VISIBILITY_MODES (0084-style — the DB
- * enum and the TS module can never diverge).
+ * Pins `baselineGrants` against WHO_SEES_WHAT_BASELINE and `effectiveReportGrants`
+ * against WHO_SEES_WHAT_ELEVATED (the SAME shape the admin pane can render), so
+ * preview and enforcement can never drift; proves the non-elevated roles
+ * (developer/manager/admin/cost-centre-owner) are BYTE-IDENTICAL to the retired
+ * standard grants (no-change-for-non-elevated-roles proof); proves totality and
+ * monotonicity over the full (role × ownership × permission-subset) space; the
+ * zombie `finance` role, the unknown-role fail-closed default; and the
+ * migration-0129 CHECK literals against REPORT_ACCESS_PERMISSIONS (0084-style).
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  REPORT_VISIBILITY_MODES,
+  REPORT_ACCESS_PERMISSIONS,
   REPORT_VISIBILITY_PERSONAS,
-  WHO_SEES_WHAT,
-  reportGrants,
-  isReportVisibilityMode,
+  WHO_SEES_WHAT_BASELINE,
+  WHO_SEES_WHAT_ELEVATED,
+  baselineGrants,
+  effectiveReportGrants,
+  isReportAccessPermission,
+  type ReportAccessPermission,
   type ReportScopeGrants,
 } from '../../../shared/auth/report-visibility'
-import type { Role } from '../../../shared/auth/roles'
+import { ROLES, type Role } from '../../../shared/auth/roles'
 
-describe('reportGrants — pinned to the WHO-SEES-WHAT matrix (3 modes × 6 personas)', () => {
-  for (const mode of REPORT_VISIBILITY_MODES) {
-    for (const persona of REPORT_VISIBILITY_PERSONAS) {
-      it(`${mode} × ${persona.key} matches the matrix`, () => {
-        const got = reportGrants(mode, { role: persona.role, ownsCostCentre: persona.ownsCostCentre })
-        expect(got).toEqual(WHO_SEES_WHAT[mode][persona.key])
+describe('baselineGrants — pinned to WHO_SEES_WHAT_BASELINE (6 personas)', () => {
+  for (const persona of REPORT_VISIBILITY_PERSONAS) {
+    it(`${persona.key} matches the baseline table`, () => {
+      const got = baselineGrants(persona.role, persona.ownsCostCentre)
+      expect(got).toEqual(WHO_SEES_WHAT_BASELINE[persona.key])
+    })
+  }
+})
+
+describe('baselineGrants — byte-identical to the retired standard grants for non-elevated roles', () => {
+  it('developer (no ownership): no across, no finance, no cost-centre', () => {
+    expect(baselineGrants('developer', false)).toEqual({
+      across: false,
+      regional: 'own-region',
+      costCentre: false,
+      finance: false,
+      teammate: false,
+      project: 'membership',
+    } satisfies ReportScopeGrants)
+  })
+
+  it('manager: own-region + owned-or-subtree, unconditionally', () => {
+    expect(baselineGrants('manager', false)).toEqual({
+      across: false,
+      regional: 'own-region',
+      costCentre: 'owned-or-subtree',
+      finance: false,
+      teammate: 'people-scope',
+      project: 'member-in-scope',
+    } satisfies ReportScopeGrants)
+  })
+
+  it('admin: identical shape to manager', () => {
+    expect(baselineGrants('admin', false)).toEqual(baselineGrants('manager', false))
+  })
+
+  it('cost-centre-owner (developer + active ownership): same elevation as manager/admin', () => {
+    expect(baselineGrants('developer', true)).toEqual({
+      across: false,
+      regional: 'own-region',
+      costCentre: 'owned-or-subtree',
+      finance: false,
+      teammate: 'people-scope',
+      project: 'member-in-scope',
+    } satisfies ReportScopeGrants)
+  })
+
+  it('global-finops / platform-admin WITHOUT ownership: region-bound, not cross-region — the behaviour change from the retired role-based grant', () => {
+    // Under the retired policy these two roles were UNCONDITIONALLY cross-region
+    // (across:true, regional:'all-regions', finance:true) even under 'standard'.
+    // The grants model requires an explicit 'operational' grant for that now.
+    expect(baselineGrants('global-finops', false)).toEqual({
+      across: false,
+      regional: 'own-region',
+      costCentre: false,
+      finance: false,
+      teammate: false,
+      project: 'membership',
+    } satisfies ReportScopeGrants)
+    expect(baselineGrants('platform-admin', false)).toEqual(baselineGrants('global-finops', false))
+  })
+
+  it('global-finops / platform-admin WITH ownership: cost-centre visible via ownership only, still not cross-region', () => {
+    expect(baselineGrants('global-finops', true)).toEqual({
+      across: false,
+      regional: 'own-region',
+      costCentre: 'owned-or-subtree',
+      finance: false,
+      teammate: 'people-scope',
+      project: 'member-in-scope',
+    } satisfies ReportScopeGrants)
+  })
+})
+
+describe('effectiveReportGrants — pinned to WHO_SEES_WHAT_ELEVATED (both permissions, 6 personas)', () => {
+  for (const persona of REPORT_VISIBILITY_PERSONAS) {
+    it(`${persona.key} matches the elevated table`, () => {
+      const got = effectiveReportGrants({
+        role: persona.role,
+        ownsCostCentre: persona.ownsCostCentre,
+        permissions: ['operational', 'finance'],
+      })
+      expect(got).toEqual(WHO_SEES_WHAT_ELEVATED[persona.key])
+    })
+  }
+
+  it('every persona lands on the SAME full grant object when both permissions are held', () => {
+    const values = REPORT_VISIBILITY_PERSONAS.map((p) => WHO_SEES_WHAT_ELEVATED[p.key])
+    for (const v of values) expect(v).toEqual(values[0])
+  })
+})
+
+describe('effectiveReportGrants — single-permission overlays for developer (no ownership)', () => {
+  it("operational-only ⇒ across + all-regions + all BUs, finance stays false", () => {
+    const g = effectiveReportGrants({ role: 'developer', ownsCostCentre: false, permissions: ['operational'] })
+    expect(g.across).toBe(true)
+    expect(g.regional).toBe('all-regions')
+    expect(g.costCentre).toBe('all')
+    expect(g.finance).toBe(false)
+  })
+
+  it("finance-only ⇒ finance true, but regional stays 'own-region', costCentre false, teammate false", () => {
+    const g = effectiveReportGrants({ role: 'developer', ownsCostCentre: false, permissions: ['finance'] })
+    expect(g.finance).toBe(true)
+    expect(g.across).toBe(false)
+    expect(g.regional).toBe('own-region')
+    expect(g.costCentre).toBe(false)
+    expect(g.teammate).toBe(false)
+  })
+
+  it('no permissions ⇒ exactly the baseline', () => {
+    expect(effectiveReportGrants({ role: 'developer', ownsCostCentre: false, permissions: [] })).toEqual(
+      baselineGrants('developer', false),
+    )
+  })
+})
+
+/*
+ * ── Union totality & monotonicity ─────────────────────────────────────────
+ * Every (role × ownership × permission-subset) — 6 × 2 × 4 = 48 — must yield a
+ * VALID ReportScopeGrants, and adding a permission must never NARROW any field.
+ * Rank tables mirror the module's own ordering, stated independently here
+ * (an INDEPENDENT statement, not an import of the internal ranking) so this is
+ * a real pin on the union's monotonicity contract, not a tautology.
+ */
+const REGIONAL_RANK: Record<string, number> = { false: 0, 'own-region': 1, 'all-regions': 2 }
+const COST_CENTRE_RANK: Record<string, number> = { false: 0, 'owned-or-subtree': 1, all: 2 }
+const TEAMMATE_RANK: Record<string, number> = { false: 0, 'people-scope': 1 }
+const PROJECT_RANK: Record<string, number> = { false: 0, membership: 1, 'member-in-scope': 2, 'region-wide': 3 }
+
+function isValidGrants(g: ReportScopeGrants): boolean {
+  return (
+    typeof g.across === 'boolean' &&
+    String(g.regional) in REGIONAL_RANK &&
+    String(g.costCentre) in COST_CENTRE_RANK &&
+    typeof g.finance === 'boolean' &&
+    String(g.teammate) in TEAMMATE_RANK &&
+    String(g.project) in PROJECT_RANK
+  )
+}
+
+/** `b` is field-wise ≥ `a` on every field — never narrower. */
+function widensOrEqual(a: ReportScopeGrants, b: ReportScopeGrants): boolean {
+  return (
+    (a.across ? b.across : true) &&
+    REGIONAL_RANK[String(b.regional)]! >= REGIONAL_RANK[String(a.regional)]! &&
+    COST_CENTRE_RANK[String(b.costCentre)]! >= COST_CENTRE_RANK[String(a.costCentre)]! &&
+    (a.finance ? b.finance : true) &&
+    TEAMMATE_RANK[String(b.teammate)]! >= TEAMMATE_RANK[String(a.teammate)]! &&
+    PROJECT_RANK[String(b.project)]! >= PROJECT_RANK[String(a.project)]!
+  )
+}
+
+const PERMISSION_SUBSETS: ReportAccessPermission[][] = [
+  [],
+  ['operational'],
+  ['finance'],
+  ['operational', 'finance'],
+]
+
+describe('effectiveReportGrants — totality + monotonicity over role × ownership × permission-subset', () => {
+  for (const role of ROLES) {
+    for (const ownsCostCentre of [true, false]) {
+      const baseline = effectiveReportGrants({ role, ownsCostCentre, permissions: [] })
+      for (const permissions of PERMISSION_SUBSETS) {
+        it(`${role} × owns=${ownsCostCentre} × [${permissions.join(',')}] is a valid, non-narrowing grant`, () => {
+          const g = effectiveReportGrants({ role, ownsCostCentre, permissions })
+          expect(isValidGrants(g), `${JSON.stringify(g)} is not a valid ReportScopeGrants`).toBe(true)
+          expect(
+            widensOrEqual(baseline, g),
+            `adding permissions ${JSON.stringify(permissions)} narrowed a field vs the baseline`,
+          ).toBe(true)
+        })
+      }
+      it(`${role} × owns=${ownsCostCentre}: holding BOTH permissions is ≥ holding either alone`, () => {
+        const both = effectiveReportGrants({ role, ownsCostCentre, permissions: ['operational', 'finance'] })
+        const operationalOnly = effectiveReportGrants({ role, ownsCostCentre, permissions: ['operational'] })
+        const financeOnly = effectiveReportGrants({ role, ownsCostCentre, permissions: ['finance'] })
+        expect(widensOrEqual(operationalOnly, both)).toBe(true)
+        expect(widensOrEqual(financeOnly, both)).toBe(true)
       })
     }
   }
 })
 
-describe('reportGrants — standard-mode is byte-identical to meta.get.ts (real personas)', () => {
-  it('cross-region roles get across + finance; a region admin gets NO finance under standard', () => {
-    expect(reportGrants('standard', { role: 'global-finops', ownsCostCentre: false })).toEqual({
-      across: true,
-      regional: 'all-regions',
-      costCentre: 'owned-or-subtree',
-      finance: true,
-      // W4 (D38): the two drill columns are part of the grant object now, so
-      // "byte-identical to meta.get.ts" has to include them.
-      teammate: 'people-scope',
-      project: 'region-wide',
-    } satisfies ReportScopeGrants)
-    // A region admin sees finance ONLY via a loosened mode — never under standard.
-    expect(reportGrants('standard', { role: 'admin', ownsCostCentre: false }).finance).toBe(false)
-    expect(reportGrants('standard', { role: 'admin', ownsCostCentre: false }).across).toBe(false)
-  })
+describe('sg-M7 zombie finance role', () => {
+  it("the enum member 'finance' is benign (developer-tier baseline: no across, no finance) and still elevatable", () => {
+    const base = baselineGrants('finance' as Role, false)
+    expect(base.across).toBe(false)
+    expect(base.finance).toBe(false)
+    expect(base.regional).toBe('own-region')
 
-  it('a plain developer (no ownership) gets no cost-centre, no across, no finance', () => {
-    expect(reportGrants('standard', { role: 'developer', ownsCostCentre: false })).toEqual({
-      across: false,
-      regional: 'own-region',
-      costCentre: false,
-      finance: false,
-      // A plain developer holds NO people-scope: the per-person drill is a
-      // governance surface, and `regional: 'own-region'` is a reporting width.
-      teammate: false,
-      project: 'membership',
-    } satisfies ReportScopeGrants)
+    const elevated = effectiveReportGrants({ role: 'finance' as Role, ownsCostCentre: false, permissions: ['operational', 'finance'] })
+    expect(elevated).toEqual(WHO_SEES_WHAT_ELEVATED.developer)
   })
 })
 
-describe('reportGrants — sg-M7 zombie finance role', () => {
-  it("the enum member 'finance' is benign (developer-tier: no across, no finance) in every mode", () => {
-    for (const mode of REPORT_VISIBILITY_MODES) {
-      const g = reportGrants(mode, { role: 'finance' as Role, ownsCostCentre: false })
-      expect(g.across).toBe(false)
-      expect(g.finance).toBe(false)
-      expect(g.regional).toBe('own-region')
-    }
-  })
-})
-
-describe('reportGrants — sg-M5 fail-closed on garbage mode', () => {
-  it('an unknown mode collapses to standard grants (never throws, never permissive)', () => {
-    const garbage = reportGrants('made-up-mode' as never, { role: 'admin', ownsCostCentre: false })
-    expect(garbage).toEqual(reportGrants('standard', { role: 'admin', ownsCostCentre: false }))
-    // A region admin under garbage must NOT get across / finance (fail-closed to standard).
+describe('fail-closed on an unrecognised role', () => {
+  it('an unknown role collapses to developer-tier baseline grants (never throws, never permissive)', () => {
+    const garbage = baselineGrants('made-up-role' as Role, false)
+    expect(garbage).toEqual(baselineGrants('developer', false))
     expect(garbage.across).toBe(false)
     expect(garbage.finance).toBe(false)
   })
 })
 
-describe('reportGrants — sg-L10 revoked/expired ownership grants nothing', () => {
-  it('ownsCostCentre=false yields no elevation even under all-admins-see-all', () => {
-    // A revoked cou_owner row resolves to ownsCostCentre=false at the call site, so the
-    // matrix treats it as a plain developer — no full report set.
-    const g = reportGrants('all-admins-see-all', { role: 'developer', ownsCostCentre: false })
-    expect(g).toEqual({ across: false, regional: 'own-region', costCentre: false, finance: false, teammate: false, project: 'membership' })
-  })
-
-  it('an ACTIVE owner (ownsCostCentre=true) IS elevated under all-admins-see-all', () => {
-    const g = reportGrants('all-admins-see-all', { role: 'developer', ownsCostCentre: true })
-    expect(g).toEqual({ across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' })
+describe('isReportAccessPermission', () => {
+  it('accepts exactly the two known literals', () => {
+    for (const p of REPORT_ACCESS_PERMISSIONS) expect(isReportAccessPermission(p)).toBe(true)
+    expect(isReportAccessPermission('bogus')).toBe(false)
+    expect(isReportAccessPermission('')).toBe(false)
   })
 })
 
-describe('migration 0087 CHECK literals pinned to REPORT_VISIBILITY_MODES (0084-style)', () => {
+describe('migration 0129 CHECK literals pinned to REPORT_ACCESS_PERMISSIONS (0084-style)', () => {
   const migration = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), '../../../drizzle/migrations/0087_report_visibility_setting.sql'),
+    join(dirname(fileURLToPath(import.meta.url)), '../../../drizzle/migrations/0129_report_access_grant.sql'),
     'utf8',
   )
 
-  it('the mode CHECK lists exactly the three module literals', () => {
-    const m = migration.match(/mode\s+TEXT\s+NOT NULL\s+CHECK \(mode IN \(([^)]*)\)\)/i)
-    expect(m, 'mode CHECK not found in 0087').toBeTruthy()
+  it('the permission CHECK lists exactly the two module literals', () => {
+    const m = migration.match(/permission\s+text\s+NOT NULL\s+CHECK \(permission IN \(([^)]*)\)\)/i)
+    expect(m, 'permission CHECK not found in 0129').toBeTruthy()
     const literals = m![1]!.split(',').map((s) => s.trim().replace(/^'|'$/g, ''))
-    expect(literals).toEqual([...REPORT_VISIBILITY_MODES])
-    for (const lit of literals) expect(isReportVisibilityMode(lit)).toBe(true)
+    expect(literals).toEqual([...REPORT_ACCESS_PERMISSIONS])
+    for (const lit of literals) expect(isReportAccessPermission(lit)).toBe(true)
   })
 
-  it("the key is pinned to 'policy' (single logical row) and no row is seeded", () => {
-    expect(migration).toMatch(/key\s+TEXT\s+PRIMARY KEY\s+DEFAULT 'policy'\s+CHECK \(key = 'policy'\)/i)
-    expect(migration).not.toMatch(/INSERT\s+INTO\s+report_visibility_setting/i)
+  it('the revoke-shape CHECK requires the actor in the revoked arm (an actorless revocation is unrepresentable)', () => {
+    expect(migration).toMatch(/CONSTRAINT report_access_grant_revoke_shape CHECK/i)
+    // Both arms, verbatim: active rows carry neither field; revoked rows carry
+    // BOTH — tighter than cou_owner's shape, whose revoked arm does not bind
+    // the actor despite its comment saying it does.
+    expect(migration).toMatch(
+      /\(revoked_at IS NULL AND revoked_by IS NULL\)\s*OR \(revoked_at IS NOT NULL AND revoked_by IS NOT NULL\)/,
+    )
+  })
+
+  it('the migration DROPs report_visibility_setting in the same change', () => {
+    expect(migration).toMatch(/DROP TABLE report_visibility_setting;/)
   })
 })

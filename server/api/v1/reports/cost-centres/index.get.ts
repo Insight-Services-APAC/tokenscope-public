@@ -20,7 +20,7 @@
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { z } from 'zod'
 import { requireAuth } from '../../../../auth/rbac'
-import { requireReportScope } from '../../../../auth/report-scope'
+import { requireReportScope, costCentreScopeOpts } from '../../../../auth/report-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import {
   withReportCache,
@@ -70,16 +70,16 @@ export default defineEventHandler(async (event) => {
   // cache-miss leader.
   //
   // S3 part (d): the missing deny arm — WITHOUT this, a caller whose
-  // reportGrants.costCentre === false (denied entirely) fell through to
+  // grants.costCentre === false (denied entirely) fell through to
   // fetchVisibleCostCentres' owner/subtree predicate and got a silent EMPTY
   // 200 instead of an explicit 403 (Theme 4's one small independent defect: a
-  // 'false' grant was never distinguished from 'owned-or-subtree'). A loosened
-  // policy mode (reportGrants.costCentre === 'all') still makes every cost
-  // centre visible; non-elevated callers keep the owner/subtree predicate
-  // unchanged.
+  // 'false' grant was never distinguished from 'owned-or-subtree'). An ACTIVE
+  // 'operational' report-access grant (grants.costCentre === 'all') still
+  // makes every cost centre visible; non-elevated callers keep the
+  // owner/subtree predicate unchanged.
   const { grants, ccs } = await withRequestRls(event, async (tx) => {
-    const { grants } = await requireReportScope(event, tx, 'cost-centre')
-    const ccs = await fetchVisibleCostCentres(tx, { unbounded: grants.costCentre === 'all' })
+    const { session, grants } = await requireReportScope(event, tx, 'cost-centre')
+    const ccs = await fetchVisibleCostCentres(tx, costCentreScopeOpts(session, grants))
     return { grants, ccs }
   })
   const session = await requireAuth(event)

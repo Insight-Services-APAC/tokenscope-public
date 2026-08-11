@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import regionalHandler from '../../../server/api/v1/reports/region/index.get'
 import driversHandler from '../../../server/api/v1/reports/region/drivers.get'
@@ -40,6 +41,18 @@ let unitB = '' // cost-owning practice 'b' (region B)
 let alice = ''
 let dave = ''
 let projA = ''
+/*
+ * mig 0129: a DEDICATED teammate for every 'global-finops' session in this
+ * file — NEVER the shared `sess()` default sentinel
+ * ('00000000-0000-0000-0000-000000000009'), which `adminA()` / `sess('admin', …)`
+ * ALSO resolve to (S3's audit-FK backing row, above). Report-access grants are
+ * keyed on teammate_id alone, not on the `role` string the test hands
+ * `injectTestSession` — so granting the shared sentinel would ALSO elevate every
+ * admin/manager/developer session built from it, silently flipping this file's
+ * own 'an admin is granted region + cost-centre (NOT finance …)' meta pin and
+ * every anti-IDOR 403 that reuses the same default id.
+ */
+let finopsElevatedId = ''
 
 const ev = (session: Session, query = '') => {
   const url = '/x' + (query ? `?${query}` : '')
@@ -100,6 +113,17 @@ beforeAll(async () => {
   // this file now needs a backing row, not just a synthetic uuid literal).
   await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, is_active)
     VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-default-caller', 'caller@a.test', 'Caller', ${regionA}::uuid, ${unitA}::uuid, true)`
+
+  // A SEPARATE, DEDICATED teammate for this file's 'global-finops' sessions
+  // (mig 0129) — see the `finopsElevatedId` declaration above for why it must
+  // NOT be the shared sentinel row just inserted. Granted BOTH permissions so
+  // every 'global-finops' call below keeps its pre-mig-0129 (unconditional
+  // org-wide) reach — the file's own point is the SCOPE mechanics
+  // (region-picker, anti-IDOR, meta), not the grants model itself.
+  await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
+    VALUES ('oid-finops-elevated', 'finops-elevated@a.test', 'Finops Elevated', ${regionA}::uuid, ${unitA}::uuid, 'global-finops', true)`
+  ;[{ id: finopsElevatedId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='finops-elevated@a.test'`
+  await grantReportAccess(t.client, finopsElevatedId)
 
   // Project (region A, cost-owning a) — alice's tagged rows.
   await t.client`INSERT INTO project (code, code_hash, display_name, type, region_id, cost_owning_unit_id)
@@ -287,16 +311,16 @@ describe('GET /reports/region — RBAC scope matrix', () => {
     // caller's home and the first by display_name. The org-wide default (first by
     // (display_name, code), home ignored) is pinned where the two disagree:
     // tests/integration/reports/regional-default-region.test.ts.
-    const dflt = (await regionalHandler(ev(sess('global-finops', 'a', regionA), 'month=2026-07'))) as unknown as RegionalResp
+    const dflt = (await regionalHandler(ev(sess('global-finops', 'a', regionA, finopsElevatedId), 'month=2026-07'))) as unknown as RegionalResp
     expect(dflt.kpis.genuineUsd).toBe(50) // region A
     expect(dflt.regionOptions.length).toBe(2) // gets the picker
-    const other = (await regionalHandler(ev(sess('global-finops', 'a', regionA), `month=2026-07&region=${regionB}`))) as unknown as RegionalResp
+    const other = (await regionalHandler(ev(sess('global-finops', 'a', regionA, finopsElevatedId), `month=2026-07&region=${regionB}`))) as unknown as RegionalResp
     expect(other.kpis.genuineUsd).toBe(8) // region B (bob)
   })
 
   it('an unknown region uuid → 404 (no silent fallback to all)', async () => {
     await expect(
-      regionalHandler(ev(sess('global-finops', 'a', regionA), 'region=11111111-1111-4111-8111-111111111111')),
+      regionalHandler(ev(sess('global-finops', 'a', regionA, finopsElevatedId), 'region=11111111-1111-4111-8111-111111111111')),
     ).rejects.toMatchObject({ statusCode: 404 })
   })
 
@@ -404,7 +428,7 @@ describe('GET /reports/region — §B chargeback bill-lane cards (Anthropic per-
 
   it('the billed figures are FINANCE-scope-clamped — region B (no Anthropic bill) reports zero', async () => {
     // Region B (bob) has usage but NO actual bill homed to it, so the bill lane is empty there.
-    const r = (await regionalHandler(ev(sess('global-finops', 'a', regionA), `month=2026-07&region=${regionB}`))) as unknown as RegionalResp
+    const r = (await regionalHandler(ev(sess('global-finops', 'a', regionA, finopsElevatedId), `month=2026-07&region=${regionB}`))) as unknown as RegionalResp
     expect(r.kpis.billedTeammates).toBe(0)
     expect(r.kpis.billedTokens).toBe(0)
     expect(r.kpis.avgChargePerBilledUser).toBe(0)
@@ -579,7 +603,7 @@ describe('GET /reports/meta — granted scopes + floors + copilot mode', () => {
 
   it('global-finops is granted every scope; floors span the lanes; copilot defaults to pool-utilisation', async () => {
     delete process.env.NUXT_COPILOT_CHARGEBACK_ENABLED
-    const m = (await metaHandler(ev(sess('global-finops', 'a', regionA)))) as unknown as MetaResp
+    const m = (await metaHandler(ev(sess('global-finops', 'a', regionA, finopsElevatedId)))) as unknown as MetaResp
     expect(m.scopes).toEqual(['region', 'cost-centre', 'finance'])
     expect(m.defaultScope).toBe('region')
     // The `across` holder still opens on the whole-company answer — now as the
@@ -733,7 +757,7 @@ describe('GET /reports/export — the teammate-axis driver export is complete + 
    * payload is the only thing that later distinguishes a company-wide pull from a
    * single-region one.
    */
-  const finops = () => sess('global-finops', 'caproot', capRegionId)
+  const finops = () => sess('global-finops', 'caproot', capRegionId, finopsElevatedId)
 
   it('audits the WHOLE-COMPANY teammate export, with the width that names the population', async () => {
     const [{ n: before }] = await t.client<{ n: string }[]>`

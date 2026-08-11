@@ -66,9 +66,9 @@ beforeAll(async () => {
   const [p1] = await t.db
     .insert(schema.project)
     .values({
-      code: 'AFL-AII',
+      code: 'CSL-AII',
       codeHash: 'h-afl-aii-u',
-      displayName: 'AFL · AI Insights',
+      displayName: 'Contoso League · AI Insights',
       type: 'billable',
       regionId: region!.id,
       costOwningUnitId: bu!.id,
@@ -81,7 +81,7 @@ beforeAll(async () => {
     .values({
       code: 'NAB-RR',
       codeHash: 'h-nab-rr-u',
-      displayName: 'NAB · Retail risk',
+      displayName: 'Northwind Bank · Retail risk',
       type: 'billable',
       regionId: region!.id,
       costOwningUnitId: bu!.id,
@@ -198,7 +198,7 @@ describe('Epic 11 /me/home allocation rollup contract', () => {
       principalOid: 'oid-priya-u',
       teammateId: priyaId,
       projectCodeHash: 'h-afl-aii-u',
-      rawProjectCode: 'AFL-AII',
+      rawProjectCode: 'CSL-AII',
       tool: 'claude-code',
       sessionTokenHash: 'tok-active-' + sessionId,
       tsStart: new Date(Date.now() - 15 * 60_000),

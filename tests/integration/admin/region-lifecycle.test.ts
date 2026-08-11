@@ -215,10 +215,10 @@ describe('3. org-unit create', () => {
   it('admin creates a root cost centre (200, path = derived label)', async () => {
     const out = await call<{ id: string; path: string }>(
       orgUnitsCreate,
-      ev({ body: { region_id: regionAId, code: 'AFL-DRP', display_name: 'AFL Delivery', unit_type: 'bu', is_cost_owning_unit: true }, session: adminA() }),
+      ev({ body: { region_id: regionAId, code: 'CSL-DRP', display_name: 'AFL Delivery', unit_type: 'bu', is_cost_owning_unit: true }, session: adminA() }),
     )
-    // 'AFL-DRP' → label 'afl_drp', root → path == label.
-    expect(out.path).toBe('afl_drp')
+    // 'CSL-DRP' → label 'csl_drp', root → path == label.
+    expect(out.path).toBe('csl_drp')
   })
 
   it('creates a child → path = parent.path + "." + label', async () => {

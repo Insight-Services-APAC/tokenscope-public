@@ -30,11 +30,11 @@ beforeAll(() => {
     [
       '# root-level .tokenscope',
       'project:',
-      '  code: "AFL-AII"',
+      '  code: "CSL-AII"',
       '  id: "afl-ai-insights"',
-      '  name: "AFL · AI Insights"',
+      '  name: "Contoso League · AI Insights"',
       '',
-      'client: "AFL"',
+      'client: "Contoso League"',
       'pm: "Anil Verma"',
     ].join('\n'),
   )
@@ -43,9 +43,9 @@ beforeAll(() => {
     join(root, 'other', 'repo', '.tokenscope'),
     [
       'project:',
-      '  code: NAB-CIB',
+      '  code: NWB-CIB',
       '  id: nab-cib-modernise',
-      '  name: "NAB · CIB Modernise"',
+      '  name: "Northwind Bank · CIB Modernise"',
     ].join('\n'),
   )
 })
@@ -83,20 +83,20 @@ describe('findTokenscopeFile', () => {
 describe('parseTokenscope', () => {
   it('reads project.code, .id, .name', () => {
     const parsed = parseTokenscope(join(root, '.tokenscope'))
-    expect(parsed.project.code).toBe('AFL-AII')
+    expect(parsed.project.code).toBe('CSL-AII')
     expect(parsed.project.id).toBe('afl-ai-insights')
-    expect(parsed.project.name).toBe('AFL · AI Insights')
+    expect(parsed.project.name).toBe('Contoso League · AI Insights')
   })
 
   it('reads optional top-level fields (client, pm, etc.)', () => {
     const parsed = parseTokenscope(join(root, '.tokenscope'))
-    expect(parsed.optional.client).toBe('AFL')
+    expect(parsed.optional.client).toBe('Contoso League')
     expect(parsed.optional.pm).toBe('Anil Verma')
   })
 
   it('handles unquoted scalar values', () => {
     const parsed = parseTokenscope(join(root, 'other', 'repo', '.tokenscope'))
-    expect(parsed.project.code).toBe('NAB-CIB')
+    expect(parsed.project.code).toBe('NWB-CIB')
     expect(parsed.project.id).toBe('nab-cib-modernise')
   })
 

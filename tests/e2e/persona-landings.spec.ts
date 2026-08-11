@@ -44,11 +44,11 @@ test.describe('Persona landings', () => {
     await expect(hero).toContainText('Unallocated · soft cap')
     await expect(page.locator('[data-testid="hero-status"]')).toBeVisible()
 
-    // The 3 seeded buckets (AFL-DRP contributed, AFL-AII assigned+PM,
+    // The 3 seeded buckets (CSL-DRP contributed, CSL-AII assigned+PM,
     // INT-PLT assigned). Asserted individually, not as a count —
     // journey-mvp-path adds an Acme bucket when it runs first.
-    await expect(page.locator('[data-testid="usage-bucket-AFL-DRP"]')).toBeVisible()
-    await expect(page.locator('[data-testid="usage-bucket-AFL-AII"]')).toBeVisible()
+    await expect(page.locator('[data-testid="usage-bucket-CSL-DRP"]')).toBeVisible()
+    await expect(page.locator('[data-testid="usage-bucket-CSL-AII"]')).toBeVisible()
     await expect(page.locator('[data-testid="usage-bucket-INT-PLT"]')).toBeVisible()
 
     // No fake "↓ N% vs last month" — that delta was hardcoded and was
@@ -56,7 +56,7 @@ test.describe('Persona landings', () => {
     await expect(page.locator('main')).not.toContainText('vs last month')
 
     // Inbox bell shows 3 unread (velocity-warning + untagged-backlog +
-    // over-budget — Priya is AFL-AII's PM, a budget-responsible recipient).
+    // over-budget — Priya is CSL-AII's PM, a budget-responsible recipient).
     await expect(
       page.locator('[data-testid="inbox-bell"] span.bg-brand-hunger'),
     ).toHaveText('3')
@@ -75,12 +75,12 @@ test.describe('Persona landings', () => {
     await expect(page.locator('main')).toBeVisible()
   })
 
-  test("manager's homepage (when visited directly) shows AFL-AII Contributed", async ({ page }) => {
+  test("manager's homepage (when visited directly) shows CSL-AII Contributed", async ({ page }) => {
     await signInAs(page, 'manager')
     await page.goto(`${baseUrl}/`)
     await expect(page.locator('h1')).toContainText('Hello Anil.')
     await expect(page.locator('[data-testid="project-bucket-list"] li')).toHaveCount(3)
-    const aflRow = page.locator('[data-testid="project-bucket-list"] li').filter({ hasText: 'AFL-AII' })
+    const aflRow = page.locator('[data-testid="project-bucket-list"] li').filter({ hasText: 'CSL-AII' })
     await expect(aflRow.locator('[data-testid="contributed-badge"]')).toBeVisible()
   })
 
@@ -104,7 +104,7 @@ test.describe('Persona landings', () => {
     await expect(page.locator('h1')).toContainText('Month-end cross-charge')
     // Practice Delta should be the top CoU by spend (priya + anil are
     // the only current-month contributors and both book to Delta).
-    // The total = anil's $12,710 AFL-AII spike (always current-month)
+    // The total = anil's $12,710 CSL-AII spike (always current-month)
     // + priya's velocity-ramp tail ($0–$250 of it lands in the current
     // month depending on the run date) → assert the $12,xxx band, not
     // a day-exact literal.
@@ -117,7 +117,7 @@ test.describe('Persona landings', () => {
      * resolveAdmins (server/notifications/dispatch.ts) routes
      * sync-conflict to admin-CLASS roles — admin, platform-admin AND
      * global-finops — so Mara now sees the seeded "PSR · APAC reports
-     * conflict on NAB · CIB Modernise" item. (Pre-region-model this
+     * conflict on Northwind Bank · CIB Modernise" item. (Pre-region-model this
      * spec asserted an empty finance inbox; routing changed.)
      */
     await signInAs(page, 'finance')

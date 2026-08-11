@@ -488,12 +488,8 @@ interface AbDecompositionResp {
   unhomedWorklistCap: number
   unhomedHistoryMonths: number
   visibility: {
-    mode: string
-    label: string
-    description: string
-    isDefault: boolean
-    defaultMode: string
     personas: { key: string; label: string; scopes: string[] }[]
+    elevated: { teammates: number; operational: number; finance: number }
   }
 }
 
@@ -2323,20 +2319,18 @@ function pretty(obj: unknown): string {
                 <div class="mb-3" data-testid="admin-diag-unhomed-visibility">
                   <h4 class="text-xs font-bold text-carbon mb-1">Who can see Business Unit reporting right now</h4>
                   <p class="text-[11px] text-carbon-3 mb-1">
-                    Report visibility is set to <strong>{{ abData.visibility.label }}</strong> —
-                    {{ abData.visibility.description }} This is the <strong>capability matrix</strong>
-                    for that mode — what each role WOULD be granted, computed from the policy, not
-                    from this estate. It does not inspect who actually holds those roles, owns a
-                    Business Unit, or reads these reports, so it tells you which roles could notice
-                    this spend going missing, never how many people that is or whether anyone
-                    occupies them.
-                    <strong v-if="!abData.visibility.isDefault" data-testid="admin-diag-unhomed-visibility-nondefault">
-                      This is not the default mode.
-                    </strong>
+                    This is the <strong>baseline capability matrix</strong> — what each role WOULD be
+                    granted with NO report-access grant at all, computed from the policy, not from this
+                    estate. It does not inspect who actually holds those roles, owns a Business Unit, or
+                    reads these reports, so it tells you which roles could notice this spend going
+                    missing, never how many people that is or whether anyone occupies them.
+                    {{ abData.visibility.elevated.teammates }} teammates hold elevated grants
+                    ({{ abData.visibility.elevated.operational }} operational,
+                    {{ abData.visibility.elevated.finance }} finance) — on top of this baseline.
                     <NuxtLink
-                      to="/admin/policies/report-visibility"
+                      to="/admin/policies/report-access"
                       class="text-brand-harmony hover:underline"
-                    >Compare the modes →</NuxtLink>
+                    >Manage report access →</NuxtLink>
                   </p>
                   <table class="w-full text-[11px]">
                     <tbody>

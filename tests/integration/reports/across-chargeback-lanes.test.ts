@@ -18,6 +18,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import acrossHandler from '../../../server/api/v1/reports/region/index.get'
 import trendHandler from '../../../server/api/v1/reports/region/trend.get'
@@ -71,6 +72,15 @@ beforeAll(async () => {
     VALUES ('oid-alice', 'alice@a.test', 'alice', ${regionA}::uuid, ${unitA}::uuid, true)`
   const [al] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='alice@a.test'`
   alice = al!.id
+
+  // `gfo()`'s teammateId (mig 0129) — hardcoded inline and used by NO other
+  // persona in this file (grepped: only `gfo()` builds a session here), so a
+  // real backing row + a direct grant is safe. Needed for `evAll(gfo(), …)` —
+  // the whole-company region=all width — to keep passing (an ungranted
+  // global-finops is now clamped to its own region, not the unclamped scope).
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
+    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-gfo', 'x@x.test', 'X', ${regionA}::uuid, ${unitA}::uuid, 'global-finops', true)`
+  await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   // Anthropic bill lane (actual_spend → v_finance_bill_chargeback): cent-odd
   // figures so the conservation checks are genuinely CENT-exact, split across

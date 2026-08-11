@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import acrossHandler from '../../../server/api/v1/reports/region/index.get'
 import trendHandler from '../../../server/api/v1/reports/region/trend.get'
@@ -22,6 +23,13 @@ let regionA = ''
 let unitA = ''
 let alice = ''
 let dave = ''
+/*
+ * mig 0129: a DEDICATED teammate for this file's 'global-finops' session —
+ * NEVER the shared sess() default sentinel ('00000000-0000-0000-0000-
+ * 000000000009'), which the admin/manager/developer 403 loop below ALSO
+ * resolves to. See regional.test.ts / across-regions.test.ts for the same fix.
+ */
+let trendElevatedId = ''
 
 const ev = (session: Session, query = '') => {
   const url = '/x' + (query ? `?${query}` : '')
@@ -47,9 +55,9 @@ const ev = (session: Session, query = '') => {
 const evAll = (session: Session, query = '') =>
   ev(session, query ? `${query}&region=all` : 'region=all')
 
-const sess = (role: string, regionId: string): Session =>
-  ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role, regionId, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
-const gfo = () => sess('global-finops', regionA)
+const sess = (role: string, regionId: string, teammateId = '00000000-0000-0000-0000-000000000009'): Session =>
+  ({ teammateId, email: 'x@x.test', displayName: 'X', role, regionId, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
+const gfo = () => sess('global-finops', regionA, trendElevatedId)
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -72,6 +80,14 @@ beforeAll(async () => {
   }
   alice = await mkTeammate('alice@a.test')
   dave = await mkTeammate('dave@a.test')
+
+  // A SEPARATE, DEDICATED teammate for this file's 'global-finops' session
+  // (mig 0129) — see the `trendElevatedId` declaration above. Granted BOTH
+  // permissions so gfo() keeps its pre-mig-0129 (unconditional org-wide) reach.
+  await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
+    VALUES ('oid-finops-elevated', 'finops-elevated@a.test', 'Finops Elevated', ${regionA}::uuid, ${unitA}::uuid, 'global-finops', true)`
+  ;[{ id: trendElevatedId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='finops-elevated@a.test'`
+  await grantReportAccess(t.client, trendElevatedId)
 
   await t.client`INSERT INTO instance_attestation (instance_id, principal_oid, teammate_id, tool, region_id, org_unit_id, project_code_hash, raw_project_code)
     VALUES (gen_random_uuid(), 'p', ${alice}::uuid, 'claude-code', ${regionA}::uuid, ${unitA}::uuid, 'h', 'P')`

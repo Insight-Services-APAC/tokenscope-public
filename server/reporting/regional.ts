@@ -208,21 +208,29 @@ export async function resolveRegionalScope(
   params: { region?: string | null; ou?: string | null },
   opts?: { crossRegion?: boolean },
 ): Promise<RegionalScope> {
-  // A role is cross-region by its enum (ORG_WIDE_ROLES — global-finops /
-  // platform-admin) OR by the report-visibility policy loosening it (an admin under
-  // modes 2/3, a cost-centre owner under mode 3 — reportGrants.regional ===
-  // 'all-regions', threaded here as `opts.crossRegion`). The policy grant is a LEVEL,
-  // not a bypass: an elevated caller sees the region SELECTOR + a honoured `?region`,
-  // exactly as global-finops does — one region at a time, never an unclamped union.
-  //
-  // ONE predicate for "org-wide role", shared with the default-region branch below.
-  // Spelling it out twice is how the two would drift if ORG_WIDE_ROLES ever grew a
-  // member: a role that reached the picker but not the region-less default.
-  const roleCrossRegion = isOrgWideRole(caller.role)
-  const isCrossRegion = roleCrossRegion || opts?.crossRegion === true
+  // GRANTS ARE NOW THE ONLY CROSS-REGION SOURCE (mig 0129). A role is no
+  // longer cross-region by its enum: `effectiveReportGrants`'s baseline for
+  // global-finops / platform-admin is 'own-region' like everyone else
+  // (shared/auth/report-visibility.ts's `baselineGrants`), so cross-region
+  // reach now comes ENTIRELY from an ACTIVE 'operational' report-access grant
+  // (regional === 'all-regions'), threaded here as `opts.crossRegion` by every
+  // caller from their already-resolved grants. The grant is a LEVEL, not a
+  // bypass: an elevated caller sees the region SELECTOR + a honoured
+  // `?region`, exactly as a genuinely cross-region caller does — one region
+  // at a time, never an unclamped union.
+  const isCrossRegion = opts?.crossRegion === true
   const isAdmin = caller.role === 'admin'
   const isSubtree = caller.role === 'developer' || caller.role === 'manager'
-  if (!isCrossRegion && !isAdmin && !isSubtree) {
+  // A caller whose ORG-WIDE role holds no cross-region grant is region-bound,
+  // not scope-less: `baselineGrants` gives it 'own-region' (never
+  // 'all-regions') until an 'operational' grant is active. Admitted here as a
+  // FOURTH, non-cross class — rather than forbidden — because `scopeRole`
+  // below falls through to `caller.role` for it, and
+  // `managerScopePredicate`'s fallback arm (org-subtree-scope.ts:189-190)
+  // clamps that to `effectiveRegionId = caller's own region`, exactly the
+  // `admin` treatment.
+  const isOrgWide = isOrgWideRole(caller.role)
+  if (!isCrossRegion && !isAdmin && !isSubtree && !isOrgWide) {
     forbid(`Role '${caller.role}' is not permitted for the Regional report.`)
   }
 
@@ -246,7 +254,23 @@ export async function resolveRegionalScope(
   // matched everything via orgSubtreeScopePredicate's global-finops branch.
   let ou: OuRef | null = null
   if (params.ou) {
-    const scopeClause = isCrossRegion ? sql`TRUE` : orgSubtreeScopePredicate('org_unit')
+    /*
+     * A2 — SEALS THE ?ou= DRILL BYPASS. `orgSubtreeScopePredicate`'s GUC arm
+     * is UNCONDITIONALLY TRUE for role 'global-finops' (org-subtree-scope.ts:
+     * 49; platform-admin maps to it at the RLS layer, request-rls.ts:33). For
+     * the new `isOrgWide && !isCrossRegion` class (admitted above, never
+     * forbidden) that predicate would therefore validate ANY unit in ANY
+     * region — an ungranted org-wide caller is supposed to be bound to their
+     * OWN region, exactly like `admin`. So THIS class gets an explicit
+     * JS-computed clamp instead of the predicate: `org_unit.region_id =
+     * caller.regionId`, the same own-region semantics `admin` gets. Does NOT
+     * touch org-subtree-scope.ts or the GUC layer.
+     */
+    const scopeClause = isCrossRegion
+      ? sql`TRUE`
+      : isOrgWide
+        ? sql`org_unit.region_id = ${caller.regionId}::uuid`
+        : orgSubtreeScopePredicate('org_unit')
     const ownerClause = sql`EXISTS (
       SELECT 1 FROM cou_owner co
       WHERE co.org_unit_id = org_unit.id
@@ -288,33 +312,30 @@ export async function resolveRegionalScope(
       throw createError({ statusCode: 404, statusMessage: 'region not found' })
     }
     /*
-     * THE DEFAULT REGION, decided on the caller's ROLE (owner decision, updated
-     * 2026-08-01 — verbatim: "global-finops should get alphabetical too, they have
-     * no region"):
+     * THE DEFAULT REGION. Owner decision, extended uniformly alongside the
+     * grants model (mig 0129): cross-region access is now ALWAYS
+     * grant-derived (`isCrossRegion` is `opts?.crossRegion === true`, full
+     * stop — the role-based `roleCrossRegion` arm is gone), so EVERY caller
+     * reaching this branch got here by holding an active 'operational'
+     * report-access grant, never by role alone. The original ruling for
+     * global-finops — "should get alphabetical too, they have no region" —
+     * is therefore extended to everyone this branch admits: `ownRegionId` is
+     * `undefined` whenever `isCrossRegion` is true, which it always is here,
+     * so every grant-elevated caller opens on the FIRST of `regionOptions`,
+     * ordered by (display_name, code) — a TOTAL order (see the region-list
+     * query above for why the `code` tiebreaker is load-bearing).
+     * `caller.regionId` is where such a caller's Entra record happens to sit,
+     * not a region they answer for by virtue of the grant, so it plays no
+     * part in the default.
      *
-     *   - an ORG-WIDE role (ORG_WIDE_ROLES = global-finops, platform-admin) has no
-     *     region of its own — it is org-wide by definition — so it opens on the
-     *     FIRST of `regionOptions`, ordered by (display_name, code): a TOTAL order
-     *     (see the region-list query above for why the `code` tiebreaker is
-     *     load-bearing). `caller.regionId` is where such a caller's Entra record
-     *     happens to sit, not a region they answer for, so it is ignored here.
-     *   - every other caller in this branch is a REGION-BOUND role the
-     *     report-visibility policy elevated to all-regions (a region admin under
-     *     modes 2/3, a cost-centre owner under mode 3). They DO have a region of
-     *     their own, so they open on it — `caller.regionId`, when it is a real
-     *     region in the list.
-     *
-     * The test is the ROLE, not "does this caller have a home region": every caller
-     * has one. That is why global-finops, homed like anyone else, still gets the
-     * alphabetical default.
-     *
-     * The rule reads only the caller's role, the caller's own region and the region
-     * list — never the window and never a spend figure. That is the point: all five
-     * Regional endpoints plus the CSV export resolve this scope independently and
-     * cannot compare notes, so a default that varied with the window would name one
-     * region in the header while another was computed underneath it.
+     * The rule reads only `isCrossRegion`, the region list and (via the `??`
+     * chain below) an explicit `?region=` — never the window and never a
+     * spend figure. That is the point: all five Regional endpoints plus the
+     * CSV export resolve this scope independently and cannot compare notes,
+     * so a default that varied with the window would name one region in the
+     * header while another was computed underneath it.
      */
-    const ownRegionId = isOrgWideRole(caller.role)
+    const ownRegionId = isCrossRegion
       ? undefined
       : regionOptions.find((o) => o.id === caller.regionId)?.id
     effectiveRegionId =
@@ -333,11 +354,13 @@ export async function resolveRegionalScope(
     ? { id: rgRow.id, code: rgRow.code, displayName: rgRow.display_name }
     : null
 
-  // Scope-clause role: a cross-region caller (by role OR policy) clamps to the single
-  // effectiveRegionId (the global-finops branch of managerScopePredicate); a plain
-  // developer shares the manager subtree clause; admin/manager keep their own clamps.
-  // The drill overrides with the unit's own subtree (usage: all units; finance:
-  // cost-owning only).
+  // Scope-clause role: a cross-region caller (grant-derived — mig 0129) clamps to the
+  // single effectiveRegionId (the global-finops branch of managerScopePredicate); a
+  // plain developer shares the manager subtree clause; admin/manager keep their own
+  // clamps. An org-wide-but-ungranted caller falls through to `caller.role`, landing
+  // in managerScopePredicate's fallback arm (own-region — see the forbid-gate comment
+  // above). The drill overrides with the unit's own subtree (usage: all units;
+  // finance: cost-owning only).
   const scopeRole = isCrossRegion ? 'global-finops' : isSubtree ? 'manager' : caller.role
   const scopeCaller = { role: scopeRole, regionId: caller.regionId }
   const usageScope = (regionCol: string, subtreeCol: string): SQL =>

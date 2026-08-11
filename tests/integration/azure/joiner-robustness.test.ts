@@ -62,7 +62,7 @@ beforeAll(async () => {
       VALUES ('${TEAM}', 'oid', 'dev@i.com',
               '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222');
     INSERT INTO project (id, code, code_hash, display_name, type, region_id, cost_owning_unit_id)
-      VALUES ('44444444-4444-4444-4444-444444444444', 'AFL-AII', 'h-afl-aii', 'AFL · AI Insights',
+      VALUES ('44444444-4444-4444-4444-444444444444', 'CSL-AII', 'h-afl-aii', 'Contoso League · AI Insights',
               'billable', '11111111-1111-1111-1111-111111111111',
               '22222222-2222-2222-2222-222222222222'),
              ('55555555-5555-5555-5555-555555555555', 'INT-PLT', 'h-int-plt', 'Internal Platform',
@@ -84,7 +84,7 @@ async function insertInstance(id: string, tool = 'claude-code'): Promise<void> {
        raw_project_code, tool, session_token_hash, ts_start, ts_actual_end,
        region_id, org_unit_id, cost_owning_unit_id)
     VALUES
-      ('${id}', 'oid', 'dev@i.com', '${TEAM}', 'h-afl-aii', 'AFL-AII',
+      ('${id}', 'oid', 'dev@i.com', '${TEAM}', 'h-afl-aii', 'CSL-AII',
        '${tool}', 'hash-${id}', '2026-05-24 09:00:00+00', '2026-05-24 09:30:00+00',
        '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
        '22222222-2222-2222-2222-222222222222');

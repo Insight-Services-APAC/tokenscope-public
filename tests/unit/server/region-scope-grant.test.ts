@@ -1,10 +1,12 @@
 // @vitest-environment node
 /*
- * Region absorbs Across — the landing invariant (04-prototype-delta.md §6/§7).
+ * Region absorbs Across — the landing invariant (04-prototype-delta.md §6/§7),
+ * re-grounded on the report-access GRANTS model (mig 0129) in place of the
+ * retired three-mode admin dial.
  *
- * THE INVARIANT, STATED POSITIVELY: every (visibility mode × role × cost-centre
- * ownership) combination resolves to EXACTLY ONE landing scope, and — when that
- * scope is Region — exactly one landing WIDTH. None resolves to zero.
+ * THE INVARIANT, STATED POSITIVELY: every (role × cost-centre ownership × held
+ * permission-subset) combination resolves to EXACTLY ONE landing scope, and —
+ * when that scope is Region — exactly one landing WIDTH. None resolves to zero.
  *
  * That is not a stylistic preference. Before the merge, Across-Regions and Regional
  * were separately-granted tabs, and the shell picked the first granted one. Deleting
@@ -14,20 +16,22 @@
  * blank page behind a tab that renders, not a 403, so nothing else in the stack
  * would report it.
  *
- * The assertions run over the FULL cross product (every mode × every role literal ×
- * both ownership states = 36), not just the six named personas, so a role that never
- * appears in the persona list still has to land somewhere.
+ * The assertions run over the FULL cross product (every role literal × both
+ * ownership states × all 4 permission subsets = 48), not just the six named
+ * personas, so a role that never appears in the persona list still has to land
+ * somewhere.
  */
 import { describe, it, expect } from 'vitest'
 import {
-  REPORT_VISIBILITY_MODES,
   REPORT_VISIBILITY_PERSONAS,
-  WHO_SEES_WHAT_REGION,
+  WHO_SEES_WHAT_REGION_BASELINE,
+  WHO_SEES_WHAT_REGION_ELEVATED,
   regionScopeGrant,
-  reportGrants,
+  effectiveReportGrants,
   grantsToScopes,
   type ReportScopeGrants,
   type RegionScopeGrant,
+  type ReportAccessPermission,
 } from '../../../shared/auth/report-visibility'
 import { REPORT_SCOPES, type ReportScope } from '../../../shared/reports/types'
 import { ROLES, type Role } from '../../../shared/auth/roles'
@@ -47,21 +51,29 @@ function landingScope(g: ReportScopeGrants): ReportScope | null {
   return REPORT_SCOPES.filter((s) => tabs[s])[0] ?? null
 }
 
-const EVERY_CALLER = REPORT_VISIBILITY_MODES.flatMap((mode) =>
-  ROLES.flatMap((role: Role) =>
-    [true, false].map((ownsCostCentre) => ({ mode, role, ownsCostCentre })),
+const PERMISSION_SUBSETS: ReportAccessPermission[][] = [
+  [],
+  ['operational'],
+  ['finance'],
+  ['operational', 'finance'],
+]
+
+const EVERY_CALLER = ROLES.flatMap((role: Role) =>
+  [true, false].flatMap((ownsCostCentre) =>
+    PERMISSION_SUBSETS.map((permissions) => ({ role, ownsCostCentre, permissions })),
   ),
 )
 
-describe('every (mode × role × ownership) lands on exactly one scope — never zero', () => {
-  for (const { mode, role, ownsCostCentre } of EVERY_CALLER) {
-    it(`${mode} × ${role} × owns=${ownsCostCentre}`, () => {
-      const g = reportGrants(mode, { role, ownsCostCentre })
+describe('every (role × ownership × permission-subset) lands on exactly one scope — never zero', () => {
+  for (const { role, ownsCostCentre, permissions } of EVERY_CALLER) {
+    it(`${role} × owns=${ownsCostCentre} × [${permissions.join(',')}]`, () => {
+      const g = effectiveReportGrants({ role, ownsCostCentre, permissions })
       const scope = landingScope(g)
+      const label = `${role}/owns=${ownsCostCentre}/[${permissions.join(',')}]`
 
       // NEVER ZERO. A caller with no granted scope at all has no reporting area to
       // open, which is the strand this merge could have created.
-      expect(scope, `${mode}/${role}/owns=${ownsCostCentre} has NO landing scope`).not.toBeNull()
+      expect(scope, `${label} has NO landing scope`).not.toBeNull()
 
       // EXACTLY ONE. `landingScope` returns the first, so the real assertion is that
       // the first is well-defined: it must be a scope this caller is actually granted.
@@ -79,9 +91,9 @@ describe('every (mode × role × ownership) lands on exactly one scope — never
 })
 
 describe('the Region tab always resolves exactly one landing WIDTH', () => {
-  for (const { mode, role, ownsCostCentre } of EVERY_CALLER) {
-    it(`${mode} × ${role} × owns=${ownsCostCentre}`, () => {
-      const rg = regionScopeGrant(reportGrants(mode, { role, ownsCostCentre }))
+  for (const { role, ownsCostCentre, permissions } of EVERY_CALLER) {
+    it(`${role} × owns=${ownsCostCentre} × [${permissions.join(',')}]`, () => {
+      const rg = regionScopeGrant(effectiveReportGrants({ role, ownsCostCentre, permissions }))
       if (rg.tab) {
         // One landing, and it is a width this caller may actually be served.
         expect(rg.landing).not.toBeNull()
@@ -98,28 +110,42 @@ describe('the Region tab always resolves exactly one landing WIDTH', () => {
   }
 })
 
-describe('regionScopeGrant — pinned to the hand-written WHO_SEES_WHAT_REGION matrix', () => {
-  for (const mode of REPORT_VISIBILITY_MODES) {
-    for (const persona of REPORT_VISIBILITY_PERSONAS) {
-      it(`${mode} × ${persona.key} matches the matrix`, () => {
-        const got = regionScopeGrant(
-          reportGrants(mode, { role: persona.role, ownsCostCentre: persona.ownsCostCentre }),
-        )
-        expect(got).toEqual(WHO_SEES_WHAT_REGION[mode][persona.key])
-      })
-    }
+describe('regionScopeGrant — pinned to the hand-written WHO_SEES_WHAT_REGION_BASELINE / _ELEVATED tables', () => {
+  for (const persona of REPORT_VISIBILITY_PERSONAS) {
+    it(`${persona.key} baseline matches the table`, () => {
+      const got = regionScopeGrant(baselineOf(persona.role, persona.ownsCostCentre))
+      expect(got).toEqual(WHO_SEES_WHAT_REGION_BASELINE[persona.key])
+    })
+
+    it(`${persona.key} elevated (both permissions) matches the table`, () => {
+      const got = regionScopeGrant(
+        effectiveReportGrants({
+          role: persona.role,
+          ownsCostCentre: persona.ownsCostCentre,
+          permissions: ['operational', 'finance'],
+        }),
+      )
+      expect(got).toEqual(WHO_SEES_WHAT_REGION_ELEVATED[persona.key])
+    })
   }
 
-  it('the matrix names a landing for EVERY cell — the §7 persona-matrix row', () => {
-    for (const mode of REPORT_VISIBILITY_MODES) {
-      for (const persona of REPORT_VISIBILITY_PERSONAS) {
-        const cell = WHO_SEES_WHAT_REGION[mode][persona.key]
-        expect(cell.tab, `${mode}/${persona.key} lost its Region tab`).toBe(true)
-        expect(cell.landing, `${mode}/${persona.key} has no landing`).not.toBeNull()
+  it('every cell in both tables names a landing — the §7 persona-matrix row', () => {
+    for (const persona of REPORT_VISIBILITY_PERSONAS) {
+      for (const table of [WHO_SEES_WHAT_REGION_BASELINE, WHO_SEES_WHAT_REGION_ELEVATED]) {
+        const cell = table[persona.key]
+        expect(cell.tab, `${persona.key} lost its Region tab`).toBe(true)
+        expect(cell.landing, `${persona.key} has no landing`).not.toBeNull()
       }
     }
   })
 })
+
+/** `baselineGrants` isn't imported here on purpose — `effectiveReportGrants` with
+ * an empty permission set IS the baseline (pinned by report-visibility.test.ts),
+ * so reusing it keeps this file's only dependency on the two producer functions. */
+function baselineOf(role: Role, ownsCostCentre: boolean): ReportScopeGrants {
+  return effectiveReportGrants({ role, ownsCostCentre, permissions: [] })
+}
 
 /*
  * The §6 grant table, transcribed. Each row is a caller's held grants and the
@@ -127,6 +153,10 @@ describe('regionScopeGrant — pinned to the hand-written WHO_SEES_WHAT_REGION m
  * three are the combinations today's role matrix never produces, pinned so the
  * mapping stays TOTAL — the point of the merge is that no held-grant combination is
  * left without an answer.
+ *
+ * UNCHANGED by the grants-model migration (mig 0129): this table exercises
+ * `regionScopeGrant` directly over raw `ReportScopeGrants` literals and never
+ * touches a mode or a permission.
  */
 const SELECTOR_TABLE: Array<{
   name: string
@@ -168,7 +198,7 @@ const SELECTOR_TABLE: Array<{
 describe('§6 grant table — the selector options ARE the grant', () => {
   for (const row of SELECTOR_TABLE) {
     it(row.name, () => {
-      const g: ReportScopeGrants = { ...row.grants, costCentre: false, finance: false }
+      const g: ReportScopeGrants = { ...row.grants, costCentre: false, finance: false, teammate: false, project: 'membership' }
       expect(regionScopeGrant(g)).toEqual(row.expected)
     })
   }
@@ -182,7 +212,7 @@ describe('§6 grant table — the selector options ARE the grant', () => {
 
   it('no option is offered that the grant does not back', () => {
     for (const row of SELECTOR_TABLE) {
-      const g: ReportScopeGrants = { ...row.grants, costCentre: false, finance: false }
+      const g: ReportScopeGrants = { ...row.grants, costCentre: false, finance: false, teammate: false, project: 'membership' }
       const rg = regionScopeGrant(g)
       // "All regions" IS `across` — never inferred from a regional grant.
       expect(rg.allRegions).toBe(g.across === true)
@@ -196,15 +226,14 @@ describe('§6 grant table — the selector options ARE the grant', () => {
 
 describe('grantsToScopes — ONE Region line, never a retired Across one', () => {
   it('never names a scope that no longer exists', () => {
-    for (const mode of REPORT_VISIBILITY_MODES) {
-      for (const persona of REPORT_VISIBILITY_PERSONAS) {
-        const scopes = grantsToScopes(
-          reportGrants(mode, { role: persona.role, ownsCostCentre: persona.ownsCostCentre }),
-        )
-        expect(scopes.join(' · ')).not.toMatch(/Across regions|Regional \(/)
-        // Exactly one Region line — the tab is one tab.
-        expect(scopes.filter((s) => s.startsWith('Region ')).length).toBe(1)
-      }
+    for (const { role, ownsCostCentre, permissions } of EVERY_CALLER) {
+      const scopes = grantsToScopes(effectiveReportGrants({ role, ownsCostCentre, permissions }))
+      expect(scopes.join(' · ')).not.toMatch(/Across regions|Regional \(/)
+      // Exactly one Region line — the tab is one tab. `baselineGrants` sets
+      // `regional: 'own-region'` on EVERY role's every arm (including the
+      // fail-closed default), and `unionGrants` only ever widens, so the
+      // Region tab is always present regardless of held permissions.
+      expect(scopes.filter((s) => s.startsWith('Region ')).length).toBe(1)
     }
   })
 

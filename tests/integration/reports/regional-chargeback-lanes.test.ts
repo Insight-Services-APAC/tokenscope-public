@@ -19,6 +19,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import regionalHandler from '../../../server/api/v1/reports/region/index.get'
 import trendHandler from '../../../server/api/v1/reports/region/trend.get'
@@ -80,6 +81,21 @@ beforeAll(async () => {
   }
   alice = await mkTeammate(regionA, unitA, 'alice@a.test')
   bob = await mkTeammate(regionB, unitB, 'bob@b.test')
+
+  /*
+   * mig 0129: `gfo()` is the ONLY session this file ever builds — its shared
+   * sentinel id ('00000000-0000-0000-0000-000000000009') is never reused for
+   * an admin/manager/developer persona here (unlike seasonality-active-trend
+   * .test.ts / regional.test.ts), so granting it directly is safe per the
+   * "no other role shares this id" rule. Needs a backing `teammate` row first
+   * (report_access_grant.teammate_id is a real FK) — this file never inserted
+   * one, since nothing previously needed it. Both permissions: 'operational'
+   * is what the cross-region `?region=` switch and the whole-company chargeback
+   * conservation checks below need.
+   */
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
+    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-gfo', 'gfo@a.test', 'GFO Caller', ${regionA}::uuid, ${unitA}::uuid, 'global-finops', true)`
+  await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   // Anthropic bill lane (actual_spend → v_finance_bill_chargeback): cent-odd
   // figures so the conservation checks are genuinely CENT-exact, split across

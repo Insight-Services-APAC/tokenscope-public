@@ -10,8 +10,8 @@
 
 /** Old settings anchor (fragment, sans '#') → new destination route. */
 export const SETTINGS_ANCHOR_REDIRECTS: Record<string, string> = {
-  'report-visibility': '/admin/policies/report-visibility',
-  reporting: '/admin/policies/report-visibility',
+  'report-visibility': '/admin/policies/report-access',
+  reporting: '/admin/policies/report-access',
   governance: '/admin/policies/detection-thresholds',
   'governance-dials': '/admin/policies/detection-thresholds',
   detection: '/admin/policies/detection-thresholds',

@@ -174,12 +174,18 @@ export type CostCentreDrillAxis = (typeof COST_CENTRE_DRILL_AXES)[number]
  */
 export async function fetchVisibleCostCentres(
   tx: Tx,
-  opts?: { unbounded?: boolean },
+  opts?: { unbounded?: boolean; ownerOnly?: boolean },
 ): Promise<VisibleCostCentre[]> {
-  // `unbounded` = reportGrants.costCentre === 'all' (an admin under a loosened policy
-  // mode, or a cost-centre owner under mode 3): every cost centre is visible. For a
-  // non-elevated caller the owner/subtree predicate is UNCHANGED (byte-identical to
-  // standard behaviour).
+  // `unbounded` = grants.costCentre === 'all' (an ACTIVE 'operational' report-access
+  // grant, mig 0129): every cost centre is visible. `ownerOnly` (A3) is the OTHER
+  // elevation shape: an ORG-WIDE role (global-finops/platform-admin) holding
+  // costCentre ONLY via its baseline ('owned-or-subtree', no 'operational' grant) —
+  // see costCentreScopeOpts (server/auth/report-scope.ts). orgSubtreeScopePredicate's
+  // GUC arm is unconditionally TRUE for role 'global-finops' (org-subtree-scope.ts:49),
+  // so admitting it here for this class would silently widen an ungranted org-wide
+  // caller to EVERY cost centre — `ownerOnly` uses the ownership arm ALONE instead.
+  // For every other caller the owner/subtree predicate is UNCHANGED (byte-identical
+  // to today's behaviour).
   // The ownership half, named once and used TWICE: as (half of) the visibility
   // gate, and as the `owned` flag on every row. One expression, so a centre can
   // never be visible-because-owned while reporting `owned: false`.
@@ -190,7 +196,9 @@ export async function fetchVisibleCostCentres(
           AND co.revoked_at IS NULL)`
   const scopeClause = opts?.unbounded
     ? sql`TRUE`
-    : sql`( ${orgSubtreeScopePredicate('ou')} OR ${ownerClause} )`
+    : opts?.ownerOnly
+      ? ownerClause
+      : sql`( ${orgSubtreeScopePredicate('ou')} OR ${ownerClause} )`
   const rows = await tx.execute<{
     id: string
     code: string
@@ -262,9 +270,18 @@ export async function resolveCostCentreDrill(
   tx: Tx,
   caller: CostCentreCaller,
   ccId: string,
-  opts?: { unbounded?: boolean },
+  opts?: { unbounded?: boolean; ownerOnly?: boolean },
 ): Promise<CostCentreRef> {
-  const scopeClause = opts?.unbounded ? sql`TRUE` : orgSubtreeScopePredicate('ou')
+  // See fetchVisibleCostCentres' comment (A3, mig 0129) for `ownerOnly` — the
+  // SAME seal, on the resource-anchored resolver: `FALSE` collapses the
+  // `( scopeClause OR ownerClause )` disjunction below to the ownership arm
+  // alone, rather than admitting orgSubtreeScopePredicate's unconditional
+  // 'global-finops' GUC arm for an org-wide caller with no 'operational' grant.
+  const scopeClause = opts?.unbounded
+    ? sql`TRUE`
+    : opts?.ownerOnly
+      ? sql`FALSE`
+      : orgSubtreeScopePredicate('ou')
   const ownerClause = sql`EXISTS (
     SELECT 1 FROM cou_owner co
     WHERE co.org_unit_id = ou.id

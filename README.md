@@ -31,6 +31,20 @@ gives every token an owner (a teammate), a claim (a project), and a home (a
 cost-owning unit) — and shows both the person's _usage_ and the organisation's
 _cost_ without ever letting the two be confused.
 
+## What it looks like
+
+All screenshots come from the synthetic demo estate — fictitious people,
+fictitious clients, data generated through the real ingestion pipeline.
+
+| | |
+|---|---|
+| **Developer dashboard** — month spend against budget, connect nudges, rolling velocity | **My usage** — where it went, quota pace, and what you could change |
+| ![Developer dashboard](docs/assets/screenshots/developer-dashboard.png) | ![My usage](docs/assets/screenshots/my-usage.png) |
+| **A project** — budget vs burn, per-model daily stack, every contributor | **Reporting** — the whole company, region by region, coverage made explicit |
+| ![Project page](docs/assets/screenshots/project.png) | ![Reporting, all regions](docs/assets/screenshots/reports-region.png) |
+| **Finance** — chargeback reconciling to the provider bill, to the cent | **Admin** — org setup, policies, and data-source operations in one place |
+| ![Finance pack](docs/assets/screenshots/reports-finance.png) | ![Admin overview](docs/assets/screenshots/admin.png) |
+
 ## The two lenses (why this isn't just a cost dashboard)
 
 TokenScope keeps two concerns rigorously separate — a discipline baked into the

@@ -8,7 +8,7 @@
  *   (cou_owner, project_assignment.role), never from the role enum.
  *
  * Seed state used: Owen Cole owns Practices Delta + Echo; Priya is PM
- * of AFL-AII (which has a current-month baseline allocation); Anil
+ * of CSL-AII (which has a current-month baseline allocation); Anil
  * (manager) owns nothing.
  */
 import { test, expect } from '@playwright/test'
@@ -43,16 +43,16 @@ test.describe.skip('CC owner — the P&L view (J3)', () => {
     await expect(page.locator('[data-testid="cost-centre-delta"]')).toBeVisible()
     await expect(page.locator('[data-testid="cost-centre-echo"]')).toBeVisible()
     // Lead projects render with the PM name from the assignment role.
-    await expect(page.locator('[data-testid="cc-project-AFL-AII"]')).toContainText('PM: Priya Iyer')
+    await expect(page.locator('[data-testid="cc-project-CSL-AII"]')).toContainText('PM: Priya Iyer')
   })
 
   test('nav shows My cost centres for the owner; drill-through reaches project detail', async ({ page }) => {
     await signIn(page, 'cc-owner')
     await expect(page.locator('nav a[href="/cost-centres"]')).toBeVisible()
-    await page.click('[data-testid="cc-project-AFL-AII"]')
-    await page.waitForURL(`${baseUrl}/projects/AFL-AII`)
+    await page.click('[data-testid="cc-project-CSL-AII"]')
+    await page.waitForURL(`${baseUrl}/projects/CSL-AII`)
     await expect(page.locator('[data-testid="project-dashboard"]')).toBeVisible()
-    // R2 F1: Owen is NOT a member of AFL-AII — he gets the project-health
+    // R2 F1: Owen is NOT a member of CSL-AII — he gets the project-health
     // aggregates but never the NAMED per-developer contribution rows
     // (PO principle #5: contribution shows to the team, not an observer).
     await expect(page.locator('[data-testid="team-card"]')).toBeVisible()
@@ -106,9 +106,9 @@ test.describe('Region admin — owner assignment (J4)', () => {
 })
 
 test.describe('PM — budget authority from the assignment role (J2/J5)', () => {
-  test('Priya (developer role, PM of AFL-AII) reaches the editor and appends a top-up', async ({ page }) => {
+  test('Priya (developer role, PM of CSL-AII) reaches the editor and appends a top-up', async ({ page }) => {
     await signIn(page, 'developer')
-    await page.goto(`${baseUrl}/projects/AFL-AII`)
+    await page.goto(`${baseUrl}/projects/CSL-AII`)
     await expect(page.locator('[data-testid="pm-manage-budget"]')).toBeVisible()
     await page.click('[data-testid="pm-manage-budget"]')
     await page.waitForURL(/\/allocations\//)
@@ -133,9 +133,9 @@ test.describe('PM — budget authority from the assignment role (J2/J5)', () => 
   })
 
   test('a plain member has no Manage budget affordance', async ({ page }) => {
-    // Anil is a member (not PM) of NAB-CIB.
+    // Anil is a member (not PM) of NWB-CIB.
     await signIn(page, 'manager')
-    await page.goto(`${baseUrl}/projects/NAB-CIB`)
+    await page.goto(`${baseUrl}/projects/NWB-CIB`)
     await expect(page.locator('[data-testid="project-dashboard"]')).toBeVisible()
     await expect(page.locator('[data-testid="pm-manage-budget"]')).toHaveCount(0)
   })

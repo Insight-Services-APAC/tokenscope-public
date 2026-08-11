@@ -29,6 +29,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { sql } from 'drizzle-orm'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import drillHandler from '../../../server/api/v1/reports/cost-centres/[ccId].get'
 import {
@@ -114,6 +115,15 @@ beforeAll(async () => {
 
   await t.client`INSERT INTO audit_event (event_type, actor_system, payload) VALUES ('seed', 'test', '{}'::jsonb)`
   const [{ id: auditId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM audit_event ORDER BY ts_recorded DESC LIMIT 1`
+
+  /*
+   * gfo()'s teammateId (mig 0129) — hardcoded inline, and the ONLY persona this
+   * file exercises via an HTTP handler, so a real backing row + a direct grant
+   * is safe: no admin/manager/developer/403 case shares this id.
+   */
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
+    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-gfo', 'gfo@p.test', 'GFO', ${regionId}::uuid, ${ccId}::uuid, 'global-finops', true)`
+  await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   for (let i = 0; i < PROJECT_COUNT; i++) {
     // Zero-padded so the LABEL sorts the same way a human reads it — a tie-break

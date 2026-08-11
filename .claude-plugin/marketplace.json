@@ -20,7 +20,7 @@
     {
       "name": "tokenscope-copilot",
       "description": "Attribute GitHub Copilot CLI token spend to projects via the TokenScope attribution platform.",
-      "version": "0.1.10",
+      "version": "0.1.11",
       "author": {
         "name": "Insight Services APAC"
       },

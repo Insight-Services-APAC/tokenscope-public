@@ -47,6 +47,7 @@ import type { BilledAxisArm, DriverRow } from '../../../shared/reports/types'
 import driversHandler from '../../../server/api/v1/reports/region/drivers.get'
 import exportHandler from '../../../server/api/v1/reports/export.get'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 
 let t: TestDb
@@ -189,6 +190,19 @@ beforeAll(async () => {
   }
   alice = await mkTeammate(regionA, unitA, 'billed-alice@x.test', 'Billed Alice')
   bob = await mkTeammate(regionB, unitB, 'billed-bob@x.test', 'Billed Bob')
+
+  /*
+   * mig 0129: `finops()` below (used against `driversHandler`/`exportHandler`
+   * with `region=all` widths) resolves to this DEDICATED sentinel id — the ONLY
+   * place in this file that id appears (grep confirms no other role/persona
+   * shares it). A real backing row is required for the `report_access_grant`
+   * FK; both permissions are granted so the whole-company width and the
+   * chargeback lane the tests below exercise keep working under the new
+   * per-teammate grants model.
+   */
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, is_active)
+    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-billed-finops', 'billed-finops@x.test', 'Billed Finops', ${regionA}::uuid, ${unitA}::uuid, true)`
+  await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   await t.client`INSERT INTO project (code, code_hash, display_name, type, region_id, cost_owning_unit_id)
     VALUES ('BD-ATLAS', 'h-bd-atlas', 'Atlas', 'billable', ${regionA}::uuid, ${unitA}::uuid)`

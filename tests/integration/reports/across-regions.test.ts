@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import acrossHandler from '../../../server/api/v1/reports/region/index.get'
 import acrossDriversHandler from '../../../server/api/v1/reports/region/drivers.get'
@@ -37,6 +38,17 @@ let unitAsub = '' // team 'a.sub' under a (region A)
 let unitB = '' // cost-owning practice 'b' (region B)
 let alice = ''
 let dave = ''
+/*
+ * mig 0129: a DEDICATED teammate for every 'global-finops' / 'platform-admin'
+ * session in this file — NEVER the shared sess() default sentinel
+ * ('00000000-0000-0000-0000-000000000009'), which the admin/manager/developer
+ * 403 loop below ALSO resolves to. Report-access grants are keyed on
+ * teammate_id alone, not on the `role` string handed to injectTestSession — so
+ * granting the shared sentinel would ALSO elevate every 403-expecting session
+ * built from it (see tests/integration/reports/regional.test.ts for the same
+ * fix, already committed).
+ */
+let acrossElevatedId = ''
 
 const ev = (session: Session, query = '') => {
   const url = '/x' + (query ? `?${query}` : '')
@@ -65,7 +77,7 @@ const evAll = (session: Session, query = '') =>
 const sess = (role: string, orgPath: string, regionId: string, teammateId = '00000000-0000-0000-0000-000000000009'): Session =>
   ({ teammateId, email: 'x@x.test', displayName: 'X', role, regionId, orgPath, issuedAt: new Date().toISOString() } as unknown as Session)
 
-const gfo = () => sess('global-finops', 'a', regionA)
+const gfo = () => sess('global-finops', 'a', regionA, acrossElevatedId)
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -187,6 +199,17 @@ beforeAll(async () => {
   await t.client`INSERT INTO actual_spend (teammate_id, date, tool, input_tokens, output_tokens, cost_usd, source, chargeback_exempt)
     VALUES (${ework}::uuid, '2026-08-05'::date, 'claude-code', 200, 200, 25, 'anthropic-analytics-api', false)`
 
+  // A SEPARATE, DEDICATED teammate for this file's 'global-finops'/'platform-admin'
+  // sessions (mig 0129) — see the `acrossElevatedId` declaration above for why it
+  // must NOT be the shared sentinel row. Granted BOTH permissions so every
+  // org-wide call below keeps its pre-mig-0129 (unconditional org-wide) reach —
+  // this file's own point is the whole-company scope mechanics, not the grants
+  // model itself.
+  await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
+    VALUES ('oid-finops-elevated', 'finops-elevated@a.test', 'Finops Elevated', ${regionA}::uuid, ${unitA}::uuid, 'global-finops', true)`
+  ;[{ id: acrossElevatedId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='finops-elevated@a.test'`
+  await grantReportAccess(t.client, acrossElevatedId)
+
   // Copilot pooled chargeback (region A, July) — folds into chargeable ONLY in chargeback mode.
   await t.client`INSERT INTO provider_enterprise (provider, external_id, display_name)
     VALUES ('github', 'ent-x', 'Enterprise X')`
@@ -296,7 +319,7 @@ describe('GET /reports/region (region=all) — RBAC (whole-company only)', () =>
     expect(gf.meta.coverage?.denominator).toBeNull()
     expect(gf.meta.coverage?.connected).toBe(0)
     expect(gf.meta.coverage?.nonConnected).toBe(0)
-    const pa = (await acrossHandler(evAll(sess('platform-admin', 'a', regionA), 'month=2026-07'))) as unknown as AcrossResp
+    const pa = (await acrossHandler(evAll(sess('platform-admin', 'a', regionA, acrossElevatedId), 'month=2026-07'))) as unknown as AcrossResp
     expect(pa.kpis.genuineUsd).toBe(58)
   })
 

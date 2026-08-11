@@ -65,11 +65,11 @@ describe('resolveRepoProjectCode', () => {
   })
 
   it('resolves from a committed YAML .tokenscope walked up from cwd', () => {
-    writeFileSync(join(dir, '.tokenscope'), 'project:\n  code: NAB-CIB\n')
+    writeFileSync(join(dir, '.tokenscope'), 'project:\n  code: NWB-CIB\n')
     const nested = join(dir, 'a', 'b')
     mkdirSync(nested, { recursive: true })
     const r = resolveRepoProjectCode({ arg: '', cwd: nested })
-    expect(r.code).toBe('NAB-CIB')
+    expect(r.code).toBe('NWB-CIB')
     expect(r.source).toBe('tokenscope')
     expect(r.tokenscopePath).toBe(join(dir, '.tokenscope'))
   })
@@ -113,7 +113,7 @@ describe('isSafeProjectCode / S1 fix 5 — parse-boundary charset validation', (
   })
 
   it('accepts ordinary alphanumeric-with-hyphen/underscore/dot codes', () => {
-    for (const code of ['TokenScope-MVP', 'NAB-CIB', 'ABC', 'foo_bar.baz', 'a'.repeat(64)]) {
+    for (const code of ['TokenScope-MVP', 'NWB-CIB', 'ABC', 'foo_bar.baz', 'a'.repeat(64)]) {
       expect(isSafeProjectCode(code)).toBe(true)
     }
   })

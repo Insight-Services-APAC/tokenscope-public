@@ -31,6 +31,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import type { OverSoftCap } from '#shared/reports/types'
 import drillHandler from '../../../server/api/v1/reports/cost-centres/[ccId].get'
@@ -184,6 +185,16 @@ beforeAll(async () => {
     await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, is_active)
       VALUES (${id}::uuid, 'oid-'||${email}, ${email}, ${email}, ${region}::uuid, ${root}::uuid, true)`
   }
+  /*
+   * mig 0129: `gfo()` resolves to '...0009' — the ONLY role/persona in this
+   * file that id backs (grep confirms '...000c' backs the SEPARATE 'outsider'
+   * manager persona below, which must stay UNELEVATED — its own test asserts a
+   * 403, and a manager already holds cost-centre access via baselineGrants
+   * regardless, so it needs no grant here). Both permissions are granted to
+   * '...0009' so the cost-centre drill + export the tests below exercise keep
+   * working under the new per-teammate grants model.
+   */
+  await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   const mkTeammate = async (unit: string, name: string, active = true) => {
     await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, is_active)

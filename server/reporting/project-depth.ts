@@ -35,6 +35,7 @@ import type { Session } from '../utils/auth'
 import type { ReportScopeGrants } from '../../shared/auth/report-visibility'
 import { namedContributionRow, teammateDrillAdmission } from '../../shared/auth/report-visibility'
 import { orgSubtreeScopePredicate } from '../auth/org-subtree-scope'
+import { costCentreScopeOpts } from '../auth/report-scope'
 import { scopeSql, type UsageScope } from './engine/scope'
 import { TEAMMATE_DRILL_FACTS_AGG, teammateDrillFacts } from './teammate-drill-facts'
 import type { UsageWindow } from './params'
@@ -119,19 +120,32 @@ function forbid(): never {
  * `null` for a caller whose grants are region-wide — there is no clamp, and
  * expressing "everyone" as a `TRUE` predicate would make the two cases
  * indistinguishable in the cache key.
+ *
+ * `ownerOnly` (costCentreScopeOpts) drops the subtree arm: for an org-wide
+ * role the GUC predicate's `'global-finops'` disjunct is unconditionally TRUE
+ * (org-subtree-scope.ts:49, request-rls.ts:33 maps platform-admin onto it), so
+ * an UNGRANTED org-wide caller holding project depth solely via cou_owner
+ * would otherwise collapse this clause to TRUE and read any project in the
+ * company. Same seal the Business-Unit resolvers apply.
  */
-export function viewerPeopleScope(grants: ReportScopeGrants, alias: string): SQL | null {
+export function viewerPeopleScope(
+  grants: ReportScopeGrants,
+  alias: string,
+  opts?: { ownerOnly?: boolean },
+): SQL | null {
   if (grants.project === 'region-wide' || grants.costCentre === 'all') return null
-  return sql`(
-    ${orgSubtreeScopePredicate(alias)}
-    OR EXISTS (
+  const ownerArm = sql`EXISTS (
       SELECT 1 FROM cou_owner co
       JOIN org_unit owned ON owned.id = co.org_unit_id
       WHERE co.teammate_id = NULLIF(current_setting('app.user_teammate_id', true), '')::uuid
         AND co.revoked_at IS NULL
         AND ${sql.raw(`${alias}.path`)} <@ owned.path
         AND ${sql.raw(`${alias}.region_id`)} = owned.region_id
-    )
+    )`
+  if (opts?.ownerOnly) return sql`(${ownerArm})`
+  return sql`(
+    ${orgSubtreeScopePredicate(alias)}
+    OR ${ownerArm}
   )`
 }
 
@@ -148,12 +162,13 @@ export function viewerPeopleScope(grants: ReportScopeGrants, alias: string): SQL
  */
 export async function resolveProjectReportsAdmission(
   tx: Tx,
-  _session: Session,
+  session: Session,
   grants: ReportScopeGrants,
   code: string,
 ): Promise<ProjectReportsAdmission> {
   if (grants.project !== 'region-wide' && grants.project !== 'member-in-scope') forbid()
-  const peopleScope = viewerPeopleScope(grants, 'ou')
+  const { ownerOnly } = costCentreScopeOpts(session, grants)
+  const peopleScope = viewerPeopleScope(grants, 'ou', { ownerOnly })
 
   const memberClause =
     peopleScope == null
@@ -181,7 +196,12 @@ export async function resolveProjectReportsAdmission(
   // WHICH roots define the scope, not merely THAT there is one (r3-H1). Resolved
   // in the same live authz transaction as the admission above, so a revocation
   // re-keys on the very next request rather than at TTL expiry.
-  const roots = peopleScope == null ? 'all' : `scoped:${await ownershipRootFingerprint(tx)}`
+  // Owner-only scope keys distinctly from subtree scope: the same teammate can
+  // move between the two classes (role change) inside one cache TTL.
+  const roots =
+    peopleScope == null
+      ? 'all'
+      : `${ownerOnly ? 'owner' : 'scoped'}:${await ownershipRootFingerprint(tx)}`
   return {
     project: { id: p!.id, code: p!.code, displayName: p!.display_name, regionId: p!.region_id },
     peopleScope,

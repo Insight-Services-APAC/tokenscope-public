@@ -24,6 +24,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { injectTestSession } from '../../helpers/auth'
+import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
 import ccDrillHandler from '../../../server/api/v1/reports/cost-centres/[ccId].get'
 import regionDrivers from '../../../server/api/v1/reports/region/drivers.get'
@@ -83,6 +84,18 @@ beforeAll(async () => {
   await t.client`INSERT INTO org_unit (region_id, path, code, display_name, unit_type, is_cost_owning_unit)
     VALUES (${regionId}::uuid, 'd'::ltree, 'd', 'Practice D', 'bu', true)`
   ;[{ id: ccId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM org_unit WHERE code='d'`
+
+  /*
+   * mig 0129: `gfo()` below resolves to this DEDICATED sentinel id — the ONLY
+   * place in this file that id appears (grep confirms no other role/persona
+   * shares it). A real backing row is required for the `report_access_grant`
+   * FK; both permissions are granted so the whole-company (`region=all`) width
+   * and the cost-centre drill the tests below exercise keep working under the
+   * new per-teammate grants model.
+   */
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, is_active)
+    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-da-finops', 'g@a.test', 'G Finops', ${regionId}::uuid, ${ccId}::uuid, true)`
+  await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
   await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, is_active)
     VALUES ('oid-d', 'dana@d.test', 'Dana', ${regionId}::uuid, ${ccId}::uuid, true)`
   const [{ id: dana }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='dana@d.test'`
