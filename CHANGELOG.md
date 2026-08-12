@@ -1,10 +1,17 @@
 # Changelog
 
 Reader-facing release notes for TokenScope. Each entry is one line: what
-changed, as a user of the product would describe it. The `Unreleased` section
-accumulates between public snapshots; `tools/publish/publish.sh --push` stamps
-it with the snapshot date. Every code PR adds its line here in the same change
-(a pre-PR gate reminds you; see `tools/publish/README.md`).
+changed, as a user of the product would describe it. Entries accumulate under
+`Unreleased`; each dated section below is one public snapshot. (Maintainers:
+the publish tooling stamps the heading and a pre-PR gate reminds you to add
+the line — see the internal `tools/publish/README.md`, which is not part of
+the public mirror.)
+
+## 2026-08-12 (snapshot 3c430d2f)
+
+- The project site's landing page shows the six product screenshots (they were
+  README-only, and the site builds from the docs folder where they never
+  appeared).
 
 ## 2026-08-11 (snapshot 71467f44)
 

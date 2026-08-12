@@ -64,6 +64,18 @@
     .analogy .card:last-child{border-radius:0 0 var(--radius) var(--radius)}
     .analogy .mid{writing-mode:horizontal-tb;padding:8px}}
 
+  /* screenshots */
+  .shots{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:28px}
+  .shot{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    overflow:hidden;display:flex;flex-direction:column}
+  .shot a{display:block;line-height:0;border-bottom:1px solid var(--line)}
+  .shot img{width:100%;height:auto;display:block}
+  .shot figcaption{padding:14px 18px}
+  .shot b{display:block;color:var(--ink);font-size:.95rem}
+  .shot span{color:var(--muted);font-size:.88rem;line-height:1.5}
+  .shots-note{color:var(--faint);font-size:.85rem;margin-top:16px;text-align:center}
+  @media (max-width:760px){.shots{grid-template-columns:1fr}}
+
   section{padding:64px 0;border-top:1px solid var(--line)}
   h2{font-size:clamp(1.5rem,3.2vw,2rem);letter-spacing:-.01em;margin:.2em 0 .3em}
   .lead{color:var(--muted);max-width:680px;font-size:1.05rem}
@@ -131,6 +143,42 @@
         <small>An AI developer emits tokens. Tokens attribute to a project. The project has a token budget. The same manager watches the same burn — and tops it up the same way.</small>
       </div>
     </div>
+  </div>
+</section>
+
+<section id="screens">
+  <div class="wrap">
+    <span class="ey">What it looks like</span>
+    <h2>Six surfaces, one paradigm</h2>
+    <p class="lead">Captured from the synthetic demo estate — fictitious people, fictitious clients,
+      data generated through the real ingestion pipeline.</p>
+    <div class="shots">
+      <figure class="shot">
+        <a href="assets/screenshots/developer-dashboard.png"><img src="assets/screenshots/developer-dashboard.png" alt="Developer dashboard" loading="lazy"></a>
+        <figcaption><b>Developer dashboard</b><span>Month spend against budget, connect nudges, rolling velocity.</span></figcaption>
+      </figure>
+      <figure class="shot">
+        <a href="assets/screenshots/my-usage.png"><img src="assets/screenshots/my-usage.png" alt="My usage" loading="lazy"></a>
+        <figcaption><b>My usage</b><span>Where it went, quota pace, and what you could change.</span></figcaption>
+      </figure>
+      <figure class="shot">
+        <a href="assets/screenshots/project.png"><img src="assets/screenshots/project.png" alt="Project page" loading="lazy"></a>
+        <figcaption><b>A project</b><span>Budget vs burn, per-model daily stack, every contributor.</span></figcaption>
+      </figure>
+      <figure class="shot">
+        <a href="assets/screenshots/reports-region.png"><img src="assets/screenshots/reports-region.png" alt="Reporting, all regions" loading="lazy"></a>
+        <figcaption><b>Reporting</b><span>The whole company, region by region, coverage made explicit.</span></figcaption>
+      </figure>
+      <figure class="shot">
+        <a href="assets/screenshots/reports-finance.png"><img src="assets/screenshots/reports-finance.png" alt="Finance pack" loading="lazy"></a>
+        <figcaption><b>Finance</b><span>Chargeback reconciling to the provider bill, to the cent.</span></figcaption>
+      </figure>
+      <figure class="shot">
+        <a href="assets/screenshots/admin.png"><img src="assets/screenshots/admin.png" alt="Admin overview" loading="lazy"></a>
+        <figcaption><b>Admin</b><span>Org setup, policies, and data-source operations in one place.</span></figcaption>
+      </figure>
+    </div>
+    <p class="shots-note">Every figure above is synthetic, and every card is real product behaviour.</p>
   </div>
 </section>
 
