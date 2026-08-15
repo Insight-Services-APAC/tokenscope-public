@@ -7,6 +7,13 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-08-15 (snapshot cd9e2ff0)
+
+- The published repository's own test suite and checks now pass on a fresh
+  clone. Four of them read files that are internal-only and therefore absent
+  here, so they failed on every published snapshot; they now skip where the
+  source they check does not exist, and still fail wherever it does.
+
 ## 2026-08-15 (snapshot 8cafda19)
 
 - Security hardening round 2: a manager can no longer reach another region's

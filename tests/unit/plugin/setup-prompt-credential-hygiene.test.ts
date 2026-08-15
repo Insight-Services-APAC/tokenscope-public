@@ -29,7 +29,7 @@
  *   5. copilot-plugin/skills/tokenscope-setup/SKILL.md (Copilot lane)
  */
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { SKILL_SETUP } from '../../../server/utils/skill-prompts.gen'
 
@@ -60,12 +60,40 @@ function provisionEmitDeclaration(): string {
   return src.slice(start, end)
 }
 
+/*
+ * Surface 2 is the ONLY one of the five that is internal-only.
+ * `docs/skills/` is dropped from the public mirror
+ * (tools/publish/internal-only-paths.txt), so reading it there threw ENOENT and
+ * failed this file on every published release.
+ *
+ * Drop that ONE surface when its source directory is absent rather than skipping
+ * the whole suite — the other four still ship and still get asserted. Nothing is lost
+ * publicly either, because surface 3 (`SKILL_SETUP`) is this file's GENERATED
+ * twin: it is produced from exactly this markdown and it is what the MCP server
+ * actually serves, so the prose guarantee stays pinned on the copy that ships.
+ * Internally the file is tracked and all five are checked, as before.
+ */
+const SKILL_SOURCE_MD = 'docs/skills/tokenscope/tokenscope-setup.md'
+/*
+ * Keyed on the DIRECTORY, not on the markdown file — deliberately, and the same
+ * condition check-skill-prompts-sync.mjs uses. Keying on the file would make a
+ * DELETED prompt look identical to the public mirror's dropped directory, so an
+ * internal deletion would silently drop this surface instead of failing. With the
+ * directory as the condition, a tree that has it but is missing the file lets
+ * `read()` throw, loudly, which is what should happen.
+ */
+const HAS_SKILL_SOURCE = existsSync(join(root, 'docs/skills/tokenscope'))
+
 const SURFACES: Array<{ label: string; text: () => string }> = [
   { label: 'plugin/commands/setup.md (Claude client copy)', text: () => read('plugin/commands/setup.md') },
-  {
-    label: 'docs/skills/tokenscope/tokenscope-setup.md (server skill source)',
-    text: () => read('docs/skills/tokenscope/tokenscope-setup.md'),
-  },
+  ...(HAS_SKILL_SOURCE
+    ? [
+        {
+          label: `${SKILL_SOURCE_MD} (server skill source)`,
+          text: () => read(SKILL_SOURCE_MD),
+        },
+      ]
+    : []),
   { label: 'SKILL_SETUP (generated, served over MCP)', text: () => SKILL_SETUP },
   { label: 'mcp.ts provision_emit descriptions', text: provisionEmitDeclaration },
   {
@@ -119,8 +147,11 @@ describe('the SERVER skill copy carries the round-1 S1 prose fix too', () => {
    * ships to every MCP client, including Copilot CLI. Pin both halves here so the
    * pair can't drift apart again.
    */
-  it('the skill source no longer defers to "the authoritative command"', () => {
-    expect(read('docs/skills/tokenscope/tokenscope-setup.md')).not.toMatch(/authoritative command/i)
+  // `.skipIf` for the same reason surface 2 is conditional above: this markdown
+  // is internal-only and absent from the published mirror. Its GENERATED twin is
+  // asserted immediately below and does ship, so the pair is still pinned there.
+  it.skipIf(!HAS_SKILL_SOURCE)('the skill source no longer defers to "the authoritative command"', () => {
+    expect(read(SKILL_SOURCE_MD)).not.toMatch(/authoritative command/i)
   })
 
   it('the generated prompt no longer defers to "the authoritative command"', () => {
