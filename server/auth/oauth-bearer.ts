@@ -7,7 +7,9 @@
  *   1. Bearer header present + parseable.
  *   2. Token hash matches a live oauth_token row (not revoked, not expired).
  *   3. Optional required scope is present in the granted scope set.
- *   4. ADR-0005 E2 revocation cascade: the bound teammate must NOT have been
+ *   4. DEACTIVATION: the bound teammate must be `is_active = true`. Unlike (5)
+ *      this is a durable STATE with no timestamp comparison — see below.
+ *   5. ADR-0005 E2 revocation cascade: the bound teammate must NOT have been
  *      revoked AFTER the token was issued (teammate.revoked_at > access_issued_at),
  *      AND must still exist. This is the emit-path analogue of isRevoked() —
  *      `bearer.get.ts` historically never checked teammate.revoked_at.
@@ -72,6 +74,7 @@ interface TokenJoinRow extends Record<string, unknown> {
   token_revoked_at: string | Date | null
   access_issued_at: string | Date
   teammate_revoked_at: string | Date | null
+  teammate_is_active: boolean | null
   is_current: boolean
   prev_in_grace: boolean | null
   instance_id: string | null
@@ -185,6 +188,7 @@ export async function requireOAuthBearer(
            t.revoked_at              AS token_revoked_at,
            t.access_issued_at        AS access_issued_at,
            tm.revoked_at             AS teammate_revoked_at,
+           tm.is_active              AS teammate_is_active,
            t.instance_id::text       AS instance_id,
            t.client_id::text         AS client_id,
            (t.access_token_hash = ${accessHash}) AS is_current,
@@ -224,6 +228,28 @@ export async function requireOAuthBearer(
     if (row.prev_in_grace !== true) {
       bearerError(event, 'invalid_token', 'Bearer token has expired')
     }
+  }
+
+  // DEACTIVATION — the durable axis, and NOT the same shape as the E2 check
+  // below. `is_active = false` denies EVERY credential for that teammate,
+  // existing or freshly minted, with no timestamp comparison: there is no
+  // "after" to be on the right side of, because the account is retired.
+  //
+  // Why this has to be here and not only on the cookie path: the
+  // privileged-identity-cleanup worker's ONLY identity mutation is
+  // `UPDATE teammate SET is_active = FALSE`
+  // (server/workers/privileged-identity-cleanup.ts) — it never touches
+  // revoked_at — so the E2 comparison below can never fire for a cleaned
+  // account. isRevoked() (server/utils/auth.ts) closed that hole for the
+  // COOKIE session; this closes it for the credential that actually carries
+  // telemetry. Without it a deactivated teammate keeps a valid unexpired
+  // access token across every requireOAuthBearer consumer — the four
+  // /instances/{id}/* emit routes and the MCP endpoint.
+  //
+  // FAIL CLOSED: the test is `!== true`, so NULL (not expected — mig 0001
+  // declares the column NOT NULL DEFAULT TRUE) or an absent field denies.
+  if (row.teammate_is_active !== true) {
+    bearerError(event, 'invalid_token', 'The teammate bound to this token has been deactivated')
   }
 
   // ADR-0005 E2 — teammate revoked AFTER the token was issued ⇒ reject. A

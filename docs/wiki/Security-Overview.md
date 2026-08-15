@@ -102,9 +102,9 @@ flowchart TB
 
 | Domain | Mechanism (Today) | Notes |
 |---|---|---|
-| **AuthN — browser** | Entra OIDC (`nuxt-oidc-auth`) cookie + per-request DB enrichment | Only path that reads "my data" or changes attribution; revocation honoured against `revoked_at` |
+| **AuthN — browser** | Entra OIDC (`nuxt-oidc-auth`) cookie + per-request DB enrichment | Only path that reads "my data" or changes attribution; revocation honoured against `revoked_at`, and a teammate with `is_active = false` resolves no session at all |
 | **AuthN — telemetry** | App-level **Managed Identity** bearer | Write-only to one DCR; same token every session; Azure never sees a TokenScope token |
-| **AuthN — MCP/CLI** | **OAuth 2.1** PKCE (read/tag); one-time **emit handoff** (handoff-is-auth) for device provisioning | Tokens HMAC-hashed at rest; non-rotating refresh (revoke is the control); handoff single-use via atomic conditional `UPDATE`, ~5-min TTL; durable emit secret redeemed process→server, never through the LLM. An emit credential is checked against its bound `instance_id` **at use** on every instance-scoped route, not only at mint |
+| **AuthN — MCP/CLI** | **OAuth 2.1** PKCE (read/tag); one-time **emit handoff** (handoff-is-auth) for device provisioning | Tokens HMAC-hashed at rest; non-rotating refresh (revoke is the control); handoff single-use via atomic conditional `UPDATE`, ~5-min TTL; durable emit secret redeemed process→server, never through the LLM. An emit credential is checked against its bound `instance_id` **at use** on every instance-scoped route, not only at mint. Deactivation (`teammate.is_active = false`) refuses bearer validation, refresh, code exchange and issuance alike, so no credential survives it and none is minted after it |
 | **AuthN — internal** | **HMAC-SHA256** worker-trigger signature | Key separate from session key (blast-radius isolation); constant-time compare; uniform 401 |
 | **AuthZ — roles** | **RBAC** — 5 assignable roles: developer / manager / admin ("Region admin") / global-finops ("Global finance") / platform-admin. A 6th enum member, `finance`, is **retired/unassignable** (excluded from `SELECTABLE_ROLES`, kept only for historical rows) | `requireRole` + `requireRegionScope`; `platform-admin` short-circuits |
 | **AuthZ — data scope** | App-level scope predicates **+ Postgres RLS** (defence-in-depth) | App predicates are the **live** gate; RLS policies are shipped, role-converged and mirror the app predicates, but remain **inert** under the owner connection (see R2) |
@@ -258,13 +258,15 @@ scale-out beyond the dogfood/beta footprint.
       workflow `--parameters` overrides that currently beat the bicepparam. The
       fail-closed code half is shipped; **no environment sets either value**.
       `/api/health` must stay excluded or ACA's probe restart-loops the replicas.
-- [ ] **Pin `appPublicOrigin` in sandbox / staging / production** — only dev pins it
-      today, so the other three derive their public origin from forwarded headers.
-      The origin is baked into every device's durable emit credential, the OAuth
-      issuer and the MCP `WWW-Authenticate` challenge, so a wrong-but-valid value is
-      a silent fleet-wide outage with 2xx-looking symptoms. Set it, verify
-      `/.well-known/oauth-authorization-server` per environment, then make a missing
-      pin fail closed in a deployed env.
+- [ ] **Make a missing `appPublicOrigin` fail closed in a deployed env** — `dev` is
+      the only environment this repo deploys and the only parameter file that pins
+      the value; an environment stood up from the `example-*` templates derives its
+      public origin from forwarded headers instead. The origin is baked into every
+      device's durable emit credential, the OAuth issuer and the MCP
+      `WWW-Authenticate` challenge, so a wrong-but-valid value is a silent
+      fleet-wide outage with 2xx-looking symptoms. Any new environment must pin it,
+      verify `/.well-known/oauth-authorization-server`, and the missing-pin case
+      must then refuse to boot rather than guess.
 - [ ] **Per-worker Managed Identity separation** — split the shared app MI as worker scope grows.
 - [ ] **Split the deploy identity off the infra service principal** — `deploy.yml`
       and `infra.yml` federate the same client id, and that principal holds **Owner**

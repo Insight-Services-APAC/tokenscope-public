@@ -50,6 +50,38 @@ function redirectResult(event: H3Event, url: string) {
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
   const session = await requireAuth(event)
+
+  // GUARD-RAIL, not a fix for a live hole. `impersonatorOid` is set only when
+  // the session is an ASSUMED identity — written at exactly two sites
+  // (server/utils/auth.ts:303, :343) from the persona-override cookie. An
+  // OAuth consent mints a teammate-bound auth code that becomes a durable
+  // access/refresh token, so granting one on an assumed identity would hand
+  // the impersonator a credential that outlives the impersonation and carries
+  // the impersonated teammate's identity with nothing on it recording that a
+  // human never consented.
+  //
+  // This CANNOT fire today: persona override is double-gated on the
+  // {local, sandbox} demo-capable allowlist (shared/env/deploy-env.ts:27) AND
+  // NUXT_ALLOW_PERSONA_OVERRIDE, and `dev` — the only environment that
+  // authenticates — is in neither. The check exists so the property still
+  // holds IF persona override is ever enabled on a real environment.
+  //
+  // Refused BEFORE the client/redirect_uri lookup deliberately: this returns a
+  // JSON 403 rather than redirecting, so it cannot become an open-redirect,
+  // and refusing first means no code is issued and no DB work happens.
+  if (session.impersonatorOid) {
+    consola.warn('[oauth:authorize.post] refused — assumed identity', {
+      teammateId: session.teammateId,
+      impersonatorOid: session.impersonatorOid,
+    })
+    return jsonError(
+      event,
+      'access_denied',
+      'Authorization cannot be granted while acting as another user. Stop impersonating and sign in as yourself to connect a client.',
+      403,
+    )
+  }
+
   const body = await readValidatedBody(event, (d) => authorizeBodySchema.parse(d))
 
   if (body.response_type && body.response_type !== 'code') {

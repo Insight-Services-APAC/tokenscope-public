@@ -106,11 +106,20 @@ describe('command-frontmatter — $ARGUMENTS is never interpolated unsafely for 
 describe('command-frontmatter — setup.md step 4 is a FIXED command, not the old "authoritative tool response" prose', () => {
   it('the documented redeem invocation passes only --handoff-code — never --redeem-url or --api-base', () => {
     const content = readFileSync(join(COMMANDS_DIR, 'setup.md'), 'utf8')
-    const [block] = fencedBashBlocks(content)
-    expect(block, 'setup.md has no fenced bash block for the redeem command').toBeDefined()
-    expect(block).toContain('--handoff-code')
-    expect(block).not.toContain('--redeem-url')
-    expect(block).not.toContain('--api-base')
+    // Select the redeem block by IDENTITY, not by position. setup.md now opens
+    // with the device-id.mjs block (S16b — step 2 asks the credential-free
+    // helper for the instance id instead of telling the model to open
+    // ~/.claude/settings.json, which holds the durable emit credential), so
+    // "the first fenced block" is no longer the redeem command.
+    const blocks = fencedBashBlocks(content).filter((b) => b.includes('claude-redeem.mjs'))
+    expect(blocks, 'setup.md documents no claude-redeem.mjs invocation').toHaveLength(1)
+    expect(blocks[0]).toContain('--handoff-code')
+    // Checked across EVERY block, not just the redeem one: the grant is scoped to
+    // the script, so a stray --api-base in any documented invocation is reachable.
+    for (const block of fencedBashBlocks(content)) {
+      expect(block).not.toContain('--redeem-url')
+      expect(block).not.toContain('--api-base')
+    }
   })
 
   it('no longer defers to "the tool response is the authoritative command"', () => {

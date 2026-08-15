@@ -21,7 +21,6 @@
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 // endpoint-guard.mjs (S1/S2) — the ONE endpoint validator, vendored verbatim
 // (see scripts/sync-copilot-plugin.mjs). Do not write a second one; mirrors
@@ -29,6 +28,9 @@ import { fileURLToPath } from 'node:url'
 // DELIBERATELY separate, non-vendored implementation — see version-sync.test.ts's
 // DELIBERATELY_NOT_VENDORED — but the fix shape is the same).
 import { assertSafeEndpoint } from './endpoint-guard.mjs'
+// real-home.mjs — the ONE answer to "where is the account's home", vendored verbatim
+// like endpoint-guard.mjs. See stateDir() below.
+import { realHome } from './real-home.mjs'
 
 const TIMEOUT_MS = 4000
 
@@ -40,9 +42,19 @@ function readJson(p) {
   }
 }
 
-/** The TokenScope state dir (TOKENSCOPE_STATE_DIR or ~/.tokenscope). */
+/**
+ * The TokenScope state dir: a `TOKENSCOPE_STATE_DIR` pin first, else `~/.tokenscope`
+ * under the PASSWD home — the one resolution `copilot-forwarder.mjs`, `enroll.mjs`,
+ * `status.mjs` and `copilot-redeem.mjs`'s `TOKENSCOPE_DIR` all share.
+ *
+ * `realHome()`, not `homedir()`: this reads `config.json` (which holds
+ * `oauth_refresh_token`) for the instance id and the bearer endpoint it derives the
+ * health URL from, so a leaked or model-set `HOME` would otherwise choose which
+ * device's identity is checked and which host is asked — and, absent a planted file,
+ * would simply report a healthy device as "not configured".
+ */
 export function stateDir() {
-  return (process.env.TOKENSCOPE_STATE_DIR ?? '').trim() || join(homedir(), '.tokenscope')
+  return (process.env.TOKENSCOPE_STATE_DIR ?? '').trim() || join(realHome(), '.tokenscope')
 }
 
 /**

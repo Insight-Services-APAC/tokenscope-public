@@ -969,3 +969,135 @@ describe('JIT teammate creator (resolveOrCreateTeammate)', () => {
     expect(result.created).toBe(false) // fast-path returned it, no exclusion query
   })
 })
+
+describe('POST /api/v1/oauth/authorize refuses an assumed identity', () => {
+  // An OAuth consent mints a teammate-bound auth code that a client exchanges
+  // for a durable access/refresh token. Granting one while impersonating would
+  // hand the impersonator a credential that outlives the impersonation and
+  // carries the impersonated teammate's identity. This is a GUARD-RAIL: the
+  // persona override is double-gated ({local, sandbox} + NUXT_ALLOW_PERSONA_
+  // OVERRIDE) and cannot fire on dev, the only environment that authenticates.
+  // These assertions hold the property if that ever changes.
+  const REDIRECT_URI = 'http://127.0.0.1:57621/callback'
+  let clientId: string
+
+  beforeAll(async () => {
+    // Only the APPROVE path needs this (issueAuthCode HMACs the code). The
+    // refusal tests below pass without it — which is itself evidence the guard
+    // short-circuits before any code is minted.
+    process.env.NUXT_HMAC_SESSION_KEY = 'persona-guard-hmac-key-padded-well-beyond-32-chars'
+    const [row] = await t.db
+      .insert(schema.oauthClient)
+      .values({
+        clientSecretHash: 'not-used-on-this-path',
+        clientName: 'Persona Guard Test Client',
+        redirectUris: [REDIRECT_URI],
+      })
+      .returning()
+    clientId = row!.clientId
+  })
+
+  async function loadAuthorizeHandler() {
+    return (
+      await import('../../../server/api/v1/oauth/authorize.post')
+    ).default as (event: unknown) => Promise<unknown>
+  }
+
+  // No Origin header → assertSameOrigin treats this as a non-browser call and
+  // allows it, so these assertions isolate the impersonation guard. CSRF is
+  // covered by tests/integration/auth/csrf.test.ts.
+  function oauthEvent(session: Session) {
+    const body = {
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: REDIRECT_URI,
+      // A real S256 challenge shape (43-128 chars, base64url charset).
+      code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM',
+      code_challenge_method: 'S256',
+      scope: 'tokenscope.read',
+      state: 'persona-guard-state-0123456789',
+      action: 'approve',
+    }
+    const headers: Record<string, string> = { host: 'localhost:3450' }
+    const e = {
+      method: 'POST',
+      path: '/api/v1/oauth/authorize',
+      context: { params: {} },
+      node: {
+        req: {
+          method: 'POST',
+          url: '/api/v1/oauth/authorize',
+          body,
+          socket: { remoteAddress: '127.0.0.1' },
+          get headers() {
+            return { ...headers, 'content-type': 'application/json' }
+          },
+        },
+        res: {
+          _headers: {} as Record<string, string | string[]>,
+          _ended: false,
+          statusCode: 200,
+          getHeader(n: string) { return this._headers[n.toLowerCase()] },
+          setHeader(n: string, v: string | string[]) { this._headers[n.toLowerCase()] = v },
+          removeHeader(n: string) { this._headers[n.toLowerCase()] = '' },
+          appendHeader(n: string, v: string | string[]) { this._headers[n.toLowerCase()] = v },
+          write() { return true },
+          end() { this._ended = true; return this },
+          get headersSent() { return this._ended },
+        },
+      },
+    }
+    injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], session)
+    return e
+  }
+
+  const normalSession = (): Session =>
+    ({
+      teammateId: priyaId,
+      email: 'demo-priya.iyer@example.com',
+      displayName: 'Priya Iyer',
+      role: 'developer',
+      regionId,
+      orgPath: 'apac.svc',
+    }) as Session
+
+  const assumedSession = (): Session =>
+    ({ ...normalSession(), impersonatorOid: LENA_OID }) as Session
+
+  it('refuses with 403 access_denied when impersonatorOid is set', async () => {
+    const handler = await loadAuthorizeHandler()
+    const e = oauthEvent(assumedSession())
+    const out = (await handler(e)) as { error: string; error_description: string }
+
+    // 403, not 500 and not a redirect — a refusal the consent page can render.
+    expect(e.node.res.statusCode).toBe(403)
+    expect(out.error).toBe('access_denied')
+    expect(out.error_description).toMatch(/acting as another user/i)
+    // Fail-CLOSED: no redirect was issued, so no code can have leaked to the
+    // client's redirect_uri.
+    expect(e.node.res._headers['location']).toBeUndefined()
+  })
+
+  it('issues no auth code at all for the refused request', async () => {
+    const before = await t.client`SELECT count(*)::int AS n FROM oauth_auth_code`
+    const handler = await loadAuthorizeHandler()
+    await handler(oauthEvent(assumedSession()))
+    const after = await t.client`SELECT count(*)::int AS n FROM oauth_auth_code`
+    expect(after[0]!.n).toBe(before[0]!.n)
+  })
+
+  it('still issues consent for a normal (non-impersonated) session', async () => {
+    const handler = await loadAuthorizeHandler()
+    const e = oauthEvent(normalSession())
+    await handler(e)
+
+    // 302 to the registered redirect_uri carrying a code — the guard is
+    // specific to assumed identities and does not break the real flow.
+    expect(e.node.res.statusCode).toBe(302)
+    const loc = e.node.res._headers['location'] as string
+    expect(loc).toBeTruthy()
+    const u = new URL(loc)
+    expect(u.searchParams.get('code')).toBeTruthy()
+    expect(u.searchParams.get('state')).toBe('persona-guard-state-0123456789')
+  })
+})

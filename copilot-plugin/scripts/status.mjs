@@ -51,7 +51,8 @@
  * Either way the verdict NEVER calls "a span landed" alone "healthy".
  *
  * Env in:
- *   TOKENSCOPE_STATE_DIR  state dir override (default $HOME/.tokenscope) — holds
+ *   TOKENSCOPE_STATE_DIR  state dir pin (default ~/.tokenscope under the PASSWD home,
+ *                         not $HOME — see landed-check.mjs's stateDir()) — holds
  *                         config.json, oauth-access.json, the emit-failure sentinel.
  *   TOKENSCOPE_NEEDS_TAGGING_COUNT  optional — the untagged/unbound session count the
  *                         skill read from `my_usage`'s unallocated.needs_tagging_count.
@@ -59,19 +60,16 @@
  *                         must check my_usage). 0 → landed-AND-attributed (healthy).
  */
 import { readFileSync, existsSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { refreshLanded } from './landed-check.mjs'
+// landed-check.mjs already owns the state-dir resolver this probe needs, and this
+// module already imports from it — so import it rather than keep a second copy that
+// could drift onto a different home anchor from the one refreshLanded() reads.
+import { refreshLanded, stateDir } from './landed-check.mjs'
 import { detectManagedTelemetry } from './managed-telemetry.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-
-/** The TokenScope state dir (TOKENSCOPE_STATE_DIR or ~/.tokenscope). */
-function stateDir() {
-  return (process.env.TOKENSCOPE_STATE_DIR ?? '').trim() || join(homedir(), '.tokenscope')
-}
 
 function readJson(p) {
   try {
@@ -330,9 +328,12 @@ function probeEmissionAuth(stateD) {
     TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: cfg.oauth_token_endpoint,
     TOKENSCOPE_OAUTH_CLIENT_ID: cfg.oauth_client_id,
     TOKENSCOPE_OAUTH_REFRESH_TOKEN: cfg.oauth_refresh_token,
-    TOKENSCOPE_STATE_DIR: stateD,
   }
-  const res = spawnSync('sh', [helperPath], {
+  // State dir as an ARGUMENT, `/bin/sh` absolute: the helper no longer reads
+  // TOKENSCOPE_STATE_DIR (Claude Code invokes it directly with a repo-merged
+  // environment — see otel-headers-helper.sh's header), and a bare `sh` resolves
+  // through a PATH that same merge can set.
+  const res = spawnSync('/bin/sh', [helperPath, '--state-dir', stateD], {
     encoding: 'utf8',
     env,
     stdio: ['ignore', 'pipe', 'pipe'],

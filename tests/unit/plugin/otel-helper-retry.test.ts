@@ -44,13 +44,16 @@ esac
 exit 0
 `
 
+// The state dir arrives as an ARGUMENT, not `TOKENSCOPE_STATE_DIR`: the helper
+// stopped reading that variable because Claude Code invokes it directly with a
+// repository's merged settings env (docs/security-sprint/repo-env-inheritance-capture.md).
+// `HOME` is still set here only to prove it is IGNORED — see the anchor tests.
 function runHelper(env: Record<string, string>) {
-  return spawnSync('sh', [HELPER], {
+  return spawnSync('sh', [HELPER, '--state-dir', stateDir, '--tool-dir', stubDir], {
     encoding: 'utf8',
     env: {
       PATH: `${stubDir}:${process.env.PATH}`,
       HOME: tmp,
-      TOKENSCOPE_STATE_DIR: stateDir,
       // S1 fix 3: the helper now pre-flight-validates both endpoints (https
       // required off-box) before any curl call — https:// here, not http://,
       // so this fixture exercises the retry logic through the validator
@@ -176,12 +179,11 @@ describe('otel-headers-helper — S1 fix 4: the shared device credential store f
    * (unlike runHelper(), which always sets it — a tagged-repo session omits
    * it entirely per tag-repo.mjs's `delete deviceEnv.TOKENSCOPE_OAUTH_REFRESH_TOKEN`). */
   function runHelperNoRefreshTokenEnv(env: Record<string, string>) {
-    return spawnSync('sh', [HELPER], {
+    return spawnSync('sh', [HELPER, '--state-dir', stateDir, '--tool-dir', stubDir], {
       encoding: 'utf8',
       env: {
         PATH: `${stubDir}:${process.env.PATH}`,
         HOME: tmp,
-        TOKENSCOPE_STATE_DIR: stateDir,
         TOKENSCOPE_BEARER_ENDPOINT: 'https://stub.local/api/v1/instances/x/bearer',
         TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://stub.local/api/v1/oauth/token',
         TOKENSCOPE_OAUTH_CLIENT_ID: 'cid',

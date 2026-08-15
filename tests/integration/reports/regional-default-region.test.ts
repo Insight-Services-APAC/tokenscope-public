@@ -240,13 +240,14 @@ afterAll(async () => {
   await stopTestDb(t)
 })
 
-describe('a caller who names NO region: ungranted → own region, operational-granted → alphabetical', () => {
+describe('a caller who names NO region: region admin → own region; org-wide → alphabetical by role', () => {
   it('a region admin gets their own region — and no picker to get it wrong with', async () => {
+    // A region admin is REGION-BOUND (unchanged): own region, no cross-region
+    // picker. Only the org-wide roles open on the alphabetical default by role.
     await clearGrants()
     const r = await resolveEverywhere(sess('admin', zebraAdminId))
     expect(new Set(r.names)).toEqual(new Set(['Zebra Region']))
     expect(new Set(r.totals)).toEqual(new Set([ZEBRA_USD]))
-    // No grant: there is no region list to pick from.
     expect(r.regionOptions).toEqual([])
   })
 
@@ -297,21 +298,33 @@ describe('a caller who names NO region: ungranted → own region, operational-gr
     }
   })
 
-  it('an UNGRANTED org-wide role (global-finops / platform-admin) gets its OWN region, not alphabetical', async () => {
-    // mig 0129's disconnect: role alone no longer buys cross-region reach, so an
-    // org-wide caller with no active grant is clamped to its own region exactly
-    // like `admin` (resolveRegionalScope's `isOrgWide && !isCrossRegion` class) —
-    // the OPPOSITE of the pre-migration default this file used to pin.
+  it('an org-wide role (global-finops / platform-admin), NO grant, opens alphabetical-first by ROLE', async () => {
+    // Role default: full cross-region reach with no grant. Both open on Aardvark
+    // (regionOptions[0]) with the full picker — the reverse of #251's clamp.
     await clearGrants()
     const gfo = await resolveEverywhere(sess('global-finops', zebraFinopsId))
-    expect(new Set(gfo.names)).toEqual(new Set(['Zebra Region']))
-    expect(new Set(gfo.totals)).toEqual(new Set([ZEBRA_USD]))
-    expect(gfo.regionOptions).toEqual([])
+    expect(new Set(gfo.names)).toEqual(new Set(['Aardvark Region']))
+    expect(new Set(gfo.totals)).toEqual(new Set([AARDVARK_USD]))
+    expect(gfo.regionOptions).toEqual(['Aardvark Region', 'Zebra Region'])
 
     const pa = await resolveEverywhere(sess('platform-admin', zebraPlatformId))
-    expect(new Set(pa.names)).toEqual(new Set(['Zebra Region']))
-    expect(new Set(pa.totals)).toEqual(new Set([ZEBRA_USD]))
-    expect(pa.regionOptions).toEqual([])
+    expect(new Set(pa.names)).toEqual(new Set(['Aardvark Region']))
+    expect(new Set(pa.totals)).toEqual(new Set([AARDVARK_USD]))
+    expect(pa.regionOptions).toEqual(['Aardvark Region', 'Zebra Region'])
+  })
+
+  it('a REVOKED org-wide role is clamped to NOTHING — every Regional endpoint refuses', async () => {
+    // The deny (mig 0130) is the "administer, no data" lever: it overrides the
+    // role default, so resolveEverywhere refuses across the board.
+    await clearGrants()
+    await grantReportAccess(t.client, zebraFinopsId, 'revoke-all')
+    try {
+      await expect(resolveEverywhere(sess('global-finops', zebraFinopsId))).rejects.toMatchObject({
+        statusCode: 403,
+      })
+    } finally {
+      await clearGrants()
+    }
   })
 })
 
@@ -368,10 +381,11 @@ describe('never a wrong region under a wrong name', () => {
     { who: 'global finance (operational-granted)', role: 'global-finops', teammate: () => zebraFinopsId, grant: true, region: 'Aardvark Region', usd: AARDVARK_USD, users: AARDVARK_USERS },
     { who: 'a platform admin (operational-granted)', role: 'platform-admin', teammate: () => zebraPlatformId, grant: true, region: 'Aardvark Region', usd: AARDVARK_USD, users: AARDVARK_USERS },
     { who: 'an operational-granted region admin', role: 'admin', teammate: () => zebraAdminId, grant: true, region: 'Aardvark Region', usd: AARDVARK_USD, users: AARDVARK_USERS },
-    // The DIFFERENT-answer row, and the one mig 0129 introduced: NO grant at all.
-    // A rule that collapsed every org-wide caller onto `regionOptions[0]`
-    // regardless of grant state would leave this row red.
-    { who: 'an UNGRANTED global finance — own region, not alphabetical', role: 'global-finops', teammate: () => zebraFinopsId, grant: false, region: 'Zebra Region', usd: ZEBRA_USD, users: ZEBRA_USERS },
+    // NO grant at all — and post-2026-08-13 that resolves the SAME as granted:
+    // an org-wide role has full cross-region reach BY ROLE, so it lands on the
+    // alphabetical default too. (The distinct-answer case is now a REVOKE, which
+    // refuses outright and is covered by its own test above.)
+    { who: 'an UNGRANTED global finance — alphabetical by role', role: 'global-finops', teammate: () => zebraFinopsId, grant: false, region: 'Aardvark Region', usd: AARDVARK_USD, users: AARDVARK_USERS },
   ]
 
   it.each(CASES)(

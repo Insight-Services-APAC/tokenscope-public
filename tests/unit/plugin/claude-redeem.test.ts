@@ -36,6 +36,9 @@ import { spawn } from 'node:child_process'
 const { buildClaudeDeviceEnv, assertClaudeRedeemResponse, writeClaudeSettings, writeSharedCredentialStore, parseArgs } = await import(
   '../../../plugin/scripts/claude-redeem.mjs'
 )
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore — mjs import resolved by Vitest
+const { realHome } = await import('../../../plugin/scripts/real-home.mjs')
 
 // A complete, valid /setup/redeem response for the claude-code path.
 const FAKE_REDEEM_RESPONSE = {
@@ -428,11 +431,14 @@ describe('parseArgs', () => {
   })
 
   it('accepts flags and does not treat a flag value as the positional code', () => {
-    const a = parseArgs(['--handoff-code', 'h', '--api-base', 'https://x', '--instance-id', 'i', '--settings-path', '/s'])
+    // --settings-path is deliberately absent here: it is now confined to the
+    // account's own home (S16a), so a fixture path like '/s' is refused. Its
+    // accept + refuse cases live in redeem-argv-guard.test.ts, which anchors a
+    // temp dir under realHome() to exercise both.
+    const a = parseArgs(['--handoff-code', 'h', '--api-base', 'https://x', '--instance-id', 'i'])
     expect(a.handoffCode).toBe('h')
     expect(a.apiBase).toBe('https://x')
     expect(a.instanceId).toBe('i')
-    expect(a.settingsPath).toBe('/s')
   })
 })
 
@@ -445,6 +451,23 @@ describe('main() against a mock redeem server', () => {
   let server: ReturnType<typeof createServer>
   let baseUrl: string
   let lastBody: { handoff_code?: string; instance_id?: string } = {}
+
+  // --settings-path is confined to the account's own home (S16a: it names where a
+  // durable OAuth emit credential is written, and this process's argv is composed
+  // by a model). So the fixture has to live there — a tmpdir() path is refused,
+  // which redeem-argv-guard.test.ts pins as behaviour in its own right. One dir
+  // for the whole describe, a distinct SUBdirectory per case, because the
+  // basename must stay `settings.json`.
+  let homeDir: string
+  const settingsIn = (name: string) => join(homeDir, name, 'settings.json')
+  beforeAll(() => {
+    homeDir = mkdtempSync(join(realHome(), '.ts-claude-redeem-main-'))
+  })
+  afterAll(() => {
+    if (homeDir && homeDir.startsWith(join(realHome(), '.ts-claude-redeem-main-'))) {
+      rmSync(homeDir, { recursive: true, force: true })
+    }
+  })
 
   const claudeBundle = (attrs = 'tokenscope.instance_id=f825e796,tool=claude-code') => ({
     OTEL_LOGS_EXPORTER: 'otlp',
@@ -506,7 +529,7 @@ describe('main() against a mock redeem server', () => {
     })
 
   it('happy path: redeems, writes settings.json, exits 0, binds instance_id', async () => {
-    const path = join(dir, 'settings.json')
+    const path = settingsIn('happy')
     const r = await run('GOOD', path, ['--instance-id', 'f825e796-ef29-4aa0-9a35-4aa2a5b8059c'])
     expect(r.status).toBe(0)
     const written = JSON.parse(readFileSync(path, 'utf8'))
@@ -519,14 +542,14 @@ describe('main() against a mock redeem server', () => {
   })
 
   it('bad bundle (no instance id): exits 1 and writes NOTHING', async () => {
-    const path = join(dir, 'settings.json')
+    const path = settingsIn('bad-bundle')
     const r = await run('BADATTRS', path)
     expect(r.status).toBe(1)
     expect(existsSync(path)).toBe(false)
   })
 
   it('401 from server: exits 1 and writes NOTHING', async () => {
-    const path = join(dir, 'settings.json')
+    const path = settingsIn('unauthorized')
     const r = await run('WRONGCODE', path)
     expect(r.status).toBe(1)
     expect(existsSync(path)).toBe(false)

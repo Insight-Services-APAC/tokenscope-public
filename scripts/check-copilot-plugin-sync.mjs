@@ -39,6 +39,11 @@ const FILES = [
   // a second, un-gated (and therefore driftable) guard defeats the whole
   // point of having promoted it into one dependency-free file.
   'endpoint-guard.mjs',
+  // argv-guard.mjs (S16a) — the shared validator for the flags handed to the
+  // redeem helpers. Gated because the Copilot lane has no permission-grant
+  // mechanism behind it: a drifted copy there is not a weaker control, it is
+  // none.
+  'argv-guard.mjs',
   // mcp-origin.mjs — the shared "where is the MCP server registered" resolver.
   // Gated so the vendored copy cannot drift: divergence means one client
   // redeems its handoff against a different host than the other.
@@ -53,6 +58,11 @@ const FILES = [
   // two clients disagree about whether a credential-valid probe is actually
   // emission-healthy.
   'managed-telemetry.mjs',
+  // device-id.mjs (S16b) — the credential-free device-identity accessor both
+  // setup prompts now call INSTEAD of naming ~/.claude/settings.json or
+  // ~/.tokenscope/config.json. Gated so the copy that reads a credential store
+  // can never drift from the reviewed source.
+  'device-id.mjs',
 ]
 
 // Match the FULL auto-generated signature (not a bare `// SYNC NOTE:` prefix), so a

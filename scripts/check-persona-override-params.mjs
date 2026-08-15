@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /*
- * CI guard: allowPersonaOverride=true is permitted ONLY in the sandbox bicepparam.
+ * CI guard: a bicepparam may set allowPersonaOverride=true ONLY when its own
+ * `param env` is 'sandbox'. (Since 2026-08-13 no deployable sandbox parameter
+ * file exists — `infra/parameters/sandbox.bicepparam` was deleted with the
+ * workflow option lists — so today the only file this permits is the
+ * `example-sandbox.bicepparam` template shipped for self-hosters.)
  *
  * The persona gate is allowlist-gated in code (only {local, sandbox} are
  * demo-capable; shared/env/deploy-env.ts), so a stray allowPersonaOverride=true on
@@ -51,7 +55,7 @@ for (const file of readdirSync(PARAMS_DIR).filter((f) => f.endsWith('.bicepparam
 }
 
 if (failed) {
-  console.error('\nallowPersonaOverride may be true ONLY in infra/parameters/sandbox.bicepparam.')
+  console.error("\nallowPersonaOverride may be true ONLY in a bicepparam whose `param env` is 'sandbox'.")
   process.exit(1)
 }
 process.stdout.write('✓ allowPersonaOverride params consistent with the demo-capable allowlist (sandbox only).\n')

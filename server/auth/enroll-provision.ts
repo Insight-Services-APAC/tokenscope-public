@@ -34,14 +34,15 @@ import { resolveDefaultRegionId, unplacedOrgUnitIdForRegion } from './placement-
 type Db = PostgresJsDatabase<Record<string, unknown>>
 
 /**
- * Global cap on provisional instance_attestation rows — a coarse DoS backstop on
- * the (gated but login-less) enroll endpoint, mirroring MAX_OAUTH_CLIENTS on the
- * unauthenticated /oauth/register. Generous: real enrolments number in the low
- * thousands. Env-overridable via MAX_PROVISIONAL_INSTANCES.
+ * Global cap on LIVE provisional instance_attestation rows — a coarse DoS
+ * backstop on the (gated but login-less) enroll endpoint, mirroring
+ * MAX_OAUTH_CLIENTS on the unauthenticated /oauth/register. Generous: real
+ * enrolments number in the low thousands. Env-overridable via
+ * MAX_PROVISIONAL_INSTANCES.
  */
 export const DEFAULT_MAX_PROVISIONAL_INSTANCES = 100_000
 /**
- * Per-claimed_email cap — bounds how many provisional instances any single
+ * Per-claimed_email cap — bounds how many LIVE provisional instances any single
  * claimed identity can accrue (an insider can't fabricate unbounded shadow
  * devices against one coworker). Env-overridable via MAX_PROVISIONAL_INSTANCES_PER_EMAIL.
  */
@@ -233,8 +234,19 @@ export async function locateOrCreateProvisionalInstance(
 
   // Caps apply ONLY to the create branch — idempotent reuse above never consumes
   // quota. Global DoS backstop first, then the per-claimed_email bound.
+  //
+  // Both counts filter to LIVE rows (ts_actual_end IS NULL AND ts_purged IS NULL),
+  // exactly as the authenticated sibling does (emit-provision.ts's
+  // locateOrCreateInstance) and for the same reason: an ENDED or PURGED instance
+  // is not a device any more, and counting it lets dead rows consume quota
+  // permanently. Unfiltered, a person who revokes and re-enrols a laptop 50 times
+  // is refused for ever while holding no live device at all, and the global
+  // backstop drifts monotonically toward its ceiling as instances are retired —
+  // the door shutting on a population that no longer exists. It fails CLOSED, so
+  // this is availability/quota hygiene, not a security control.
   const globalRows = await db.execute<{ count: string }>(sql`
-    SELECT COUNT(*)::text AS count FROM instance_attestation WHERE identity_state = 'provisional'
+    SELECT COUNT(*)::text AS count FROM instance_attestation
+     WHERE identity_state = 'provisional' AND ts_actual_end IS NULL AND ts_purged IS NULL
   `)
   if (Number([...globalRows][0]?.count ?? 0) >= maxProvisionalInstances()) {
     return { capExceeded: true }
@@ -242,6 +254,7 @@ export async function locateOrCreateProvisionalInstance(
   const emailRows = await db.execute<{ count: string }>(sql`
     SELECT COUNT(*)::text AS count FROM instance_attestation
      WHERE identity_state = 'provisional' AND claimed_email = ${claimedEmail}
+       AND ts_actual_end IS NULL AND ts_purged IS NULL
   `)
   if (Number([...emailRows][0]?.count ?? 0) >= maxProvisionalInstancesPerEmail()) {
     return { capExceeded: true }

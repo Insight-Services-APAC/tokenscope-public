@@ -144,7 +144,27 @@ export default defineNuxtConfig({
         // payload. nuxt-oidc-auth's callback handler copies any claim
         // listed here into user.claims for downstream session-hook
         // consumers.
-        optionalClaims: ['oid', 'email', 'name'],
+        //
+        // `preferred_username` / `upn` carry the sign-in UPN, which is the axis
+        // the directory-exclusion policy matches on (#121,
+        // server/auth/jit-teammate.ts). THIS LIST IS THE ONLY SOURCE FOR THEM:
+        // nuxt-oidc-auth populates user.claims strictly from optionalClaims
+        // (dist/runtime/server/handler/callback.js), and user.userInfo is
+        // written only when a userInfoUrl is configured — we configure none. So
+        // while the UPN was absent from this list, extractClaims' three lookups
+        // were all permanently undefined and the JIT exclusion guard fails open
+        // on every sign-in.
+        //
+        // `userNameClaim` above is NOT a substitute: the module reads it out of
+        // the ACCESS token, not the id token, and an Entra Graph access token
+        // does not reliably carry preferred_username.
+        //
+        // TODAY'S EXPOSURE IS NIL, and this must not be described as closing a
+        // live hole: mig 0083 seeds ZERO exclusion patterns and the cleanup
+        // worker returns early with none, so the guard currently matches nobody
+        // either way. This ARMS the control for the deployment that first adds
+        // a pattern.
+        optionalClaims: ['oid', 'email', 'name', 'preferred_username', 'upn'],
       },
     },
   },

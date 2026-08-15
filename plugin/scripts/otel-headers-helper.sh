@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/bin/sh
 # otelHeadersHelper — called by Claude Code every ~29 minutes to refresh
 # the Azure Monitor Bearer for OTLP emission. Per RN-15 §Stream 3, the
 # helper must print a JSON object with one Authorization header to stdout.
@@ -36,13 +36,175 @@
 #   TOKENSCOPE_BEARER_ENDPOINT   — e.g. https://attestation/api/v1/instances/{instanceId}/bearer
 # Auth env (OAuth — all three required):
 #   TOKENSCOPE_OAUTH_REFRESH_TOKEN + TOKENSCOPE_OAUTH_TOKEN_ENDPOINT + TOKENSCOPE_OAUTH_CLIENT_ID
-# Optional env:
-#   TOKENSCOPE_STATE_DIR         — where the sentinel + token cache live (default $HOME/.tokenscope)
+# Args (NOT env — see THE STATE DIR below). Both must be ABSOLUTE paths; an
+# unknown argument is refused outright rather than ignored:
+#   --state-dir <path>           — where the sentinel + token cache live
+#                                  (default: ~/.tokenscope under the PASSWD home)
+#   --tool-dir <path>            — prepend a directory to PATH ahead of the
+#                                  trusted ones (test stubs / local debugging)
 set -eu
 
 # POSIX sh has no `pipefail`; we avoid pipes in the failure path instead.
 
-STATE_DIR="${TOKENSCOPE_STATE_DIR:-$HOME/.tokenscope}"
+# ── A TRUSTED PATH, BEFORE THE FIRST EXTERNAL COMMAND ────────────────────────
+#
+# Everything below runs `curl`, `id`, `date`, `sed`, `awk`, `mkdir`, `rm` by NAME,
+# and this script is handed TOKENSCOPE_OAUTH_REFRESH_TOKEN — the durable emit
+# credential. `PATH` is repo-settable and reaches this process (Claude Code
+# invokes this script itself with the merged settings environment; see THE STATE
+# DIR below and docs/security-sprint/repo-env-inheritance-capture.md), so without
+# this line a repository chooses the `curl` that the refresh token is handed to.
+#
+# PREPEND rather than replace. Replacing outright would break hosts whose `curl`
+# lives somewhere else entirely (Homebrew on Apple silicon, Nix, a locked-down
+# image with tools under /opt) and the failure mode there is silent zero
+# telemetry, which is worse than the threat. Prepending means a system tool wins
+# wherever one exists, and an unusual host still resolves through the inherited
+# PATH. Also the reason the shebang is `#!/bin/sh` and not `/usr/bin/env sh`:
+# `env` would resolve the INTERPRETER through the untrusted PATH, before this
+# line ever runs.
+#
+# NOT a complete sandbox — see the residual in
+# docs/security-sprint/owner-decisions.md §0. `curl` still inherits proxy and CA
+# variables (`http_proxy`, `CURL_CA_BUNDLE`, `SSL_CERT_FILE`) from the same
+# untrusted environment; `-q` on every invocation neutralises `.curlrc`/`CURL_HOME`
+# but those variables are legitimate on corporate hosts and cannot be dropped here
+# without breaking them.
+# `--tool-dir <abs path>` prepends one more directory AHEAD of the trusted ones.
+# It exists for the test suite, which drives this script against stub `curl` /
+# `id` binaries, and for local debugging. It is safe for the same reason
+# `--state-dir` is: argv is the one channel the settings merge cannot contribute
+# to, so reaching it already requires executing code on this machine. Parsed
+# below with the other arguments; applied here as an ordinary PATH prefix.
+TRUSTED_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+PATH="${TRUSTED_PATH}:$PATH"
+export PATH
+
+# ── THE STATE DIR: an ARGUMENT, never an environment variable ────────────────
+#
+# This directory is where the freshly minted emit ACCESS TOKEN is cached
+# (`oauth-access.json`) and where a stored durable credential is read back from
+# (`config.json`). It decides who receives a secret, so its provenance has to be
+# something a repository cannot write.
+#
+# `TOKENSCOPE_STATE_DIR` USED TO CHOOSE IT, AND WAS REACHABLE. Claude Code merges
+# a repository's `.claude/settings.json` `env` block into the environment, and
+# `otelHeadersHelper` is invoked BY CLAUDE CODE — a sibling process of any hook,
+# spawned every ~29 minutes to mint the bearer. Captured against Claude Code
+# 2.1.232 (docs/security-sprint/repo-env-inheritance-capture.md): a repo shipping
+# `{"env":{"TOKENSCOPE_STATE_DIR":"<repo>/exfil"}}` got a live access token
+# written into its own working tree.
+#
+# `session-start.mjs`'s `hookStateDir()` CANNOT close that. It repairs the HOOK
+# process's own `process.env`; it has no reach into a process Claude Code spawns
+# beside it. The capture above was re-run with that fix installed and the token
+# still landed in the repo-chosen directory.
+#
+# So the channel moves to one the merge cannot reach: **argv**. Nothing in a
+# settings file contributes arguments to `otelHeadersHelper` — Claude Code
+# invokes the bare script — so an argument is authorable only by a caller that
+# already executes code on this machine. Our own callers pass the state dir they
+# resolved (`plugin-runtime.mjs`'s `runEmitHelper`, `backfill.mjs`,
+# `copilot-forwarder.mjs`, `status.mjs`); Claude Code passes nothing and lands on
+# the passwd-home default, which is the right answer precisely because its
+# environment is the untrusted one.
+#
+# `$HOME` is excluded for the same reason and by the same capture: it is equally
+# repo-settable, and `os.homedir()`/`~` would follow it. `passwd_home` reads the
+# passwd database, which no environment variable can move — the sh mirror of
+# `real-home.mjs`'s `userInfo().homedir`.
+#
+# NOT a behaviour toggle: with no argument this resolves to exactly the path the
+# JS side's `stateDir()` resolves with no pin set, so an unpinned device is
+# byte-identical to before.
+
+# The account's real home, read from the passwd DATABASE rather than $HOME, via
+# whichever of the three sources this platform actually keeps accounts in:
+# `getent` (Linux), `dscl` (macOS Directory Services), then /etc/passwd. Falls
+# back to $HOME — loudly — only when all three yield nothing, which is a genuinely
+# unusual host rather than, as an earlier version of this had it, every Mac.
+passwd_home() {
+  _u="$(id -un 2>/dev/null || printf '')"
+  _h=''
+  # NO `eval`. This was `eval echo "~$_u"`, relying on tilde expansion to consult
+  # passwd. Two problems: `$_u` comes from `id`, which is resolved by NAME (see
+  # the trusted PATH above — before that line existed it was outright
+  # attacker-selectable), so its output reached `eval` as shell syntax; and `echo`
+  # mangles backslashes in some shells, corrupting a home that contains one.
+  # `getent` first, then a direct /etc/passwd read, both with `printf`. Neither
+  # interprets its input.
+  if [ -n "$_u" ]; then
+    # Linux/glibc: the passwd database, whatever NSS backend it lives in.
+    _h="$(getent passwd "$_u" 2>/dev/null | cut -d: -f6 || printf '')"
+    # macOS: NO `getent`, and regular accounts are NOT in /etc/passwd — that file
+    # holds only system accounts there, so the awk branch below silently finds
+    # nothing and every Mac would fall through to the $HOME fallback this
+    # function exists to avoid. Directory Services is the real passwd database on
+    # macOS; `dscl` is the supported way to read it and ships with the OS.
+    if [ -z "$_h" ]; then
+      _h="$(dscl . -read "/Users/$_u" NFSHomeDirectory 2>/dev/null \
+            | sed -n 's/^NFSHomeDirectory: //p' | head -n1 || printf '')"
+    fi
+    # Last structured source: a local passwd file (musl/Alpine, minimal images,
+    # and macOS system accounts).
+    if [ -z "$_h" ] && [ -r /etc/passwd ]; then
+      _h="$(awk -F: -v u="$_u" '$1 == u { print $6; exit }' /etc/passwd 2>/dev/null || printf '')"
+    fi
+  fi
+  case "$_h" in
+    '')
+      # LAST RESORT, and it re-opens what the anchor exists to close: this branch
+      # follows $HOME, so on a box with no passwd entry for the uid (a minimal
+      # container) a moved HOME chooses where the token cache lands again. Say so
+      # — a silent fallback here is indistinguishable from the anchor working,
+      # which is the whole failure class. Exactly what real-home.mjs does in its
+      # matching branch, and for the same reason.
+      echo "[tokenscope] WARN: no passwd entry for this uid; state dir falls back to \$HOME (leak-susceptible). Pass --state-dir to pin it." >&2
+      _h="${HOME:-}"
+      ;;
+  esac
+  echo "$_h"
+}
+
+# Parsed BEFORE the default is resolved: `--tool-dir` has to be in effect before
+# passwd_home() runs, because that function shells out to `getent`/`awk`/`id`.
+STATE_DIR=""
+# Parse the ONE accepted argument. An unknown argument is refused rather than
+# ignored, the same rule argv-guard.mjs applies to the redeem helpers: a flag
+# this script does not implement is argv nobody in the product wrote.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --state-dir)
+      [ $# -ge 2 ] || { echo "otel-headers-helper: --state-dir requires a value" >&2; exit 2; }
+      # ABSOLUTE and non-empty. An empty value would make every path below start
+      # at `/` (STATE_DIR="" → "/emit-failure.json"); a relative one would place
+      # the token cache under whatever cwd this happened to be spawned in — which
+      # for a Claude Code hook is the repository; and a leading `-` turns into an
+      # option for the `mkdir`/`rm` that follow, despite the quoting. None is a
+      # value any caller in this product passes, so refuse rather than normalise.
+      case "$2" in
+        /*) STATE_DIR="$2" ;;
+        *) echo "otel-headers-helper: --state-dir must be a non-empty absolute path" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    --tool-dir)
+      [ $# -ge 2 ] || { echo "otel-headers-helper: --tool-dir requires a value" >&2; exit 2; }
+      case "$2" in
+        /*) PATH="$2:${TRUSTED_PATH}:$PATH"; export PATH ;;
+        *) echo "otel-headers-helper: --tool-dir must be a non-empty absolute path" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    *)
+      echo "otel-headers-helper: unknown argument" >&2
+      exit 2
+      ;;
+  esac
+done
+# No --state-dir ⇒ the passwd-home default. Resolved here, after argv, so the
+# tools passwd_home() needs are resolved through the PATH argv just set up.
+[ -n "$STATE_DIR" ] || STATE_DIR="$(passwd_home)/.tokenscope"
 SENTINEL="${STATE_DIR}/emit-failure.json"
 ACCESS_CACHE="${STATE_DIR}/oauth-access.json"
 # Re-mint the access token if it expires within this many seconds.
@@ -167,7 +329,7 @@ oauth_refresh() {
   # otherwise silently corrupt the form body → refresh fails → emission dies.
   _tok_form="grant_type=refresh_token&client_id=$(urlencode "${TOKENSCOPE_OAUTH_CLIENT_ID}")&refresh_token=$(urlencode "${TOKENSCOPE_OAUTH_REFRESH_TOKEN}")"
   _tok_response="$(
-    printf '%s' "$_tok_form" | curl -s --connect-timeout 5 --max-time 10 -w '\n%{http_code}' \
+    printf '%s' "$_tok_form" | curl -q -s --connect-timeout 5 --max-time 10 -w '\n%{http_code}' \
       --proto "$(proto_for "$TOKENSCOPE_OAUTH_TOKEN_ENDPOINT")" \
       -X POST \
       -H 'Content-Type: application/x-www-form-urlencoded' \
@@ -331,7 +493,7 @@ present_bearer() {
   _resp="$(
     # shellcheck disable=SC2086 -- word-splitting $VERSION_HEADER_ARGS is intended;
     # its tokens are charset-constrained by safe_version above.
-    curl -s --connect-timeout 5 --max-time 10 -w '\n%{http_code}' \
+    curl -q -s --connect-timeout 5 --max-time 10 -w '\n%{http_code}' \
       --proto "$(proto_for "$TOKENSCOPE_BEARER_ENDPOINT")" \
       -H "Authorization: Bearer ${AUTH_TOKEN}" \
       $VERSION_HEADER_ARGS \

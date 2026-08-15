@@ -37,6 +37,12 @@ const FILES = [
   // gated the same way tokenscope-project.mjs is — a second, un-gated guard
   // is exactly what this epic's opening principle forbids.
   { name: 'endpoint-guard.mjs', type: 'js' },
+  // argv-guard.mjs (S16a) — the ONE validator for the flags handed to the
+  // redeem helpers. Gated for the same reason endpoint-guard.mjs is, and for
+  // one more: the Copilot lane has NO permission-grant mechanism to fall back
+  // on, so a drifted copy there is not a weaker second control, it is no
+  // control at all.
+  { name: 'argv-guard.mjs', type: 'js' },
   // mcp-origin.mjs — the ONE resolver for "where is the MCP server actually
   // registered", used by BOTH redeem helpers so a handoff is always redeemed at
   // the server that minted it. Gated for the same reason endpoint-guard.mjs is:
@@ -58,6 +64,13 @@ const FILES = [
   // prevent, and here it would mean the two clients disagree about whether a
   // credential-valid probe is actually emission-healthy.
   { name: 'managed-telemetry.mjs', type: 'js' },
+  // device-id.mjs (S16b) — the ONE credential-free device-identity accessor, so
+  // neither client's setup prompt has to tell the model to open a file that
+  // holds the durable emit credential. Gated for the sharpest reason on this
+  // list: a drifted copy would be a second, un-reviewed reader of a credential
+  // store, and the whole point of the module is that exactly one audited reader
+  // exists and it prints only non-secret fields.
+  { name: 'device-id.mjs', type: 'js' },
 ]
 
 // Single-line SYNC NOTE markers — the parity check strips lines starting with these.

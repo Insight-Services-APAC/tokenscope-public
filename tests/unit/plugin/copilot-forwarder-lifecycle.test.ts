@@ -178,36 +178,52 @@ describe('extractCodeHash — legacy OTEL_RESOURCE_ATTRIBUTES CSV parser', () =>
 
 // Unprovisioned-host behaviour is about the process EXIT CODE (the Stop hook runs
 // the script synchronously and propagates it), so it is tested by spawning the
-// script as a child with HOME pointed at a config-less dir — not via an in-process
+// script as a child pointed at a config-less state dir — not via an in-process
 // import (main() is not exported and calls process.exit).
+//
+// The sandbox seam is TOKENSCOPE_STATE_DIR, NOT `HOME`. It used to be `HOME`, which
+// worked only because the forwarder resolved its credential store through
+// `os.homedir()` — the very split this suite's sibling (copilot-state-dir.test.ts)
+// exists to close. The store is anchored on the PASSWD home now, so a `HOME` override
+// no longer moves it: a HOME-based sandbox would read the developer's own live
+// ~/.tokenscope, and this test's outcome would depend on whether the machine running
+// it happens to be enrolled. TOKENSCOPE_STATE_DIR is the supported process-level pin
+// (same seam tag-repo-selfheal.test.ts uses on the Claude side).
 describe('unprovisioned host → graceful no-op exit 0 (Stop hook must not fail)', () => {
   // Vitest runs from the repo root; resolve the script from cwd (import.meta.url
   // is not a file: URL under the test runner, so fileURLToPath on it throws).
   const scriptPath = join(process.cwd(), 'plugin/scripts/copilot-forwarder.mjs')
 
   function runWithoutConfig(mode: 'start' | 'stop') {
-    const home = mkdtempSync(join(tmpdir(), 'ts-fwd-noconfig-')) // no ~/.tokenscope/config.json
+    const stateDir = mkdtempSync(join(tmpdir(), 'ts-fwd-noconfig-')) // holds no config.json
     try {
-      return spawnSync(process.execPath, [scriptPath, mode], {
+      const result = spawnSync(process.execPath, [scriptPath, mode], {
         encoding: 'utf8',
         timeout: 10_000,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, TOKENSCOPE_STATE_DIR: stateDir },
       })
+      return { result, stateDir }
     } finally {
-      rmSync(home, { recursive: true, force: true })
+      rmSync(stateDir, { recursive: true, force: true })
     }
   }
 
   it('stop → exits 0 with a "not provisioned" notice (was exit 1)', () => {
-    const r = runWithoutConfig('stop')
+    const { result: r, stateDir } = runWithoutConfig('stop')
     expect(r.status).toBe(0)
     expect(r.stderr).toContain('not provisioned')
+    // The notice names the path it looked at, so this also proves the SANDBOX held:
+    // the child resolved the pinned dir, not the developer's own ~/.tokenscope. A
+    // bare "not provisioned" assertion would pass on an unenrolled machine even if
+    // the pin were ignored entirely.
+    expect(r.stderr).toContain(join(stateDir, 'config.json'))
   })
 
   it('start → exits 0 and does not hang (guard fires before claiming the singleton)', () => {
-    const r = runWithoutConfig('start')
+    const { result: r, stateDir } = runWithoutConfig('start')
     expect(r.status).toBe(0)
     expect(r.signal).toBeNull() // not killed by the 10s timeout
     expect(r.stderr).toContain('not provisioned')
+    expect(r.stderr).toContain(join(stateDir, 'config.json'))
   })
 })

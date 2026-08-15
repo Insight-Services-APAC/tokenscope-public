@@ -197,5 +197,24 @@ export async function runRegionReenrichment(
       })
     }
   }
+
+  /*
+   * THE CONTINUATION CURSOR — the same stamp region-reresolve.ts makes for the
+   * same reason, and the jam stampPlacementAttempt's own comment describes.
+   *
+   * Only the MOVE branch wrote last_sync_at (inside store.homeTeammate). Every
+   * other exit — unresolved (no directory match, or on a holding node with no
+   * signal), already-correct, and the per-row catch — left the row's timestamp
+   * untouched, so it stayed at the head of `ORDER BY t.last_sync_at NULLS FIRST`
+   * for ever. Past `limit` such rows the window is entirely re-read every tick
+   * and no other candidate is ever reached: the unmovable starve the movable.
+   *
+   * So every row this pass LOOKED AT is stamped, moved or not — which is what a
+   * sync timestamp means (the directory was read for this row). This worker has
+   * no dry-run mode (unlike region-reresolve, whose stamp is gated on one): every
+   * pass here is a real pass, so there is no preview to keep off the cursor.
+   */
+  await store.stampPlacementAttempt(rows.map((r) => r.id))
+
   return result
 }

@@ -31,15 +31,15 @@
  * `systemMessage` is shown to the developer; `additionalContext` goes to the
  * model). No credential/token material is ever written to stdout or stderr.
  */
-import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, chmodSync, mkdirSync, appendFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, chmodSync, mkdirSync, appendFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import http from 'node:http'
-import { resolveRepoProjectCode, computeCodeHash, readGlobalEnrolment, writeRepoTag } from '../scripts/tag-repo.mjs'
+import { resolveRepoProjectCode, computeCodeHash, readGlobalEnrolment, writeRepoTag, resolveRepoRoot } from '../scripts/tag-repo.mjs'
 import { reconcilePluginPaths, applyOtlpProxyRepoint, otlpForwarderPath, mergeClaudeSettings, otlpProxyStashMissing, isLoopbackHost, OTLP_DCE_ENV_KEY } from '../scripts/env-builder.mjs'
-import { readSettingsEnv, readEmitSentinel, runEmitHelper, stateDir, globalSettingsEnv, repoTagEnv } from '../scripts/plugin-runtime.mjs'
+import { readSettingsEnv, readEmitSentinel, runEmitHelper, stateDir, globalSettingsEnv, repoTagEnv, safeProcessEnv, realHome } from '../scripts/plugin-runtime.mjs'
 import { resolveShim, shimActive } from '../scripts/otlp-shim-policy.mjs'
 import { refreshLanded } from '../scripts/landed-check.mjs'
 import { checkRepoProjectBillable } from '../scripts/project-check.mjs'
@@ -64,6 +64,377 @@ const PROBE_TIMEOUT_MS = 4000
  */
 function repoAwareEnv(cwd) {
   return repoTagEnv(globalSettingsEnv(), readSettingsEnv(join(cwd, '.claude', 'settings.local.json')))
+}
+
+/**
+ * The repo-local settings files whose `env` blocks Claude Code merges over the
+ * global one. BOTH are repo-controlled: `settings.json` is committed to the
+ * repository, `settings.local.json` is the file our own tagger writes — a
+ * hostile repository can ship either.
+ */
+const REPO_SETTINGS_FILES = ['settings.json', 'settings.local.json']
+
+/** The one key whose provenance this hook has to establish. */
+const STATE_DIR_KEY = 'TOKENSCOPE_STATE_DIR'
+
+/**
+ * The keys that decide WHERE `os.homedir()` points. `homedir()` consults `HOME`
+ * (POSIX) / `USERPROFILE` (Windows) before the passwd entry, so these choose the
+ * file `globalSettingsEnv()` opens — and that file is this hook's trust anchor
+ * three times over: it is what `hookStateDir` restores a repo-claimed state dir
+ * FROM, what `safeProcessEnv()` restores every credential-steering key from, and
+ * what `repoAwareEnv()` builds the emit-probe and forwarder-spawn env out of.
+ * They are also the one class `hookStateDir`'s restore-from-global trick cannot
+ * settle by itself: the global file's own LOCATION is what they decide.
+ */
+const HOME_KEYS = ['HOME', 'USERPROFILE']
+
+/**
+ * Does `env` name `key` at all, in ANY letter case?
+ *
+ * Case-folded because `process.env` is case-INSENSITIVE on Windows: there a
+ * repo-supplied `tokenscope_state_dir` sets the same variable Node hands back
+ * for `process.env.TOKENSCOPE_STATE_DIR`, so an exact-key test on the settings
+ * JSON would miss a claim that still steers `stateDir()`. On POSIX the cases
+ * are distinct variables and only the exact spelling can steer anything, so
+ * folding costs nothing there and closes the Windows case.
+ *
+ * Presence-based, not string-typed: a repo naming the key with a number or a
+ * null is still a repo that named the key, and "did a repo file claim this?"
+ * is the whole question. (The GLOBAL side below still requires a non-empty
+ * string, because there the value is used, not just counted.)
+ */
+function namesKey(env, key) {
+  const want = key.toLowerCase()
+  return Object.keys(env && typeof env === 'object' ? env : {}).some(
+    (k) => k.toLowerCase() === want,
+  )
+}
+
+/** The value `env` gives `key` in any letter case, or undefined. See namesKey. */
+function pickKey(env, key) {
+  const want = key.toLowerCase()
+  for (const [k, v] of Object.entries(env && typeof env === 'object' ? env : {})) {
+    if (k.toLowerCase() === want && typeof v === 'string') return v
+  }
+  return undefined
+}
+
+/** A path deeper than this is pathological — the ancestor walk stops regardless. */
+const MAX_ANCESTOR_DEPTH = 64
+
+/** realpathSync, or the input unchanged when it cannot be resolved. */
+function realpathOr(p) {
+  try {
+    return realpathSync(p)
+  } catch {
+    return p
+  }
+}
+
+/**
+ * Every directory whose `.claude/` could hold a settings file Claude Code
+ * merges for a session launched in `cwd`: the cwd itself, and each ancestor up
+ * to AND INCLUDING the git root.
+ *
+ * WHY MORE THAN THE CWD (verified against Claude Code 2.1.231's own bundle,
+ * `Cln`/`vet` in the settings loader — this is not inferred from our own code):
+ * the two repo-scoped files do NOT resolve from the same directory.
+ *   - `projectSettings` (`.claude/settings.json`) resolves at `resolve(cwd)`.
+ *   - `localSettings` (`.claude/settings.local.json`) resolves at the
+ *     CANONICAL GIT ROOT, falling back to the cwd when there is no git root,
+ *     when the root IS the cwd, when the root is the home directory, when the
+ *     root fails an owner-uid check, or on a platform with no uid semantics
+ *     (that canonicalisation is POSIX-only).
+ * `localSettings` is the highest-precedence half of the merge AND the file our
+ * own tagger writes (`writeRepoTag` anchors on `resolveRepoRoot` for the same
+ * reason), so `claude` launched from `repo/subdir` merges a `settings.local.json`
+ * sitting at `repo/` that a cwd-only check never opens.
+ *
+ * Rather than mirror Claude's per-file rule — which would re-derive an upstream
+ * detail that can change under us — inspect the whole cwd→root chain. Checking
+ * extra directories is the SAFE direction: the only consequence of a match is
+ * that an inherited `TOKENSCOPE_STATE_DIR` is replaced by the global one or
+ * dropped, and `stateDir()` then falls back to `~/.tokenscope`.
+ *
+ * BOUNDED, three ways: it never walks ABOVE the git root, it stops at the
+ * filesystem root (`dirname(dir) === dir`), and it stops at MAX_ANCESTOR_DEPTH
+ * regardless. With no git root at all (not a work tree) it inspects the cwd
+ * alone — outside a repository there is no principled place to stop.
+ *
+ * Symlinked cwd: the walk runs on the REAL cwd, because `resolveRepoRoot` asks
+ * git, which answers with a physical path — a lexical walk from a symlinked cwd
+ * would never meet it. If the chain still fails to reach the root (a bind
+ * mount, an exotic layout), the collected ancestors are discarded and only the
+ * three directories whose provenance is certain — the cwd as given, the real
+ * cwd, and the root — are inspected.
+ *
+ * Memoised per resolved cwd: `hookStateDir()` is called from five points in one
+ * hook run and `resolveRepoRoot` shells out to `git rev-parse`. A directory's git
+ * root cannot change inside the lifetime of this short-lived process, so the
+ * cache cannot go stale in production; it is per-process, so nothing outlives
+ * the hook. Exported for tests.
+ */
+const REPO_DIRS_CACHE = new Map()
+
+export function repoSettingsDirs(cwd) {
+  const asGiven = resolve(cwd)
+  const cached = REPO_DIRS_CACHE.get(asGiven)
+  if (cached) return cached
+  const dirs = computeRepoSettingsDirs(asGiven)
+  REPO_DIRS_CACHE.set(asGiven, dirs)
+  return dirs
+}
+
+function computeRepoSettingsDirs(asGiven) {
+  const start = realpathOr(asGiven)
+  let root
+  try {
+    root = resolveRepoRoot(start)
+  } catch {
+    root = null // resolveRepoRoot threw outright — treat as "no repo": cwd only
+  }
+  if (!root) return [...new Set([asGiven, start])]
+  const rootReal = realpathOr(resolve(root))
+  const chain = []
+  let dir = start
+  for (let i = 0; i < MAX_ANCESTOR_DEPTH; i++) {
+    chain.push(dir)
+    if (dir === rootReal) return [...new Set([asGiven, ...chain])]
+    const parent = dirname(dir)
+    if (parent === dir) break // filesystem root, without ever meeting the git root
+    dir = parent
+  }
+  return [...new Set([asGiven, start, rootReal])]
+}
+
+/**
+ * Does ANY repo-controlled settings file reachable from `cwd` name `key`? The
+ * provenance question, asked of the FILES — `process.env` cannot answer it,
+ * because Claude Code has already flattened the merge by the time a hook runs.
+ */
+function repoClaims(cwd, key) {
+  return repoSettingsDirs(cwd).some((dir) =>
+    REPO_SETTINGS_FILES.some((f) => namesKey(readSettingsEnv(join(dir, '.claude', f)), key)),
+  )
+}
+
+/**
+ * Put `HOME` / `USERPROFILE` back on the passwd entry IF a repo-local settings
+ * file named either one. Returns the keys it reset (empty when none was claimed).
+ *
+ * WHY THIS IS NOT COVERED BY `hookStateDir` OR `safeProcessEnv`. Claude Code
+ * applies the repo-local `env` block by REPLACEMENT (`tag-repo.mjs:236-240`), so
+ * a repository can set ANY variable in the environment a hook inherits — not
+ * only the `TOKENSCOPE_*` / `OTEL_*` keys `REPO_UNTRUSTED_ENV_KEYS` enumerates.
+ * `HOME` is the one that matters most, because `os.homedir()` trusts it and
+ * `globalSettingsEnv()` resolves `~/.claude/settings.json` through it. A repo
+ * that sets BOTH `HOME` and `TOKENSCOPE_STATE_DIR` therefore gets to plant the
+ * very file `hookStateDir` treats as the trustworthy value to restore from — and
+ * the emit helper then caches its freshly minted access token wherever that
+ * planted file says. `safeProcessEnv()` cannot help: it restores the keys it
+ * strips FROM `globalSettingsEnv()`, so under a moved `HOME` it hands the
+ * forwarder child the attacker's ingest endpoint with a live bearer attached.
+ *
+ * WHY THE PASSWD ENTRY, AND NOT THE GLOBAL SETTINGS FILE. The restore-from-global
+ * shape used for `TOKENSCOPE_STATE_DIR` is circular here — reading the global
+ * file requires already knowing the home. `realHome()` (`real-home.mjs`) is the
+ * only source an env var cannot move, and it is already this project's answer
+ * wherever a path decides who receives a secret.
+ *
+ * WHY ONLY WHEN A REPO NAMED IT. A developer whose `HOME` legitimately differs
+ * from their passwd home must keep reading THEIR `~/.claude/settings.json` —
+ * that is the file Claude Code itself will read, and `plugin-runtime.mjs:129`
+ * keeps `~/.claude` on `homedir()` for exactly that reason. A blanket swap to
+ * `realHome()` would silently read the wrong settings for that person. Nothing
+ * legitimately writes `HOME` into a repository's `.claude/settings*.json`, so
+ * acting only on a repo CLAIM fixes the provenance without touching that case.
+ *
+ * Mutates `process.env` (idempotent) rather than returning a value, because the
+ * consumers are `os.homedir()` calls scattered across the modules this hook
+ * reaches (`globalSettingsEnv`, `selfHealPluginPaths`, `tag-repo`, `enroll`,
+ * `landed-check`, `project-check`) and the environment every child inherits.
+ * Key matching is case-folded (see `namesKey`) for the Windows case-insensitive
+ * `process.env`; on POSIX a lower-case `home` is a different variable and
+ * resetting the real one is harmless.
+ */
+export function neutraliseRepoHome(cwd = process.cwd()) {
+  const claimed = HOME_KEYS.filter((key) => repoClaims(cwd, key))
+  if (!claimed.length) return claimed
+  const real = realHome()
+  for (const key of claimed) process.env[key] = real
+  return claimed
+}
+
+/**
+ * The keys that decide WHICH CODE RUNS in anything this hook spawns — as opposed
+ * to `HOME_KEYS`, which decide which FILES it reads.
+ *
+ * Every one of them is a strictly stronger primitive than the
+ * `TOKENSCOPE_STATE_DIR` steering `hookStateDir` exists to stop, against exactly
+ * the same attacker. Verified reachable, not theorised: a repository shipping
+ * `.claude/settings.json` with an `env` block has that block merged into the
+ * environment a hook inherits (captured against Claude Code 2.1.232 —
+ * docs/security-sprint/repo-env-inheritance-capture.md, where a repo-set `PATH`
+ * removed `node` from the search path and silently killed EVERY node hook on the
+ * device, and a repo-set `TOKENSCOPE_STATE_DIR` collected a live emit access
+ * token).
+ *
+ *   - `PATH`        — chooses the `sh`, `curl`, `git`… any child resolves by name.
+ *   - `NODE_OPTIONS`— `--require <file>` executes attacker code inside the
+ *                     forwarder this hook spawns, before its first line runs.
+ *   - `BASH_ENV` / `ENV`        — sourced by a non-interactive shell at startup.
+ *   - `LD_PRELOAD` / `LD_LIBRARY_PATH` — inject a shared object into any child.
+ *   - `NODE_PATH`   — re-points bare `require`/`import` resolution.
+ *
+ * `safeProcessEnv()` cannot cover these: it enumerates the `TOKENSCOPE_*`/`OTEL_*`
+ * keys whose VALUES are credential-bearing, and restores them from the global
+ * settings file. These are not restorable that way — nothing legitimately writes
+ * `PATH` into `~/.claude/settings.json` — and they steer execution rather than
+ * data.
+ *
+ * SAME PROVENANCE TEST, DIFFERENT REPAIR. Like `neutraliseRepoHome` this acts
+ * only when a repo-local settings file NAMES the key, so a developer's own shell
+ * `PATH` (the overwhelmingly normal case) is untouched. The repair is:
+ *   1. the global settings value, if the device has one — the same "restore from
+ *      the file the repository cannot write" trick `hookStateDir` uses; else
+ *   2. for `PATH`, a conservative default, because deleting `PATH` outright is
+ *      not safe: children resolved by name would fall back to the libc default
+ *      (`/bin:/usr/bin`) and a Node installed under nvm/homebrew/`/usr/local`
+ *      would vanish — which is the very outage the capture recorded. The
+ *      directory holding THIS process's own interpreter is prepended, so `node`
+ *      is always findable by the same interpreter that is already running;
+ *   3. for everything else, deletion. None of them has a safe default value, and
+ *      absent is their normal state.
+ *
+ * THIS PROTECTS CHILDREN, NOT THIS PROCESS. Said explicitly because the
+ * function name invites the opposite reading: by the time any of this runs, node
+ * has already started, so a repo-set `NODE_OPTIONS=--require` has ALREADY
+ * executed its module and a repo-set `PATH` already chose which `node` we are.
+ * Nothing running inside the compromised process can undo that. What the repair
+ * buys is that everything spawned FROM here — the emit helper, the OTLP
+ * forwarder, `git` — inherits a repaired environment instead of the hostile one.
+ * Closing the startup half needs the hook to be launched through a trusted
+ * interpreter with an allowlisted environment, which is not ours to change: the
+ * hook command lives in `hooks.json` and Claude Code expands and spawns it.
+ *
+ * NOT a claim that the whole class is closed, either. A repository can set
+ * variables beyond this list, and the list is a denylist. It is here because
+ * these are the keys that turn a data-steering bug into code execution; the
+ * structural answer (build credential-bearing child environments from an
+ * allowlist rather than from `process.env`) is a larger change and is recorded
+ * as such in docs/security-sprint/owner-decisions.md §0.
+ */
+const EXEC_STEERING_KEYS = [
+  'PATH',
+  'NODE_OPTIONS',
+  'BASH_ENV',
+  'ENV',
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'NODE_PATH',
+]
+
+/**
+ * A `PATH` that is safe to fall back to when a repository claimed the real one
+ * and the global settings file offers no replacement.
+ *
+ * `dirname(process.execPath)` first, so the Node already executing this hook can
+ * always be found by name by the children it spawns — that is the one entry we
+ * can be certain about, because it is where we ourselves came from.
+ */
+function fallbackPath() {
+  const own = dirname(process.execPath)
+  const base = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/local/sbin', '/usr/sbin', '/sbin']
+  return [own, ...base.filter((p) => p !== own)].join(':')
+}
+
+/**
+ * Put the execution-steering keys back on a value a repository did not choose,
+ * IF a repo-local settings file named them. Returns the keys it repaired.
+ *
+ * Mutates `process.env` (idempotent) rather than returning an env object,
+ * because the consumers are `spawn`/`spawnSync` calls in modules this hook only
+ * reaches indirectly, plus every child's inherited environment. See
+ * EXEC_STEERING_KEYS for why each key is on the list and what the repair is.
+ */
+export function neutraliseRepoExecEnv(cwd = process.cwd()) {
+  const claimed = EXEC_STEERING_KEYS.filter((key) => repoClaims(cwd, key))
+  if (!claimed.length) return claimed
+  const global = globalSettingsEnv()
+  for (const key of claimed) {
+    const fromGlobal = pickKey(global, key)
+    if (typeof fromGlobal === 'string' && fromGlobal.trim()) process.env[key] = fromGlobal
+    else if (key === 'PATH') process.env.PATH = fallbackPath()
+    else delete process.env[key]
+  }
+  return claimed
+}
+
+/**
+ * The state dir this hook uses, with a REPO-SUPPLIED `TOKENSCOPE_STATE_DIR` —
+ * and a repo-supplied `HOME`, which would otherwise choose the "trusted" file
+ * the restore below reads (neutraliseRepoHome) — neutralised first. Every
+ * state-dir read in this hook goes through this, and anything we spawn is
+ * pinned to its result.
+ *
+ * `stateDir()` resolves `TOKENSCOPE_STATE_DIR` from `process.env` deliberately
+ * (plugin-runtime.mjs) — that is right for a genuine process-level pin (a shell
+ * export, a container/deployment config, a test sandbox). But a hook inherits
+ * the environment Claude Code assembled from the merged settings, and the
+ * repo-local block is the highest-precedence half of that merge (applied by
+ * REPLACEMENT — the fact `tag-repo.mjs:236-240` builds the whole self-contained
+ * repo env copy around), so that one variable can also be repo-supplied. The
+ * state dir is where `otel-headers-helper.sh` caches the freshly minted emit
+ * ACCESS TOKEN (`oauth-access.json`) and where the OTLP forwarder reads the
+ * stash naming its upstream — both credential-bearing, so a repository must not
+ * get to choose it.
+ *
+ * `safeProcessEnv()` cannot settle this one: it strips the key from a COPY,
+ * while `stateDir()` reads the live `process.env`, and it has no way to tell a
+ * repo-supplied value from the developer's own once the merge has flattened the
+ * two. The settings FILES still carry that provenance, so read them: if a
+ * repo-local settings file names `TOKENSCOPE_STATE_DIR` at all, the inherited
+ * value is not trustworthy — replace it with the GLOBAL settings value when
+ * there is one, else remove it so `stateDir()` falls back to `~/.tokenscope`
+ * anchored on the passwd home. A repo that says nothing about the key leaves a
+ * genuine process-level pin exactly as it was.
+ *
+ * WHICH files: every `.claude/settings*.json` from the cwd up to and including
+ * the GIT ROOT — see repoSettingsDirs. A cwd-only check missed the git-root
+ * `settings.local.json`, which is exactly the file Claude Code resolves from
+ * the git root and the one our own tagger writes there, so `claude` launched
+ * from a subdirectory left a hostile claim undetected. Key matching is
+ * case-folded (namesKey) for the Windows case-insensitive `process.env`.
+ *
+ * Deliberately conservative in one case: if a repo names the key we drop the
+ * inherited value even when the developer's shell also exported one, because
+ * the merge makes those two indistinguishable in `process.env` and nothing
+ * legitimately writes `TOKENSCOPE_STATE_DIR` to a repo settings file.
+ *
+ * Mutates `process.env` (idempotent) rather than only returning a value,
+ * because consumers we do not call directly — `stateDir()` inside
+ * `readEmitSentinel`, and the forwarder child — resolve the dir by that same
+ * live read.
+ */
+export function hookStateDir(cwd = process.cwd()) {
+  // FIRST — the global settings file is what the restore below trusts, and a
+  // repo-claimed HOME would choose which file that is. See neutraliseRepoHome.
+  neutraliseRepoHome(cwd)
+  // Then the keys that decide which CODE runs in anything spawned from here.
+  // Ordered after the HOME repair because this one also reads the global
+  // settings file, and under a repo-claimed HOME that would be the repository's
+  // own planted copy. Riding on hookStateDir rather than sitting beside it in
+  // main() for the reason emissionHealthWarning documents: these functions are
+  // exported, so the guarantee must not depend on call order.
+  neutraliseRepoExecEnv(cwd)
+  const claimedByRepo = repoClaims(cwd, STATE_DIR_KEY)
+  if (claimedByRepo) {
+    const fromGlobal = pickKey(globalSettingsEnv(), STATE_DIR_KEY)
+    if (typeof fromGlobal === 'string' && fromGlobal.trim()) process.env.TOKENSCOPE_STATE_DIR = fromGlobal
+    else delete process.env.TOKENSCOPE_STATE_DIR
+  }
+  return stateDir()
 }
 
 /**
@@ -226,7 +597,7 @@ function probeForwarder(port, expectedDir) {
  */
 function logForwarderEvent(msg) {
   try {
-    const dir = stateDir()
+    const dir = hookStateDir()
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     appendFileSync(join(dir, 'otlp-forwarder.log'), `${new Date().toISOString()} ${msg}\n`)
   } catch {
@@ -273,10 +644,21 @@ function killForwarderPidfile(dir) {
 
 /**
  * Env for the detached forwarder spawn: the hook's own process env PLUS an
- * EXPLICIT durable-DCE handoff read fresh from the merged settings env. The
- * forwarder's env fallback must not depend on Claude exporting settings `env`
- * into hook subprocesses — that inheritance link is unverified, and this
- * project's standing lesson is to capture, not infer. Exported for tests.
+ * EXPLICIT durable-DCE handoff read fresh from the merged settings env, so the
+ * forwarder's fallback does not depend on the shape of that merge.
+ *
+ * THE INHERITANCE LINK IS NOW VERIFIED, and this comment used to say the
+ * opposite. It read "that inheritance link is unverified" while, sixty lines
+ * above, `hookStateDir`/`neutraliseRepoHome` were being built on the premise
+ * that it exists — two comments in one file taking opposite positions on the
+ * same load-bearing fact. It was settled by capture rather than by argument
+ * (docs/security-sprint/repo-env-inheritance-capture.md): against Claude Code
+ * 2.1.232, a repository's `.claude/settings.json` `env` block IS merged into the
+ * environment a hook inherits. Keeping the explicit handoff regardless is still
+ * right — it costs one line and does not depend on an upstream detail that can
+ * change under us — but nobody should re-derive the premise from this sentence.
+ *
+ * Exported for tests.
  */
 export function forwarderSpawnEnv(baseEnv, settingsEnv) {
   const v = settingsEnv && typeof settingsEnv[OTLP_DCE_ENV_KEY] === 'string' ? settingsEnv[OTLP_DCE_ENV_KEY].trim() : ''
@@ -297,7 +679,7 @@ async function spawnOtlpForwarder() {
   // emission otherwise. See plugin/scripts/otlp-shim-policy.mjs + README.
   if (!shimActive()) return
   if (!readGlobalEnrolment()) return // not enrolled — nothing to forward
-  const dir = stateDir()
+  const dir = hookStateDir()
   // Lock the state dir owner-only EVERY enrolled session (mkdirSync(mode) is ignored on
   // an existing dir; this tightens installs that predate the mode arg).
   try {
@@ -319,10 +701,16 @@ async function spawnOtlpForwarder() {
   // read from disk AFTER the self-heals above may have backfilled it) so its
   // stash-lost fallback works deterministically.
   const settingsEnv = repoAwareEnv(process.cwd())
+  // The forwarder relays every export — with the emit bearer attached — to
+  // whatever endpoint its own env and stash resolve to, so its env is
+  // credential-steering input: base it on safeProcessEnv() (a repo-supplied
+  // TOKENSCOPE_DCE_LOGS_ENDPOINT et al. dropped, restored from the global file
+  // where that has them) rather than raw process.env, and pin its state dir to
+  // the one WE resolved so parent and child cannot disagree about `dirMatches`.
   const child = spawn(process.execPath, [scriptPath], {
     detached: true,
     stdio: 'ignore',
-    env: forwarderSpawnEnv(process.env, settingsEnv),
+    env: { ...forwarderSpawnEnv(safeProcessEnv(), settingsEnv), TOKENSCOPE_STATE_DIR: dir },
   })
   child.on('error', () => {}) // fail-open: never break session start over a spawn error
   child.unref()
@@ -374,8 +762,9 @@ export async function selfHealGlobalOtlpEndpoint({
   // than risk dropping the sibling — the safe-for-the-fleet reading of "off".
   let revertWhenDormant = true
   if (isLoopbackHost(before) && !shimActive()) {
-    const probe = forwarderProbe ?? (await probeForwarder(OTLP_PORT, stateDir()))
-    const healthy = decideForwarderAction(probe, stateDir()).action === 'healthy'
+    const dir = hookStateDir()
+    const probe = forwarderProbe ?? (await probeForwarder(OTLP_PORT, dir))
+    const healthy = decideForwarderAction(probe, dir).action === 'healthy'
     revertWhenDormant = !healthy
   }
   // Reconcile a COPY of the env so we can compare and skip a no-op write. The
@@ -445,6 +834,13 @@ function warnFor(http) {
  */
 function emissionHealthWarning() {
   const cwd = process.cwd()
+  // BEFORE the "global" read below: hookStateDir also puts a repo-claimed HOME
+  // back on the passwd entry (neutraliseRepoHome), and repoAwareEnv resolves
+  // ~/.claude/settings.json through HOME — so under a repo-supplied one that
+  // read would open a file the repository planted and every value below would
+  // be attacker-chosen. main() already ran this; doing it here too means the
+  // guarantee does not depend on call order (this function is exported).
+  const dir = hookStateDir(cwd)
   // The env the NEXT launch will use: global device env with ONLY the repo's
   // OTEL_RESOURCE_ATTRIBUTES overlaid (repoAwareEnv / repoTagEnv — S1 fix 1).
   const env = repoAwareEnv(cwd)
@@ -460,7 +856,30 @@ function emissionHealthWarning() {
   // pre-existing sentinel: it can be STALE — a superseded-cache 401 the helper now
   // self-heals on retry (0.1.6), or a since-resolved failure — so trusting it
   // would cry wolf. The helper IS the live, self-healing source of truth; run it.
-  const { ran, status } = runEmitHelper({ env: { ...process.env, ...env }, timeoutMs: PROBE_TIMEOUT_MS })
+  //
+  // The helper MINTS a credential and caches it under its state dir, so the env
+  // it runs under is credential-steering input, not merely context. The BASE is
+  // safeProcessEnv(), not raw `process.env`: Claude Code merged the repo's
+  // settings `env` into the environment this hook inherited, and `env` above is
+  // an OVERLAY — it can only outvote a base key it actually holds. The global
+  // settings file has no writer for TOKENSCOPE_STATE_DIR, so on a normal device
+  // the overlay does not hold it and a repo-supplied one survived the spread,
+  // dropping the freshly minted access token inside the repository's own tree.
+  // The state dir is then pinned to the one this hook resolved, so the helper
+  // writes its cache and failure sentinel exactly where readEmitSentinel() below
+  // looks for them. (`dir` was resolved at the top of this function — it has to
+  // be, because the same call is what un-poisons HOME for the reads above.)
+  // `stateDir` is passed as an ARGUMENT, not left to the env key: the helper no
+  // longer reads TOKENSCOPE_STATE_DIR at all, because Claude Code invokes it
+  // directly (every ~29 min, to mint the bearer) with an environment that
+  // carries the repository's merged settings — a process no hook can repair.
+  // The env key is kept alongside only for the JS-side readers further down that
+  // still resolve through `stateDir()`.
+  const { ran, status } = runEmitHelper({
+    env: { ...safeProcessEnv(), ...env, TOKENSCOPE_STATE_DIR: dir },
+    stateDir: dir,
+    timeoutMs: PROBE_TIMEOUT_MS,
+  })
   if (!ran) return null
   // Exit 0 = healthy (the helper only exits 0 via the /bearer-200 path, which mints
   // a bearer + clears the sentinel). A null exit = killed (timeout) before
@@ -510,6 +929,19 @@ function otlpForwarderStashWarning() {
 }
 
 async function main() {
+  // FIRST: neutralise a repo-supplied TOKENSCOPE_STATE_DIR — and a repo-supplied
+  // HOME — on this process's env, before anything resolves a state dir or opens
+  // the global settings file. The jobs below reach modules that call
+  // `stateDir()` and `homedir()` themselves — env-builder.mjs reads and writes
+  // the OTLP DCE stash, selfHealPluginPaths/tag-repo/enroll open
+  // `~/.claude/settings.json` — and those reads are of the live `process.env`,
+  // so this one call is what keeps them off a path the repository chose.
+  try {
+    hookStateDir()
+  } catch {
+    /* fail-open */
+  }
+
   try {
     selfHealPluginPaths()
   } catch {

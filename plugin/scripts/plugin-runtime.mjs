@@ -134,20 +134,41 @@ export function resolveHelperPath() {
  */
 // eslint-disable-next-line no-unused-vars, @typescript-eslint/no-unused-vars
 export function stateDir(env) {
-  // S1 fix 2 (hardened): the override is a PROCESS-level concern (a
-  // deployment pin / test sandbox) — NEVER carried in a per-settings OTEL env
-  // block, because nothing anywhere legitimately writes TOKENSCOPE_STATE_DIR
-  // to settings.json (global or repo). Reading it from a PASSED `env` object
-  // used to trust exactly that non-existent legitimate source — the same
-  // shape as the vulnerability repoTagEnv/safeProcessEnv close elsewhere: a
-  // settings-derived object is attacker-reachable in a way `process.env`
-  // (this process's own, real OS environment) is not. So this reads
-  // `process.env` ONLY, ignoring a passed `env.TOKENSCOPE_STATE_DIR` entirely
-  // — the parameter still exists so call sites don't need to change, it
-  // simply no longer influences the state dir. Anchored on the passwd home
-  // (HOME-leak-proof).
+  // The override is a PROCESS-level concern (a deployment pin / test sandbox):
+  // nothing anywhere legitimately writes TOKENSCOPE_STATE_DIR to settings.json,
+  // global or repo. So this reads `process.env` ONLY and ignores a passed
+  // `env.TOKENSCOPE_STATE_DIR` entirely — the parameter still exists so call
+  // sites need not change, it simply no longer influences the state dir.
+  // Anchored on the passwd home (HOME-leak-proof).
+  //
+  // WHAT THIS DOES NOT BUY, stated plainly because an earlier version of this
+  // comment claimed the opposite: reading `process.env` is NOT safer than
+  // reading a settings-derived object. Claude Code merges a repository's
+  // settings `env` block into the process environment, so on this code path
+  // `process.env` IS settings-derived and a hostile repo can set this key.
+  // Ignoring the passed `env` therefore closes one route and leaves the other
+  // open — it is a narrowing, not a boundary.
+  //
+  // The boundary lives at the CALLER, which is the only layer that still knows
+  // provenance: see `hookStateDir()` in plugin/hooks/session-start.mjs, which
+  // asks whether a repo-local settings file named the key and replaces or drops
+  // it if so. `safeProcessEnv()` cannot do that job here — it strips a COPY,
+  // while this function reads the live environment.
   const override = (process.env.TOKENSCOPE_STATE_DIR ?? '').trim()
-  return override || join(realHome(), '.tokenscope')
+  return override || trustedStateDir()
+}
+
+/**
+ * The state dir with NO environment override — `~/.tokenscope` on the passwd
+ * home, and nothing else.
+ *
+ * For the paths where a directory decides who receives a secret and the caller
+ * has NOT established the provenance of `TOKENSCOPE_STATE_DIR`. `stateDir()`
+ * deliberately honours that variable (a deployment pin, a test sandbox); this is
+ * the answer for callers that cannot afford to.
+ */
+export function trustedStateDir() {
+  return join(realHome(), '.tokenscope')
 }
 
 /** Read a settings.json's `env` block (or {} on any failure). */
@@ -282,12 +303,34 @@ export function readEmitSentinel(env = process.env) {
  *   - hasAuth: stdout parsed to a JSON object carrying an Authorization header
  * The helper itself writes/clears the emit-failure sentinel as a side effect.
  *
- * @param {{env?: Record<string,string>, timeoutMs?: number}} [opts]
+ * THE STATE DIR TRAVELS AS AN ARGUMENT, not in `env`. The helper stopped reading
+ * `TOKENSCOPE_STATE_DIR` because Claude Code invokes it directly with a
+ * repo-merged environment (see the header of otel-headers-helper.sh and the
+ * capture it cites), so passing it here is what keeps THIS invocation writing
+ * its token cache where the caller resolved rather than wherever the ambient
+ * environment says. Defaults to `stateDir()` — the same value the helper's own
+ * passwd-home fallback would compute when nothing is pinned.
+ *
+ * `/bin/sh`, not `sh`: the interpreter is resolved by the OS from PATH when the
+ * command is a bare name, and PATH is one of the variables a repository can set
+ * (same capture). An absolute path is not steerable.
+ *
+ * THE DEFAULT IS `trustedStateDir()`, NOT `stateDir()`. `stateDir()` honours a
+ * `TOKENSCOPE_STATE_DIR` process-level pin, which is right for a deployment or
+ * test sandbox — but this function MINTS A CREDENTIAL, and on the Claude lane
+ * that variable is repo-settable (the settings merge; see the capture doc). The
+ * callers that legitimately pin — the SessionStart hook, which has established
+ * provenance — pass `stateDir` explicitly. The callers that do NOT pass one
+ * (`status.mjs`, and any added later) get the passwd home rather than silently
+ * inheriting whatever the ambient environment says, which is the safe default
+ * for a function whose side effect is writing a token cache.
+ *
+ * @param {{env?: Record<string,string>, timeoutMs?: number, stateDir?: string}} [opts]
  */
-export function runEmitHelper({ env = process.env, timeoutMs } = {}) {
+export function runEmitHelper({ env = process.env, timeoutMs, stateDir: dir } = {}) {
   const helper = resolveHelperPath()
   if (!existsSync(helper)) return { ran: false, status: null, hasAuth: false }
-  const res = spawnSync('sh', [helper], {
+  const res = spawnSync('/bin/sh', [helper, '--state-dir', dir ?? trustedStateDir()], {
     encoding: 'utf8',
     env,
     ...(timeoutMs ? { timeout: timeoutMs } : {}),

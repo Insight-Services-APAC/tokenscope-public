@@ -73,12 +73,16 @@ function installHelper(pluginJson: string | null, layout: 'claude' | 'copilot' =
 }
 
 function runHelper(env: Record<string, string> = {}) {
-  return spawnSync('sh', [helperPath], {
+  // `--state-dir` and `--tool-dir` on argv, not in env: the helper prepends a
+  // TRUSTED PATH before its first external command (a repo-set PATH would
+  // otherwise choose the `curl` the refresh token is handed to), which would
+  // shadow this file's stubs. `--tool-dir` is the trusted channel for putting
+  // them back in front. Same reason `TOKENSCOPE_STATE_DIR` no longer works here.
+  return spawnSync('sh', [helperPath, '--state-dir', stateDir, '--tool-dir', stubDir], {
     encoding: 'utf8',
     env: {
       PATH: `${stubDir}:${process.env.PATH}`,
       HOME: tmp,
-      TOKENSCOPE_STATE_DIR: stateDir,
       // S1 fix 3: the helper pre-flight-validates both endpoints (https
       // required off-box) before any curl call.
       TOKENSCOPE_BEARER_ENDPOINT: 'https://stub.local/api/v1/instances/x/bearer',

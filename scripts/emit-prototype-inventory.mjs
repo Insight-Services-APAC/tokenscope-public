@@ -158,6 +158,29 @@ async function emit() {
   }
 }
 
+/*
+ * A TREE THAT CARRIES NEITHER ARTEFACT IS NOT A BROKEN TREE.
+ *
+ * `docs/design/` is internal-only (tools/publish/internal-only-paths.txt), so the
+ * PUBLIC mirror ships this script and the parity test while the prototype they
+ * read is deliberately dropped. `--check` therefore threw `prototype not found`
+ * on every public release and took the whole Smoke job down with it — a publish
+ * pipeline defect wearing a test failure's clothes.
+ *
+ * The condition is BOTH absent, never "the prototype is missing". Some-but-not-all
+ * is a real inconsistency and must still fail:
+ *   - inventory.json present, prototype gone  → emit() throws, as before;
+ *   - prototype present, inventory.json gone  → the --check compare reports STALE.
+ * So this cannot become a gate that silently passes internally, where both files
+ * are tracked and present.
+ */
+if (!existsSync(PROTOTYPE) && !existsSync(OUT_JSON)) {
+  console.log(
+    'prototype inventory: docs/design/reporting-consolidation is absent — this tree does not carry the prototype (the public mirror drops it). Nothing to check.',
+  )
+  process.exit(0)
+}
+
 const inventory = await emit()
 const serialised = JSON.stringify(inventory, null, 2) + '\n'
 

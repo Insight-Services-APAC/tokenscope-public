@@ -25,12 +25,23 @@ useHead({ title: 'Worker controls · TokenScope' })
 const { session, ensure } = useSession()
 await ensure()
 
-// Same tier as the enablement endpoints themselves (admin / global-finops); the
-// fetch stays cold for anyone else so an unauthorised visit does not fire a 403
-// on load. The API is the real gate — this only avoids a pointless request.
+// The two enablement endpoints sit at DIFFERENT tiers, so this page needs two
+// checks, not one. Reading is admin / global-finops (enablement.get); the fetch
+// stays cold for anyone else so an unauthorised visit does not fire a 403 on load.
 const isAdmin = computed(() => {
   const r = session.value?.role
   return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+})
+
+// Writing is global-finops only (enablement.put) — `worker_enablement` has no
+// region column and every worker it governs runs estate-wide, so a toggle exceeds
+// a region admin's scope. A region admin still SEES the card: knowing which
+// kill-switches are thrown is not a region boundary crossing, and hiding it would
+// leave them unable to explain a gap in their own region's attribution. The API is
+// the real gate — withholding the button just avoids offering a certain 403.
+const canToggle = computed(() => {
+  const r = session.value?.role
+  return r === 'global-finops' || r === 'platform-admin'
 })
 
 interface WorkerEnablementRow {
@@ -105,6 +116,7 @@ async function toggleWorker(w: WorkerEnablementRow) {
           :key="w.name"
           :worker="w"
           :busy="togglingWorker === w.name"
+          :can-toggle="canToggle"
           @toggle="toggleWorker(w)"
         />
       </ul>

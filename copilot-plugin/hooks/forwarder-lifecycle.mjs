@@ -18,9 +18,13 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { homedir } from 'node:os'
 import * as fs from 'node:fs'
-import { enrollIfNeeded } from '../scripts/enroll.mjs'
+// enroll.mjs owns the ONE state-dir resolver on this side (TOKENSCOPE_STATE_DIR pin,
+// else ~/.tokenscope under the PASSWD home). Imported rather than re-derived so the
+// log this hook opens lands in the same directory the enrol it runs writes into and
+// the forwarder it spawns reads from — a second `homedir()`-based copy here used to
+// put the log in a phantom dir whenever `$HOME` was leaked.
+import { enrollIfNeeded, stateDir } from '../scripts/enroll.mjs'
 
 const __dir = dirname(fileURLToPath(import.meta.url))
 const action = process.argv[2] ?? 'start'
@@ -53,7 +57,7 @@ export function resolveProjectDir() {
 function spawnForwarder() {
   // D1b fix: redirect daemon stderr to a log file so failures are visible.
   // Previously stdio:'ignore' made spawn errors completely silent.
-  const tokenscopeDir = join(homedir(), '.tokenscope')
+  const tokenscopeDir = stateDir()
   try { fs.mkdirSync(tokenscopeDir, { recursive: true }) } catch { /* pre-exists */ }
   const logFd = fs.openSync(join(tokenscopeDir, 'forwarder.log'), 'a')
 

@@ -145,6 +145,48 @@ The `CopilotBundle` returned by `redeem` (see `server/api/v1/setup/redeem.post.t
 is the Copilot-specific variant of the `telemetry.*` envelope — it contains the
 file-exporter path and forwarder config instead of the Claude OTel plumbing.
 
+### What the setup skill may hand the redeem helper
+
+Copilot CLI has no `allowed-tools` mechanism, so the argv of
+`copilot-redeem.mjs` is simply whatever the model wrote, and the process it
+starts spends a live single-use handoff code and appends an export block to a
+shell init file. The validation therefore sits in the helper, in the shared
+`argv-guard.mjs` vendored from `plugin/scripts/` alongside `endpoint-guard.mjs`:
+
+- An **unknown `--flag` refuses the whole argv**, and a flag missing its value is
+  refused rather than reinterpreted as the next token. A second bare positional
+  is refused too — the documented form passes the handoff code once.
+- **`--api-base` may only select an origin this device already knows**: loopback,
+  or whatever discovery returns — the user-scope MCP registration
+  (`~/.copilot/mcp-config.json` first, then the Claude CLI's own user config),
+  falling back to the plugin's bundled `.mcp.json`. A **repo-local** `.mcp.json`
+  is deliberately not a candidate, for the same reason `TOKENSCOPE_API_BASE` is
+  not. Anything else is warned about on stderr and dropped, and
+  resolution continues from local configuration — refusing outright would hand a
+  prompt injection a denial of setup for free. No flag names the POST target at
+  all — the path is fixed at `/api/v1/setup/redeem` on the resolved base — and
+  `TOKENSCOPE_API_BASE` is not in this chain either. When nothing resolves, the
+  remedy is to register the server in `~/.copilot/mcp-config.json`, not to pass a
+  flag.
+- **`--shell-rc` is confined** to the user's own home — compared on real,
+  symlink-resolved paths — and to one of the shell init filenames the no-flag
+  default already writes (`.bashrc`, `.profile`, `.bash_profile`, `.bash_login`,
+  `.zshrc`, `.zprofile`, `.zshenv`). What lands in that file is executed by every
+  future shell, so an arbitrary path would be model-chosen persistence.
+
+The same skill needs this host's existing `instance_id` so a re-run rotates the
+device instead of minting a duplicate — and that id sits in
+`~/.tokenscope/config.json` next to `oauth_refresh_token`. It therefore asks
+`scripts/device-id.mjs --tool copilot-cli` (vendored verbatim from the Claude
+plugin), which reads the store out of process and prints only
+`{enrolled, tool, instance_id, bearer_host, reason}`. `--tool` is load-bearing:
+the helper reads only that tool's store, so it can never hand back the Claude
+Code id on a host running both — a cross-tool re-provision would revoke the other
+CLI's credential and silently stop its emitting. A host with no Copilot enrolment
+reports `enrolled: false` (`reason: "no-enrolment"`), which means *mint a fresh
+one*. `bearer_host` is how the skill tells which deployment the device currently
+points at, so a Sandbox→Dev move omits the old id.
+
 ---
 
 ## Transcoder contract
@@ -204,6 +246,8 @@ copilot-plugin/
   hooks/forwarder-lifecycle.mjs   hook driver → ../scripts/copilot-forwarder.mjs (co-located)
   scripts/copilot-forwarder.mjs   the shipped per-project forwarder (+ otlp-logs.mjs, copilot-redeem.mjs)
   scripts/managed-telemetry.mjs   enterprise-managed `telemetry`-setting detector (hostile/benign/none/unknown)
+  scripts/argv-guard.mjs          redeem-argv validator (vendored from plugin/scripts/)
+  scripts/device-id.mjs           credential-free device identity (vendored from plugin/scripts/)
   skills/tokenscope-setup/SKILL.md
   skills/project/SKILL.md
   skills/usage/SKILL.md

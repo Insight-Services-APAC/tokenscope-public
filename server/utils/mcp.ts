@@ -346,14 +346,14 @@ export function createMcpServer(dbOverride?: Db, publicOrigin?: string): McpServ
   // process→process by the local helper).
   server.tool(
     'provision_emit',
-    "Provision THIS device to emit TokenScope telemetry (turn on token attribution). One read-scoped call locates-or-creates your device's instance attestation and returns a SHORT-LIVED (~5 min), single-use handoff code plus a redeem URL — it does NOT return the durable emit credential (that secret is redeemed process-to-process by the local emit-redeem helper, never through this chat). Pass your existing tokenscope.instance_id (read from ~/.claude/settings.json's OTEL_RESOURCE_ATTRIBUTES) so re-running rotates the existing device instead of minting a new one; omit it for a fresh device. After calling, run the local redeem helper with the returned handoff_code to finish setup.",
+    "Provision THIS device to emit TokenScope telemetry (turn on token attribution). One read-scoped call locates-or-creates your device's instance attestation and returns a SHORT-LIVED (~5 min), single-use handoff code plus a redeem URL — it does NOT return the durable emit credential (that secret is redeemed process-to-process by the local emit-redeem helper, never through this chat). Pass your existing tokenscope.instance_id (get it from the plugin's device-id helper, which prints only non-secret fields — never by opening the device settings/credential file, which also holds the durable emit secret) so re-running rotates the existing device instead of minting a new one; omit it for a fresh device. After calling, run the local redeem helper with the returned handoff_code to finish setup.",
     {
       instance_id: z
         .string()
         .uuid()
         .optional()
         .describe(
-          'Your existing device id (tokenscope.instance_id from ~/.claude/settings.json), for idempotency; omit for a fresh device.',
+          "Your existing device id (tokenscope.instance_id, as reported by the plugin's device-id helper), for idempotency; omit for a fresh device.",
         ),
       tool: z
         .enum(EMIT_TOOLS)

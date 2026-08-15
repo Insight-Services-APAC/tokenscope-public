@@ -268,4 +268,42 @@ describe('runRegionReenrichment', () => {
     expect(tm!.code).toBe('emea-prac2')
     void r
   })
+
+  /*
+   * THE BATCHING CURSOR. The candidate query is `ORDER BY last_sync_at NULLS
+   * FIRST LIMIT n`, and only the MOVE branch stamped last_sync_at — so a row that
+   * could not move kept its old timestamp and re-occupied the head of the window
+   * on every subsequent pass. Past `limit` such rows, no other candidate was ever
+   * read. Stamping every row the pass LOOKED AT is what advances it.
+   *
+   * Deterministic by construction: every other teammate is stamped `now()` first,
+   * then the two rows under test are given distinct, older timestamps — so the
+   * order the worker reads them in is a fact, not a heap-order accident.
+   */
+  it('a pass over rows that cannot move still advances the cursor — the next pass reads DIFFERENT candidates', async () => {
+    const store = makePlacementStore(t.db)
+    const globalUnplaced = await store.unplacedOrgUnitId()
+    await t.client`UPDATE teammate SET last_sync_at = now()`
+    const aId = await store.createBillTeammate({ email: 'jam-a@example.com', displayName: null, orgUnitId: globalUnplaced })
+    const bId = await store.createBillTeammate({ email: 'jam-b@example.com', displayName: null, orgUnitId: globalUnplaced })
+    await t.client`UPDATE teammate SET last_sync_at = now() - interval '2 hours' WHERE id = ${aId}::uuid`
+    await t.client`UPDATE teammate SET last_sync_at = now() - interval '1 hour'  WHERE id = ${bId}::uuid`
+
+    // Unmovable: no directory match at all → the `unresolved` exit, which writes
+    // nothing about the teammate. It is the cheapest of the three non-move exits
+    // and the one an unplaceable person hits every tick, for ever.
+    const seen: string[] = []
+    const unresolvable = async (email: string) => {
+      seen.push(email)
+      return null
+    }
+
+    await runRegionReenrichment(t.db, { lookupDirectory: unresolvable, getManager: async () => null, limit: 1 })
+    expect(seen).toEqual(['jam-a@example.com'])
+
+    const second = await runRegionReenrichment(t.db, { lookupDirectory: unresolvable, getManager: async () => null, limit: 1 })
+    expect(second.unresolved).toBe(1)
+    // The second pass must reach the row BEHIND the one it could not move.
+    expect(seen).toEqual(['jam-a@example.com', 'jam-b@example.com'])
+  })
 })

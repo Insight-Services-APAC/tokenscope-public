@@ -18,11 +18,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 // vi.mock is hoisted above imports, so the mock fns must be created inside
 // vi.hoisted() (which is hoisted with it) — a plain top-level const would be in
 // the temporal dead zone when the factory runs.
-const { runReadJoiner, shouldDeepRescan, selectJoinableInstances } = vi.hoisted(() => ({
-  runReadJoiner: vi.fn(async () => ({ deepRescan: false })),
-  shouldDeepRescan: vi.fn(async () => false),
-  selectJoinableInstances: vi.fn(async () => ({ ids: ['inst-1'], capHit: null as number | null })),
-}))
+const { runReadJoiner, shouldDeepRescan, selectJoinableInstances, recordJoinerSelectionCap } =
+  vi.hoisted(() => ({
+    runReadJoiner: vi.fn(async () => ({ deepRescan: false })),
+    shouldDeepRescan: vi.fn(async () => false),
+    selectJoinableInstances: vi.fn(async () => ({ ids: ['inst-1'], capHit: null as number | null })),
+    recordJoinerSelectionCap: vi.fn(async () => ({ raised: 0, skippedExisting: 0, autoResolved: 0 })),
+  }))
 
 // The factory must export EVERY name registry.ts imports: vitest throws on an
 // unlisted export at USE site, so a missing one hides whichever branch touches
@@ -31,6 +33,7 @@ vi.mock('../../../server/workers/azure-monitor-reader', () => ({
   runReadJoiner,
   shouldDeepRescan,
   selectJoinableInstances,
+  recordJoinerSelectionCap,
 }))
 // getTelemetryReader is a SPY, not a zero-arg stub: the registry passes it the
 // operator's lookbackDays, and a stub that discards its argument makes that
@@ -119,8 +122,38 @@ describe('registry azure-monitor-read — selection cap-hit + recovery threading
     runReadJoiner.mockClear()
     shouldDeepRescan.mockClear()
     selectJoinableInstances.mockClear()
+    recordJoinerSelectionCap.mockClear()
     shouldDeepRescan.mockResolvedValue(false)
     selectJoinableInstances.mockResolvedValue({ ids: ['inst-1'], capHit: null })
+  })
+
+  it('reports the cap hit to the SIGNAL recorder, not only to worker_run.result', async () => {
+    // worker_run.result had five writers and no reader; the alert is what makes
+    // the cap observable before it silently truncates the fleet.
+    selectJoinableInstances.mockResolvedValue({ ids: ['inst-1'], capHit: 500 })
+    await azureMonitorRead().run(fakeDb, { runId: null })
+    expect(recordJoinerSelectionCap).toHaveBeenCalledWith(fakeDb, 500)
+  })
+
+  it('reports null on an uncapped run, which is what CLEARS an open signal', async () => {
+    await azureMonitorRead().run(fakeDb, { runId: null })
+    expect(recordJoinerSelectionCap).toHaveBeenCalledWith(fakeDb, null)
+  })
+
+  it('an operator sessionIds override never touches the signal (it ran no selection)', async () => {
+    // Its capHit is null by construction, so passing it on would auto-resolve a
+    // live signal mid-outage — exactly what read-path-health excludes scoped runs for.
+    await azureMonitorRead().run(fakeDb, {
+      runId: null,
+      opts: { sessionIds: ['11111111-1111-4111-8111-111111111111'] },
+    })
+    expect(recordJoinerSelectionCap).not.toHaveBeenCalled()
+  })
+
+  it('a failing signal recorder never fails the tick (observability is fenced)', async () => {
+    recordJoinerSelectionCap.mockRejectedValueOnce(new Error('inbox is down'))
+    await expect(azureMonitorRead().run(fakeDb, { runId: null })).resolves.toBeDefined()
+    expect(runReadJoiner).toHaveBeenCalledTimes(1) // the join still ran
   })
 
   it('threads the selection cap hit into runReadJoiner (so it reaches worker_run.result)', async () => {

@@ -56,7 +56,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { encodeExportLogsServiceRequest } from './otlp-logs.mjs'
-import { safeProcessEnv } from './plugin-runtime.mjs'
+import { safeProcessEnv, trustedStateDir } from './plugin-runtime.mjs'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 
 // Re-export so existing callers (tests, file-forwarder) can import from here.
@@ -389,7 +389,10 @@ function mintBearer(pluginRoot, env) {
   }
   let stdout
   try {
-    stdout = execFileSync('sh', [helper], {
+    // State dir as an ARGUMENT and `/bin/sh` absolute — the helper no longer
+    // reads TOKENSCOPE_STATE_DIR, and a bare `sh` would be resolved through a
+    // PATH a repository can set. See otel-headers-helper.sh's header.
+    stdout = execFileSync('/bin/sh', [helper, '--state-dir', trustedStateDir()], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'inherit'],
       env,

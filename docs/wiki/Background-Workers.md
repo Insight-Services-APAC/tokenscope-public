@@ -38,6 +38,8 @@ sequenceDiagram
 
 The registry (`server/workers/registry.ts`) is the single source of truth: a static list mapping each name to its `run(db)` function, `recommendedCron`, and description.
 
+**Kill switch.** Any scheduled worker can be turned off from the admin worker-controls card and stays off from its next tick, with no deploy. The state lives in `worker_enablement`; an absent row means enabled. Reading the fleet's state is open to `admin` and `global-finops`; **writing a toggle is `global-finops` only** — the table has no region column and every worker it governs runs globally, so a toggle reaches past a region admin's scope, and disabling one can stop attribution, budget alerting or spoof detection estate-wide. A region admin therefore sees the card and its states but is offered no toggle. Disabling requires a reason, and every toggle is attributed and audited. Routes: [`GET`/`PUT /api/v1/admin/workers/enablement`](API-Reference.md#admin).
+
 ## Dev / Ops CLI
 
 For local runs or one-offs, bypass HTTP and hit the DB directly:
@@ -55,7 +57,7 @@ The 31 registered workers and their cron cadence. The registry's `recommendedCro
 |---|---|---|
 | `analytics-poll` | Poll every reconciled Anthropic org for new `actual_spend` rows — one row per surface lane since #142 (month-to-date, idempotent upserts + convergence prune) | `*/15 * * * *` |
 | `placement-sync` | Provision + place cost-bearing teammates from the owed-bill queue (bill-driven placement) | `*/30 * * * *` |
-| `region-reenrichment` | Re-derive the region of cost-centre-unplaced bill teammates sitting on a holding node (ongoing heal + one-shot backfill; only moves never-adopted placeholders, rehome-safe) | `0 */6 * * *` |
+| `region-reenrichment` | Re-derive the region of cost-centre-unplaced bill teammates sitting on a holding node (ongoing heal + one-shot backfill; only moves never-adopted placeholders, rehome-safe). Stamps `last_sync_at` on every row it examined, moved or not — the candidate window is ordered `last_sync_at NULLS FIRST`, so a row left unstamped would sit at the head of it for ever and the unmovable would starve the movable | `0 */6 * * *` |
 | `privileged-identity-cleanup` | Report (or, under a signed `{apply:true}` body + hard cap, clean) teammate rows matching the directory-exclusion policy | `30 4 * * *` |
 | `pending-placement-gc` | Garbage-collect replayed owed bills from the pending-placement queue past the 90-day retention window | `0 4 * * *` |
 | `azure-monitor-read` | Join recent OTel spans into `attribution_record` (the read joiner) | `*/5 * * * *` |
@@ -103,6 +105,7 @@ Two workers carry the attribution loop. They share a lane model: every `attribut
 Scans recent joinable sessions and joins their emitted usage into `attribution_record`.
 
 - **Scan scope.** Joins active sessions (re-scanned every tick so long-lived Claude sessions keep attributing in near-real-time) plus ended-but-unattributed sessions, bounded to a recent window; only `attested`, non-purged rows.
+- **Per-run selection cap.** One run scans at most `NUXT_JOINER_INSTANCE_CAP` devices (default 500). Candidates are ordered active-first, then by most recent activity, so what gets shed is the least recently active. A scheduled run whose selection is truncated raises a `joiner-selection-cap` inbox item at `attention`, routed to the cross-region ops roles (`global-finops` / `platform-admin`) — the cap is a property of the deployment, not of any region. One open item per episode: a second truncated run adds nothing, and the first run whose selection fits again resolves it. Only the **scheduled** path signals; an operator's scoped run ran no selection at all, so it neither raises nor clears. Raising the cap is deliberate — each device costs two to three serial Log Analytics queries inside one run — and the signal is observability only: a failure to record it is logged and never stops the join.
 - **Membership gate.** A session's project tag is a *claim*. Cost is billed to the project only if the teammate is a current member (`project_assignment.effective @> now()`). A tag from a non-member is **withheld** (it later surfaces as untagged spend at reconciliation) and the rejection is audited as `attribution-spill-unauthorized`. *Tag proposes, membership disposes.*
 - **Org-lane fidelity.** The Claude-stamped `organization.id` selects the lane via the `provider_org` registry: a reconciled org → `tier-1` / `estimated` (the Anthropic API is the ceiling); indicative or unknown org → `tier-2` / `telemetry-only` (excluded from reconciliation). An unknown org is attributed best-effort and flagged (`attribution-org-unclassified`) for classification.
 - **Cost.** Derived at write time from the matching `rate_card` / `rate_line`, with `rate_card_id` + version pinned on each row. A span with no matching rate card is skipped (counted), never silently zeroed.

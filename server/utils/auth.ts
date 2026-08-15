@@ -398,15 +398,30 @@ function excludedIdentityDetail(err: unknown): string | null {
   return null
 }
 
+/**
+ * The session's mint time, as the ISO string isRevoked() compares revoked_at
+ * against.
+ *
+ * The fallback is EPOCH, not now(). `issuedAt` is only ever used to answer "was
+ * this session minted before the revocation?", so an unknown mint time has to
+ * sort BEFORE every revocation, not after it. now() would make a session with
+ * an unreadable loggedInAt look newer than any revoke_at that has ever been
+ * stamped — i.e. it would survive revocation precisely when we know least about
+ * it. Epoch fails closed instead.
+ *
+ * Defence in depth, not a live defect: nuxt-oidc-auth always sets loggedInAt to
+ * a number (callback.js), so this branch is unreachable today.
+ */
 function oidcLoggedInAtIso(oidcSession: OidcUserSessionLike): string {
   const v = oidcSession.loggedInAt
   if (typeof v === 'number') return new Date(v * 1000).toISOString()
   if (typeof v === 'string') return v
-  return new Date().toISOString()
+  return new Date(0).toISOString()
 }
 
 interface RevocationRow extends Record<string, unknown> {
   revoked_at: string | Date | null
+  is_active: boolean | null
 }
 
 function parseRevokedAtMs(value: string | Date | null | undefined): number | null {
@@ -416,9 +431,40 @@ function parseRevokedAtMs(value: string | Date | null | undefined): number | nul
 }
 
 /**
- * True if the session is post-revocation. Checks the primary identity
- * AND the impersonator (when present). One DB round-trip in the
- * non-impersonating case; two when impersonating.
+ * True if the session must not resolve. Checks the primary identity AND the
+ * impersonator (when present). One DB round-trip in the non-impersonating
+ * case; two when impersonating.
+ *
+ * TWO INDEPENDENT AXES, and they are NOT the same shape:
+ *
+ *  - `revoked_at` is a SESSION ANCHOR. It is overloaded (ADR-0005 §E2: a benign
+ *    role/region change, an explicit revoke-sessions, and an offboarding all
+ *    bump it), so it only invalidates sessions minted BEFORE it — hence the
+ *    `> issuedAt` comparison. A teammate whose revoked_at was bumped can sign
+ *    in again immediately and get a fresh, valid session. That is deliberate.
+ *
+ *  - `is_active = false` is DEACTIVATION — a durable state, not an instant.
+ *    It denies EVERY session for that teammate, existing or newly minted,
+ *    regardless of issuedAt. There is no timestamp comparison because there is
+ *    no "after" to be on the right side of: the account is retired.
+ *
+ * Why the second one has to live here: the privileged-identity-cleanup worker's
+ * ONLY identity mutation is `UPDATE teammate SET is_active = FALSE`
+ * (server/workers/privileged-identity-cleanup.ts) — it never touches
+ * revoked_at — and resolveOrCreateTeammate's fast path returns an existing row
+ * without consulting is_active. Without this check a "cleaned" privileged /
+ * service account keeps its live cookie session and can keep signing in, so the
+ * retirement worker would be cosmetic for access. The assignment side already
+ * gates on the same column (server/auth/ensure-real-identity.ts,
+ * provision-directory-teammate.ts); this is the authentication side of it.
+ *
+ * FAIL CLOSED: the test is `!== true`, so a NULL (impossible today — mig 0001
+ * declares the column `NOT NULL DEFAULT TRUE`) or an absent field denies rather
+ * than admits.
+ *
+ * This function is the PLATFORM-SESSION (cookie) gate only. The emit/MCP bearer
+ * path has its own analogue in server/auth/oauth-bearer.ts and is untouched by
+ * anything here.
  */
 async function isRevoked(
   db: ReturnType<typeof getDb>,
@@ -427,18 +473,22 @@ async function isRevoked(
   const issuedAtMs = Date.parse(session.issuedAt) || 0
 
   const rows = await db.execute<RevocationRow>(sql`
-    SELECT revoked_at FROM teammate WHERE id = ${session.teammateId}::uuid LIMIT 1
+    SELECT revoked_at, is_active FROM teammate WHERE id = ${session.teammateId}::uuid LIMIT 1
   `)
   const row = [...rows][0]
   if (!row) return true // teammate gone — treat as revoked
+  if (row.is_active !== true) return true // deactivated — no session, ever
   const primaryRevokedMs = parseRevokedAtMs(row.revoked_at)
   if (primaryRevokedMs !== null && primaryRevokedMs > issuedAtMs) return true
 
   if (session.impersonatorOid) {
     const impRows = await db.execute<RevocationRow>(sql`
-      SELECT revoked_at FROM teammate WHERE entra_oid = ${session.impersonatorOid} LIMIT 1
+      SELECT revoked_at, is_active FROM teammate WHERE entra_oid = ${session.impersonatorOid} LIMIT 1
     `)
     const impRow = [...impRows][0]
+    // Only judge a row that EXISTS — a missing impersonator row stays
+    // non-revoking, exactly as before (widening that is a separate change).
+    if (impRow && impRow.is_active !== true) return true
     const impRevokedMs = parseRevokedAtMs(impRow?.revoked_at ?? null)
     if (impRevokedMs !== null && impRevokedMs > issuedAtMs) return true
   }

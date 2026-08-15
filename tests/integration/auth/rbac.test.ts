@@ -156,4 +156,45 @@ describe('assertProjectScope — explicit allowlist, 403 default (CORE-3)', () =
       })
     }
   })
+
+  // ── S13a: the region clamp the SQL twins carry ────────────────────────────
+  // allocation-scope.ts:57 / org-subtree-scope.ts:51 both wrap the `<@` in
+  // `region_id = app.user_region_id`, because org_unit paths are unique only
+  // per region. The manager arm here had the `<@` and not the clamp. Proven at
+  // the ROUTE boundary in tests/integration/allocations/project-scope-region-clamp.test.ts
+  // (a module test cannot see the handlers this gate is the sole gate for);
+  // these cases pin the helper's own truth table.
+  it('manager in ANOTHER region → 403 on the very same cou path', async () => {
+    await expect(
+      projectScope({ ...DEV, role: 'manager', regionId: '9a1e0000-0000-4000-8000-333333333333' }),
+    ).rejects.toMatchObject({ statusCode: 403 })
+  })
+
+  it('a missing/empty region on EITHER side fails CLOSED — including both at once', async () => {
+    const blanks = [undefined, null, ''] as unknown as string[]
+    for (const bad of blanks) {
+      // session side blank
+      await expect(projectScope({ ...DEV, role: 'manager', regionId: bad })).rejects.toMatchObject({
+        statusCode: 403,
+      })
+      // project side blank
+      await expect(
+        assertProjectScope(
+          makeEvent({ ...DEV, role: 'manager' }) as unknown as Parameters<
+            typeof assertProjectScope
+          >[0],
+          { regionId: bad, couPath: project.couPath },
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 })
+      // BOTH blank — the `undefined === undefined` grant this must never be
+      await expect(
+        assertProjectScope(
+          makeEvent({ ...DEV, role: 'manager', regionId: bad }) as unknown as Parameters<
+            typeof assertProjectScope
+          >[0],
+          { regionId: bad, couPath: project.couPath },
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 })
+    }
+  })
 })

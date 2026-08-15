@@ -5,8 +5,14 @@
  * VERY NEXT tick — no deploy, no infra change. Every toggle is attributed
  * (updated_by/at) and audited.
  *
- * RBAC: admin / global-finops. Deliberately NOT developer-reachable: disabling a
- * worker can stop attribution, budget alerts, or spoof detection fleet-wide.
+ * RBAC: requireRole(global-finops). NOT region-scoped `admin`, for the same reason
+ * the RUN twin gives at [name]/run.post.ts:29-33 — `worker_enablement` has no region
+ * column (mig 0090), and every worker it governs operates GLOBALLY, so a toggle
+ * exceeds a region admin's scope. Disabling is the stronger case of the two: forcing
+ * a run costs a sweep, whereas turning one off stops attribution, budget alerts or
+ * spoof detection fleet-wide until someone notices. The read side (enablement.get)
+ * stays open to `admin` — seeing the estate's kill-switch state is not a region
+ * boundary crossing.
  */
 import { defineEventHandler, readValidatedBody, createError } from 'h3'
 import { z } from 'zod'
@@ -30,7 +36,7 @@ export default defineEventHandler(async (event) => {
   // CSRF: this control can stop attribution / budget alerting / spoof detection
   // fleet-wide, so a logged-in admin must not be cross-site-forced into it.
   assertSameOrigin(event)
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'global-finops')
   const body = await readValidatedBody(event, (b) => bodySchema.parse(b))
 
   // Only real registry workers — a typo would otherwise create a dead row that

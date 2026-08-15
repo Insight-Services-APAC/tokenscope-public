@@ -41,6 +41,7 @@ import {
   emptyParseCounters,
 } from '../azure/reader'
 import { recordAuditEvent } from '../db/audit'
+import { dispatchInbox, type InboxCategory } from '../notifications/dispatch'
 import { canonicaliseEmail } from '../../shared/identity/email'
 import { sweepStaleDismissals } from '../utils/stale-dismissals'
 import { loadLifecyclePolicyResolver } from '../db/project-lifecycle-policy'
@@ -892,6 +893,115 @@ export async function selectJoinableInstances(
     )
   }
   return { ids: kept.map((r) => r.id), capHit }
+}
+
+/**
+ * inbox_item.category for the selection-cap signal. `satisfies` (not a cast) so
+ * adding it here without registering it in the dispatcher's union — which is
+ * what decides severity and routing — fails the build rather than dispatching an
+ * unrouted category to nobody.
+ */
+export const JOINER_SELECTION_CAP = 'joiner-selection-cap' satisfies InboxCategory
+/**
+ * The read path is a GLOBAL singleton, not one entity per row — so the signal
+ * hangs off the same synthetic kind read-path-health uses, with no id.
+ * dispatchInbox drops a non-UUID related_entity_id to null, so omitting it is
+ * safe and routing stays category-driven.
+ */
+const JOINER_SELECTION_CAP_KIND = 'read-path'
+
+export interface JoinerSelectionCapResult {
+  /** 1 when this call opened a new signal, else 0. */
+  raised: number
+  /** 1 when a signal was already open (the 5-minute tick, deduped), else 0. */
+  skippedExisting: number
+  /** Open signals closed because this run's selection fit under the cap. */
+  autoResolved: number
+}
+
+/**
+ * Make a selection-cap hit OBSERVABLE — the thing `selectionCapHit` was not.
+ *
+ * The cap has always been detected (selectJoinableInstances over-fetches by one
+ * to tell "exactly at the cap" from "truncated by it"), logged, and threaded
+ * into worker_run.result. Nothing READ it: no query, no panel, no alert — five
+ * write sites and no reader. So the only symptom of the joiner scanning a
+ * fraction of the fleet was spend quietly not appearing, which is the outage
+ * class this whole file is scarred by.
+ *
+ * It is a real reach, not a theoretical one: the platform admits
+ * DEFAULT_MAX_LIVE_EMIT_INSTANCES (50,000) live emit devices while this
+ * selection scans 500 per tick, so ORGANIC GROWTH alone crosses it.
+ *
+ * OBSERVABILITY ONLY. It does not widen the scan: each instance costs 2-3 SERIAL
+ * Log Analytics queries behind a ~120s gateway (see telemetry-recovery.ts, where
+ * a 187s slice 504'd while holding the single-flight lock), so draining an
+ * unbounded selection in one tick would trade a partial read for an outage. A
+ * resumable cursor is an owner decision, not a side effect of an alert.
+ *
+ * Idempotent per EPISODE, modelled on read-path-health: one open item until the
+ * selection fits again, then auto-resolved. `capHit === null` is the recovery
+ * signal, so callers must only pass the result of a REAL scheduled selection —
+ * an operator's scoped override ran no selection and would falsely clear a live
+ * signal (the same trap read-path-health documents for scoped runs).
+ *
+ * CONCURRENCY: the check-then-insert below is non-atomic and is safe only under
+ * the per-worker dispatch lock the run-worker endpoint holds (dispatch-lock.ts)
+ * — the same contract read-path-health, went-silent and budget-alert rely on.
+ */
+export async function recordJoinerSelectionCap(
+  db: PostgresJsDatabase<typeof schema>,
+  capHit: number | null,
+  opts: { now?: Date } = {},
+): Promise<JoinerSelectionCapResult> {
+  const now = opts.now ?? new Date()
+
+  if (capHit === null) {
+    const resolved = await db.execute<{ id: string }>(sql`
+      UPDATE inbox_item
+         SET ack_state = 'resolved', ack_at = ${now.toISOString()}::timestamptz
+       WHERE category = ${JOINER_SELECTION_CAP}
+         AND related_entity_kind = ${JOINER_SELECTION_CAP_KIND}
+         AND ack_state IN ('unread', 'read', 'acknowledged')
+      RETURNING id::text AS id
+    `)
+    return { raised: 0, skippedExisting: 0, autoResolved: [...resolved].length }
+  }
+
+  const existing = await db.execute<{ id: string }>(sql`
+    SELECT id::text AS id FROM inbox_item
+     WHERE category = ${JOINER_SELECTION_CAP}
+       AND related_entity_kind = ${JOINER_SELECTION_CAP_KIND}
+       AND ack_state IN ('unread', 'read', 'acknowledged')
+     LIMIT 1
+  `)
+  if ([...existing].length > 0) {
+    return { raised: 0, skippedExisting: 1, autoResolved: 0 }
+  }
+
+  // Severity is the dispatcher's default for this category ('attention'), set
+  // there rather than here so there is ONE place that decides how loud a
+  // category is. Deliberately not 'urgent' like read-path-stale: the selection
+  // sheds least-recently-active FIRST, so a cap hit does not prove spend is
+  // being lost, and a device that IS starved by it surfaces separately (and
+  // urgently) as attribution-gap once it falls 72h behind — provided it had
+  // attributed before. This is the early capacity warning, not the outage.
+  const dispatched = await dispatchInbox(db, {
+    category: JOINER_SELECTION_CAP,
+    subject: `Attribution joiner is capped at ${capHit} devices per run — the surplus is skipped`,
+    body: {
+      worker: 'azure-monitor-read',
+      cap: capHit,
+      summary:
+        `The scheduled selection matched more joinable devices than its per-run cap (${capHit}), so the surplus was not scanned on this run. ` +
+        'Candidates are ordered active-first, then by most recent activity, so what gets shed is the least recently active: dormant devices while the active population stays under the cap, and live ones once it does not. A device skipped on every run stops attributing spend silently.',
+      hint:
+        'Raise NUXT_JOINER_INSTANCE_CAP (default 500) above the joinable-device count and redeploy the reader; this clears itself on the first run whose selection fits. Raise it deliberately — each device costs 2-3 serial Log Analytics queries inside one run, so a much larger cap makes the run proportionally longer.',
+      detectedAt: now.toISOString(),
+    },
+    relatedEntityKind: JOINER_SELECTION_CAP_KIND,
+  })
+  return { raised: dispatched.length > 0 ? 1 : 0, skippedExisting: 0, autoResolved: 0 }
 }
 
 /**

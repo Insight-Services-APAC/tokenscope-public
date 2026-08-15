@@ -21,8 +21,15 @@
  * collector). `URL#hostname` for an IPv6 literal INCLUDES the brackets
  * (`new URL('http://[::1]/x').hostname === '[::1]'`, not `'::1'`) — match
  * both forms so an IPv6-loopback dev endpoint isn't misclassified as off-box.
+ *
+ * EXPORTED because `assertSafeEndpoint` deliberately takes an early exit for
+ * loopback and so cannot answer "is this on-box?" for a caller that needs to
+ * decide something else on the same fact (argv-guard.mjs, which allows a
+ * loopback api-base but must still refuse a non-http(s) scheme there). One
+ * definition of loopback, not a second one beside it — the same reason this
+ * module exists at all.
  */
-function isLoopbackHostname(hostname) {
+export function isLoopbackHostname(hostname) {
   const h = (hostname || '').toLowerCase()
   return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]'
 }

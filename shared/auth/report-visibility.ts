@@ -1,19 +1,25 @@
 /*
- * report-visibility — the ONE source of truth for report-ACCESS vocabulary:
- * per-teammate GRANTS (`report_access_grant`, mig 0129) union a role-derived
- * BASELINE. Replaces the three-mode admin dial (task #19, mig 0087,
+ * report-visibility — the ONE source of truth for report-ACCESS vocabulary: a
+ * role-derived BASELINE, widened by per-teammate positive GRANTS and zeroed by a
+ * per-teammate DENY (`report_access_grant`, migs 0129 + 0130).
+ * Replaces the three-mode admin dial (task #19, mig 0087,
  * `REPORT_VISIBILITY_MODES`/`reportGrants`) — that dial could only say "every
  * region admin" or "every cost-centre owner", org-wide; this says "this
  * teammate, this permission, until <expiry>".
  *
- * Two PERMISSIONS ({@link REPORT_ACCESS_PERMISSIONS}) an admin grants
+ * Two positive PERMISSIONS ({@link REPORT_ACCESS_PERMISSIONS}) an admin grants
  * per-teammate: 'operational' (every region + every Business Unit) and
- * 'finance' (the whole-company finance pack). {@link baselineGrants} is what
- * every caller holds with NO grant at all — role + cost-centre ownership,
- * unchanged from the RBAC docs for the roles that never held elevation.
- * {@link effectiveReportGrants} widens the baseline by whichever permissions
- * the caller's ACTIVE grants (`server/auth/report-scope.ts::resolveReportPermissions`)
- * return. `ReportScopeGrants` (the resolved per-scope object every reporting
+ * 'finance' (the whole-company finance pack); plus ONE deny,
+ * {@link REPORT_ACCESS_REVOKE} (mig 0130). {@link baselineGrants} is what every
+ * caller holds with NO row at all — role + cost-centre ownership; the ORG-WIDE
+ * roles (global-finops / platform-admin) hold the whole company there, every
+ * other role is region-bound.
+ * {@link effectiveReportGrants} widens the baseline by whichever positive
+ * permissions the caller's ACTIVE grants
+ * (`server/auth/report-scope.ts::resolveReportPermissions`) return — a widening
+ * that applies to ANY role whose baseline lacks that scope, a region `admin`
+ * included — and zeroes it outright when an active revoke is present
+ * (`resolveReportAccessRevoked`). `ReportScopeGrants` (the resolved per-scope object every reporting
  * endpoint reads) keeps its SHAPE exactly as before — only what PRODUCES it
  * changed — so `server/auth/report-scope.ts` and the `/reports/**` read path
  * are untouched below the two producer functions.
@@ -39,8 +45,11 @@ import { consola } from 'consola'
 import type { Role } from './roles'
 
 /**
- * The two permissions an admin grants per-teammate (`report_access_grant.permission`,
- * mig 0129 — CHECK-pinned to this exact tuple, 0084-style, see the migration unit test).
+ * The two POSITIVE permissions an admin grants per-teammate
+ * (`report_access_grant.permission`, mig 0129). The column's CHECK is pinned
+ * 0084-style to {@link REPORT_ACCESS_GRANT_VALUES} — this tuple PLUS the
+ * {@link REPORT_ACCESS_REVOKE} deny — as widened by mig 0130; the migration
+ * unit test reads both migrations off disk and compares them to that constant.
  */
 export const REPORT_ACCESS_PERMISSIONS = ['operational', 'finance'] as const
 export type ReportAccessPermission = (typeof REPORT_ACCESS_PERMISSIONS)[number]
@@ -48,6 +57,26 @@ export type ReportAccessPermission = (typeof REPORT_ACCESS_PERMISSIONS)[number]
 export function isReportAccessPermission(v: string): v is ReportAccessPermission {
   return (REPORT_ACCESS_PERMISSIONS as readonly string[]).includes(v)
 }
+
+/**
+ * The REVOKE sentinel (mig 0130). An active `report_access_grant` row with this
+ * `permission` value zeroes a teammate's report access — below their role
+ * default and below any positive grant. It exists for the "administer, no data
+ * access" separation-of-duties case: an org may want an admin who can operate
+ * the platform but must not read billed-spend reports. Precedence is DENY-WINS
+ * (see {@link effectiveReportGrants}); it is NOT one of the grantable positive
+ * {@link REPORT_ACCESS_PERMISSIONS}, so the two sets never overlap.
+ *
+ * Stored, not a role: revoking is per-PERSON, and it survives a role change, so
+ * it lives in the same table as the grants and is set/cleared by the same admin
+ * surface. The DB CHECK (mig 0130) pins `permission IN
+ * ('operational','finance','revoke-all')`.
+ */
+export const REPORT_ACCESS_REVOKE = 'revoke-all' as const
+export type ReportAccessRevoke = typeof REPORT_ACCESS_REVOKE
+
+/** Every value the `report_access_grant.permission` column may hold. */
+export const REPORT_ACCESS_GRANT_VALUES = [...REPORT_ACCESS_PERMISSIONS, REPORT_ACCESS_REVOKE] as const
 
 export const REPORT_ACCESS_PERMISSION_LABELS: Record<ReportAccessPermission, string> = {
   operational: 'Operational reporting (whole company)',
@@ -68,6 +97,23 @@ export const REPORT_ACCESS_PERMISSION_DESCRIPTIONS: Record<ReportAccessPermissio
   operational:
     'Company-wide reporting: every region and Business Unit view, including their billed-spend figures.',
   finance: 'The whole-company finance pack (month close, Business Unit invoices).',
+}
+
+/**
+ * Labels + descriptions for EVERY report_access_grant value, including the
+ * {@link REPORT_ACCESS_REVOKE} deny (mig 0130). The admin grant surface and the
+ * grants list read these so a 'revoke-all' row never renders as an undefined
+ * label. The revoke copy states the OPPOSITE of a grant — it takes access away.
+ */
+export const REPORT_ACCESS_GRANT_LABELS: Record<(typeof REPORT_ACCESS_GRANT_VALUES)[number], string> = {
+  ...REPORT_ACCESS_PERMISSION_LABELS,
+  'revoke-all': 'Revoke — no report access',
+}
+
+export const REPORT_ACCESS_GRANT_DESCRIPTIONS: Record<(typeof REPORT_ACCESS_GRANT_VALUES)[number], string> = {
+  ...REPORT_ACCESS_PERMISSION_DESCRIPTIONS,
+  'revoke-all':
+    'Remove ALL report access for this person — below their role default and any grant. They can still administer; they see no reports. The "administer, no data" separation of duties.',
 }
 
 /**
@@ -188,18 +234,30 @@ function withDrillGrants(
  * from "grant" is that a role which never held elevation keeps exactly what
  * it had.
  *
- * global-finops / platform-admin are NOT unconditionally cross-region here —
- * that used to be "standard" behaviour for these two roles, and it is now the
- * thing an explicit 'operational' grant buys (via {@link OPERATIONAL_OVERLAY}
- * in {@link effectiveReportGrants}). Their cost-centre floor stays
- * ownership-conditional for a SECURITY reason, not a style one:
- * `orgSubtreeScopePredicate`'s GUC arm is unconditionally TRUE for role
- * 'global-finops' (server/auth/org-subtree-scope.ts:49; platform-admin maps to
- * it at the RLS layer, request-rls.ts:33), so an unconditional
- * 'owned-or-subtree' baseline would open the WHOLE Business-Unit list to an
- * org-wide caller holding no grant at all — the resolvers refuse it BEFORE
- * that predicate ever runs by making the floor `false` absent ownership (see
- * `costCentreScopeOpts`'s `ownerOnly`, server/auth/report-scope.ts).
+ * global-finops / platform-admin see the WHOLE COMPANY at this floor —
+ * all-regions, every Business Unit, and the finance pack (PO decision
+ * 2026-08-13). These roles answer for no single region, so tying their report
+ * access to a per-person grant made the access fragile: a platform-admin whose
+ * backfilled grant landed on a different teammate row (or whose grant never
+ * backfilled) saw an EMPTY report shell, which is the opposite of least
+ * privilege — it is a broken admin. The role is the authority here.
+ *
+ * The cost-centre floor is `'all'`, NOT `'owned-or-subtree'`, and that choice is
+ * what keeps the old #251 SECURITY note irrelevant rather than violated:
+ * `orgSubtreeScopePredicate`'s GUC arm is unconditionally TRUE for org-wide
+ * roles (org-subtree-scope.ts:49; platform-admin maps at request-rls.ts:33), so
+ * an `'owned-or-subtree'` floor on these roles WOULD have leaked every BU
+ * through that predicate. `'all'` never touches the predicate — it routes
+ * through `costCentreScopeOpts`'s `unbounded` arm, the resolvers' explicit
+ * "every BU" path. So the hazard #251 named is designed out, not re-opened.
+ *
+ * Pulling a specific org-wide admin BELOW this default is an explicit admin
+ * action and it IS expressible: an active `report_access_grant` row carrying
+ * {@link REPORT_ACCESS_REVOKE} (mig 0130) zeroes their report access.
+ * DENY-WINS — {@link effectiveReportGrants} returns {@link REVOKED_GRANTS}
+ * before any union, so the deny beats this floor AND any positive grant. What
+ * is NOT expressible is a PARTIAL deny (revoke finance, keep operational);
+ * that is a deliberate follow-up, not this lever.
  */
 export function baselineGrants(role: Role, ownsCostCentre: boolean): ReportScopeGrants {
   const devTier: ReportScopeGrants = withDrillGrants({
@@ -214,10 +272,13 @@ export function baselineGrants(role: Role, ownsCostCentre: boolean): ReportScope
       return devTier
     case 'manager':
     case 'admin':
-      // Unconditional 'owned-or-subtree' — byte-identical to today's grants for
-      // these two roles regardless of `ownsCostCentre` (their org-subtree
-      // ownership predicate is real either way; only the org-wide branch below
-      // needs the ownership-conditional treatment).
+      // Region-BOUND. A region `admin` sees all reports FOR THEIR OWN REGION
+      // (own-region + their real org-subtree ownership), NOT other regions. This
+      // is deliberate: making a region admin cross-region would drop the
+      // anti-IDOR region clamp that stops one region's admin reading another
+      // region's billed spend (tests/integration/reports/{regional,cost-centres}
+      // assert exactly that). "Admins see all reports" is delivered for the
+      // ORG-WIDE roles below; a region admin is scoped, widened only by a grant.
       return withDrillGrants({
         across: false,
         regional: 'own-region',
@@ -226,13 +287,27 @@ export function baselineGrants(role: Role, ownsCostCentre: boolean): ReportScope
       })
     case 'global-finops':
     case 'platform-admin':
-      // Ownership-conditional — see the function comment above for why this is
-      // NOT the same unconditional shape as manager/admin.
+      // ORG-WIDE roles see the whole company BY DEFAULT (PO decision 2026-08-13,
+      // reversing #251 for these roles). They answer for no single region, so an
+      // `own-region` floor is degenerate — there is no home region to clamp to,
+      // which is exactly how a platform-admin ended up staring at an empty report
+      // shell while their backfilled grant sat unread on another teammate row.
+      // The role is the default; an explicit REVOKE
+      // (report_access_grant.permission = 'revoke-all') pulls a specific admin
+      // below it — the "administer, no data access" separation-of-duties case
+      // (see effectiveReportGrants). Finer per-scope granularity is a TODO.
+      //
+      // `costCentre: 'all'` is deliberate and SAFE: it routes through the
+      // resolvers' `unbounded` arm (costCentreScopeOpts → `unbounded: true`) and
+      // the project path's explicit `return null` — NEVER the org-subtree
+      // predicate whose unconditional org-wide GUC arm #251's `ownerOnly` seal
+      // guarded. `'all'` is the explicit "every BU" value, so that leak class is
+      // designed out, not re-opened.
       return withDrillGrants({
-        across: false,
-        regional: 'own-region',
-        costCentre: ownsCostCentre ? 'owned-or-subtree' : false,
-        finance: false,
+        across: true,
+        regional: 'all-regions',
+        costCentre: 'all',
+        finance: true,
       })
     default: {
       // Unreachable for a valid Role; fail-closed to developer-tier rather than throw.
@@ -318,19 +393,45 @@ function permissionOverlay(
 }
 
 /**
- * The ONE enforcement primitive: (role × ownership × held permissions) → the
- * caller's effective per-scope grants. `baselineGrants(role, ownsCostCentre)`
- * UNION `permissionOverlay(permissions)`, field-wise widest
- * ({@link unionGrants}), then {@link withDrillGrants}. PURE and TOTAL — no DB
- * handle, no throw: an empty `permissions` array degrades to exactly the
- * baseline, and an unrecognised role still fails closed via
+ * What a caller with report access explicitly REVOKED holds: nothing. Every
+ * report scope is `false`, so `meta.scopes` is empty and the shell renders the
+ * "no access" state — by DESIGN this time, not by the degenerate-floor accident
+ * #251 produced. `withDrillGrants` still fills `teammate: false` /
+ * `project: 'membership'` (the `me/*` floor everyone keeps — a revoke removes
+ * REPORT depth, not membership of one's own projects).
+ */
+const REVOKED_GRANTS: ReportScopeGrants = withDrillGrants({
+  across: false,
+  regional: false,
+  costCentre: false,
+  finance: false,
+})
+
+/**
+ * The ONE enforcement primitive: (role × ownership × held permissions × the
+ * deny) → the caller's effective per-scope grants. An active
+ * {@link REPORT_ACCESS_REVOKE} short-circuits to {@link REVOKED_GRANTS}
+ * (DENY-WINS, before anything is unioned); otherwise
+ * `baselineGrants(role, ownsCostCentre)` UNION `permissionOverlay(permissions)`,
+ * field-wise widest ({@link unionGrants}), then {@link withDrillGrants}. PURE
+ * and TOTAL — no DB handle, no throw: an empty `permissions` array degrades to
+ * exactly the baseline, and an unrecognised role still fails closed via
  * {@link baselineGrants}'s own default arm.
  */
 export function effectiveReportGrants(caller: {
   role: Role
   ownsCostCentre: boolean
   permissions: readonly ReportAccessPermission[]
+  /**
+   * True when the teammate holds an active {@link REPORT_ACCESS_REVOKE} row.
+   * DENY-WINS: a revoke overrides BOTH the role default and any positive grant,
+   * so it is checked before anything is unioned. Defaults false — an omitted
+   * flag degrades to exactly the pre-revoke behaviour, so every existing caller
+   * is unchanged until it opts in.
+   */
+  revoked?: boolean
 }): ReportScopeGrants {
+  if (caller.revoked) return REVOKED_GRANTS
   const base = baselineGrants(caller.role, caller.ownsCostCentre)
   const overlay = permissionOverlay(caller.permissions)
   return withDrillGrants(unionGrants(base, overlay))
@@ -459,20 +560,27 @@ export type ReportVisibilityPersonaKey = (typeof REPORT_VISIBILITY_PERSONAS)[num
  * `effectiveReportGrants`) so the assertion is a real pin, not a tautology: change
  * the semantics without updating these tables and the matrix test fails.
  *
- * `WHO_SEES_WHAT_BASELINE` — what each persona holds with NO report-access grant.
+ * `WHO_SEES_WHAT_BASELINE` — what each persona holds with NO report-access row.
  * `WHO_SEES_WHAT_ELEVATED` — what each persona holds with BOTH permissions
  * ('operational' AND 'finance') actively granted. Every persona lands on the SAME
  * object at full elevation (the whole-company set) — that identity is the point:
  * the two permissions together buy everyone the full report set regardless of
  * starting role, which is what "elevated" means.
+ *
+ * Neither table states the REVOKED state: a deny is not a third column of the
+ * same axis, it short-circuits both ({@link REVOKED_GRANTS} — all-false, for
+ * every persona alike), so a per-persona row would say the same thing six times.
  */
 export const WHO_SEES_WHAT_BASELINE: Record<ReportVisibilityPersonaKey, ReportScopeGrants> = {
   developer: { across: false, regional: 'own-region', costCentre: false, finance: false, teammate: false, project: 'membership' },
   manager: { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
   admin: { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
   'cost-centre-owner': { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
-  'global-finops': { across: false, regional: 'own-region', costCentre: false, finance: false, teammate: false, project: 'membership' },
-  'platform-admin': { across: false, regional: 'own-region', costCentre: false, finance: false, teammate: false, project: 'membership' },
+  // Org-wide roles: full access AT BASELINE (PO decision 2026-08-13). For these
+  // two roles baseline == elevated — an additive permission on an already-full
+  // floor is idempotent — so both tables state the same shape by construction.
+  'global-finops': { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
+  'platform-admin': { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
 }
 
 export const WHO_SEES_WHAT_ELEVATED: Record<ReportVisibilityPersonaKey, ReportScopeGrants> = {
@@ -497,17 +605,18 @@ export const WHO_SEES_WHAT_ELEVATED: Record<ReportVisibilityPersonaKey, ReportSc
  * passes through any change to `f`, including one that strands a persona with
  * no landing at all.
  *
- * Every persona lands on the SAME row within each table (baseline: own-region,
- * no cross-region option; elevated: all-regions) — the same identity
- * WHO_SEES_WHAT_BASELINE / _ELEVATED show, read through `regionScopeGrant`.
+ * Region-BOUND personas land on the same baseline row (own-region, no
+ * cross-region option); the two ORG-WIDE personas (global-finops /
+ * platform-admin) land on all-regions AT BASELINE, matching their full-access
+ * floor above — for them baseline == elevated here too.
  */
 export const WHO_SEES_WHAT_REGION_BASELINE: Record<ReportVisibilityPersonaKey, RegionScopeGrant> = {
   developer: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
   manager: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
   admin: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
   'cost-centre-owner': { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-  'global-finops': { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-  'platform-admin': { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
+  'global-finops': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
+  'platform-admin': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
 }
 
 export const WHO_SEES_WHAT_REGION_ELEVATED: Record<ReportVisibilityPersonaKey, RegionScopeGrant> = {

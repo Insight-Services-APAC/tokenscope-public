@@ -82,6 +82,11 @@ import {
 // scripts/sync-copilot-plugin.mjs). Never write a second one; import it here too,
 // same as landed-check.mjs and status.mjs.
 import { assertSafeEndpoint } from './endpoint-guard.mjs'
+// real-home.mjs — the ONE answer to "where is the account's home", vendored verbatim
+// like endpoint-guard.mjs. This door WRITES config.json (oauth_refresh_token), so it
+// must land on the same anchor copilot-redeem.mjs writes and copilot-forwarder.mjs
+// reads; see stateDir() below.
+import { realHome } from './real-home.mjs'
 // mcp-origin.mjs — the ONE resolver for "where is the MCP server actually
 // registered", vendored verbatim like endpoint-guard.mjs. Used here so the enrol
 // door resolves its destination from user-scope config rather than from the
@@ -213,8 +218,24 @@ export function httpsPostJson(urlStr, body, { timeoutMs = 30_000 } = {}) {
   })
 }
 
-/** The TokenScope state dir (TOKENSCOPE_STATE_DIR or ~/.tokenscope). */
-export function stateDir(env = process.env, home = homedir()) {
+/**
+ * The TokenScope state dir: a `TOKENSCOPE_STATE_DIR` pin first, else `~/.tokenscope`
+ * under the PASSWD home. The house form — `plugin-runtime.mjs`'s `stateDir()`,
+ * `status.mjs`, `landed-check.mjs` and `copilot-forwarder.mjs` all resolve this way,
+ * and `copilot-redeem.mjs` anchors its own `TOKENSCOPE_DIR` on `realHome()` too.
+ *
+ * The anchor is `realHome()`, not `homedir()`, because this is the SECOND writer of
+ * `config.json` — which holds `oauth_refresh_token`. `os.homedir()` consults `HOME`
+ * first, so a leaked or model-set `HOME` would decide where a live durable credential
+ * lands, and would split this writer from the forwarder that has to read it back.
+ *
+ * The `home` parameter is still honoured when passed (tests inject one); it only
+ * changed what the DEFAULT is. Note that the caller's own `home` option — the one
+ * `enrollIfNeeded` threads into `readClaimedEmail` and `armRc` — is deliberately NOT
+ * this value: `~/.copilot/*` is read by Copilot itself and a shell rc is read by the
+ * user's shell, and both of those resolve through `$HOME`.
+ */
+export function stateDir(env = process.env, home = realHome()) {
   return (env?.TOKENSCOPE_STATE_DIR ?? '').trim() || join(home, '.tokenscope')
 }
 

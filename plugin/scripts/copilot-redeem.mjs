@@ -5,7 +5,9 @@
  * returns a handoff_code + redeem_url. Runs process→server (NOT through the
  * MCP/chat), so the durable emit credential never enters the LLM's context.
  *
- * Writes:
+ * Writes (1 + 2 under the account's PASSWD home, which `$HOME` cannot move —
+ * see TOKENSCOPE_DIR; 3 under `$HOME`, because a shell resolves its rc files
+ * that way):
  *   1. ~/.tokenscope/config.json — durable emit creds + endpoints (mode 0600).
  *   2. ~/.tokenscope/oauth-access.json — OAuth creds (mode 0600). (same shape
  *      as otel-headers-helper.sh expects)
@@ -17,17 +19,24 @@
  *      no ~/.copilot/config.json write needed here.
  *
  * Usage (both forms accepted):
- *   node copilot-redeem.mjs <handoff_code> [--redeem-url <url>] \
- *       [--api-base <base>] [--shell-rc <path>]
- *   node copilot-redeem.mjs --handoff-code <code> [--redeem-url <url>] \
- *       [--api-base <base>] [--shell-rc <path>]
+ *   node copilot-redeem.mjs <handoff_code> [--api-base <base>] [--shell-rc <path>]
+ *   node copilot-redeem.mjs --handoff-code <code> [--api-base <base>] [--shell-rc <path>]
  *
  * --remove: removes the TokenScope block from the shell RC and exits 0
  *           (the analogue of /tokenscope:statusline-toggle disable).
  *
+ * EVERY flag is validated before it is used (argv-guard.mjs). Copilot CLI has no
+ * `allowed-tools` mechanism at all — its skills are plain SKILL.md prose — so the
+ * argv of this process is whatever the model wrote, and this file is the only
+ * place a control can sit: an unknown flag is refused outright, --shell-rc is
+ * confined to rc files in the user's own home, and --api-base may only SELECT
+ * among the origins this device already knows (loopback, or the MCP registration
+ * discovered in local config). `--redeem-url` was deleted rather than validated:
+ * it named the POST target for a live single-use handoff code outright.
+ *
  * Env:
- *   TOKENSCOPE_API_BASE — the TokenScope server base URL (e.g. https://ts.example.com).
- *                         Required unless --api-base is passed or --redeem-url is absolute.
+ *   TOKENSCOPE_API_BASE — deliberately NOT read on this path (see main()); a
+ *                         checked-out repository can set environment variables.
  */
 import {
   writeFileSync,
@@ -45,11 +54,37 @@ import https from 'node:https'
 import http from 'node:http'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 import { discoverMcpOrigin } from './mcp-origin.mjs'
+import { realHome } from './real-home.mjs'
+import {
+  acceptApiBaseArg,
+  assertConfinedPath,
+  assertKnownFlag,
+  flagValue,
+} from './argv-guard.mjs'
 
 // ── constants ────────────────────────────────────────────────────────────────
 const BLOCK_START = '# >>> TokenScope >>>'
 const BLOCK_END = '# <<< TokenScope <<<'
-const TOKENSCOPE_DIR = join(homedir(), '.tokenscope')
+/**
+ * The durable Copilot credential store. Anchored on the PASSWD home, not `$HOME`.
+ *
+ * `config.json` under this dir holds `oauth_refresh_token` — a long-lived
+ * credential — so this path is a TRUST SINK, not merely a location. `os.homedir()`
+ * consults `HOME` first, so a leaked or model-set `HOME` would write a live
+ * refresh token into a directory somebody else chose (the working tree, a shared
+ * dir). `realHome()` reads the passwd entry, which an env var cannot move.
+ *
+ * The Claude lane already made exactly this call (`claude-redeem.mjs`'s
+ * `trustedHome`), which is why the Copilot lane was the inconsistent one. Like
+ * that lane, there is NO read-time fallback to a `$HOME`-derived path: a
+ * fallback would let a moved `HOME` re-choose the store the moment the trusted
+ * one is absent, which is the bypass this anchor exists to remove. `main()` says
+ * so out loud instead, naming both paths, when the two homes differ.
+ *
+ * NOT the shell-rc files — those are read by the user's SHELL, which resolves
+ * them through `$HOME`; see `detectShellRcTargets` and the `--shell-rc` guard.
+ */
+const TOKENSCOPE_DIR = join(realHome(), '.tokenscope')
 /**
  * Per-PROJECT telemetry dir, RELATIVE to the project root (= Copilot's launch cwd).
  * The span file, byte-offset, and singleton lock all live here so telemetry travels
@@ -116,28 +151,69 @@ function discoverApiBaseFromMcpJson() {
 }
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
+// The shell-rc filenames --shell-rc may name. Not "any file in your home": this
+// flag OVERRIDES detectShellRcTargets, whose whole output is drawn from this set,
+// and what lands in the named file is an export block every future shell then
+// executes. An arbitrary path would be model-chosen persistence.
+const SHELL_RC_BASENAMES = [
+  '.bashrc',
+  '.profile',
+  '.bash_profile',
+  '.bash_login',
+  '.zshrc',
+  '.zprofile',
+  '.zshenv',
+]
+
+// STRICT: this process spends a live single-use handoff code and appends to shell
+// init files, and Copilot CLI has no permission grant to narrow — the argv is
+// whatever the model wrote. Anything the documented flow does not produce is
+// refused rather than reinterpreted. Throws; main() runs inside the top-level
+// catch that prints it.
 function parseArgs(argv) {
-  const out = { handoffCode: null, redeemUrl: null, apiBase: null, shellRc: null, remove: false }
+  const out = { handoffCode: null, apiBase: null, shellRc: null, remove: false }
   for (let i = 0; i < argv.length; i++) {
-    switch (argv[i]) {
+    const flag = argv[i]
+    switch (flag) {
       case '--handoff-code':
-        out.handoffCode = argv[++i]
-        break
-      case '--redeem-url':
-        out.redeemUrl = argv[++i]
+        out.handoffCode = flagValue(argv, ++i, flag, { allowLeadingDash: true })
         break
       case '--api-base':
-        out.apiBase = argv[++i]
+        // Value-checked in main(), where the discovered MCP origin is in hand.
+        out.apiBase = flagValue(argv, ++i, flag)
         break
       case '--shell-rc':
-        out.shellRc = argv[++i]
+        // BOTH homes are accepted, deliberately — and the reason is now the ONLY
+        // one left: a shell rc is read by the user's SHELL, which resolves it
+        // through $HOME, so `detectShellRcTargets` anchors the no-flag default on
+        // homedir(). Confining the override to realHome() alone would refuse the
+        // very file the default writes on a moved-HOME host while still writing
+        // it. Naming an rc file inside a home this process can already see is not
+        // the capability being withheld here — naming a path outside both is.
+        //
+        // This list used to be justified by "everything else this file writes is
+        // anchored on homedir(), TOKENSCOPE_DIR included". That was widening the
+        // guard to match an unsafe anchor; the anchor is fixed (TOKENSCOPE_DIR is
+        // on realHome() now) and the justification with it. What lands in an rc
+        // file is an export line, never a credential.
+        out.shellRc = assertConfinedPath(flagValue(argv, ++i, flag), {
+          flag,
+          roots: [realHome(), homedir()],
+          allowedBasenames: SHELL_RC_BASENAMES,
+        })
         break
       case '--remove':
         out.remove = true
         break
       default:
-        // Accept a bare positional argument as the handoff code (documented usage).
-        if (!argv[i].startsWith('--') && !out.handoffCode) out.handoffCode = argv[i]
+        // A stray empty token is not an argument at all.
+        if (!flag.trim()) break
+        assertKnownFlag(flag)
+        // Accept a bare positional argument as the handoff code (documented
+        // usage). A SECOND positional means the argv is not one this flow
+        // produces — refuse rather than silently drop it.
+        if (out.handoffCode) throw new Error('unexpected extra argument')
+        out.handoffCode = flag
     }
   }
   return out
@@ -323,7 +399,8 @@ function bearerHost(endpoint) {
 // Human label for a deployment, DERIVED from the bearer (and optional logs) host —
 // never hardcoded. Inlined rather than imported from statusline.mjs because the
 // standalone copilot-plugin distribution ships copilot-redeem.mjs WITHOUT its
-// sibling scripts (only the four vendored files), so it cannot import them. Mirrors
+// sibling scripts (only the files in sync-copilot-plugin.mjs's list, which
+// statusline.mjs is not one of), so it cannot import them. Mirrors
 // statusline.emitEnvLabel's classification. Null when nothing recognised/present.
 export function emitEnvLabel(bearerEndpoint, logsEndpoint) {
   const bearer = bearerHost(bearerEndpoint)
@@ -523,28 +600,31 @@ async function main() {
 
   // Resolve the full redeem URL. S2 fix: a naive startsWith('http') guard accepts
   // http:// as readily as https:// — replaced with assertSafeEndpoint so a
-  // misconfigured (or MITM'd) --api-base/TOKENSCOPE_API_BASE is refused with a
-  // clear message here, rather than relying solely on httpsPost's own downstream
-  // check. allowLoopback:true — local dev legitimately targets :3450.
-  // `??` alone is wrong here: it only skips null/undefined, so an EMPTY
-  // TOKENSCOPE_API_BASE='' (a very common shape — an unset var exported by a
-  // wrapper script, or a blanked-out shell rc line) is treated as an
-  // authoritative answer and suppresses the .mcp.json fallback entirely, putting
-  // the fresh-device path straight back into the "Cannot resolve a safe redeem
-  // URL" failure it exists to prevent. Normalise blanks to null first so each
-  // source is consulted only when it actually carries a value.
-  const nonBlank = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+  // misconfigured (or MITM'd) --api-base is refused with a clear message here,
+  // rather than relying solely on httpsPost's own downstream check.
+  // allowLoopback:true — local dev legitimately targets :3450.
   //
-  // TOKENSCOPE_API_BASE is deliberately NOT in this chain. It is repo-settable,
-  // and this is the request that carries a live single-use handoff code whose
-  // answer is a durable emit credential; letting a cloned repository name that
-  // destination is the trust-boundary breach the sibling Claude helper closes
-  // the same way. --api-base survives because a human types it, and discovery
-  // reads only files outside the repository, so local dev against :3450 keeps
-  // working through either.
-  const apiBase = nonBlank(args.apiBase) ?? discoverApiBaseFromMcpJson() ?? ''
-  const redeemPath = args.redeemUrl ?? '/api/v1/setup/redeem'
-  const redeemUrl = redeemPath.startsWith('http') ? redeemPath : `${apiBase}${redeemPath}`
+  // WHAT DECIDES THE HOST. Discovery: the MCP registration in the user's own
+  // client config, then the plugin's bundled .mcp.json — files a human wrote,
+  // outside the conversation and outside any checked-out repository.
+  // `--api-base` may SELECT one of those origins (or loopback); a value naming
+  // anything else is warned about and dropped, because the argv of this process
+  // is composed by a model and this request carries a live single-use handoff
+  // code whose answer is a durable emit credential. `--redeem-url`, which named
+  // the POST target outright, is gone for the same reason.
+  //
+  // TOKENSCOPE_API_BASE is deliberately NOT in this chain either: it is
+  // repo-settable, and a process cannot tell a repo-supplied value from one the
+  // developer exported. (It was once read here through a `??` chain in which an
+  // EMPTY value counted as an authoritative answer and suppressed discovery
+  // outright — the fresh-device "Cannot resolve a safe redeem URL" failure.
+  // acceptApiBaseArg treats a blank as absent for the same reason.)
+  const discovered = discoverApiBaseFromMcpJson()
+  const apiBase =
+    acceptApiBaseArg(args.apiBase, { allowed: [discovered], warn: (m) => console.error(m) }) ??
+    discovered ??
+    ''
+  const redeemUrl = `${apiBase}/api/v1/setup/redeem`
   try {
     assertSafeEndpoint(redeemUrl, { allowLoopback: true })
   } catch (err) {
@@ -552,10 +632,19 @@ async function main() {
     // sites do: assertSafeEndpoint's own message embeds the rejected value, and
     // this one is resolved partly from .mcp.json, so interpolating err.message
     // here prints an untrusted endpoint to stderr. The reason code is all a user
-    // needs to fix their --api-base.
+    // needs to act on.
+    //
+    // The remedy named is REGISTRATION, not the flag. `--api-base` can only
+    // select an origin this device already knows, so on a device where nothing
+    // was discovered the only values it accepts are loopback ones — telling the
+    // user to "pass --api-base <your host>" here would be advice that cannot
+    // work.
     const safe = unsafeEndpointError('Resolved redeem URL', err)
     console.error(
-      `[tokenscope] Cannot resolve a safe redeem URL — pass --api-base (${safe.reason})`,
+      `[tokenscope] Cannot resolve a safe redeem URL (${safe.reason}) — register the tokenscope MCP ` +
+        'server in your own client config (~/.copilot/mcp-config.json) so this helper can discover ' +
+        'its origin. --api-base only selects an origin already known here (loopback, or that ' +
+        'registration).',
     )
     process.exit(1)
   }
@@ -610,7 +699,19 @@ async function main() {
     process.exit(1)
   }
 
-  // 1. Write ~/.tokenscope/ credentials
+  // 1. Write the durable credentials, under the PASSWD home (see TOKENSCOPE_DIR).
+  //
+  // Under a moved HOME that is a directory the user's own tooling may not look
+  // in, so say so — the alternative (following $HOME, or falling back to it)
+  // hands a live refresh token to whoever moved HOME. Name both paths so it is
+  // fixable rather than merely reported. Mirrors claude-redeem.mjs's warning.
+  if (realHome() !== homedir()) {
+    console.error(
+      `[tokenscope] WARN: $HOME (${homedir()}) differs from your account's real home (${realHome()}). ` +
+        `Writing the credential to the real home (${TOKENSCOPE_DIR}); anything still reading $HOME ` +
+        'will not see it until HOME is corrected.',
+    )
+  }
   const envChange = writeTokenscopeConfig(bundle, resp.oauth_refresh_token, resp.oauth_client_id)
   // Cross-environment transition note (never prints a credential — only env labels).
   // The bearer host changed, so the device just moved deployments and config.json was
@@ -675,4 +776,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 }
 
 // Named exports for unit testing only — not part of the public API.
-export { writeTokenscopeConfig, removeBlock, upsertBlock, PROJECT_LOCAL_DIR }
+// TOKENSCOPE_DIR is exported so a test can assert the ANCHOR (that a moved $HOME
+// does not move the credential store) without writing to the real one.
+export { writeTokenscopeConfig, removeBlock, upsertBlock, PROJECT_LOCAL_DIR, parseArgs, TOKENSCOPE_DIR }

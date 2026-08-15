@@ -1,11 +1,12 @@
 // ── TokenScope — Root Bicep Template ──────────────────────────────────
 //
 // Deploys all Azure resources for TokenScope (Wave-I + Wave-II).
-// Usage:
+// Usage (dev is the only environment with a parameter file; see
+// .github/workflows/infra.yml, which is the supported way to apply):
 //   az deployment group create \
-//     -g rg-tokenscope-sandbox \
+//     -g rg-tokenscope-example \
 //     -f infra/main.bicep \
-//     -p infra/parameters/sandbox.bicepparam \
+//     -p infra/parameters/dev.bicepparam \
 //     -p pgAdminLogin=... -p pgAdminPassword=... <other-secrets>
 //
 // Pattern follows PSR's battle-tested root shape. Deployment graph

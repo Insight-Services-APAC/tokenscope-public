@@ -382,9 +382,24 @@ export interface ConsumedAuthCode {
 
 /**
  * Consume an auth code: atomically mark it consumed iff it was unconsumed AND
- * not expired. The `consumed_at IS NULL AND expires_at > now()` predicate +
- * RETURNING makes this a single-statement compare-and-swap — concurrent
- * exchanges of the same code see at most one success (replay-safe).
+ * not expired AND its teammate is still active. The
+ * `consumed_at IS NULL AND expires_at > now()` predicate + RETURNING makes this
+ * a single-statement compare-and-swap — concurrent exchanges of the same code
+ * see at most one success (replay-safe).
+ *
+ * DEACTIVATION is in the CAS predicate, not a follow-up read, so a deactivation
+ * landing concurrently with an exchange cannot be straddled. A code minted
+ * BEFORE the teammate was deactivated must not be exchangeable AFTER it: the
+ * cleanup worker inspects existing oauth_token rows before retiring an account
+ * (privileged-identity-cleanup.ts's has_live_token gate) but an OUTSTANDING auth
+ * code is invisible to it, so this is the one path by which a retired account
+ * could re-arm itself with a fresh 30-day token pair.
+ *
+ * A refused code is left UNBURNED (the CAS simply matches no row) and the caller
+ * reports the same opaque invalid_grant as for an unknown code — no
+ * deactivation oracle. Unburned is deliberate and not a weakening: the code is
+ * useless while the account is retired, its TTL is 5 minutes
+ * (AUTH_CODE_TTL_MS), and holding it still requires the raw secret.
  */
 export async function consumeAuthCode(db: Db, rawCode: string): Promise<ConsumedAuthCode | null> {
   const codeHash = hashSessionToken(rawCode)
@@ -401,6 +416,11 @@ export async function consumeAuthCode(db: Db, rawCode: string): Promise<Consumed
      WHERE code_hash = ${codeHash}
        AND consumed_at IS NULL
        AND expires_at > now()
+       AND EXISTS (
+             SELECT 1 FROM teammate tm
+              WHERE tm.id = oauth_auth_code.teammate_id
+                AND tm.is_active IS TRUE
+           )
     RETURNING client_id::text AS client_id,
               teammate_id::text AS teammate_id,
               redirect_uri,
@@ -429,7 +449,33 @@ export interface IssuedTokens {
   scope: string
 }
 
-/** Issue an access + refresh token pair for an authorized teammate. */
+/**
+ * Issue an access + refresh token pair for an authorized teammate.
+ *
+ * This is the ONLY place an oauth_token row is created — both the interactive
+ * authorization_code exchange (api/v1/oauth/token.post.ts) and the durable emit
+ * credential (auth/emit-credential.ts::issueEmitCredential, reached from
+ * /setup/redeem and /setup/enroll) land here. The is_active gate therefore makes
+ * "no OAuth credential is ever minted for a deactivated teammate" true at the
+ * choke point rather than once per caller.
+ *
+ * For the authorization_code lane this is a BACKSTOP: consumeAuthCode already
+ * refuses in its CAS, and the interactive /authorize that mints the code needs a
+ * cookie session, which isRevoked() (server/utils/auth.ts) gates on the same
+ * column. For the emit lane it is likewise defence in depth:
+ *   - /setup/redeem requires a handoff minted by an authenticated caller;
+ *   - /setup/enroll either creates a fresh provisional shadow (is_active
+ *     defaults TRUE) or REUSES one, and a reusable shadow is necessarily still
+ *     active — the only thing that retires a shadow is confirm-instance.ts,
+ *     which flips the instance to identity_state='confirmed' in the same
+ *     transaction, and enroll-provision.ts's reuse predicate matches only
+ *     identity_state='provisional' rows.
+ * So neither door is reachable with a deactivated teammate today. This gate is
+ * here so that stays true for callers added later. A throw on the emit lane
+ * surfaces as a 500 (redeem/enroll translate their own failures, not
+ * OAuthError) — acceptable for a branch no traced path reaches, and strictly
+ * better than minting.
+ */
 export async function issueTokens(
   db: Db,
   params: { teammateId: string; clientId: string; scope: string },
@@ -449,17 +495,70 @@ export async function issueTokens(
   const refreshToken = randomBytes(32).toString('base64url')
   const now = Date.now()
 
-  await db.insert(oauthToken).values({
-    accessTokenHash: hashSessionToken(accessToken),
-    refreshTokenHash: hashSessionToken(refreshToken),
-    clientId: params.clientId,
-    teammateId: params.teammateId,
-    scope: params.scope,
-    accessIssuedAt: new Date(now),
-    accessExpiresAt: new Date(now + ACCESS_TOKEN_TTL_MS),
-    refreshIssuedAt: new Date(now),
-    refreshExpiresAt: new Date(now + REFRESH_TOKEN_TTL_MS),
-  })
+  /*
+   * The deactivation gate is IN the INSERT, not a read before it.
+   *
+   * It was a `SELECT is_active` followed by `db.insert(...)`. Both statements
+   * are correct in isolation, and between them is a window: a deactivation
+   * landing there is straddled, and the mint proceeds on a teammate the check
+   * just declared active. That window is exactly what the sibling gates on this
+   * axis were written to avoid — `consumeAuthCode` puts the predicate in its
+   * compare-and-swap and `refreshAccessToken` puts it in the UPDATE's join,
+   * both with the reasoning spelled out — and this function's own docstring
+   * calls itself the choke point where "no OAuth credential is ever minted for
+   * a deactivated teammate" becomes true. A choke point with a read-then-write
+   * race does not make that sentence true; it makes it nearly true.
+   *
+   * INSERT … SELECT … WHERE EXISTS is the single-statement form: the row is
+   * written only if the teammate is active as of the INSERT's own snapshot.
+   * Zero rows inserted ⇒ the gate refused, and we raise the same `invalid_grant`
+   * the read-then-write form did — no new error surface for callers.
+   *
+   * WHAT THIS DOES NOT BUY. Under READ COMMITTED it removes the application-level
+   * window, not every window: a deactivation that COMMITS just after this
+   * statement's snapshot is taken is still not seen, so a token row can be
+   * written moments before the account is retired. Closing that needs the
+   * deactivation side to take a row lock and revoke tokens in the same
+   * transaction, which is a change to the cleanup worker, not to this function.
+   * The residual is inert in practice — every consumer re-checks `is_active` on
+   * use (requireOAuthBearer, refreshAccessToken), so such a token authorises
+   * nothing — but it would become live again if the account were ever
+   * reactivated, and it should not be described as "no interval at all".
+   *
+   * FAIL CLOSED is unchanged and is now structural: a missing teammate row, or
+   * a NULL/false `is_active` (mig 0001 declares the column NOT NULL DEFAULT
+   * TRUE, so NULL is not expected), all fail `is_active IS TRUE` and insert
+   * nothing. `IS TRUE`, not `= TRUE`, so a NULL yields false rather than NULL.
+   *
+   * Written as raw SQL because drizzle's `.insert().values()` builds INSERT …
+   * VALUES, which has no room for a predicate. Column list mirrors the schema
+   * (drizzle/schema/auth.ts) — the remaining columns take their defaults, as
+   * they did before.
+   */
+  const inserted = await db.execute<{ id: string }>(sql`
+    INSERT INTO oauth_token (
+      access_token_hash, refresh_token_hash, client_id, teammate_id, scope,
+      access_issued_at, access_expires_at, refresh_issued_at, refresh_expires_at
+    )
+    SELECT ${hashSessionToken(accessToken)},
+           ${hashSessionToken(refreshToken)},
+           ${params.clientId}::uuid,
+           ${params.teammateId}::uuid,
+           ${params.scope},
+           ${new Date(now).toISOString()}::timestamptz,
+           ${new Date(now + ACCESS_TOKEN_TTL_MS).toISOString()}::timestamptz,
+           ${new Date(now).toISOString()}::timestamptz,
+           ${new Date(now + REFRESH_TOKEN_TTL_MS).toISOString()}::timestamptz
+     WHERE EXISTS (
+             SELECT 1 FROM teammate tm
+              WHERE tm.id = ${params.teammateId}::uuid
+                AND tm.is_active IS TRUE
+           )
+    RETURNING id::text AS id
+  `)
+  if ([...inserted].length === 0) {
+    throw new OAuthError('invalid_grant', 'The teammate is not active')
+  }
 
   return {
     access_token: accessToken,
@@ -490,7 +589,14 @@ export async function issueTokens(
  *     — a revoked teammate can no longer mint fresh access tokens via refresh.
  *     refresh_issued_at (not the per-refresh-bumped access_issued_at) is the
  *     stable anchor. The join is in the UPDATE so the race is closed in-statement.
- * No match ⇒ invalid_grant (replayed/expired/revoked refresh, or revoked teammate).
+ *   - DEACTIVATION: `tm.is_active IS TRUE`. A separate, durable axis from E2 —
+ *     no timestamp comparison, because a retired account has no "after" to be on
+ *     the right side of. The privileged-identity-cleanup worker only ever sets
+ *     is_active=FALSE (never revoked_at), so without this a cleaned account
+ *     refreshes itself a fresh access token every ~29 minutes, indefinitely.
+ *     `IS TRUE` (not `= TRUE`) so a NULL fails CLOSED rather than yielding NULL.
+ * No match ⇒ invalid_grant (replayed/expired/revoked refresh, revoked teammate,
+ * or DEACTIVATED teammate).
  */
 export async function refreshAccessToken(
   db: Db,
@@ -525,6 +631,7 @@ export async function refreshAccessToken(
        AND t.refresh_expires_at > now()
        AND t.client_id = ${clientId}::uuid
        AND NOT (tm.revoked_at IS NOT NULL AND tm.revoked_at > t.refresh_issued_at)
+       AND tm.is_active IS TRUE
     RETURNING t.teammate_id::text AS teammate_id, t.scope AS scope
   `)
   const row = [...rows][0]

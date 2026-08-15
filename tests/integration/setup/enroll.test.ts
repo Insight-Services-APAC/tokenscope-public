@@ -398,6 +398,49 @@ describe('enroll — provisional caps return 429', () => {
     }
   })
 
+  it('an ENDED or PURGED provisional instance does NOT consume quota', async () => {
+    /*
+     * The caps bound how many devices a claimed identity may have RIGHT NOW, not
+     * how many it has ever had. Counting retired rows makes revoke-then-re-enrol
+     * cost a permanent slot, so a laptop rebuilt often enough locks its owner out
+     * of a door they hold no live device behind. The authenticated sibling
+     * (emit-provision.ts) has always filtered on the lifecycle columns; this is
+     * the enrol door catching up.
+     */
+    process.env.MAX_PROVISIONAL_INSTANCES_PER_EMAIL = '1'
+    try {
+      const first = await enroll(
+        validBody({ claimed_email: 'lifecycle@example.com', device_binding: 'lifecycle-dev-1' }),
+      )
+      // Retire it the way a revoke does — the row stays, the device does not.
+      await t.client`
+        UPDATE instance_attestation SET ts_actual_end = now()
+         WHERE instance_id = ${first.instance_id}::uuid`
+
+      // A different device for the same email now fits under the cap of 1.
+      const second = await enroll(
+        validBody({ claimed_email: 'lifecycle@example.com', device_binding: 'lifecycle-dev-2' }),
+      )
+      expect(second.instance_id).not.toBe(first.instance_id)
+
+      // Same again for a PURGED row (soft-purge, the other lifecycle terminal).
+      await t.client`
+        UPDATE instance_attestation SET ts_purged = now()
+         WHERE instance_id = ${second.instance_id}::uuid`
+      const third = await enroll(
+        validBody({ claimed_email: 'lifecycle@example.com', device_binding: 'lifecycle-dev-3' }),
+      )
+      expect(third.instance_id).not.toBe(second.instance_id)
+
+      // …and the cap still BITES on the one live row that remains.
+      await expect(
+        enroll(validBody({ claimed_email: 'lifecycle@example.com', device_binding: 'lifecycle-dev-4' })),
+      ).rejects.toMatchObject({ statusCode: 429 })
+    } finally {
+      delete process.env.MAX_PROVISIONAL_INSTANCES_PER_EMAIL
+    }
+  })
+
   it('the global provisional cap returns 429 once exceeded', async () => {
     // Many provisional instances already exist from the cases above, so a cap of 1
     // is already exceeded. (A cap of '0' is deliberately treated as garbage and

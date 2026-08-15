@@ -37,7 +37,7 @@
  * is the check that can.
  */
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { SCOPE_ROOTS, scopeTree } from './component-graph'
 
@@ -66,14 +66,33 @@ interface Built {
 }
 type Entry = Built | { missing: string } | { waived: { reason: string; decision: string } }
 
-const inventory: Inventory = JSON.parse(readFileSync(resolve(DESIGN, 'inventory.json'), 'utf8'))
-const parityMap: Record<string, Record<string, Entry>> = JSON.parse(
-  readFileSync(resolve(DESIGN, 'parity-map.json'), 'utf8'),
-)
+/*
+ * THE PUBLIC MIRROR DOES NOT CARRY THE ARTEFACT THIS GATE READS.
+ *
+ * `docs/design/` is internal-only (tools/publish/internal-only-paths.txt), so the
+ * published snapshot ships this file while `inventory.json` / `parity-map.json`
+ * are deliberately dropped — and a module-scope read then failed the whole FILE
+ * (0 tests) on every public release.
+ *
+ * Skip only when BOTH are absent, which means "this tree does not carry the
+ * prototype". Some-but-not-all is a genuine inconsistency and still throws right
+ * here, loudly, because the JSON.parse below runs unguarded once either exists.
+ * Internally both are tracked, so the gate keeps every tooth it had.
+ */
+const INVENTORY_JSON = resolve(DESIGN, 'inventory.json')
+const PARITY_MAP_JSON = resolve(DESIGN, 'parity-map.json')
+const CARRIES_PROTOTYPE = existsSync(INVENTORY_JSON) || existsSync(PARITY_MAP_JSON)
+
+const inventory: Inventory = CARRIES_PROTOTYPE
+  ? JSON.parse(readFileSync(INVENTORY_JSON, 'utf8'))
+  : { source: '', scopes: {} }
+const parityMap: Record<string, Record<string, Entry>> = CARRIES_PROTOTYPE
+  ? JSON.parse(readFileSync(PARITY_MAP_JSON, 'utf8'))
+  : {}
 
 const key = (s: Surface) => `${s.kind}:${s.title}`
 
-describe('the built reporting scopes match the approved prototype', () => {
+describe.skipIf(!CARRIES_PROTOTYPE)('the built reporting scopes match the approved prototype', () => {
   it('every scope in the inventory has a root component and a parity map', () => {
     for (const scope of Object.keys(inventory.scopes)) {
       expect(SCOPE_ROOTS[scope], `no component root declared for scope "${scope}"`).toBeDefined()

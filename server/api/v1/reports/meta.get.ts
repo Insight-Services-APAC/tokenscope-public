@@ -18,7 +18,11 @@ import { defineEventHandler, setHeader } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireAuth } from '../../../auth/rbac'
 import { withRequestRls } from '../../../db/request-rls'
-import { resolveReportGrants, resolveReportPermissions } from '../../../auth/report-scope'
+import {
+  resolveReportGrants,
+  resolveReportPermissions,
+  resolveReportAccessRevoked,
+} from '../../../auth/report-scope'
 import { regionScopeGrant } from '../../../../shared/auth/report-visibility'
 import { providerStatesForMonth } from '../../../reports/settling'
 import { copilotFinanceMode } from '../../../reports/copilot-mode'
@@ -44,7 +48,11 @@ export default defineEventHandler(async (event) => {
     // inline map for a caller with no report-access grants at all (the
     // baseline).
     const g = await resolveReportGrants(event, tx, session)
-    const permissions = await resolveReportPermissions(event, tx, session.teammateId)
+    const revoked = await resolveReportAccessRevoked(event, tx, session.teammateId)
+    // A REVOKE zeroes access (resolveReportGrants already returned the empty
+    // grant set), so a leftover positive grant must NOT surface as an "elevated
+    // access" chip beside an empty shell — the chip would contradict the page.
+    const permissions = revoked ? [] : await resolveReportPermissions(event, tx, session.teammateId)
 
     /*
      * Map the per-scope grant object onto the tab booleans, in REPORT_SCOPES order
@@ -107,8 +115,25 @@ export default defineEventHandler(async (event) => {
      * the Across merge, the WIDTH they were computed at.
      */
 
-    // Daily-cacheable (floors + provider settling config change at most daily).
-    setHeader(event, 'cache-control', 'private, max-age=3600')
+    /*
+     * NOT cacheable, despite the floors being daily-stable. This response also
+     * carries AUTHORISATION state — `scopes`, `defaultScope` and `permissions`
+     * — which changes the instant an admin grants or revokes report access.
+     *
+     * It used to say `private, max-age=3600`, which was true of the payload when
+     * that line was written (floors + settling config) and became false when the
+     * grant fields moved in. The cost was real: a browser holding an hour-old
+     * empty-scopes response renders "You don't have access to any reports" with
+     * NO request to this endpoint at all, so a freshly granted admin sees the
+     * refusal until the entry expires or they force a reload. In the other
+     * direction a REVOKE stays invisible in the shell for up to an hour — the
+     * data endpoints still 403, so nothing leaks, but the UI contradicts them.
+     *
+     * `no-store` matches every sibling that returns per-caller report data
+     * (teammate/[id]/index.get.ts:112,271; teammate/[id]/export.get.ts:73). The
+     * floors are one aggregate query — not worth an hour of stale authorisation.
+     */
+    setHeader(event, 'cache-control', 'no-store')
 
     /*
      * The Region scope's LANDING WIDTH — "All regions" or one region — and nothing

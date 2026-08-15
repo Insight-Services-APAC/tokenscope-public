@@ -162,8 +162,15 @@ function resolveHelperPath(enrolment) {
  * doesn't care which) when git itself is unavailable or the call fails (not a
  * repo, no `git` on PATH). Returns null when NEITHER resolves — the caller
  * refuses to write rather than guess a directory.
+ *
+ * EXPORTED (S16c follow-up) because "which directory is the repository?" must
+ * have exactly ONE answer in this plugin: the SessionStart hook asks the same
+ * question when it decides whether a repo-local settings file claimed
+ * `TOKENSCOPE_STATE_DIR`, and a second resolver there could disagree with the
+ * one that WRITES the repo tag — i.e. the hook could inspect a directory the
+ * tagger never writes, or miss the one it does.
  */
-function resolveRepoRoot(cwd) {
+export function resolveRepoRoot(cwd) {
   try {
     const out = execFileSync('git', ['rev-parse', '--show-toplevel'], {
       cwd,

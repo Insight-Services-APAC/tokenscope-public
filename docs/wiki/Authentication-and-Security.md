@@ -82,18 +82,45 @@ sequenceDiagram
         H->>DB: resolveOrCreateTeammate (JIT, ON CONFLICT DO NOTHING)
         Note right of DB: role=platform-admin if email==BOOTSTRAP_ADMIN_EMAIL else developer<br/>region/org = first seeded#59; winner emits teammate-jit-created
     end
-    H->>H: revocation check (revoked_at vs issuedAt)
+    H->>H: is_active check + revocation check (revoked_at vs issuedAt)
     H-->>B: enriched Session (frozen, cached on event.context)
 ```
 
 - Configured in `nuxt.config.ts` under the `entra` provider; OIDC enabled unless `NUXT_OIDC_AUTH_DEV_MODE === 'true'`.
 - Secrets (`clientId`, `clientSecret`, URLs) are build-time placeholders, overridden at boot by `NUXT_OIDC_PROVIDERS_ENTRA_*` env vars — `nuxt.config.ts` is evaluated at build with no secrets present, so reading `process.env` in provider config is deliberately avoided.
-- `userNameClaim = preferred_username`; `oid`/`email`/`name` passed through as optional claims.
+- `userNameClaim = preferred_username`; the optional claims copied into the session are `oid`, `email`, `name`, `preferred_username` and `upn`. The last two carry the sign-in UPN, which is the axis the directory-exclusion policy matches on, and this list is their only source — `user.claims` is populated from it alone, and no `userInfoUrl` is configured. `userNameClaim` is not a substitute: it is read from the access token, which does not reliably carry `preferred_username`.
 - **Session resolution — Option C** (`docs/design/auth-session-cookie-architecture.md`): identity resolved **per request** from OIDC cookie + DB enrichment; the earlier dual-cookie `ts_session` bridge was retired.
   - `tryAuth(event)` → resolved `Session` or `null` (unauthenticated / enrichment fails).
   - `requireAuth(event)` → strict gate; `401` problem-details on no session.
   - Enriched `Session` = `teammateId, email, displayName, role, regionId, orgPath, issuedAt`; **frozen + cached per request** on `event.context.__tokenscope_session` so middleware → `withRequestRls` → route share one DB lookup.
-  - **Revocation:** a session minted before the teammate's `revoked_at` is rejected.
+  - **Revocation:** a session minted before the teammate's `revoked_at` is rejected — and on an assumed identity, the impersonator's own row is checked on the same two axes.
+  - **Deactivation:** a teammate with `is_active = false` resolves no session at all — existing or freshly signed-in, with no timestamp comparison.
+
+### Revocation and deactivation
+
+**Two axes, and they are not the same shape.** `revoked_at` is a *session anchor*:
+it is overloaded (a benign role change or region move bumps it, as do the
+explicit revoke endpoints), so it only clears sessions minted **before** it — the
+same person can sign in again a second later and hold a valid session.
+`is_active = false` is **deactivation**: a durable state that denies every
+credential for that teammate, existing or newly minted, because there is no
+"after" to be on the right side of. Both tests fail closed — a missing teammate
+row, or an `is_active` that is not exactly `true`, denies.
+
+Deactivation is enforced on every credential path, not just the cookie:
+
+| Path | Where |
+|---|---|
+| Cookie session (`tryAuth`/`requireAuth`) | `isRevoked` reads `revoked_at` **and** `is_active` for the primary identity — a missing row denies outright — and again for the impersonator's row when the session carries one (a missing impersonator row is not itself a denial) |
+| OAuth bearer (MCP, the four instance-scoped emit routes) | `requireOAuthBearer` joins `teammate.is_active` and rejects with `invalid_token` |
+| Refresh-token grant | `tm.is_active IS TRUE` is a conjunct of the refresh `UPDATE`, so no match ⇒ `invalid_grant` |
+| Authorization-code exchange | part of `consumeAuthCode`'s compare-and-swap predicate, so a deactivation landing mid-exchange cannot be straddled. A refused code is left **unburned** and reports the same opaque `invalid_grant` as an unknown one — no deactivation oracle |
+| Token issuance (`issueTokens`) | the single choke point through which both the interactive exchange and the durable emit credential (`/setup/redeem`, `/setup/enroll`) mint an `oauth_token` row |
+
+This matters because the **privileged-identity-cleanup** worker's only identity
+mutation is `is_active = FALSE` — it never writes `revoked_at`. On the
+`revoked_at` axis alone a retired account would keep its live cookie session and
+keep refreshing a fresh access token indefinitely.
 
 ### Persona override (non-production demo impersonation — sidecar path)
 
@@ -154,7 +181,7 @@ Per-resource scope helpers (the *live* boundary while RLS is inert):
 | Helper | Effect |
 |---|---|
 | `allocationScopePredicate(tableRef)` | SQL predicate: `global-finops` unbounded; otherwise the project must sit in the caller's region, and an `admin` is bound to that region while a `manager`/`developer` additionally needs the project's cost-owning unit inside their `app.user_org_path` subtree. The region clamp **wraps** the role split rather than sitting beside it. Used by every allocation read and the two allocation writes. |
-| `assertProjectScope(event, project)` | Write-side mirror: `admin` bound to project region; `manager` needs project cost-owning unit in org subtree; `global-finops` unbounded. |
+| `assertProjectScope(event, project)` | Write-side mirror: `admin` bound to project region; `manager` needs the project in their **own region** *and* its cost-owning unit in their org subtree; `global-finops` unbounded. The region clamp **wraps** the subtree test here too — org-unit paths are unique only per region (`UNIQUE (region_id, code)`), so an ltree prefix match alone would accept a colliding path from another region. Both halves fail as one `403` — the refusal names neither. The sole gate on the four project-assignment routes and the two allocation writes. |
 | `placedBelowRegionRootPredicate()` | The org-placement clamp, ANDed onto every subtree arm above. See below. |
 | `requireReportScope(event, tx, scope)` | The `/reports/*` read gate. Resolves caller + active cost-centre ownership + active **report-access grants**, evaluates `effectiveReportGrants`, and throws the same RFC-9457 `403` as `requireRole`. `requireAuth`-based (identity + an in-query/JS-computed scope) rather than a fixed-role gate — a documented exception to "every gate is `requireRole`". See [Report access grants](#report-access-grants). |
 
@@ -203,49 +230,61 @@ Two halves close that:
 
 ### Report access grants
 
-The full RBAC above still decides *what a role can ever see*. On top of it, an
-admin can hand a **named teammate** company-wide reporting access without
-touching their role — a per-teammate, revocable, optionally-expiring grant
-(`report_access_grant`, mig 0129), replacing a retired org-wide three-mode dial.
-Design: [`docs/design/report-visibility-policy.md`](../design/report-visibility-policy.md).
+The full RBAC above decides *what a role can ever see*, and the admin roles see
+reports **by their role**: a region `admin` sees their own region, and
+`global-finops` / `platform-admin` see the whole company (all regions, all
+Business Units, the finance pack). On top of that, an admin can **widen** a named
+teammate whose baseline lacks that scope — a region admin included — to
+company-wide reporting, or **revoke** a person's report
+access entirely — per-teammate, revocable, optionally-expiring rows
+(`report_access_grant`, migs 0129 + 0130), without touching anyone's platform
+role. Design: [`docs/design/report-visibility-policy.md`](../design/report-visibility-policy.md).
 
 **To grant report access** (requires Global finance or Platform admin — the
 roster is org-wide only): **Admin → Policies → Report access** → search the
-teammate by name or email → pick the permission (*Operational reporting* or
-*Finance reporting*, table below) → optionally set an expiry → confirm. The
-grant is enforced on the teammate's very next report request; the *Reporting*
-entry appears in their navigation on their next page load (the shell caches
-report metadata for up to an hour). Revoke from the same roster — one click;
-an expired grant stays listed as *Expired* until revoked or superseded by a
-re-grant. Granting and revoking are both audited (`report-access-granted` /
-`report-access-revoked`). On a fresh install nothing is pre-granted: the
-first platform admin opens the same page and grants themselves or others.
+teammate by name or email → pick the action (*Operational reporting*, *Finance
+reporting*, or *Revoke — no report access*, table below) → optionally set an
+expiry → confirm. It is enforced on the teammate's very next report request; the
+*Reporting* entry appears (or disappears) in their navigation on their next page
+load (the shell caches report metadata for up to an hour). Revoke a specific
+grant row from the same roster — one click; an expired grant stays listed as
+*Expired* until revoked or superseded by a re-grant. Actions are audited
+(`report-access-granted` / `report-access-revoked`). On a fresh install the admin
+roles already see reports by role, so a platform admin needs no self-grant; the
+positive grants and revokes are the per-person overrides on top.
 
-- **Two permissions** (`shared/auth/report-visibility.ts`,
-  `REPORT_ACCESS_PERMISSIONS`):
+- **Two positive permissions + one deny** (`shared/auth/report-visibility.ts`,
+  `REPORT_ACCESS_GRANT_VALUES`):
 
-  | Permission | Grants |
+  | Value | Effect |
   |---|---|
-  | `operational` | The whole-company reporting surface: cross-region access, every region, every Business Unit — including their billed-spend figures. |
-  | `finance` | The whole-company finance pack (`/reporting?scope=finance`) alone. Names the PACK, not the retired `finance` role. |
+  | `operational` | Widen to the whole-company reporting surface: cross-region access, every region, every Business Unit — including their billed-spend figures. |
+  | `finance` | Widen to the whole-company finance pack (`/reporting?scope=finance`) alone. Names the PACK, not the retired `finance` role. |
+  | `revoke-all` | **Deny.** Remove ALL report access for the teammate — below their role default and below any positive grant (deny-wins). The "administer, no data access" case. Lifting a revoke needs a *different* admin. |
 
-  The two are independent — a caller can hold either, both, or neither; a grant
-  never implies its counterpart, and neither changes the holder's platform
-  role.
-- **Baseline + grant, unioned.** `effectiveReportGrants(role, ownsCostCentre,
-  permissions)` is a role-shaped **baseline** (`developer`/`finance` own-region
-  only, Business Unit tab via ownership; `manager`/`admin` own-region + subtree
-  Business Units unconditionally — byte-identical to the retired `standard`
-  mode; `global-finops`/`platform-admin` own-region, Business Unit tab via
-  ownership only) widened **field-wise** by whichever permissions the caller's
-  active grants buy, never narrowed. A static **WHO-SEES-WHAT matrix** export
-  (baseline and fully-elevated, per persona) drives both the admin-pane preview
-  and the tests, so the preview can never drift from the gate.
-- **`global-finops`/`platform-admin` are no longer unconditionally cross-region
-  by role.** That reach now comes ONLY from an active `operational` grant — the
-  central behaviour change from the retired dial, proven per endpoint as "the
-  disconnect": an ungranted org-wide caller is 403 on every whole-company width
-  that used to be an unconditional 200.
+  The two positive grants are independent — a caller can hold either, both, or
+  neither, and a grant never implies its counterpart. None of the three changes
+  the holder's platform role.
+- **Baseline + grant − deny.** `effectiveReportGrants(role, ownsCostCentre,
+  permissions, revoked)` is a role-shaped **baseline**
+  (`developer`/`finance` own-region only, Business Unit tab via ownership;
+  `manager`/`admin` own-region + subtree Business Units; `global-finops` /
+  `platform-admin` the WHOLE COMPANY — all regions, all Business Units, finance)
+  widened **field-wise** by whichever positive permissions the caller's active
+  grants buy, then **zeroed entirely** if an active `revoke-all` is present
+  (**deny-wins**, checked before anything is unioned). A static **WHO-SEES-WHAT
+  matrix** export (baseline and fully-elevated, per persona) drives both the
+  admin-pane preview and the tests, so the preview can never drift from the gate.
+- **Admins see reports by role; a revoke is the only way off.** `global-finops`
+  and `platform-admin` see the whole company by role — no grant needed — and a
+  region `admin` sees their own region by role. There is no cross-region widening
+  for a region admin (the anti-IDOR clamp stays): "all reports" is delivered to
+  the ORG-WIDE roles. The org-wide baseline uses `costCentre: 'all'`, which the
+  resolvers treat as the explicit unbounded path — a literal `TRUE` visibility
+  predicate — never the `orgSubtreeScopePredicate` GUC arm, so the leak class
+  that arm could open is designed out. A specific admin is taken below their role
+  default only by an active `revoke-all` row. A region admin is widened only by
+  an explicit `operational` (cross-region) or `finance` grant.
 - **Two further grant columns — the DRILL contract.** `ReportScopeGrants` also
   carries `teammate` (`'people-scope' | false`) and `project`
   (`'membership' | 'member-in-scope' | 'region-wide' | false`), in the same
@@ -260,21 +299,29 @@ first platform admin opens the same page and grants themselves or others.
   to the whole-company region width and the finance report routes; the
   `regional` and `cost-centre` resolvers take a grant-computed `crossRegion` /
   `unbounded` flag. `finance` is a plain **boolean** grant — `true` sees the
-  whole-company `/reports/finance` pack (region-unbounded by design), held by
-  baseline for no one; a caller reaches it only via an active `finance` grant.
+  whole-company `/reports/finance` pack (region-unbounded by design); it is held
+  at BASELINE by the org-wide roles (`global-finops` / `platform-admin`), and
+  every other caller — a region `admin` included — reaches it only via an active
+  `finance` grant.
 - **Pure app gate — RLS-inert for report enforcement.** Like every scope
   helper, `requireReportScope` is the *live* boundary; the GUC/RLS layer is
   untouched by this feature and inert at runtime (see caveat below), and stays
   purely role-shaped for surfaces this feature does not touch (`/rollups/*`,
   `me/*`). The grant is threaded as an explicit JS-computed scope argument, not
-  a GUC change. Three seams widen or refuse deliberately on top of the existing
-  GUC arms rather than changing them (the `orgSubtreeScopePredicate` GUC arm is
-  unconditionally true for `global-finops`, so for the ungranted org-wide class
-  it is bypassed rather than trusted): the `?ou=` drill is clamped to the
-  caller's own region; the Business Unit list and drill are clamped to the
-  ownership arm alone; and project reports-depth applies the same
-  ownership-arm-only people scope, so a project outside the owned Business Unit
-  refuses. All three are sealed, not merely known gaps — see the design doc.
+  a GUC change. For the ORG-WIDE roles the whole-company reach is explicit
+  (`costCentre: 'all'` → the resolvers' unbounded arm, a literal `TRUE`
+  visibility predicate, and the project path's own `return null`), so the
+  `orgSubtreeScopePredicate` GUC arm is never on the path.
+  A REGION `admin` stays region-scoped through the ORDINARY path, not a special
+  seam: the `?ou=` drill, the Business Unit list and drill, and project
+  reports-depth all resolve through `orgSubtreeScopePredicate`, which scopes a
+  real org subtree correctly (plus the `regional: 'own-region'` clamp in
+  `resolveRegionalScope`). The three `ownerOnly` / own-region SEALS #251 added
+  fire only for an org-wide role holding no grant — `costCentreScopeOpts` is
+  explicit that "manager / admin / developer callers: always `false`" — and that
+  class no longer exists now the org-wide baseline is `costCentre: 'all'` and
+  `regional: 'all-regions'`. The seals are therefore unreachable today; retiring
+  them is a tracked follow-up. See the design doc's superseded banner.
 - **Read-only blast radius.** On the server the grant module is imported
   **only** by the reporting query layer, `/api/v1/reports/**` (+ `meta` and a
   read-only admin diagnostics preview), and the grant CRUD under
@@ -384,8 +431,9 @@ sequenceDiagram
 ### OAuth 2.1 consent (read + tag)
 
 - The MCP client runs a client-initiated PKCE (S256) authorization-code flow against `/api/v1/oauth/{authorize,token,register,revoke}`. The **GET `/oauth/authorize`** gates the Entra session and validates `client_id`/`redirect_uri`, then 302s to the consent page (`app/pages/oauth/authorize.vue`); **POST `/oauth/authorize`** is the grant — the one cookie-bearing OAuth endpoint, so it **requires `assertSameOrigin`** (the cookieless token/register/revoke endpoints deliberately skip CSRF). It reuses `issueAuthCode` (teammate-bound, PKCE-carried).
-- Tokens are stored as HMAC hashes only (`oauth_token`); the raw value is returned once. Refresh is **non-rotating** — revoke (not rotation) is the control (ADR-0005). `requireOAuthBearer` joins `teammate.revoked_at` for the E2 revocation cascade.
+- Tokens are stored as HMAC hashes only (`oauth_token`); the raw value is returned once. Refresh is **non-rotating** — revoke (not rotation) is the control (ADR-0005). `requireOAuthBearer` joins `teammate.revoked_at` for the E2 revocation cascade and `teammate.is_active` for deactivation ([Revocation and deactivation](#revocation-and-deactivation)).
 - The granted scopes are `tokenscope.read` + `tokenscope.tag` (MCP tools). The separate `tokenscope.emit` credential is provisioned via the handoff below, never granted directly to the consent.
+- **Consent is refused on an assumed identity.** `POST /oauth/authorize` returns a JSON `403 access_denied` when the session carries a persona override, before the client/`redirect_uri` lookup, so the refusal cannot become a redirect and no code is issued. An OAuth consent mints a teammate-bound code that becomes a durable access/refresh token; granting one while acting as someone else would leave a credential outliving the impersonation and carrying the impersonated teammate's identity. (Persona override is confined to the demo-capable envs `local` and `sandbox` — see [Persona override](#persona-override-non-production-demo-impersonation--sidecar-path) — so no environment that authenticates against Entra reaches this refusal; it is what holds the property if impersonation is ever enabled on one that does.)
 
 ### Device emit provisioning (secret-isolating handoff)
 
@@ -573,7 +621,7 @@ risk register; this is the mechanism-level view of the same list.
 - **CSP `style-src` allows `'unsafe-inline'`** (`nuxt.config.ts`) — baseline gap `@nuxt/ui` v4 requires for injected styles. Rest of CSP is tighter: `frame-ancestors 'none'` (clickjacking — never iframed by design), constrained `img-src`/`font-src`.
 - **RLS is inert at runtime** under the owner DB connection; app-level scope predicates are the live boundary until the non-owner role ships. The policies are converged and three more tables are covered, but flipping `FORCE` today would break the 47 API handlers and all 19 RLS-touching workers that set no GUCs — their reads would return empty and their writes would error. A CI check pins the handler count so the debt cannot grow.
 - **Origin enforcement is not running anywhere.** `AZURE_FRONT_DOOR_REQUIRED` ships in code; no environment sets it, and none supplies a real `AZURE_FRONT_DOOR_ID`. The same emptiness leaves nuxt-security's global rate limiter keyed on a spoofable forwarded hop.
-- **`appPublicOrigin` is pinned in dev only.** Sandbox, staging and production still derive their public origin from forwarded headers, and that origin is baked into every device's durable emit credential and the OAuth issuer.
+- **`appPublicOrigin` is pinned in dev only.** `dev.bicepparam` is the only parameter file that sets it, and it is also the only environment this repo deploys; anything stood up from the `example-*` templates derives its public origin from forwarded headers instead. That origin is baked into every device's durable emit credential and the OAuth issuer.
 - **Postgres connections encrypt but do not authenticate the server.** The `verify-full` change and a single connection factory are in code and the pre-flight **warns**; it takes effect only on an `infra.yml` apply that rewrites the `DATABASE_URL` secret.
 - **The anonymous OAuth registration ceiling is per-process.** The per-source sliding window is an in-memory counter, so it is one ceiling per replica, not one per deployment. The global client cap and the 1-hour abandonment sweep are what actually bound it.
 - **A live emit handoff code appears in the agent transcript** for its ~5-minute, single-use, instance-bound life. That is the accepted cost of keeping the *durable* credential out of the LLM channel entirely.

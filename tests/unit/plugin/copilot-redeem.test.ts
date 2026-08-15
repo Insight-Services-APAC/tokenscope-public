@@ -16,7 +16,7 @@
  *
  * Also pins basic shell-RC block idempotency for completeness.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -319,7 +319,13 @@ describe('detectEnvChange — bearer-host comparison', () => {
 
 describe('emitEnvLabel — host classification (mirrors statusline)', () => {
   it('classifies the known product tokens from the bearer host', () => {
-    expect(emitEnvLabel('https://tokenscope.example.com/bearer')).toBe('Dev')
+    // `.example.com`, not the real internal host, and deliberately so: the public
+    // mirror's publish step rewrites `tokenscope.example.com` wholesale to
+    // `tokenscope.example.com` (tools/publish/substitutions.txt), which strips the
+    // `-dev` token this function classifies on — rewriting the INPUT while leaving
+    // the expected `'Dev'` alone, so the assertion failed on every public release.
+    // The two lines below were already written this way and always passed.
+    expect(emitEnvLabel('https://tokenscope-dev.example.com/bearer')).toBe('Dev')
     expect(emitEnvLabel('https://ep-tokenscope-sandbox-aue.example.com/bearer')).toBe('Sandbox')
     expect(emitEnvLabel('https://tokenscope-production.example.com/bearer')).toBe('Prod')
   })
@@ -413,5 +419,59 @@ describe('detectShellRcTargets — login + non-login coverage (the .bashrc-only 
 
   it('explicit --shell-rc overrides detection (single target)', () => {
     expect(detectShellRcTargets('/custom/rc', dir, '/bin/bash')).toEqual(['/custom/rc'])
+  })
+})
+
+// ── the credential store's ANCHOR (audit round 2, finding 2) ────────────────
+//
+// config.json holds oauth_refresh_token, so the directory it lands in is a
+// TRUST SINK. os.homedir() consults $HOME first, so a model- or repo-set HOME
+// redirected the durable credential into a directory somebody else chose. The
+// anchor is the passwd home (realHome()), which an env var cannot move.
+//
+// The assertion is on the ANCHOR rather than on a real write, deliberately: a
+// test that let the no-override path run would write into the developer's own
+// ~/.tokenscope. TOKENSCOPE_DIR is the value writeTokenscopeConfig defaults to,
+// so pinning it pins the write.
+describe('the durable credential store does not follow a moved $HOME', () => {
+  const HOME_KEYS = ['HOME', 'USERPROFILE'] as const
+
+  it('TOKENSCOPE_DIR is anchored on the passwd home, not $HOME', async () => {
+    const saved = Object.fromEntries(HOME_KEYS.map((k) => [k, process.env[k]]))
+    const moved = mkdtempSync(join(tmpdir(), 'ts-moved-home-'))
+    try {
+      // Set HOME *before* the import: TOKENSCOPE_DIR is resolved at module load.
+      for (const k of HOME_KEYS) process.env[k] = moved
+      vi.resetModules()
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore — mjs import resolved by Vitest
+      const mod = await import('../../../plugin/scripts/copilot-redeem.mjs')
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore — mjs import resolved by Vitest
+      const { realHome } = await import('../../../plugin/scripts/real-home.mjs')
+
+      expect(mod.TOKENSCOPE_DIR).toBe(join(realHome(), '.tokenscope'))
+      expect(mod.TOKENSCOPE_DIR).not.toBe(join(moved, '.tokenscope'))
+      expect(mod.TOKENSCOPE_DIR.startsWith(moved)).toBe(false)
+    } finally {
+      for (const k of HOME_KEYS) {
+        // Reflect.deleteProperty, not `delete` (lint: no-dynamic-delete); and never
+        // assign undefined — process.env stringifies it to the literal "undefined".
+        if (saved[k] === undefined) Reflect.deleteProperty(process.env, k)
+        else process.env[k] = saved[k] as string
+      }
+      rmSync(moved, { recursive: true, force: true })
+      vi.resetModules()
+    }
+  })
+
+  it('the shell-rc targets DO still follow $HOME (the shell resolves them that way)', () => {
+    // The other direction, so the anchor change is not over-applied: an rc file
+    // is executed by the user's SHELL, which finds it through $HOME. Only the
+    // credential moved to the passwd home.
+    expect(detectShellRcTargets(undefined, dir, '/bin/bash')).toEqual([
+      join(dir, '.bashrc'),
+      join(dir, '.profile'),
+    ])
   })
 })

@@ -358,6 +358,48 @@ describe('DELETE /api/v1/admin/report-access/{id}', () => {
       WHERE teammate_id = ${targetId}::uuid AND permission = 'operational' AND revoked_at IS NULL`
     expect(Number(active[0]!.n)).toBe(1)
   })
+
+  // ── The self-clear guard (mig 0130): a revoked admin keeps their role, so
+  // without this they could DELETE their own revoke and restore full access.
+  it('a revoked org-wide admin CANNOT clear their OWN revoke-all (403) — but a DIFFERENT admin can', async () => {
+    // finops revokes THEMSELVES (an admin can set a revoke on anyone, incl self).
+    const rev = (await postHandler(
+      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: finopsId, permission: 'revoke-all' } }),
+    )) as { id: string }
+
+    // The revoked finops still passes requireRole (role unchanged) and can reach
+    // the endpoint — but lifting their OWN revoke is refused.
+    await expect(
+      deleteHandler(ev({ session: finopsSession(), method: 'DELETE', routerParams: { id: rev.id } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+
+    // …and the revoke is still active (the refused DELETE did nothing).
+    const still = await t.client<{ revoked_at: string | null }[]>`
+      SELECT revoked_at::text AS revoked_at FROM report_access_grant WHERE id = ${rev.id}::uuid`
+    expect(still[0]!.revoked_at).toBeNull()
+
+    // A DIFFERENT admin (platform-admin) CAN lift it — the separation is about
+    // SELF-clear, not about revokes being permanent.
+    const lifted = (await deleteHandler(
+      ev({ session: platformAdminSession(), method: 'DELETE', routerParams: { id: rev.id } }),
+    )) as { revoked: boolean }
+    expect(lifted.revoked).toBe(true)
+  })
+
+  it('a revoked admin CAN still clear SOMEONE ELSE’s revoke (ordinary admin work, not the self-clear case)', async () => {
+    // finops is revoked, AND targetId is revoked. finops lifting target's revoke
+    // is fine — the guard is strictly self-scoped.
+    await postHandler(
+      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: finopsId, permission: 'revoke-all' } }),
+    )
+    const targetRev = (await postHandler(
+      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'revoke-all' } }),
+    )) as { id: string }
+    const lifted = (await deleteHandler(
+      ev({ session: finopsSession(), method: 'DELETE', routerParams: { id: targetRev.id } }),
+    )) as { revoked: boolean }
+    expect(lifted.revoked).toBe(true)
+  })
 })
 
 describe('A5: expiry lifecycle — GET shows status, POST supersedes, resolveReportGrants stays at baseline until superseded', () => {

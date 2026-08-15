@@ -1,17 +1,19 @@
 // @vitest-environment node
 /*
- * Report-access grants — the endpoint-matrix proof (mig 0129, successor to the
- * retired report-visibility.test.ts / task #19's three-mode dial).
+ * Report-access rows — the endpoint-matrix proof (migs 0129 + 0130, successor to
+ * the retired report-visibility.test.ts / task #19's three-mode dial).
  *
  * Per-literal-endpoint proof (sg-M6/M8): every merged Region route (×5, incl. the
  * `region=all` width) and every /reports/finance surface (index + drill + export)
  * asserts 200/403 against `effectiveReportGrants` for SIX personas — plain
- * developer, cost-centre owner, region admin, AND (new, first-class since their
- * behaviour now flips with grants) global-finops and platform-admin — crossed with
- * the grant states a `report_access_grant` row can put a caller in. Plus:
- *   - THE DISCONNECT PROOF: an ungranted global-finops/platform-admin is now 403
- *     on every width that used to be unconditional role-based 200 (mig 0129's
- *     whole point — org-wide roles no longer confer elevation by role alone).
+ * developer, cost-centre owner, region admin, global-finops and platform-admin —
+ * crossed with the states a `report_access_grant` row can put a caller in. Plus:
+ *   - THE ROLE-DEFAULT PROOF (PO decision 2026-08-13, reversing #251 for the
+ *     org-wide roles only): an ungranted global-finops/platform-admin is 200 on
+ *     every whole-company width by ROLE, while an ungranted region `admin` stays
+ *     region-bound (403 on region=all and on finance) — the anti-IDOR clamp.
+ *   - THE DENY PROOF (mig 0130): an active 'revoke-all' row zeroes a caller's
+ *     report access below BOTH the role default and any positive grant.
  *   - sg-H3: velocity foreign-ou 403 — grants never thread into the rollups gate.
  *   - sg-L11 successor: DROP TABLE report_access_grant degrades every caller to
  *     baseline, 200, never a throw.
@@ -54,6 +56,7 @@ import costCentreDrill from '../../../server/api/v1/reports/cost-centres/[ccId].
 import teammateDrill from '../../../server/api/v1/reports/teammate/[id]/index.get'
 import teammateDrillExport from '../../../server/api/v1/reports/teammate/[id]/export.get'
 import projectDepth from '../../../server/api/v1/reports/project/[code].get'
+import metaHandler from '../../../server/api/v1/reports/meta.get'
 
 let t: TestDb
 let regionA = ''
@@ -78,7 +81,19 @@ const ev = (session: Session, query = '', params: Record<string, string> = {}) =
     context: { params },
     node: {
       req: { method: 'GET', url, socket: { remoteAddress: '127.0.0.1' }, get headers() { return { ...headers } } },
-      res: { _headers: {} as Record<string, unknown>, statusCode: 200, getHeader() {}, setHeader() {}, removeHeader() {}, appendHeader() {}, get headersSent() { return false } },
+      // setHeader RECORDS into _headers rather than discarding: `/reports/meta`
+      // carries authorisation state (scopes / permissions), so its Cache-Control
+      // is part of the contract and needs to be assertable. A no-op stub cannot
+      // catch a response that tells the browser to keep a stale grant set.
+      res: {
+        _headers: {} as Record<string, unknown>,
+        statusCode: 200,
+        getHeader(this: { _headers: Record<string, unknown> }, k: string) { return this._headers[String(k).toLowerCase()] },
+        setHeader(this: { _headers: Record<string, unknown> }, k: string, v: unknown) { this._headers[String(k).toLowerCase()] = v },
+        removeHeader(this: { _headers: Record<string, unknown> }, k: string) { Reflect.deleteProperty(this._headers, String(k).toLowerCase()) },
+        appendHeader() {},
+        get headersSent() { return false },
+      },
     },
   }
   injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], session)
@@ -236,7 +251,26 @@ describe('the endpoint matrix — persona × grant state', () => {
     await ok(projectDepth(ev(ownerSess(), 'month=2026-07', { code: 'RV-PROJ' })))
   })
 
-  it('admin, no grants: old "standard" admin expectations', async () => {
+  // ── The ROLE-DEFAULT proof (PO decision 2026-08-13, reversing #251 for the
+  // ORG-WIDE roles ONLY). `global-finops` and `platform-admin` see the WHOLE
+  // COMPANY with NO grant at all: region=all, the finance pack, the unbounded BU
+  // list, the across-frame teammate drill, and region-wide project depth. A
+  // region `admin` is NOT in this set — the test directly above proves it stays
+  // region-bound. The revoke below is the only thing that turns the org-wide
+  // default off.
+  const fullAccessByRole = async (session: () => ReturnType<typeof adminSess>) => {
+    await clearGrants()
+    await expectAll(regionCallsAll(session()), true)
+    await expectAll(financeCalls(session()), true)
+    await ok(costCentresIndex(ev(session(), 'month=2026-07')))
+    await ok(teammateDrill(ev(session(), 'src=across&month=2026-07', { id: subjectId })))
+    await ok(projectDepth(ev(session(), 'month=2026-07', { code: 'RV-PROJ' })))
+  }
+
+  it('admin (region admin), no grants: own region + owned BUs, but NOT whole-company or finance', async () => {
+    // A region admin is REGION-BOUND (the anti-IDOR clamp): own-region 200,
+    // region=all + finance 403, owned-BU surfaces 200. The full-company default
+    // is only for the org-wide roles below.
     await clearGrants()
     await expectAll(regionCallsAll(adminSess()), false)
     await ok(regionIndex(ev(adminSess(), 'month=2026-07')))
@@ -246,24 +280,122 @@ describe('the endpoint matrix — persona × grant state', () => {
     await ok(projectDepth(ev(adminSess(), 'month=2026-07', { code: 'RV-PROJ' })))
   })
 
-  it('global-finops, NO grants: THE DISCONNECT PROOF — 403 where role alone used to be 200', async () => {
-    await clearGrants()
-    await expectAll(regionCallsAll(finopsSess()), false)
-    await ok(regionIndex(ev(finopsSess(), 'month=2026-07'))) // own-region — role alone still carries this
-    await expectAll(financeCalls(finopsSess()), false)
-    await forbidden(costCentresIndex(ev(finopsSess(), 'month=2026-07'))) // unbounded BU list — no ownership either
-    await forbidden(teammateDrill(ev(finopsSess(), 'src=across&month=2026-07', { id: subjectId })))
-    await forbidden(projectDepth(ev(finopsSess(), 'month=2026-07', { code: 'RV-PROJ' })))
+  it('global-finops, no grants: FULL company access by role', async () => {
+    await fullAccessByRole(finopsSess)
   })
 
-  it('platform-admin, NO grants: same disconnect as global-finops', async () => {
+  it('platform-admin, no grants: FULL company access by role', async () => {
+    await fullAccessByRole(platformSess)
+  })
+
+  // ── The NEW disconnect proof (mig 0130): an explicit 'revoke-all' row zeroes
+  // an admin's report access — below the role default, below any positive grant.
+  // The "administer, no data access" separation of duties.
+  const revokedSeesNothing = async (session: () => ReturnType<typeof adminSess>, teammateId: string) => {
     await clearGrants()
-    await expectAll(regionCallsAll(platformSess()), false)
-    await ok(regionIndex(ev(platformSess(), 'month=2026-07')))
-    await expectAll(financeCalls(platformSess()), false)
-    await forbidden(costCentresIndex(ev(platformSess(), 'month=2026-07')))
-    await forbidden(teammateDrill(ev(platformSess(), 'src=across&month=2026-07', { id: subjectId })))
-    await forbidden(projectDepth(ev(platformSess(), 'month=2026-07', { code: 'RV-PROJ' })))
+    await grantReportAccess(t.client, teammateId, 'operational') // even WITH a positive grant…
+    await grantReportAccess(t.client, teammateId, 'revoke-all') // …the deny wins.
+    try {
+      await expectAll(regionCallsAll(session()), false)
+      await forbidden(regionIndex(ev(session(), 'month=2026-07'))) // even own-region: revoke means NOTHING
+      await expectAll(financeCalls(session()), false)
+      await forbidden(costCentresIndex(ev(session(), 'month=2026-07')))
+      await forbidden(teammateDrill(ev(session(), 'src=across&month=2026-07', { id: subjectId })))
+      await forbidden(projectDepth(ev(session(), 'month=2026-07', { code: 'RV-PROJ' })))
+    } finally {
+      await clearGrants()
+    }
+  }
+
+  it('admin, REVOKED: sees nothing — deny wins over role AND a positive grant', async () => {
+    await revokedSeesNothing(adminSess, adminId)
+  })
+
+  it('platform-admin, REVOKED: sees nothing', async () => {
+    await revokedSeesNothing(platformSess, platformId)
+  })
+
+  /*
+   * The SHELL contract, not just the endpoints. `/reports/meta` is the ONE
+   * bootstrap fetch: it decides which tabs render, where Region lands, whether
+   * the drill columns are links, and whether the "elevated access" chip appears.
+   * A revoke has to zero ALL of it at once — an empty `scopes` served BESIDE a
+   * chip announcing an `operational` permission is a shell contradicting itself,
+   * and a leftover positive grant is exactly what would light that chip. Route
+   * level on purpose: the module test cannot see this seam (meta reads `revoked`
+   * on its own, separately from resolveReportGrants).
+   */
+  interface MetaShape {
+    scopes: string[]
+    defaultScope: string | null
+    region: { landing: string | null; allRegions: boolean }
+    drill: { teammate: string | false; project: string | false }
+    permissions?: string[]
+  }
+
+  it('/reports/meta, REVOKED with a positive grant still on file: empty scopes AND no permissions chip', async () => {
+    await clearGrants()
+    // Both positive permissions AND the deny — the state a revoked admin who was
+    // previously granted is actually in.
+    await grantReportAccess(t.client, platformId, 'operational', 'finance', 'revoke-all')
+    try {
+      const m = (await metaHandler(ev(platformSess()))) as unknown as MetaShape
+      expect(m.scopes).toEqual([])
+      expect(m.defaultScope).toBeNull()
+      // The Region tab is gone entirely — not "own-region", which is the
+      // degenerate-floor shape #251 produced by accident.
+      expect(m.region).toEqual({ landing: null, allRegions: false })
+      // No drill depth beyond the me/* project floor a revoke never touches.
+      expect(m.drill).toEqual({ teammate: false, project: 'membership' })
+      // THE CHIP: omitted, not merely empty. meta only includes `permissions`
+      // when non-empty, so a revoked caller must carry no key at all.
+      expect(m.permissions).toBeUndefined()
+      expect(Object.keys(m)).not.toContain('permissions')
+    } finally {
+      await clearGrants()
+    }
+  })
+
+  it('/reports/meta, the SAME caller with the revoke lifted: every scope back, by role alone', async () => {
+    // The counterfactual — without it the assertion above would pass on a meta
+    // endpoint that was broken for everyone.
+    await clearGrants()
+    const m = (await metaHandler(ev(platformSess()))) as unknown as MetaShape
+    expect(m.scopes).toEqual(['region', 'cost-centre', 'finance'])
+    expect(m.defaultScope).toBe('region')
+    expect(m.region).toEqual({ landing: 'all-regions', allRegions: true })
+    // No grant row exists, so still no chip — the access is role-derived.
+    expect(m.permissions).toBeUndefined()
+  })
+
+  it('/reports/meta, a positive grant with NO revoke: the chip DOES appear (the branch is the revoke, not the read)', async () => {
+    await clearGrants()
+    await grantReportAccess(t.client, plainDevId, 'operational')
+    try {
+      const m = (await metaHandler(ev(plainDevSess()))) as unknown as MetaShape
+      expect(m.permissions).toEqual(['operational'])
+      expect(m.scopes).toContain('region')
+    } finally {
+      await clearGrants()
+    }
+  })
+
+  /*
+   * The response that carries the grant set must not be storable. Observed in
+   * production: a browser holding an hour-old `private, max-age=3600` copy
+   * rendered "You don't have access to any reports" with NO request to this
+   * endpoint at all, for an admin who by then had full access — and a reload
+   * fixed it. The mirror case is worse for the revoke lever: a revoked caller
+   * would keep seeing the shell for up to an hour after the grant was pulled.
+   */
+  it('/reports/meta is NOT storable — it carries the grant set, so a stale copy shows the wrong access', async () => {
+    const e = ev(platformSess())
+    await metaHandler(e)
+    const headers = (e as unknown as { node: { res: { _headers: Record<string, unknown> } } }).node.res._headers
+    expect(headers['cache-control']).toBe('no-store')
+    // Belt and braces: any freshness lifetime at all is the defect, whatever the
+    // directive it is spelled with.
+    expect(String(headers['cache-control'])).not.toMatch(/max-age|s-maxage|stale-while-revalidate/)
   })
 
   it('plain dev + operational: 200 on region=all, all-BU list, teammate drill via across frame; 403 on finance', async () => {
@@ -274,6 +406,45 @@ describe('the endpoint matrix — persona × grant state', () => {
     await ok(teammateDrill(ev(plainDevSess(), 'src=across&month=2026-07', { id: subjectId })))
     await ok(projectDepth(ev(plainDevSess(), 'month=2026-07', { code: 'RV-PROJ' })))
     await expectAll(financeCalls(plainDevSess()), false)
+  })
+
+  /*
+   * A REGION ADMIN IS WIDENED BY A GRANT TOO. Easy to assume the positive grants
+   * only exist for non-admin roles now that the org-wide roles hold everything at
+   * baseline — they do not: a grant widens ANY caller whose baseline lacks that
+   * scope, and a region `admin` is exactly such a caller. Route-level on purpose
+   * (rule 10): the module test proves the grant OBJECT, only the endpoints prove
+   * the region clamp actually lifts. Without these two cases the whole
+   * "region admins stay bound, but a grant still reaches them" contract — which
+   * the mig-0130 rationale and the wiki both assert — is unproven end to end.
+   */
+  it('admin (region admin) + operational: the grant WIDENS a region-bound role cross-region', async () => {
+    await clearGrants()
+    await grantReportAccess(t.client, adminId, 'operational')
+    try {
+      // region=all was 403 for this same caller with no grant (the case above).
+      await expectAll(regionCallsAll(adminSess()), true)
+      await ok(costCentresIndex(ev(adminSess(), 'month=2026-07')))
+      await ok(teammateDrill(ev(adminSess(), 'src=across&month=2026-07', { id: subjectId })))
+      await ok(projectDepth(ev(adminSess(), 'month=2026-07', { code: 'RV-PROJ' })))
+      // …but 'operational' never implies the finance pack, for an admin either.
+      await expectAll(financeCalls(adminSess()), false)
+    } finally {
+      await clearGrants()
+    }
+  })
+
+  it('admin (region admin) + finance: reaches the finance pack, and STAYS region-bound elsewhere', async () => {
+    await clearGrants()
+    await grantReportAccess(t.client, adminId, 'finance')
+    try {
+      await expectAll(financeCalls(adminSess()), true)
+      // The region clamp is untouched by a finance grant — the two are independent.
+      await expectAll(regionCallsAll(adminSess()), false)
+      await ok(regionIndex(ev(adminSess(), 'month=2026-07')))
+    } finally {
+      await clearGrants()
+    }
   })
 
   it('plain dev + finance: 200 finance index/drill/export; regional stays own-region; 403 region=all', async () => {
@@ -337,51 +508,63 @@ describe('grant lifecycle — expired / revoked behave as no grant; re-grant aft
 /*
  * ── C3 (post external design review) ────────────────────────────────────────
  */
-describe('C3: ungranted org-wide role + FOREIGN-region ?ou= drill on /reports/region → refused', () => {
+describe('org-wide role, NO grants: a FOREIGN-region ?ou= drill on /reports/region now OPENS (full access by role)', () => {
   it('global-finops', async () => {
     await clearGrants()
-    await forbidden(regionIndex(ev(finopsSess(), `month=2026-07&ou=${couB}`)))
+    await ok(regionIndex(ev(finopsSess(), `month=2026-07&ou=${couB}`)))
   })
 
   it('platform-admin', async () => {
     await clearGrants()
-    await forbidden(regionIndex(ev(platformSess(), `month=2026-07&ou=${couB}`)))
+    await ok(regionIndex(ev(platformSess(), `month=2026-07&ou=${couB}`)))
+  })
+
+  it('…but a REVOKED org-wide role is refused the same foreign-region drill', async () => {
+    await clearGrants()
+    await grantReportAccess(t.client, finopsId, 'revoke-all')
+    try {
+      await forbidden(regionIndex(ev(finopsSess(), `month=2026-07&ou=${couB}`)))
+    } finally {
+      await clearGrants()
+    }
   })
 })
 
-describe('C3: org-wide role + active cou_owner, NO grants — the ownerOnly seal', () => {
-  it('/reports/cost-centres lists ONLY the owned subtree — a foreign BU is absent', async () => {
+// The `ownerOnly` seal (#251) restricted an org-wide role with ownership-but-no-grant
+// to its owned subtree. Under the role-default policy that class no longer exists —
+// an org-wide role sees EVERY BU and EVERY project by role, ownership irrelevant —
+// so the seal is now unreachable (baseline costCentre is 'all', never 'owned-or-subtree').
+// FOLLOW-UP: retire `ownerOnly` from costCentreScopeOpts / cost-centres.ts / project-depth.ts.
+describe('org-wide role + active cou_owner, NO grants: sees the WHOLE company by role (seal retired)', () => {
+  it('/reports/cost-centres lists EVERY BU, not just the owned subtree', async () => {
     await clearGrants()
     const res = (await costCentresIndex(
       ev(finopsOwnerSess(), 'month=2026-07'),
     )) as unknown as { cards: { id: string }[] }
     const ids = res.cards.map((c) => c.id)
     expect(ids).toContain(couA)
-    expect(ids).not.toContain(couB)
+    expect(ids).toContain(couB) // the foreign BU is now present — role sees all
   })
 
-  it('the cc drill of a foreign BU is refused; the owned BU still opens', async () => {
+  it('the cc drill of BOTH the owned and a foreign BU opens', async () => {
     await clearGrants()
     await ok(costCentreDrill(ev(finopsOwnerSess(), 'month=2026-07', { ccId: couA })))
-    await forbidden(costCentreDrill(ev(finopsOwnerSess(), 'month=2026-07', { ccId: couB })))
+    await ok(costCentreDrill(ev(finopsOwnerSess(), 'month=2026-07', { ccId: couB })))
   })
 
-  it('project reports-depth: the owned BU project opens, a FOREIGN project is refused (viewerPeopleScope ownerOnly)', async () => {
-    // Without the seal, orgSubtreeScopePredicate's `'global-finops'` GUC arm
-    // (org-subtree-scope.ts:49; platform-admin maps onto it) collapses the
-    // people scope to TRUE and any project in the company admits — the class
-    // the external code review caught. The owned project still admits through
-    // the ownership arm alone.
+  it('project reports-depth: both the owned and a FOREIGN project open (region-wide by role)', async () => {
     await clearGrants()
     await ok(projectDepth(ev(finopsOwnerSess(), 'month=2026-07', { code: 'RV-PROJ' })))
-    await forbidden(projectDepth(ev(finopsOwnerSess(), 'month=2026-07', { code: 'RV-FOREIGN' })))
+    await ok(projectDepth(ev(finopsOwnerSess(), 'month=2026-07', { code: 'RV-FOREIGN' })))
   })
 
-  it('an operational grant reopens the foreign project (region-wide depth, no clamp)', async () => {
+  it('a REVOKE closes it all again — the owned BU too', async () => {
     await clearGrants()
-    await grantReportAccess(t.client, finopsOwnerId, 'operational')
+    await grantReportAccess(t.client, finopsOwnerId, 'revoke-all')
     try {
-      await ok(projectDepth(ev(finopsOwnerSess(), 'month=2026-07', { code: 'RV-FOREIGN' })))
+      await forbidden(costCentresIndex(ev(finopsOwnerSess(), 'month=2026-07')))
+      await forbidden(costCentreDrill(ev(finopsOwnerSess(), 'month=2026-07', { ccId: couA })))
+      await forbidden(projectDepth(ev(finopsOwnerSess(), 'month=2026-07', { code: 'RV-PROJ' })))
     } finally {
       await clearGrants()
     }
@@ -527,17 +710,26 @@ describe('sg-H3 leak fix: velocity foreign-ouId 403 — grants never thread into
  * sg-L11 successor. MUST run LAST — it drops the table out from under every
  * subsequent test in the file.
  */
-describe('sg-L11 successor: DROP TABLE report_access_grant → fail-closed to baseline, never throw', () => {
-  it('after dropping the table, /reports/region still 200 at baseline; region=all + finance 403 for everyone', async () => {
+describe('sg-L11 successor: DROP TABLE report_access_grant → degrade to the ROLE baseline, never throw', () => {
+  it('after dropping the table, the role DEFAULT still applies (grants are an overlay); no throw', async () => {
     await t.client`DROP TABLE report_access_grant`
-    // A region admin still gets their own-region regional report (baseline behaviour).
+    // The grant table is an OVERLAY on the role default; its absence degrades to
+    // that default, it does not strand anyone and it never throws. Both
+    // resolveReportPermissions and resolveReportAccessRevoked gate on
+    // to_regclass(...) FIRST, so a missing table short-circuits to []/false.
+    //
+    // An ORG-WIDE role therefore still sees the whole company (region=all +
+    // finance) by ROLE — no grant row was ever needed. (Honest note: a revoke
+    // also lives in this table, so a catastrophic DROP reverts a revoked admin to
+    // their role default — the revoke is data, and this is a DBA-level event, not
+    // a runtime path.)
+    await ok(regionIndex(evAll(finopsSess(), 'month=2026-07')))
+    await ok(financeIndex(ev(finopsSess(), 'month=2026-06')))
+    // …while a region admin keeps their BOUNDED baseline: own-region 200,
+    // region=all + finance 403 — proving the degrade is to the ROLE floor, which
+    // for a region admin is their own region, not "all".
     await ok(regionIndex(ev(adminSess(), 'month=2026-07')))
-    // …and is still denied the whole-company across scope + finance (fail-closed).
     await forbidden(regionIndex(evAll(adminSess(), 'month=2026-07')))
     await forbidden(financeIndex(ev(adminSess(), 'month=2026-06')))
-    // Even a caller who WOULD have held elevation via a grant now gets nothing —
-    // the table is gone, resolveReportPermissions degrades to [], never throws.
-    await forbidden(regionIndex(evAll(finopsSess(), 'month=2026-07')))
-    await forbidden(financeIndex(ev(finopsSess(), 'month=2026-06')))
   })
 })

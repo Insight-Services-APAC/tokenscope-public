@@ -102,9 +102,31 @@ every MCP client supports tools + prompts, so this is the cross-client surface.
   `my_usage`, `tag_session`, `resolve_repo_project`, `provision_emit`.
 - **MCP prompts** (orchestration skills, surfaced in Claude Code's slash menu
   tagged **(MCP)**): `tokenscope-setup`, `tag`, `project`, `usage`. A prompt tells
-  the agent which tools to call; the agent does any **local** step (write
-  `.tokenscope`, redeem the handoff, write `settings.json`) with its own file
-  tools — a tool never writes the user's disk.
+  the agent which tools to call; the agent does the genuinely local steps — a
+  tool never writes the user's disk. It writes `.tokenscope` with its own file
+  tool, and it **runs a script** for anything that touches the credential store:
+  `claude-redeem.mjs` redeems the handoff and writes the device's settings
+  itself, and `device-id.mjs` answers the one question setup needs from that
+  store.
+
+**The device store is never opened by the agent.** Re-running setup should
+*rotate* this device rather than mint a duplicate, which needs one non-secret
+fact: the `tokenscope.instance_id` the host was last provisioned with. That id
+sits in `~/.claude/settings.json` next to `TOKENSCOPE_OAUTH_REFRESH_TOKEN` (and,
+on the Copilot side, in `~/.tokenscope/config.json` next to
+`oauth_refresh_token`), so instructing the agent to read the file would pull a
+durable credential into the model's context on every ordinary setup — no attacker
+required. `plugin/scripts/device-id.mjs` reads the store out of process and
+prints a fixed five-key object and nothing else:
+`{enrolled, tool, instance_id, bearer_host, reason}`. The object is built from a
+fixed key set rather than a spread of the parsed store, so a key added to either
+store later cannot leak through it. It takes `--tool claude-code|copilot-cli` and
+reads only that tool's store, reporting `enrolled: false` with a `reason` of
+`no-enrolment` or `tool-mismatch` rather than an id the caller would misuse —
+instances are per-host but bound to one emit tool, and provisioning the other
+tool's id revokes that tool's credential. `bearer_host` is also how the prompts
+tell which deployment a device currently points at. The file is dependency-free
+so it vendors verbatim into the Copilot plugin.
 
 The **device-local** commands (`plugin/commands/*.md` → `plugin/scripts/*.mjs`)
 are the Claude-specific surface that the MCP spine can't cover — genuinely local
@@ -118,31 +140,40 @@ sparse-checks-out only those two dirs but requires the standalone `claude` CLI.
 
 | Command                            | What it does                                                                                                                                                                                                                                                                                             | Backing                                                                  |
 | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `/tokenscope:setup`                | Set up TokenScope on this device — connect + provision emitting in one OAuth consent. The **local counterpart** to the `tokenscope-setup` MCP prompt: it calls `provision_emit`/`my_usage` and runs the local redeem helper, so the durable emit credential is redeemed process→process, never via chat. | `provision_emit` + `my_usage` (MCP) + `Bash(node:*)` local redeem        |
+| `/tokenscope:setup`                | Set up TokenScope on this device — connect + provision emitting in one OAuth consent. The **local counterpart** to the `tokenscope-setup` MCP prompt: it calls `provision_emit`/`my_usage` and runs the local redeem helper, so the durable emit credential is redeemed process→process, never via chat. | `provision_emit` + `my_usage` (MCP) + local `device-id.mjs` and `claude-redeem.mjs` |
 | `/tokenscope:status`               | Report whether your sessions are emitting **and** whether the MCP is connected — the 3-state verdict (🟢 emit+MCP / 🟡 emit-only / 🔴 not emitting).                                                                                                                                                     | local emit probe (`otel-headers-helper.sh` → `/bearer`) + MCP-auth probe |
 | `/tokenscope:statusline [on\|off]` | Install/remove the status line (emission health + MCP-connection state + session id).                                                                                                                                                                                                                    | local-only                                                               |
 | `/tokenscope:backfill`             | Re-emit recent local Claude usage that may have been dropped (short emission-gap catch-up).                                                                                                                                                                                                              | local-only                                                               |
 
-Each script resolves the API base via `api-base.mjs` — `TOKENSCOPE_API_BASE`
-env as an override, else the MCP server's **registered origin** (discovered from
+Each script resolves the API base via `api-base.mjs`, most explicit first: the
+caller's explicit argument, else `TOKENSCOPE_API_BASE` **but only when it names
+loopback**, else the MCP server's **registered origin** (discovered from
 configuration the user wrote, never from the repository), else the **baked
 deployment default** (the API base is part of the plugin, since the marketplace
-ships it per-deployment); `plugin/.mcp.json` reads the same base for the MCP
+ships it per-deployment). `plugin/.mcp.json` reads the same base for the MCP
 server.
 
-**The redeem helpers are the exception, deliberately.** They resolve with
-`trustEnv: false`, so `TOKENSCOPE_API_BASE` does not participate there at all.
-Claude Code merges a project's `.claude/settings.local.json` env over the global
-one, which makes that variable something a cloned repository can set — and the
-redeem request carries a live single-use handoff code whose response is a
-durable emit credential. There is no way to distinguish a shell-exported value
-from a repo-injected one, so the credential-bearing path does not consult it and
-relies on discovery instead. Local dev against `http://localhost:3450` still
-works: whoever registered the MCP server there is discovered from their own
-configuration. `status` (emission probe) invokes the
-real emit path (`otel-headers-helper.sh`). Reads and tagging are now over MCP and
-authenticate with the connection's **`tokenscope.read`/`tag` OAuth** grant — a
-client authenticates as itself, never via a borrowed browser cookie. The old
+**Neither of the two channels a repository or a model can reach may name a
+destination.** Claude Code merges a project's `.claude/settings.local.json` env
+over the global one, so `TOKENSCOPE_API_BASE` is something a cloned repository
+can set and nothing downstream can tell that value apart from one the developer
+exported — hence loopback-only, for every script, with no opt-out flag. And on
+the redeem path `--api-base` may only **select** an origin the device already
+knows (loopback, the baked default, or the discovered registration), never
+introduce one, because that argv is composed by a model under a prefix
+`allowed-tools` grant that pre-approves every tail. The redeem request carries a
+live single-use handoff code whose answer is a durable emit credential, so it is
+the one call that must not be steerable. Local dev against
+`http://localhost:3450` still works: to be served by loopback something must
+already be running on the machine, and whoever registered an MCP server there is
+discovered from their own configuration anyway. When resolution fails, the remedy
+is to register the server with the CLI — not to pass a flag, which on a device
+that discovered nothing can only accept loopback values.
+
+`status` (emission probe) invokes the real emit path
+(`otel-headers-helper.sh`). Reads and tagging are now over MCP and authenticate
+with the connection's **`tokenscope.read`/`tag` OAuth** grant — a client
+authenticates as itself, never via a borrowed browser cookie. The old
 `TOKENSCOPE_AUTH_COOKIE` crutch is gone.
 
 The published versions are declared in three places that must move
@@ -178,9 +209,24 @@ that carries a credential.
   `TOKENSCOPE_STATE_DIR` and `TOKENSCOPE_API_BASE` are never written to global
   settings, so spreading the global block last cannot overrule a repo-supplied
   value. Every env handed to a child process or used for a fetch removes them
-  outright, and `stateDir()` reads the override from `process.env` only. The
-  direct readers (`landed-check.mjs`, `project-check.mjs`) route through the same
-  helper so one deletion covers them all.
+  outright, and `stateDir()` ignores a passed `env` entirely, reading the
+  override from `process.env`. The direct readers (`landed-check.mjs`,
+  `project-check.mjs`) route through the same helper so one deletion covers them
+  all.
+- **Provenance for `TOKENSCOPE_STATE_DIR` is established at the hook, not in
+  `stateDir()`.** Reading `process.env` is a narrowing, not a boundary: Claude
+  Code merges the repo-local settings `env` into the process environment, so by
+  the time `stateDir()` runs the two sources are indistinguishable. The settings
+  *files* still carry provenance, so `hookStateDir()` in `session-start.mjs`
+  reads them: if any `.claude/settings.json` or `.claude/settings.local.json`
+  from the cwd up to and including the **git root** names the key at all (matched
+  case-insensitively), the inherited value is replaced with the global settings
+  value, or removed so the state dir falls back to `~/.tokenscope` on the passwd
+  home. A repo that says nothing about the key leaves a genuine process-level pin
+  untouched. It matters because that directory is where the bearer helper caches
+  the freshly minted emit access token and where the forwarder reads the stash
+  naming its upstream. Every state-dir read in the hook goes through this, and
+  anything the hook spawns is pinned to its result.
 - **One endpoint validator, shared.** `assertSafeEndpoint()` in
   `endpoint-guard.mjs` is the single validator every credential-bearing call
   routes through — redeem, enrol, status, backfill, the landed check, the project
@@ -192,6 +238,24 @@ that carries a credential.
   unconditionally, so the forwarder's own address can never masquerade as the real
   DCE. The file is dependency-free precisely so it can be vendored verbatim into
   the Copilot plugin rather than reimplemented there.
+- **One argv validator, shared — because the ARGV is repo-steerable too.** A
+  slash command's `allowed-tools` entry is a **prefix** grant
+  (`Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/claude-redeem.mjs":*)`), so every
+  argument tail is pre-approved with no prompt, and a prompt-injected model can
+  append flags to the documented invocation. Copilot CLI has no grant mechanism
+  at all. `argv-guard.mjs` (vendored the same way `endpoint-guard.mjs` is) is
+  therefore the control: an unknown `--flag` refuses the whole argv, a flag
+  missing its value is refused rather than reinterpreted, `--api-base` may only
+  select a known origin (and a value outside that set is warned about and
+  dropped, not fatal — exiting would hand a prompt injection a denial of setup),
+  and the path-valued flags (`--settings-path` for the credential file,
+  `--shell-rc` for the shell init block) are confined to the home directory and
+  to the filename each flag exists to name. Confinement compares **real**,
+  symlink-resolved paths on both sides, so a `~/.claude` pointing out of the home
+  cannot pass. **No flag names the POST target**: the redeem path is fixed at
+  `/api/v1/setup/redeem` on the resolved base. That is also why refusal, not
+  tolerance, is the right answer to an unknown flag — a tolerated one degrades to
+  "silently ignored", where its value still lands as a stray positional.
 
 ## Telemetry contract
 
@@ -221,6 +285,17 @@ v2.1.158 (2026-06-01). Full recipe:
   ~29 min; `scripts/otel-headers-helper.sh` mints a short-lived OAuth
   `tokenscope.emit` access token and presents it to `TOKENSCOPE_BEARER_ENDPOINT`
   (`/api/v1/instances/{instanceId}/bearer`) to mint the Azure token. grpc cannot use the helper.
+  **The helper takes its state dir as an argument (`--state-dir`), never from
+  `TOKENSCOPE_STATE_DIR`.** Claude Code invokes it *itself*, as a sibling of every
+  hook and with its own merged environment, so no hook can repair what it reads;
+  argv is the one channel a settings file cannot contribute to. With no argument
+  it resolves `~/.tokenscope` from the **passwd database**, which `$HOME` cannot
+  move. Our own callers pass the dir they resolved. The helper also prepends a
+  trusted `PATH` and passes `curl -q`, because it is handed the durable refresh
+  token and both the interpreter and the tools were otherwise repo-selectable.
+  *One documented gap:* on a host with **no passwd entry for the uid** (some
+  minimal containers) it falls back to `$HOME` — leak-susceptible again — and
+  says so loudly on stderr. Pass `--state-dir` there.
 - **Join key** is **`tokenscope.instance_id`** (the device INSTANCE id, minted by
   `provision_emit` at setup and carried verbatim in `OTEL_RESOURCE_ATTRIBUTES`) —
   **NOT** Claude's own `session.id`, which is the per-SESSION id we don't
@@ -262,7 +337,16 @@ fleet emits **directly** with no forwarder in the path:
   is relaunched in that directory. (The `SessionStart` hook sidesteps this for
   the per-repo project injection on a fresh session.)
 - The `SessionStart` hook does more than per-repo project injection. On each fresh
-  session it also: **emit-on-install auto-enrols** (`enrollIfNeeded`, a no-op unless a
+  session it also: resolves every state-dir read through **`hookStateDir`**
+  (above), so a repo-claimed `TOKENSCOPE_STATE_DIR` reaches neither the hook nor
+  anything it spawns — and repairs the **execution-steering** variables
+  (`PATH`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
+  `NODE_PATH`) on the same provenance test, because a repo-set `PATH` chooses the
+  `sh` that runs the emit helper and a repo-set `NODE_OPTIONS=--require` runs code
+  inside the forwarder. **Neither repair reaches the ~29-minute
+  `otelHeadersHelper` refresh** — Claude Code invokes that one directly, which is
+  why the helper's own state dir moved to argv (above) rather than being fixed
+  here. It also **emit-on-install auto-enrols** (`enrollIfNeeded`, a no-op unless a
   bundled secret is present and the device is not yet enrolled), **self-heals** the
   plugin script paths and the global OTLP logs endpoint (CC #72671), spawns the
   version-aware Content-Length forwarder when needed, and surfaces one-line warnings —
@@ -281,6 +365,8 @@ fleet emits **directly** with no forwarder in the path:
 | MCP endpoint                       | `server/api/v1/mcp/[...].ts`                                                 |
 | Local commands                     | `plugin/commands/{setup,status,statusline,backfill}.md`                      |
 | Local scripts                      | `plugin/scripts/{status,statusline,statusline-toggle,backfill,tag-repo}.mjs` |
+| Device-identity accessor           | `plugin/scripts/device-id.mjs`                                               |
+| Redeem-argv validator              | `plugin/scripts/argv-guard.mjs`                                              |
 | OTel env/settings builder          | `plugin/scripts/env-builder.mjs`                                             |
 | Bearer-refresh helper              | `plugin/scripts/otel-headers-helper.sh`                                      |
 | Emit-handoff redeem                | `server/api/v1/setup/redeem.post.ts`                                         |

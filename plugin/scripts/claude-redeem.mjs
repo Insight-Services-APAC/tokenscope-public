@@ -32,12 +32,22 @@
  *
  * Usage (prefer the --handoff-code form — a base64url code can begin with `-`,
  * which a bare positional arg would be mis-parsed as a flag):
- *   node claude-redeem.mjs --handoff-code <code> [--redeem-url <url>] \
+ *   node claude-redeem.mjs --handoff-code <code> \
  *       [--api-base <base>] [--instance-id <uuid>] [--settings-path <path>]
  *   node claude-redeem.mjs <code>            # positional also accepted
  *
- * The API base defaults to the plugin's baked deployment (api-base.mjs); override
- * with --api-base or TOKENSCOPE_API_BASE for local dev / another instance.
+ * EVERY flag is validated before it is used (argv-guard.mjs): the argv of this
+ * process is composed by a model under a prefix `allowed-tools` grant, so an
+ * unknown flag is refused outright, --settings-path is confined to the account's
+ * own home, and --api-base may only SELECT among the origins this device already
+ * knows (loopback, the packaged default, the discovered MCP registration).
+ * `--redeem-url` was deleted rather than validated: it named the POST target
+ * outright, bypassing api-base.mjs entirely, and nothing in the product ever
+ * passed it — the `redeem_command` the server builds (server/utils/mcp.ts) sends
+ * only --handoff-code and, when it can vouch for its own origin, --api-base.
+ *
+ * The API base defaults to the plugin's baked deployment (api-base.mjs); a
+ * loopback TOKENSCOPE_API_BASE overrides it for local dev.
  *
  * Restart `claude` after running — Claude reads its OTel config once at startup.
  */
@@ -53,44 +63,68 @@ import {
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { resolveApiBase } from './api-base.mjs'
+import { resolveApiBase, DEFAULT_API_BASE } from './api-base.mjs'
 import { discoverMcpOrigin } from './mcp-origin.mjs'
+import {
+  acceptApiBaseArg,
+  assertConfinedPath,
+  assertKnownFlag,
+  flagValue,
+} from './argv-guard.mjs'
 import { resolveHelperPath, httpsPostJson, stateDir, realHome } from './plugin-runtime.mjs'
 import { mergeClaudeSettings, applyOtlpProxyRepoint } from './env-builder.mjs'
 import { emitEnvLabel } from './statusline.mjs'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
+// STRICT: this process spends a live single-use handoff code, and its argv is
+// composed by a model under a prefix (`:*`) allowed-tools grant, so anything the
+// documented flow does not produce is refused rather than reinterpreted. See
+// argv-guard.mjs for the invariant and why the control has to live here.
+// Throws on a bad argv; main() runs inside the top-level catch that prints it.
 function parseArgs(argv) {
   const out = {
     handoffCode: null,
-    redeemUrl: null,
     apiBase: null,
     instanceId: null,
     settingsPath: null,
   }
   for (let i = 0; i < argv.length; i++) {
-    switch (argv[i]) {
+    const flag = argv[i]
+    switch (flag) {
       case '--handoff-code':
-        out.handoffCode = argv[++i]
-        break
-      case '--redeem-url':
-        out.redeemUrl = argv[++i]
+        out.handoffCode = flagValue(argv, ++i, flag, { allowLeadingDash: true })
         break
       case '--api-base':
-        out.apiBase = argv[++i]
+        // Value-checked in main(), where the origins this device knows (the
+        // packaged default + the discovered MCP registration) are in hand.
+        out.apiBase = flagValue(argv, ++i, flag)
         break
       case '--instance-id':
-        out.instanceId = argv[++i]
+        out.instanceId = flagValue(argv, ++i, flag)
         break
       case '--settings-path':
-        out.settingsPath = argv[++i]
+        // The durable OAuth emit credential is written to this path, so it is a
+        // trust sink, not merely a location — confine it to the account's own
+        // (passwd, HOME-leak-proof) home, the same anchor main() uses for the
+        // default. `settings.json` because that is the file Claude Code reads;
+        // this flag exists to point at one, never to name an arbitrary file.
+        out.settingsPath = assertConfinedPath(flagValue(argv, ++i, flag), {
+          flag,
+          allowedBasenames: ['settings.json'],
+        })
         break
       default:
+        // A stray empty token (Claude can pass an empty $ARGUMENTS) is not an
+        // argument at all.
+        if (!flag.trim()) break
+        assertKnownFlag(flag)
         // Accept a bare positional argument as the handoff code (documented
         // fallback). The canonical invocation uses --handoff-code, which is
-        // robust to a base64url code that begins with '-'.
-        if (!argv[i].startsWith('--') && !out.handoffCode) out.handoffCode = argv[i]
+        // robust to a base64url code that begins with '-'. A SECOND positional
+        // means the argv is not one this flow produces.
+        if (out.handoffCode) throw new Error('unexpected extra argument')
+        out.handoffCode = flag
     }
   }
   return out
@@ -386,35 +420,51 @@ async function main() {
 
   // Resolve the full redeem URL. A handoff can ONLY be redeemed at the server
   // that minted it, so the base must track wherever the MCP server is actually
-  // registered — not the baked default. `setup.md` forbids passing --api-base
-  // (the allowed-tools grant is one fixed command, so a prompt-injected model
-  // cannot nominate the host a live single-use secret is posted to), which
-  // means the origin has to be discovered from local configuration rather than
-  // relayed through the conversation. discoverMcpOrigin reads only files a
+  // registered — not the baked default. discoverMcpOrigin reads only files a
   // human wrote at registration time; it returns null on a stock install, where
   // the baked default is right by construction.
   //
-  // Nothing is passed to keep the environment out of this any more. setup.md
-  // forbids --api-base so the CONVERSATION cannot nominate the host, but the
-  // resolver used to rank TOKENSCOPE_API_BASE above discovery, and Claude Code
-  // merges a repository's .claude/settings.local.json env over the global one:
-  // a cloned repo could nominate the host the live handoff is posted to, which
-  // is the exact outcome the --api-base ban exists to prevent, reached through
-  // a different door. That was first patched here with `trustEnv: false`, and
-  // the flag is now gone — resolveApiBase only honours an OFF-BOX env value if
-  // there is no such thing, because it accepts the variable solely when it
-  // names loopback. A caller can no longer opt back into the hole, or forget to
-  // opt out of it.
-  const apiBase = resolveApiBase(args.apiBase, {
-    discovered: discoverMcpOrigin(fileURLToPath(new URL('.', import.meta.url)), {
-      client: 'claude',
-    }),
+  // WHAT DECIDES THE HOST, and what merely selects among them. `setup.md` asks
+  // the model to pass only --handoff-code, but that is prose, and the
+  // allowed-tools grant it appeals to ends in `:*` — a PREFIX grant under which
+  // every argv tail is pre-approved with no prompt. So a prompt-injected model
+  // CAN append flags here, and the control is that --api-base is checked
+  // against the origins this device already knows (the packaged default and the
+  // discovered registration, plus loopback) before it is used: it can select
+  // one of them, never introduce one. A value outside that set is warned about
+  // and dropped, and resolution continues from local configuration — see
+  // argv-guard.mjs for why dropping beats exiting.
+  //
+  // The ENVIRONMENT is kept out of the same decision for the same reason:
+  // Claude Code merges a repository's .claude/settings.local.json env over the
+  // global one, so a cloned repo could otherwise nominate the host the live
+  // handoff is posted to. resolveApiBase accepts TOKENSCOPE_API_BASE solely
+  // when it names loopback, which cannot express that threat, and there is no
+  // flag left for a caller to opt back into the hole with.
+  const discovered = discoverMcpOrigin(fileURLToPath(new URL('.', import.meta.url)), {
+    client: 'claude',
   })
-  const redeemPath = args.redeemUrl ?? '/api/v1/setup/redeem'
-  const redeemUrl = redeemPath.startsWith('http') ? redeemPath : `${apiBase}${redeemPath}`
+  const apiBase = resolveApiBase(
+    acceptApiBaseArg(args.apiBase, {
+      allowed: [DEFAULT_API_BASE, discovered],
+      warn: (m) => console.error(m),
+    }),
+    { discovered },
+  )
+  // The path is FIXED. It used to come from `--redeem-url`, which bypassed all
+  // of the above — an absolute value became the POST target verbatim — and which
+  // nothing in the product ever passed; that flag is gone, and argv-guard's
+  // unknown-flag refusal keeps it gone rather than letting it degrade to
+  // "silently ignored", where the VALUE could still land as a stray positional.
+  const redeemUrl = `${apiBase}/api/v1/setup/redeem`
+  // Not dead: resolveApiBase's guard exempts a LOOPBACK base from its https
+  // requirement (the documented dev exception) and therefore does not check the
+  // scheme there at all, so a discovered `ftp://127.0.0.1` registration would
+  // reach this line. httpsPostJson would refuse it too; failing here names the
+  // cause instead of a generic endpoint rejection.
   if (!redeemUrl.startsWith('http')) {
     console.error(
-      '[tokenscope] Cannot resolve redeem URL — the API base needs an http(s):// scheme (set --api-base or TOKENSCOPE_API_BASE).',
+      '[tokenscope] Cannot resolve redeem URL — the API base needs an http(s):// scheme (check the tokenscope MCP server registered in your client config, or pass --api-base).',
     )
     process.exit(1)
   }
@@ -460,6 +510,10 @@ async function main() {
   // alternative hands the credential to whoever moved HOME. Say so loudly,
   // because the failure is otherwise invisible, and name both paths so it is
   // fixable rather than merely reported.
+  //
+  // `--settings-path` is anchored on the SAME home (parseArgs → assertConfinedPath):
+  // an override that could name any path at all would have walked straight past
+  // this anchor, which is the point of anchoring it.
   const trustedHome = realHome()
   if (!args.settingsPath && trustedHome !== homedir()) {
     console.error(

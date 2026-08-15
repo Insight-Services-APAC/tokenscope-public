@@ -73,12 +73,12 @@ dropped in migration 0034).
 |---|---|---|---|
 | ANY | `/api/v1/mcp` | OAuth Bearer (`tokenscope.read`/`tag`) | The Streamable-HTTP MCP server. A request with no/invalid token → 401 + `WWW-Authenticate` pointing at the protected-resource metadata. Exposes tools (`list_my_projects`, `list_activity_types`, `my_usage`, `tag_session`, `resolve_repo_project`, `provision_emit`) and prompts (`tokenscope-setup`, `tag`, `project`, `usage`). |
 | GET | `/api/v1/oauth/authorize` | Entra cookie session | Gates the user's Entra session, validates `client_id`/`redirect_uri`, then 302s the browser to the consent page (`/oauth/authorize.vue`). |
-| POST | `/api/v1/oauth/authorize` | cookie + CSRF (same-origin) | The consent grant: on `Accept: application/json` returns `{ redirect_url }` (callback carrying code+state) as data; on a form post, 302s. Reuses `issueAuthCode` (teammate-bound, PKCE-carried). Handles deny. |
+| POST | `/api/v1/oauth/authorize` | cookie + CSRF (same-origin) | The consent grant: on `Accept: application/json` returns `{ redirect_url }` (callback carrying code+state) as data; on a form post, 302s. Reuses `issueAuthCode` (teammate-bound, PKCE-carried). Handles deny. A session that is an **assumed identity** (persona override) is refused with a JSON `403 access_denied` before the client/`redirect_uri` lookup — so the refusal can never become a redirect, and no impersonator can mint a durable credential in the impersonated teammate's name. |
 | POST | `/api/v1/oauth/token` | PKCE code / refresh token | Exchange an authorization code (+ verifier) or refresh token for an access token (RFC 6749 + 7636). Non-rotating refresh (ADR-0005). |
 | POST | `/api/v1/oauth/register` | none (RFC 7591) | Dynamic client registration; always writes a non-internal client. |
 | POST | `/api/v1/oauth/revoke` | client-creds + raw token (RFC 7009) | Client-side token revocation (the machine path; the user-facing revoke is `/me/grants/{id}/revoke`). |
 | POST | `/api/v1/setup/redeem` | handoff code = auth | Redeem the one-time, ~5-minute emit-provisioning handoff minted by `provision_emit` (atomic single-use, no cookie/CSRF) for the durable emit credential + the Claude OTel telemetry bundle. The durable secret is fetched here process→server, never over MCP. |
-| POST | `/api/v1/setup/enroll` | bundled enrollment secret = auth | The **no-login, emit-on-install** enroll path (a separate mechanism from the retired setup-token exchange — that retirement stands): a privately-distributed plugin bundles a rotatable enrollment secret and calls this on install (no OAuth, no human) to mint a durable emit-only credential + the OTel bundle, bound to a server-chosen instance and a **provisional** shadow teammate keyed on the claimed email. A bad/expired secret is the only 401 (no existence oracle); response shape is constant regardless of whether the email exists. Usage emits immediately as `identity_state=provisional` until the human signs in and confirms. |
+| POST | `/api/v1/setup/enroll` | bundled enrollment secret = auth | The **no-login, emit-on-install** enroll path (a separate mechanism from the retired setup-token exchange — that retirement stands): a privately-distributed plugin bundles a rotatable enrollment secret and calls this on install (no OAuth, no human) to mint a durable emit-only credential + the OTel bundle, bound to a server-chosen instance and a **provisional** shadow teammate keyed on the claimed email. A bad/expired secret is the only 401 (no existence oracle); response shape is constant regardless of whether the email exists. Usage emits immediately as `identity_state=provisional` until the human signs in and confirms. Two capacity caps guard the create branch — a global one and a per-claimed-email one (`MAX_PROVISIONAL_INSTANCES` / `MAX_PROVISIONAL_INSTANCES_PER_EMAIL`) — and either returns `429`. Both count only **live** provisional instances: a row that has ended or been purged is no longer a device and no longer consumes quota, so re-enrolling one laptop repeatedly cannot exhaust either cap. Idempotent reuse of an existing instance never consumes quota at all. |
 
 Discovery metadata is served at the origin root:
 `GET /.well-known/oauth-authorization-server` (RFC 8414) and
@@ -154,7 +154,11 @@ only list that did.
 
 CRUD for project budget pools. All gated `requireRole('manager','admin','global-finops')`,
 with project/region/org-subtree scoping; write methods add CSRF and emit audit
-events.
+events. The scope is the same on both sides of that split: an `admin` is bound to
+the project's region, a `manager` needs the project to be **in their own region
+AND** its cost-owning unit inside their org subtree, and `global-finops` is
+unbounded. A project that fails either half returns the same `403` — the refusal
+does not say which.
 
 | Method | Path | Auth gate | Purpose |
 |---|---|---|---|
@@ -188,9 +192,11 @@ as `/api/v1/reports/finance`.)
 ## Reports (the reporting shell)
 
 The consolidated `/reporting` shell reads from `server/api/v1/reports/**`. Every
-route is `requireAuth` (identity), then **scoped by report access grants** —
-each caller's granted scopes are their role-shaped baseline (§RBAC) UNION
-whichever permissions their ACTIVE `report_access_grant` rows buy (see
+route is `requireAuth` (identity), then **scoped by report access** — each
+caller's granted scopes are their role-shaped baseline (§RBAC; admin roles see
+their region or the whole company by role) UNION whichever positive permissions
+their ACTIVE `report_access_grant` rows buy, then zeroed entirely if an active
+`revoke-all` row is present (see
 [Report access grants](Authentication-and-Security.md#report-access-grants)).
 `GET /reports/meta` returns only the **granted** scopes and drives which tabs
 render, plus `permissions` (the caller's held permission names) when
@@ -260,8 +266,8 @@ and emit audit events.
 | GET | `/api/v1/admin/region/{regionId}` | `admin`/`global-finops` | Region-scoped admin landing payload. |
 | GET | `/api/v1/admin/regions` | `admin`/`global-finops` | Region list for admin pickers. |
 | GET | `/api/v1/admin/report-access` | `global-finops` | List report-access grants (active + expired-but-not-revoked, each carrying holder, permission, granted-by, and expiry). Org-wide only — no region-admin read, unlike the retired policy dial. |
-| POST | `/api/v1/admin/report-access` | `global-finops` + CSRF | Grant one permission (`operational`/`finance`) to one active, non-provisional teammate, with an optional future `expires_at`. `409` on a live duplicate for the same (teammate, permission); an expired-but-unrevoked blocker is superseded automatically first (its own audited revoke). |
-| DELETE | `/api/v1/admin/report-access/{id}` | `global-finops` + CSRF | Soft-revoke a grant (history preserved; a later re-grant is a new row). `404` if no active grant matches the id. |
+| POST | `/api/v1/admin/report-access` | `global-finops` + CSRF | Write one report-access row for one active, non-provisional teammate, with an optional future `expires_at`: a positive grant (`operational`/`finance`) that WIDENS, or `revoke-all` that REMOVES all report access (deny-wins over role default and any grant — the "administer, no data" case). `409` on a live duplicate for the same (teammate, permission); an expired-but-unrevoked blocker is superseded automatically first (its own audited revoke). |
+| DELETE | `/api/v1/admin/report-access/{id}` | `global-finops` + CSRF | Soft-revoke a report-access row (history preserved; a later re-grant is a new row). `404` if no active row matches the id. `403` if the row is a `revoke-all` targeting the **caller themselves** — lifting your own revoke needs a different admin. |
 | GET | `/api/v1/admin/report-access/teammate-search` | `global-finops` | Company-wide typeahead over active, non-provisional teammates (`?q=` min 2 chars, `?limit=` max 25) for the grant dialog — the region-scoped `/admin/users` list cannot serve an org-wide picker. |
 | GET | `/api/v1/admin/repos` | `admin`/`global-finops` | Region-scoped repo-to-project mappings. |
 | GET | `/api/v1/admin/settings` | `admin`/`global-finops` | Read-only config summary (intentionally narrow). |
@@ -286,7 +292,7 @@ and emit audit events.
 | POST | `/api/v1/admin/projects/{id}/migrate-preview` | `admin`/`global-finops` + CSRF | Read-only: what a Migrate would move. See **Migrate** below. |
 | GET | `/api/v1/admin/reporting-snapshots/{month}` | `admin`/`global-finops` | What the month read when it was recorded, plus what it reads now and the movement. `null` = never recorded. |
 | POST | `/api/v1/admin/reporting-snapshots/{month}/close` | `admin`/`global-finops` + CSRF | Record the month. Refused if it has already been recorded. |
-| GET | `/api/v1/admin/projects/{id}/assignments` | `manager`/`admin`/`global-finops` | List a project's teammate assignments (writes are the `assignments` POST/DELETE/PATCH rows above). |
+| GET | `/api/v1/admin/projects/{id}/assignments` | `manager`/`admin`/`global-finops` | List a project's teammate assignments (writes are the `assignments` POST/DELETE/PATCH rows above). All four share `assertProjectScope`: `admin` bound to the project's region, `manager` needs the project in their **own region and** its cost-owning unit in their org subtree, `global-finops` unbounded. |
 | GET | `/api/v1/admin/rate-cards` · POST · POST `/{id}/retire` | `admin`/`global-finops` (+ CSRF on writes) | Rate-card registry: list, create-card-with-lines (atomic; region admins bounded to own region, a global card is `global-finops`/`platform-admin`), and retire. No line-mutation endpoint by design — pricing changes mint a new card. (Distinct from the still-unbuilt bare `/api/v1/rate-cards`.) |
 | POST | `/api/v1/admin/regions` · DELETE/PATCH `/{id}` | `platform-admin` + CSRF | Region create / edit / delete — cross-region acts reserved for the super-admin. (The list `GET /api/v1/admin/regions` is above.) |
 | GET | `/api/v1/admin/regions/{id}/leaders` · POST · DELETE `/{leaderId}` | `admin`/`global-finops` (+ CSRF on writes) | Region leaders: list, add, remove. |
@@ -297,6 +303,8 @@ and emit audit events.
 | GET | `/api/v1/admin/diagnostics/otel-logs` | `platform-admin` | Recent OTel log-ingest diagnostic (super-admin only). |
 | GET | `/api/v1/admin/worker-runs` · `/{id}` | `admin`/`global-finops` | Background-worker run history (list + one run's detail); admin-global, no region clamp. |
 | POST | `/api/v1/admin/workers/{name}/run` | `global-finops` + CSRF | Trigger a named worker from the admin UI (RBAC/cookie path). **Distinct from** the HMAC machine-to-machine `POST /api/v1/internal/run-worker/{name}` below — same worker registry, different auth (cookie+RBAC here vs. HMAC there). |
+| GET | `/api/v1/admin/workers/enablement` | `admin`/`global-finops` | The kill-switch state of the whole registry — every worker, its description, its live cron (null when it has no scheduled job), and whether it is enabled. An absent row means enabled, so the read returns the full fleet rather than a list of exceptions. |
+| PUT | `/api/v1/admin/workers/enablement` | `global-finops` + CSRF | Turn one scheduled worker on or off; takes effect on that worker's next tick. A disable requires a `reason`. `400` for an unknown worker name or one with no scheduled job. Attributed (`updated_by`/`at`) and audited as `worker-enabled` / `worker-disabled`. **Write is global-only, unlike the read**: `worker_enablement` has no region column and every worker it governs runs globally, so a toggle reaches past a region admin's scope — the admin card renders for a region `admin` but offers no toggle. |
 
 ## Internal (machine-to-machine)
 

@@ -24,7 +24,8 @@ import putHandler from '../../../server/api/v1/admin/workers/enablement.put'
 let t: TestDb
 let regionId = ''
 let unitId = ''
-const FINOPS_ID = '00000000-0000-0000-0000-0000000000f1'
+const FINOPS_ID = '9a1e0000-0000-4000-8000-0000000000f1'
+const REGION_ADMIN_ID = '9a1e0000-0000-4000-8000-0000000000a1'
 
 // One worker that genuinely has no cron job, taken from the shared source of
 // truth rather than hardcoded, so this test follows the list if it changes.
@@ -67,6 +68,9 @@ function ev(opts: { session: Session; body?: unknown; method?: string }) {
 const finops = (): Session =>
   ({ teammateId: FINOPS_ID, email: 'fx@x.test', displayName: 'Fx', role: 'global-finops', regionId, orgPath: 'de' } as Session)
 
+const regionAdmin = (): Session =>
+  ({ teammateId: REGION_ADMIN_ID, email: 'ra@x.test', displayName: 'Ra', role: 'admin', regionId, orgPath: 'de' } as Session)
+
 beforeAll(async () => {
   t = await startTestDb()
   process.env.DATABASE_URL = t.url
@@ -75,6 +79,7 @@ beforeAll(async () => {
   const [u] = await t.client<{ id: string }[]>`INSERT INTO org_unit (region_id, parent_id, path, code, display_name, unit_type) VALUES (${regionId}::uuid, NULL, 'de'::ltree, 'default', 'DE', 'bu') RETURNING id::text AS id`
   unitId = u!.id
   await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role) VALUES (${FINOPS_ID}::uuid, 'oid-fx', 'fx@x.test', 'Fx', ${regionId}::uuid, ${unitId}::uuid, 'global-finops')`
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role) VALUES (${REGION_ADMIN_ID}::uuid, 'oid-ra', 'ra@x.test', 'Ra', ${regionId}::uuid, ${unitId}::uuid, 'admin')`
 }, 180_000)
 
 afterAll(async () => {
@@ -142,5 +147,34 @@ describe('admin worker-enablement PUT', () => {
     await expect(
       putHandler(ev({ session: finops(), method: 'PUT', body: { workerName: 'budget-alert', enabled: false } })),
     ).rejects.toMatchObject({ statusCode: 400 })
+  })
+})
+
+/*
+ * The two doors to one estate-wide switch must not sit at different tiers.
+ * `worker_enablement` has no region column (mig 0090) and every worker it governs
+ * runs globally, so a region admin toggling one acts outside their region — which
+ * is the reason the RUN twin already excludes them ([name]/run.post.ts:29-33).
+ * Until this, PUT admitted `admin` while RUN did not, for the same worker.
+ */
+describe('admin worker-enablement PUT — tier', () => {
+  it('REFUSES a region admin, who cannot scope an estate-wide switch to their region', async () => {
+    await expect(
+      putHandler(ev({ session: regionAdmin(), method: 'PUT', body: { workerName: 'budget-alert', enabled: false, reason: 'not mine to throw' } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    // Refused means UNWRITTEN, not merely un-acknowledged.
+    const rows = await t.client`SELECT 1 FROM worker_enablement WHERE worker_name = 'budget-alert'`
+    expect(rows.length, 'a refused toggle must leave no row behind').toBe(0)
+  })
+
+  it('still admits global-finops', async () => {
+    await putHandler(ev({ session: finops(), method: 'PUT', body: { workerName: 'budget-alert', enabled: false, reason: 'mine to throw' } }))
+    const rows = await t.client<{ enabled: boolean }[]>`SELECT enabled FROM worker_enablement WHERE worker_name = 'budget-alert'`
+    expect(rows[0]!.enabled).toBe(false)
+  })
+
+  it('still lets a region admin READ the card — seeing a thrown kill-switch is not a boundary crossing', async () => {
+    const got = (await getHandler(ev({ session: regionAdmin(), method: 'GET' }))) as { workers: WorkerRow[] }
+    expect(got.workers.length, 'a region admin must still be able to explain a gap in their own attribution').toBeGreaterThan(0)
   })
 })

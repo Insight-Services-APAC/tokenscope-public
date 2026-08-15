@@ -328,16 +328,20 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
       const def = REPORT_VISIBILITY_PERSONAS.find((x) => x.key === p.key)!
       expect(p.scopes).toEqual(grantsToScopes(baselineGrants(def.role, def.ownsCostCentre)))
     }
-    // BASELINE — no grant needed to see this: a cost-centre owner sees only
-    // what they own, and an org-wide role (mig 0129: no elevation by role
-    // alone) sees no wider a Region width than its own.
+    // BASELINE — no grant needed. A cost-centre owner sees only what they own;
+    // the two ORG-WIDE roles (global-finops / platform-admin) see the WHOLE
+    // COMPANY by role (PO decision 2026-08-13, reversing #251 for these roles —
+    // their `own-region` floor was degenerate and stranded admins on an empty
+    // report shell).
     expect(res.visibility.personas.find((p) => p.key === 'cost-centre-owner')!.scopes).not.toContain(
       'Cost centres (all)',
     )
-    expect(res.visibility.personas.find((p) => p.key === 'global-finops')!.scopes).not.toContain(
-      'Region (all regions)',
-    )
-    // No grants seeded on this fixture yet.
+    const gfoScopes = res.visibility.personas.find((p) => p.key === 'global-finops')!.scopes
+    expect(gfoScopes).toContain('Region (all regions + every region)')
+    expect(gfoScopes).toContain('Cost centres (all)')
+    expect(gfoScopes).toContain('Finance (whole company)')
+    // …and this is BASELINE, with NO active grant seeded on the fixture: the
+    // access above is by ROLE, which is exactly what `elevated: 0/0/0` proves.
     expect(res.visibility.elevated).toEqual({ teammates: 0, operational: 0, finance: 0 })
   })
 

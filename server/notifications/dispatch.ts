@@ -29,6 +29,7 @@ export type InboxCategory =
   | 'structural-conflict' // TODO(convergence-followup): no producer wired; schema lacks structural-divergence detection
   | 'connector-health' // PRODUCED by the connector-health worker (owed-bill aging: pending_placement rows un-placed past the grace window); admin-routed
   | 'read-path-stale' // the OTel read path (azure-monitor-read gatherer) has silently stalled/failed while clients still emit (read-path-health worker); admin-routed
+  | 'joiner-selection-cap' // the scheduled azure-monitor-read selection matched more joinable devices than its per-run cap, so the surplus went unscanned (azure-monitor-reader's recordJoinerSelectionCap); admin-routed. The EARLY warning: read-path-stale needs the whole reader to stall and attribution-gap needs a device to fall 72h behind, so neither sees a fleet that has simply outgrown the cap
   | 'attribution-gap' // ONE instance is minting ingest credentials (so it is emitting) while its attribution has fallen days behind (attribution-gap worker); admin-routed. read-path-stale gates on FLEET-wide signals and cannot see a single starved instance — the 2026-07-24 dead-zone outage was invisible to every other alarm
   | 'copilot-bill-unsettled' // a Copilot org-month has usage but no read license SKU line (copilot-pool-bill worker) — the month reports unsettled; admin-routed (finance concern)
   | 'copilot-bill-unclassified' // a Copilot org-month booked unclassified SKU spend, or the C1 conservation assertion tripped (copilot-pool-bill worker, mig 0085) — classify the SKU + re-run the month; admin-routed (finance concern)
@@ -152,6 +153,7 @@ function defaultSeverity(category: InboxCategory): 'info' | 'attention' | 'urgen
       return 'urgent'
     case 'copilot-bill-unsettled':
     case 'copilot-bill-unclassified':
+    case 'joiner-selection-cap': // a CAPACITY warning, not an outage — the joiner sheds least-recently-active first, so a cap hit does not prove any live device stopped attributing, and the one that does still pages urgently as 'attribution-gap'. Pitching it at 'urgent' would page on an often-benign condition (the false-positive machine the old went-silent heuristic was)
       return 'attention'
     case 'velocity-warning':
     case 'untagged-backlog':
@@ -197,10 +199,12 @@ async function resolveRecipients(
         routingScope: region ? `region:${region}` : 'fail-open',
       }
     }
-    case 'read-path-stale': {
+    case 'read-path-stale':
+    case 'joiner-selection-cap': {
       // The azure-monitor-read gatherer is a GLOBAL, region-agnostic ingestion
       // path — a stall/outage starves EVERY region's attribution, not one
-      // region's. So this alert always routes to the cross-region ops roles
+      // region's, and a per-run scan cap is a property of the deployment, not of
+      // any region. So these alerts always route to the cross-region ops roles
       // (platform-admin / global-finops) only, never a single region's admins.
       // No region is derived (there is none to derive).
       return {

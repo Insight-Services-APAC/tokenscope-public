@@ -183,7 +183,7 @@ carries a durable role.
 | `role` | TEXT NOT NULL = `developer` | durable role anchor (mig 0005); JIT bootstrap writes the resolved role here, and stop-impersonating restores from it rather than a hardcoded default |
 | `competency_tier` | TEXT | nullable until assessed |
 | `provisional` | BOOL NOT NULL = false | emit-on-install shadow teammate (mig 0057): minted by the enroll path before the human authenticates, in the reserved `entra_oid = 'provisional:'\|\|uuid` namespace. A confirm-on-auth merge re-points its instances to the real teammate and flips this false. Display-only; never moves money |
-| `is_active` | BOOL NOT NULL = true | |
+| `is_active` | BOOL NOT NULL = true | the durable retirement axis, and the one the privileged-identity-cleanup worker writes (it never touches `revoked_at`). `false` denies **every** credential for the teammate — cookie session, OAuth bearer, refresh grant, authorization-code exchange and token issuance alike — with no timestamp comparison, unlike `revoked_at` below. Also the eligibility flag for assignability |
 | `joined_at` | TIMESTAMPTZ NOT NULL = now() | |
 | `ended_at` | TIMESTAMPTZ | soft-delete; attribution history is preserved |
 | `metadata` | JSONB | |
@@ -1304,11 +1304,25 @@ admin (via `inbox_item`).
 
 ### report_access_grant
 
-A per-teammate, revocable, optionally-expiring reporting permission (mig 0129),
-replacing the single-row `report_visibility_setting` dial. A row means "this
-teammate holds this permission" — `operational` (whole-company reporting) or
-`finance` (the whole-company finance pack) — independent of the other and of
-the holder's platform role. Soft-revoked (`revoked_at`/`revoked_by`, the
+A per-teammate, revocable, optionally-expiring reporting-access row (migs 0129,
+0130). The admin roles already see reports by ROLE — a region admin sees their
+own region, `global-finops` / `platform-admin` see the whole company — so a row
+here is an OVERRIDE of that default, not the only source of access:
+
+- `operational` (whole-company reporting) or `finance` (the whole-company finance
+  pack) WIDENS any teammate whose baseline lacks that scope — a region admin
+  included (an `operational` row takes one cross-region; a `finance` row reaches
+  them into the finance pack). Each is independent of the other and of the
+  holder's platform role; on an org-wide role, whose baseline already holds both,
+  a positive row is a no-op.
+- `revoke-all` (mig 0130) REMOVES all report access for the teammate — below their
+  role default and below any positive grant (**deny-wins**). The "administer, no
+  data access" separation of duties. A teammate may hold at most one active
+  `revoke-all` row; lifting it requires a **different** admin (a revoked admin
+  keeps their role, so they cannot clear their own revoke — enforced by
+  `report-access/[id].delete.ts`).
+
+Soft-revoked (`revoked_at`/`revoked_by`, the
 `cou_owner` shape, mig 0048): a revocation must carry its actor, an active row
 must not. A partial unique index on `(teammate_id, permission) WHERE
 revoked_at IS NULL` allows at most one **active** row per (teammate,
@@ -1327,7 +1341,7 @@ backfill preserves every teammate's pre-migration access exactly, from
 |---|---|---|
 | `id` | UUID PK | |
 | `teammate_id` | UUID NOT NULL → teammate | |
-| `permission` | TEXT NOT NULL | `permission IN ('operational','finance')` CHECK in mig 0129, pinned to `REPORT_ACCESS_PERMISSIONS` |
+| `permission` | TEXT NOT NULL | `permission IN ('operational','finance','revoke-all')` CHECK (mig 0129 for the two positive grants, widened by mig 0130 for the `revoke-all` deny), pinned to `REPORT_ACCESS_GRANT_VALUES` |
 | `granted_by` | UUID → teammate | NULL = system (migration backfill) |
 | `granted_at` | TIMESTAMPTZ NOT NULL = now() | |
 | `expires_at` | TIMESTAMPTZ | optional; NULL = open-ended |

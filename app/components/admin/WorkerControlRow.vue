@@ -25,7 +25,21 @@ export interface WorkerControlRowData {
   reason: string | null
 }
 
-defineProps<{ worker: WorkerControlRowData; busy?: boolean }>()
+withDefaults(
+  defineProps<{
+    worker: WorkerControlRowData
+    busy?: boolean
+    /**
+     * Whether THIS viewer may toggle. The write endpoint is global-finops only
+     * (enablement.put.ts) while the read side stays open to `admin`, so a region
+     * admin can legitimately see this card and must not be offered a button that
+     * would 403 — same rule as the unscheduled case below. Defaults true so the
+     * component keeps its old behaviour for any caller that does not care.
+     */
+    canToggle?: boolean
+  }>(),
+  { busy: false, canToggle: true },
+)
 defineEmits<{ toggle: [] }>()
 </script>
 
@@ -65,9 +79,11 @@ defineEmits<{ toggle: [] }>()
       </p>
     </div>
     <!-- No toggle when unscheduled: enabling or disabling has no observable
-         effect, so offering the button implies control that does not exist. -->
+         effect, so offering the button implies control that does not exist.
+         Same for a viewer who may not toggle — the API would 403, and a button
+         that always fails is a claim of control, not a control. -->
     <UiButton
-      v-if="worker.scheduled"
+      v-if="worker.scheduled && canToggle"
       :kind="worker.enabled ? 'secondary' : 'primary'"
       size="sm"
       :disabled="busy"

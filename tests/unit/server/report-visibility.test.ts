@@ -9,15 +9,19 @@
  * (developer/manager/admin/cost-centre-owner) are BYTE-IDENTICAL to the retired
  * standard grants (no-change-for-non-elevated-roles proof); proves totality and
  * monotonicity over the full (role × ownership × permission-subset) space; the
- * zombie `finance` role, the unknown-role fail-closed default; and the
- * migration-0129 CHECK literals against REPORT_ACCESS_PERMISSIONS (0084-style).
+ * zombie `finance` role, the unknown-role fail-closed default; the mig-0130
+ * 'revoke-all' DENY (deny-wins over role default AND positive grant); and the
+ * CHECK literals of BOTH migrations — 0129 against REPORT_ACCESS_PERMISSIONS and
+ * 0130's replacement against REPORT_ACCESS_GRANT_VALUES (0084-style).
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  REPORT_ACCESS_GRANT_VALUES,
   REPORT_ACCESS_PERMISSIONS,
+  REPORT_ACCESS_REVOKE,
   REPORT_VISIBILITY_PERSONAS,
   WHO_SEES_WHAT_BASELINE,
   WHO_SEES_WHAT_ELEVATED,
@@ -27,6 +31,7 @@ import {
   type ReportAccessPermission,
   type ReportScopeGrants,
 } from '../../../shared/auth/report-visibility'
+import { ReportAccessGrantBody } from '../../../shared/schemas/report-access'
 import { ROLES, type Role } from '../../../shared/auth/roles'
 
 describe('baselineGrants — pinned to WHO_SEES_WHAT_BASELINE (6 personas)', () => {
@@ -61,8 +66,13 @@ describe('baselineGrants — byte-identical to the retired standard grants for n
     } satisfies ReportScopeGrants)
   })
 
-  it('admin: identical shape to manager', () => {
+  it('admin (region admin): region-bound, identical to manager — NOT cross-region', () => {
+    // A region admin sees all reports FOR THEIR REGION, never other regions. The
+    // full-company default is only for the org-wide roles (global-finops /
+    // platform-admin); widening a region admin cross-region would drop the
+    // anti-IDOR region clamp.
     expect(baselineGrants('admin', false)).toEqual(baselineGrants('manager', false))
+    expect(baselineGrants('admin', false)).not.toEqual(baselineGrants('platform-admin', false))
   })
 
   it('cost-centre-owner (developer + active ownership): same elevation as manager/admin', () => {
@@ -76,30 +86,34 @@ describe('baselineGrants — byte-identical to the retired standard grants for n
     } satisfies ReportScopeGrants)
   })
 
-  it('global-finops / platform-admin WITHOUT ownership: region-bound, not cross-region — the behaviour change from the retired role-based grant', () => {
-    // Under the retired policy these two roles were UNCONDITIONALLY cross-region
-    // (across:true, regional:'all-regions', finance:true) even under 'standard'.
-    // The grants model requires an explicit 'operational' grant for that now.
-    expect(baselineGrants('global-finops', false)).toEqual({
-      across: false,
-      regional: 'own-region',
-      costCentre: false,
-      finance: false,
-      teammate: false,
-      project: 'membership',
-    } satisfies ReportScopeGrants)
-    expect(baselineGrants('platform-admin', false)).toEqual(baselineGrants('global-finops', false))
+  it('global-finops / platform-admin: full company access AT BASELINE, no grant required (PO decision 2026-08-13)', () => {
+    // These org-wide roles answer for no single region, so their report access
+    // comes from the ROLE, not a per-person grant. This reverses #251 for these
+    // two roles specifically: an `own-region` floor was degenerate (no home
+    // region to clamp to) and left a platform-admin with an empty report shell
+    // whenever the backfilled grant landed on another teammate row. `costCentre:
+    // 'all'` is the explicit unbounded path (costCentreScopeOpts.unbounded),
+    // NEVER the org-subtree predicate — so the BU-leak hazard #251 named is
+    // designed out, not re-opened.
+    const full = {
+      across: true,
+      regional: 'all-regions',
+      costCentre: 'all',
+      finance: true,
+      teammate: 'people-scope',
+      project: 'region-wide',
+    } satisfies ReportScopeGrants
+    expect(baselineGrants('global-finops', false)).toEqual(full)
+    expect(baselineGrants('platform-admin', false)).toEqual(full)
   })
 
-  it('global-finops / platform-admin WITH ownership: cost-centre visible via ownership only, still not cross-region', () => {
-    expect(baselineGrants('global-finops', true)).toEqual({
-      across: false,
-      regional: 'own-region',
-      costCentre: 'owned-or-subtree',
-      finance: false,
-      teammate: 'people-scope',
-      project: 'member-in-scope',
-    } satisfies ReportScopeGrants)
+  it('global-finops / platform-admin: ownership does not change the full-access floor (it is already maximal)', () => {
+    // ownsCostCentre is irrelevant for these roles now — the floor is already
+    // costCentre:'all'. This pins that the branch ignores ownership rather than
+    // narrowing on it (a regression that re-narrowed to 'owned-or-subtree' would
+    // silently re-introduce the ownerOnly/subtree-predicate path).
+    expect(baselineGrants('global-finops', true)).toEqual(baselineGrants('global-finops', false))
+    expect(baselineGrants('platform-admin', true)).toEqual(baselineGrants('platform-admin', false))
   })
 })
 
@@ -142,6 +156,44 @@ describe('effectiveReportGrants — single-permission overlays for developer (no
   it('no permissions ⇒ exactly the baseline', () => {
     expect(effectiveReportGrants({ role: 'developer', ownsCostCentre: false, permissions: [] })).toEqual(
       baselineGrants('developer', false),
+    )
+  })
+})
+
+describe('effectiveReportGrants — the REVOKE deny (mig 0130): deny-wins over role and grant', () => {
+  const EMPTY = {
+    across: false,
+    regional: false,
+    costCentre: false,
+    finance: false,
+    teammate: false,
+    project: 'membership', // the me/* floor everyone keeps; a revoke removes REPORT depth, not membership
+  } satisfies ReportScopeGrants
+
+  it('revokes an org-wide admin below their full-access role default', () => {
+    expect(
+      effectiveReportGrants({ role: 'platform-admin', ownsCostCentre: false, permissions: [], revoked: true }),
+    ).toEqual(EMPTY)
+    expect(
+      effectiveReportGrants({ role: 'admin', ownsCostCentre: false, permissions: [], revoked: true }),
+    ).toEqual(EMPTY)
+  })
+
+  it('deny WINS over a positive grant (revoke + operational ⇒ nothing)', () => {
+    expect(
+      effectiveReportGrants({
+        role: 'platform-admin',
+        ownsCostCentre: true,
+        permissions: ['operational', 'finance'],
+        revoked: true,
+      }),
+    ).toEqual(EMPTY)
+  })
+
+  it('revoked:false / omitted ⇒ unchanged (the flag is opt-in, never a narrowing by default)', () => {
+    const base = effectiveReportGrants({ role: 'admin', ownsCostCentre: false, permissions: [] })
+    expect(effectiveReportGrants({ role: 'admin', ownsCostCentre: false, permissions: [], revoked: false })).toEqual(
+      base,
     )
   })
 })
@@ -235,6 +287,46 @@ describe('fail-closed on an unrecognised role', () => {
   })
 })
 
+/*
+ * The POST body schema is built from the SAME constant the enforcement layer
+ * reads, and it must agree with it at BOTH levels. `z.enum` was previously fed
+ * `REPORT_ACCESS_GRANT_VALUES as unknown as [string, ...string[]]`, which kept
+ * runtime validation correct while widening the inferred type to plain `string`
+ * — so a typo'd literal at a call site compiled. The cast is gone; these pin
+ * both halves, and the `satisfies` line below is the compile-time half (it stops
+ * type-checking the moment the union widens back to `string`).
+ */
+describe('ReportAccessGrantBody.permission — runtime and TYPE agree on the 3 literals', () => {
+  it('accepts every REPORT_ACCESS_GRANT_VALUES literal, including the deny', () => {
+    for (const v of REPORT_ACCESS_GRANT_VALUES) {
+      const parsed = ReportAccessGrantBody.parse({
+        teammate_id: '9a1e0000-0000-4000-8000-000000000001',
+        permission: v,
+      })
+      expect(parsed.permission).toBe(v)
+    }
+  })
+
+  it('rejects a value outside the three literals, naming the field', () => {
+    const r = ReportAccessGrantBody.safeParse({
+      teammate_id: '9a1e0000-0000-4000-8000-000000000001',
+      permission: 'revoke-finance',
+    })
+    expect(r.success).toBe(false)
+    expect(r.error!.issues.some((i) => i.path.join('.') === 'permission')).toBe(true)
+  })
+
+  it('the INFERRED type is the 3-literal union, not `string`', () => {
+    // Compile-time pin. `satisfies` here is exact-assignable-both-ways in
+    // practice: if the inferred type widened to `string`, the second line stops
+    // compiling (string is not assignable to the union), and if a literal were
+    // dropped from the constant the first stops compiling.
+    const fromType: ReportAccessGrantBody['permission'] = 'revoke-all'
+    const backToUnion: (typeof REPORT_ACCESS_GRANT_VALUES)[number] = fromType
+    expect(backToUnion).toBe(REPORT_ACCESS_REVOKE)
+  })
+})
+
 describe('isReportAccessPermission', () => {
   it('accepts exactly the two known literals', () => {
     for (const p of REPORT_ACCESS_PERMISSIONS) expect(isReportAccessPermission(p)).toBe(true)
@@ -255,6 +347,36 @@ describe('migration 0129 CHECK literals pinned to REPORT_ACCESS_PERMISSIONS (008
     const literals = m![1]!.split(',').map((s) => s.trim().replace(/^'|'$/g, ''))
     expect(literals).toEqual([...REPORT_ACCESS_PERMISSIONS])
     for (const lit of literals) expect(isReportAccessPermission(lit)).toBe(true)
+  })
+
+  /*
+   * 0129's CHECK is no longer the live one — mig 0130 DROPs it and ADDs a
+   * three-literal replacement. The pin has to follow the constraint that is
+   * actually in force, or a fourth value added to REPORT_ACCESS_GRANT_VALUES
+   * ships an app that writes a value the DB rejects with a 23514 at runtime.
+   * Read 0130 and compare the REPLACEMENT literals to the module constant.
+   */
+  it('mig 0130 REPLACES that CHECK with exactly REPORT_ACCESS_GRANT_VALUES (all three literals)', () => {
+    const m0130 = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '../../../drizzle/migrations/0130_report_access_revoke.sql'),
+      'utf8',
+    )
+    // The old constraint must be dropped, or the ADD below cannot widen anything.
+    expect(m0130).toMatch(/DROP CONSTRAINT report_access_grant_permission_check/i)
+
+    const m = m0130.match(
+      /ADD CONSTRAINT report_access_grant_permission_check\s+CHECK \(permission IN \(([^)]*)\)\)/i,
+    )
+    expect(m, 'replacement permission CHECK not found in 0130').toBeTruthy()
+    const literals = m![1]!.split(',').map((s) => s.trim().replace(/^'|'$/g, ''))
+    // Exact, ORDER-SENSITIVE equality with the module constant: a value the app
+    // can mint but the CHECK rejects (or vice-versa) fails here, not in prod.
+    expect(literals).toEqual([...REPORT_ACCESS_GRANT_VALUES])
+    expect(literals).toContain(REPORT_ACCESS_REVOKE)
+    // …and the deny is NOT one of the positive permissions — the two sets are
+    // disjoint, which is what lets resolveReportPermissions filter it out.
+    expect(isReportAccessPermission(REPORT_ACCESS_REVOKE)).toBe(false)
+    expect(REPORT_ACCESS_GRANT_VALUES).toEqual([...REPORT_ACCESS_PERMISSIONS, REPORT_ACCESS_REVOKE])
   })
 
   it('the revoke-shape CHECK requires the actor in the revoked arm (an actorless revocation is unrepresentable)', () => {

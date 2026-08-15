@@ -330,9 +330,16 @@ describe('emitEnvLabel (derived from the live emit endpoint, not hardcoded)', ()
   })
 
   it('falls back to the bearer endpoint origin when no OTLP endpoint is set', () => {
-    expect(emitEnvLabel({ TOKENSCOPE_BEARER_ENDPOINT: 'https://tokenscope.example.com/api/v1/instances/x/bearer' })).toBe(
-      'Dev',
-    )
+    // `.example.com` on purpose — see the twin in copilot-redeem.test.ts: the
+    // public-mirror substitution rewrites the real internal host to
+    // `tokenscope.example.com`, dropping the `-dev` token this classifies on,
+    // while the expected `'Dev'` stays put. Any host works here; the env token is
+    // the only part under test.
+    expect(
+      emitEnvLabel({
+        TOKENSCOPE_BEARER_ENDPOINT: 'https://tokenscope-dev.example.com/api/v1/instances/x/bearer',
+      }),
+    ).toBe('Dev')
   })
 
   it('labels a localhost stub endpoint as Local', () => {

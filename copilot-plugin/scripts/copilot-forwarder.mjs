@@ -10,8 +10,9 @@
  *   - the span file (COPILOT_OTEL_FILE_EXPORTER_PATH, relative → resolves to cwd),
  *   - the persisted byte-offset (`.tokenscope.local/forwarder-offset`),
  *   - the singleton PID/heartbeat lock (`.tokenscope.local/copilot-forwarder.pid`).
- * Only the DEVICE CREDENTIAL (instance_id + endpoints + oauth) stays in HOME
- * (`~/.tokenscope/config.json`) — one enrolment per host, shared by every project.
+ * Only the DEVICE CREDENTIAL (instance_id + endpoints + oauth) stays in the account's
+ * home (`~/.tokenscope/config.json`, resolved by TOKENSCOPE_DIR below — the PASSWD
+ * home, not `$HOME`) — one enrolment per host, shared by every project.
  *
  * Because the forwarder is now scoped to ONE project root, there is exactly ONE repo
  * in play. The old cross-repo-bleed guard (boundRepo / lastBatchRepos / F3-deferral)
@@ -66,14 +67,54 @@ import {
 import { resolveRepoProjectCode, computeCodeHash } from './tokenscope-project.mjs'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 import { detectManagedTelemetry } from './managed-telemetry.mjs'
+import { realHome } from './real-home.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 // ── config ────────────────────────────────────────────────────────────────────
-// HOME holds ONLY the device credential (instance/endpoints/oauth). Everything else
-// — span file, offset, lock — is PER-PROJECT (see projectLocalDir()).
-const TOKENSCOPE_DIR = join(homedir(), '.tokenscope')
+// The account's home holds ONLY the device credential (instance/endpoints/oauth).
+// Everything else — span file, offset, lock — is PER-PROJECT (see projectLocalDir()).
+/**
+ * The durable Copilot credential store, resolved the SAME way every other reader and
+ * writer of it resolves it: an explicit `TOKENSCOPE_STATE_DIR` pin first, otherwise
+ * the PASSWD home — never `$HOME`.
+ *
+ * A TRUST SINK, not merely a location. `config.json` under this dir holds
+ * `oauth_refresh_token`, and `mintBearer` below hands what it finds there to
+ * `otel-headers-helper.sh` as BOTH the credential and the endpoint to spend it at.
+ * `os.homedir()` consults `HOME` first, so a leaked or model-set `HOME` would choose
+ * that file; `realHome()` reads the passwd entry, which an env var cannot move.
+ *
+ * It is equally an AVAILABILITY invariant. `copilot-redeem.mjs` WRITES this store and
+ * anchors it on `realHome()`; `device-id.mjs` reads it on the same anchor. A reader on
+ * a different anchor means redeem writes one file and the forwarder opens another —
+ * and on a host with a leaked `HOME` (the incident recorded in `real-home.mjs`) that
+ * is silent zero telemetry, not a visible error.
+ *
+ * The `TOKENSCOPE_STATE_DIR` pin comes first, matching the house form
+ * (`plugin-runtime.mjs`'s `stateDir()`, `status.mjs`, `landed-check.mjs`,
+ * `enroll.mjs`) — and matching `otel-headers-helper.sh`, which reads the same variable,
+ * so a forwarder that ignored it would pin the helper to a directory it does not itself
+ * read. Reading it here grants NO authority this lane had not already granted: the
+ * helper this file SPAWNS, and the status probe beside it, both consult that variable
+ * already, so anything able to set it for this process could already choose the store a
+ * bearer is minted from. `HOME` is the different case, and the reason for the anchor
+ * below — it is set ambiently and by accident (the leak incident), and on the Claude
+ * lane a repository can name it, which is why `session-start.mjs` drops a repo-claimed
+ * `HOME`/`TOKENSCOPE_STATE_DIR` before any of this runs.
+ *
+ * There is NO read-time fallback to a `$HOME`-derived path. A fallback would let a
+ * moved `HOME` plant a store the moment the trusted one is absent — the bypass this
+ * anchor exists to remove. `main()` names both paths out loud instead.
+ */
+const TOKENSCOPE_DIR =
+  (process.env.TOKENSCOPE_STATE_DIR ?? '').trim() || join(realHome(), '.tokenscope')
 const CONFIG_PATH = join(TOKENSCOPE_DIR, 'config.json')
+// Exported so a test can assert the ANCHOR — that a moved `$HOME` does not move the
+// store, and that a `TOKENSCOPE_STATE_DIR` pin is honoured — without letting the
+// no-override path read or write the developer's own ~/.tokenscope. Same reason
+// copilot-redeem.mjs exports its TOKENSCOPE_DIR.
+export { TOKENSCOPE_DIR, CONFIG_PATH }
 /** The per-PROJECT telemetry/state dir name, resolved against the daemon's cwd. */
 const PROJECT_LOCAL_DIRNAME = '.tokenscope.local'
 
@@ -148,9 +189,13 @@ function mintBearer(force = false) {
     TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: cfg.oauth_token_endpoint,
     TOKENSCOPE_OAUTH_CLIENT_ID: cfg.oauth_client_id,
     TOKENSCOPE_OAUTH_REFRESH_TOKEN: cfg.oauth_refresh_token,
-    TOKENSCOPE_STATE_DIR: TOKENSCOPE_DIR,
   }
-  const out = execFileSync('sh', [helperPath], {
+  // The state dir travels as an ARGUMENT. The helper stopped reading
+  // TOKENSCOPE_STATE_DIR because Claude Code invokes it directly with a
+  // repo-merged environment (otel-headers-helper.sh's header, and the capture it
+  // cites), so the variable is no longer a channel this process can use to place
+  // the token cache. `/bin/sh` absolute for the same reason PATH is untrusted.
+  const out = execFileSync('/bin/sh', [helperPath, '--state-dir', TOKENSCOPE_DIR], {
     encoding: 'utf8',
     env,
     stdio: ['ignore', 'pipe', 'inherit'],
@@ -884,6 +929,19 @@ async function main() {
     console.error(
       `[tokenscope-fwd] not provisioned (${CONFIG_PATH} absent) — run the tokenscope-setup skill to enable forwarding; skipping.`,
     )
+    // There is deliberately NO read-time fallback to the default store (see
+    // TOKENSCOPE_DIR), so a pinned dir that holds nothing means "not provisioned"
+    // full stop. But a pin is also the ONE way this reader can legitimately land
+    // somewhere copilot-redeem.mjs never writes — redeem has no TOKENSCOPE_STATE_DIR
+    // override, it always writes the passwd-home store — so when that is what
+    // happened, name BOTH paths rather than let a provisioned device read as
+    // unprovisioned. A warning, never a fallback.
+    const defaultConfigPath = join(realHome(), '.tokenscope', 'config.json')
+    if (CONFIG_PATH !== defaultConfigPath && fs.existsSync(defaultConfigPath)) {
+      console.error(
+        `[tokenscope-fwd] NOTE: TOKENSCOPE_STATE_DIR pins this forwarder to ${TOKENSCOPE_DIR}, but a credential does exist at ${defaultConfigPath} (where copilot-redeem writes — it has no such pin). Unset the pin, or point it at that directory, to forward from this device.`,
+      )
+    }
     process.exit(0)
   }
 

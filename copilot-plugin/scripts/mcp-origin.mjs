@@ -3,11 +3,13 @@
  * Where is the TokenScope MCP server ACTUALLY registered?
  *
  * WHY THIS EXISTS. A one-time emit-handoff code can only be redeemed at the
- * server that minted it. The server now returns an absolute `redeem_url`, but
- * that value reaches the redeem helper by way of the model, and the setup
- * prompt deliberately forbids passing `--api-base` / `--redeem-url` for exactly
- * that reason: the plugin's allowed-tools grant is scoped to one fixed command
- * so a prompt-injected model cannot nominate the host a live secret is sent to.
+ * server that minted it. The server returns an absolute `redeem_url`, but that
+ * value reaches the redeem helper by way of the MODEL, which is why the helpers
+ * do not take the destination from argv: `--redeem-url` is gone and `--api-base`
+ * may only SELECT among origins this device already knows (argv-guard.mjs).
+ * Nothing in the prompt layer can substitute for that — the Claude grant is a
+ * PREFIX grant (`…claude-redeem.mjs":*`) under which any argv tail is
+ * pre-approved, and Copilot CLI has no grant mechanism at all.
  *
  * That leaves a gap. An operator who registered the MCP server at their own URL
  * has a helper that still resolves the BAKED default, so the handoff is minted

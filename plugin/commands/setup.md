@@ -1,6 +1,6 @@
 ---
 description: Set up TokenScope on this device — connect + provision emitting (one OAuth consent; the durable credential is redeemed locally, never via chat)
-allowed-tools: mcp__tokenscope__provision_emit, mcp__tokenscope__my_usage, Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/claude-redeem.mjs":*)
+allowed-tools: mcp__tokenscope__provision_emit, mcp__tokenscope__my_usage, Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/device-id.mjs":*), Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/claude-redeem.mjs":*)
 ---
 
 Connect Claude Code to TokenScope and turn on token attribution for this device.
@@ -25,20 +25,34 @@ complete the browser OAuth consent and retry.
 
 ### 2. Read any existing device id (idempotency — SAME ENVIRONMENT **AND SAME TOOL** ONLY)
 
-Read the current `tokenscope.instance_id` if one exists, so re-running against the
-**same deployment** rotates the existing credential instead of minting a new one.
-It lives in the `OTEL_RESOURCE_ATTRIBUTES` entry inside `~/.claude/settings.json`
-(look for `tokenscope.instance_id=...`). No settings file or no instance id → treat
-as a fresh device.
+Get this host's current `tokenscope.instance_id` if it has one, so re-running
+against the **same deployment** rotates the existing credential instead of minting
+a new one. Ask the device-identity helper:
 
-> **Only reuse this id when the attributes also say `tool=claude-code`, and only
-> for a `claude-code` provision.** Instances are per-**HOST** but bound to ONE emit
-> tool. On a machine also running Copilot CLI, never pass this id to a
-> `copilot-cli` provision, and never source a Claude id from
-> `~/.tokenscope/config.json` (that is Copilot's credential store). A cross-tool
-> re-provision revokes the other CLI's credential and **breaks its emitting** —
-> silently, since the affected CLI keeps running while emitting nothing. The server
-> refuses this with HTTP 409 before any rotation, but pass the right id, or none.
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/device-id.mjs" --tool claude-code
+```
+
+It prints `{"enrolled":…,"tool":…,"instance_id":…,"bearer_host":…,"reason":…}` and
+nothing else. Use `instance_id` only when `enrolled` is `true`; anything else
+(including `enrolled: false`) → treat this as a fresh device and omit the id.
+
+> **Never go looking for the id yourself.** The device store that carries it also
+> carries this device's **durable emit credential** as a neighbouring key, so
+> opening it copies a long-lived secret into this conversation. The helper reads
+> the store out-of-process and prints only the non-secret fields — use it, and
+> only it.
+>
+> **Ask it for the tool you are provisioning.** Instances are per-**HOST** but
+> bound to ONE emit tool, and the helper reads only the store belonging to
+> `--tool` — so `--tool claude-code` can only ever report a `claude-code`
+> instance, and never hands you the Copilot CLI's id on a host running both. When
+> that store holds no instance, or holds one bound to another tool, it reports
+> `enrolled: false` (`reason: "no-enrolment"` / `"tool-mismatch"`) instead of an
+> id you would misuse. That matters because a cross-tool re-provision revokes the
+> other CLI's credential and **breaks its emitting** — silently, since the
+> affected CLI keeps running while emitting nothing. The server refuses this with
+> HTTP 409 before any rotation, but pass the right id, or none.
 
 **Re-provisioning against a DIFFERENT deployment? Do NOT reuse the old id.** When
 you are moving this device from one TokenScope deployment to another (Sandbox→Dev,
@@ -49,8 +63,8 @@ two ways:
 
 - The **`(Env)` label** in the TokenScope status line (e.g. `… (Sandbox)` vs
   `… (Dev)`), if the status line is enabled.
-- The configured **bearer host** in `~/.claude/settings.json` →
-  `env.TOKENSCOPE_BEARER_ENDPOINT` (its hostname carries `tokenscope-<env>`).
+- The **`bearer_host`** the device-id helper printed in step 2 (it carries
+  `tokenscope-<env>`).
 
 If that environment differs from the deployment you're now provisioning against,
 this is a cross-environment transition: omit the old id. (The local redeem helper
@@ -68,15 +82,20 @@ per-instance **redeem URL**, and a short local-redeem instruction.
 ### 4. Redeem locally (process → process, NOT through this chat)
 
 Run the local redeem helper, passing **only the handoff code** `provision_emit`
-returned — never `--redeem-url` or `--api-base` (the plugin's allowed-tools grant
-is scoped to this exact command; do not construct any other invocation):
+returned — do not construct any other invocation. `--redeem-url` no longer
+exists, and the helper checks `--api-base` against the origins the device already
+knows (loopback, the packaged deployment, the MCP server registered in your own
+client config), so a relayed value can select one of those but cannot name a new
+host. Pass neither:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/claude-redeem.mjs" --handoff-code <code>
 ```
 
-It redeems the handoff code and writes `~/.claude/settings.json` itself. **Do
-not** ask for, print, or store the durable credential in this conversation.
+It redeems the handoff code and writes this device's Claude Code settings itself.
+**Do not** ask for, print, or store the durable credential in this conversation,
+and do not read the settings back to check it — the helper's own output already
+says whether it succeeded.
 
 ### 5. Confirm + restart
 
@@ -84,8 +103,8 @@ Call `my_usage` again to confirm the MCP connection still answers, then tell the
 user:
 
 - **Connected** — the read/tag tools are authorised for your TokenScope account.
-- **Emitting provisioned** — `~/.claude/settings.json` now carries the OTel
-  plumbing for this device.
+- **Emitting provisioned** — this device's Claude Code settings now carry the
+  OTel plumbing.
 - **Restart `claude`** — telemetry config is read at startup, so relaunch for
   emission to begin.
 - **`/tokenscope:status` checks emit-AUTH health, not delivery.** It confirms the

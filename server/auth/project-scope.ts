@@ -5,8 +5,9 @@
  * Mirrors the allocation read predicate (server/auth/allocation-scope.ts)
  * but for handlers that resolve a project up front and then mutate it:
  *   - admin          → bound to the project's region (requireRegionScope)
- *   - manager        → the project's cost-owning unit must be within the
- *                      caller's org subtree (cou.path <@ session.orgPath)
+ *   - manager        → the project must be in the caller's OWN region AND its
+ *                      cost-owning unit within the caller's org subtree
+ *                      (region_id = session.regionId AND cou.path <@ orgPath)
  *   - global-finops  → unbounded
  *
  * This is the live gate; RLS is inert at runtime (owner DB connection)
@@ -22,9 +23,28 @@ export interface ProjectScope {
   couPath: string
 }
 
-/** True if `path` is a descendant of (or equal to) `ancestor` in ltree terms. */
+/**
+ * True if `path` is a descendant of (or equal to) `ancestor` in ltree terms.
+ *
+ * NOT a scope boundary on its own: org_unit paths are unique only PER REGION
+ * (drizzle/schema/identity.ts — UNIQUE is `(region_id, code)`, nothing pins
+ * `path`), so a prefix match matches a COLLIDING path in another region just as
+ * happily. `sameRegion` must gate it — see assertProjectScope.
+ */
 function isWithin(path: string, ancestor: string): boolean {
   return path === ancestor || path.startsWith(ancestor + '.')
+}
+
+/**
+ * Region equality, fail-CLOSED: a missing or empty region on EITHER side refuses.
+ *
+ * Both operands are typed `string`, so this is belt-and-braces — but the failure
+ * it forecloses is total: a hand-built event, a partially-populated session or a
+ * future nullable column would make `undefined === undefined` a silent grant on
+ * EVERY region at once, on a gate whose callers write money.
+ */
+function sameRegion(a: string | null | undefined, b: string | null | undefined): boolean {
+  return typeof a === 'string' && a !== '' && a === b
 }
 
 export async function assertProjectScope(event: H3Event, project: ProjectScope): Promise<void> {
@@ -35,7 +55,28 @@ export async function assertProjectScope(event: H3Event, project: ProjectScope):
     return
   }
   if (session.role === 'manager') {
-    if (!isWithin(project.couPath, session.orgPath)) {
+    // The region clamp WRAPS the subtree test, exactly as this gate's SQL twins
+    // do — allocation-scope.ts:57 and org-subtree-scope.ts:51 both put
+    // `region_id = app.user_region_id` OUTSIDE the `<@`. Reason (spelled out at
+    // org-subtree-scope.ts:39-41): org_unit paths are unique only per region, so
+    // the ltree test alone passes on a colliding path from ANOTHER region. This
+    // helper is the sole scope gate on the six handlers that call it — two of
+    // which write money (allocations/index.post.ts, allocations/[id]/split.post.ts).
+    //
+    // The refusal does not say WHICH conjunct failed, matching the twins: both
+    // failures are one "no row" there, and neither should be an oracle here.
+    //
+    // NOT at parity with the twins: they carry a THIRD conjunct,
+    // placedBelowRegionRootPredicate(), which refuses a caller whose own home IS
+    // the region root (their "subtree" is then the whole region). It is not
+    // replicated here — it is a SQL EXISTS and this helper takes only an H3Event,
+    // and a region-root manager passing this gate is a currently TESTED contract
+    // (tests/integration/admin/project-assign-directory.test.ts, case (d)).
+    // Closing that gap is an owner decision, not a silent one.
+    if (
+      !sameRegion(session.regionId, project.regionId) ||
+      !isWithin(project.couPath, session.orgPath)
+    ) {
       throw createError({
         statusCode: 403,
         statusMessage: 'Forbidden',
@@ -43,7 +84,7 @@ export async function assertProjectScope(event: H3Event, project: ProjectScope):
           type: 'https://tokenscope.example.com/errors/project-scope',
           title: 'Project outside org scope',
           status: 403,
-          detail: "This project's cost-owning unit is not within your org subtree.",
+          detail: 'This project is not within your region and org subtree.',
         },
       })
     }

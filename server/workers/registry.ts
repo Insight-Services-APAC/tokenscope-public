@@ -15,6 +15,7 @@
  * HTTP endpoint can reject unknown names without ever loading their
  * code.
  */
+import { consola } from 'consola'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type * as schema from '../../drizzle/schema'
 import { runAggregateRollup } from './aggregate-rollup'
@@ -24,7 +25,12 @@ import { runPlacementSync } from './placement-sync'
 import { runRegionReenrichment } from './region-reenrichment'
 import { runPrivilegedIdentityCleanup } from './privileged-identity-cleanup'
 import { runPendingPlacementGc } from './pending-placement-gc'
-import { runReadJoiner, selectJoinableInstances, shouldDeepRescan } from './azure-monitor-reader'
+import {
+  runReadJoiner,
+  selectJoinableInstances,
+  shouldDeepRescan,
+  recordJoinerSelectionCap,
+} from './azure-monitor-reader'
 import { runBudgetAlert } from './budget-alert'
 import { runConnectorHealth } from './connector-health'
 import { runEndingSoon } from './ending-soon'
@@ -216,8 +222,22 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
       // than the reader's 7-day default. No selection ran, so there is no cap to
       // report.
       const override = ctx?.opts?.sessionIds
+      const scoped = Boolean(override && override.length > 0)
       const { ids: sessionIds, capHit } =
-        override && override.length > 0 ? { ids: override, capHit: null } : await selectJoinableInstances(db)
+        scoped ? { ids: override!, capHit: null } : await selectJoinableInstances(db)
+      // Raise/clear the fleet-level signal for a truncated selection. ONLY on the
+      // scheduled path: a scoped override ran no selection, so its `capHit: null`
+      // is an absence of evidence, and letting it reach the recorder would
+      // auto-resolve a live signal mid-outage — the same trap read-path-health
+      // documents for scoped runs. Fenced like the stale-dismissal sweep: this is
+      // observability, and it must never be the reason attribution stops.
+      if (!scoped) {
+        try {
+          await recordJoinerSelectionCap(db, capHit)
+        } catch (e) {
+          consola.error('[azure-monitor-read] selection-cap signal failed; attribution is unaffected', e)
+        }
+      }
       // ING-1: once per ~24h, ignore the per-instance watermark and re-read the
       // full reader window — recovers telemetry that arrived later than the
       // 5-minute lookback (OTLP batching, laptop suspends, ingestion latency).
@@ -260,7 +280,8 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
         selectionCapHit: capHit,
         // lookbackDaysApplied is read back from the reader inside runReadJoiner —
         // recomputing it here would let the reported and applied windows diverge.
-        scoped: Boolean(override && override.length > 0),
+        // Same `scoped` the cap-signal gate above reads, for the same reason.
+        scoped,
       })
     },
     recommendedCron: '*/5 * * * *',
