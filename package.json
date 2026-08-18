@@ -68,7 +68,7 @@
     "@playwright/cli": "^0.1.13",
     "@playwright/test": "^1.62.0",
     "@testcontainers/postgresql": "^12.0.0",
-    "@types/node": "^24.13.3",
+    "@types/node": "^26.2.0",
     "@vitejs/plugin-vue": "^6.0.5",
     "@vue/test-utils": "^2.4.6",
     "drizzle-kit": "^0.31.10",
