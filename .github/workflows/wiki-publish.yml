@@ -1,0 +1,104 @@
+name: Publish Wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/wiki/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Sync docs/wiki to GitHub Wiki
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout wiki repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Flatten and sync wiki content
+        run: |
+          set -euo pipefail
+
+          # Clear existing wiki content (except .git)
+          find wiki -maxdepth 1 -not -name '.git' -not -name 'wiki' -exec rm -rf {} + 2>/dev/null || true
+
+          # 1. Copy root-level files (Home.md, _Sidebar.md, _Footer.md, etc.)
+          cp docs/wiki/*.md wiki/
+
+          # 2. For each subdirectory with .md files, copy each file to wiki/<subdir>-<file>.md
+          #    AND rewrite same-dir bare references in that file at copy time.
+          #    Bare same-dir reference: [X](Some-Page.md) or [X](./Some-Page.md) — no other
+          #    slash, no ../ . Inside a subdir-sourced file these refer to siblings, which
+          #    after flattening live at wiki/<prefix>-Some-Page.md.
+          #    README.md -> <prefix>-Overview.md (stable landing-page name).
+          #
+          #    Use perl (PCRE) so we can match optional `./` AND the bare form in a single
+          #    pass — running two sequential sed patterns would double-apply the prefix
+          #    (e.g. `Foo` -> `prefix-Foo` -> `prefix-prefix-Foo`).
+          for dir in docs/wiki/*/; do
+            [ -d "$dir" ] || continue
+            prefix=$(basename "$dir")
+            for f in "$dir"*.md; do
+              [ -f "$f" ] || continue
+              name=$(basename "$f")
+              if [ "$name" = "README.md" ]; then
+                target="wiki/${prefix}-Overview.md"
+              else
+                target="wiki/${prefix}-${name}"
+              fi
+              # Single perl pass: handle README.md special-case first, then the general
+              # same-dir form. Use a non-word sentinel ("~PFX~") so the general regex's
+              # word-class capture group cannot re-match the README pass's output —
+              # otherwise (e.g.) [X](README.md) -> [X](PFX-Overview.md) -> [X](PFX-PFX-Overview.md).
+              perl -pe '
+                s|\]\((?:\./)?README\.md([^)]*)\)|](~PFX~Overview.md$1)|g;
+                s|\]\((?:\./)?([A-Za-z0-9_][A-Za-z0-9_.-]*)\.md([^)]*)\)|](~PFX~$1.md$2)|g;
+              ' "$f" | sed "s|~PFX~|${prefix}-|g" > "$target"
+            done
+          done
+
+          # 3. Cross-subdir references: (P/...) and (../P/...) -> (P-...).
+          #    These appear in Home.md, _Sidebar.md, and in cross-subdir links.
+          for dir in docs/wiki/*/; do
+            [ -d "$dir" ] || continue
+            prefix=$(basename "$dir")
+            find wiki -name '*.md' -exec sed -i \
+              -e "s|(${prefix}/README\.md|(${prefix}-Overview.md|g" \
+              -e "s|(\.\./${prefix}/README\.md|(${prefix}-Overview.md|g" \
+              -e "s|(${prefix}/|(${prefix}-|g" \
+              -e "s|(\.\./${prefix}/|(${prefix}-|g" \
+              {} +
+          done
+
+          # 4. Bare ../ traversal back to wiki root (sub-dir file linking to Home/_Sidebar etc.)
+          find wiki -name '*.md' -exec sed -i 's|(\.\./|(|g' {} +
+
+          # 5. Strip .md extensions on the link targets (GH wiki uses bare page names).
+          #    Use perl with a negative lookahead so http(s):// URLs ending in .md
+          #    (intentional cross-tree links to source code blob URLs) are preserved.
+          find wiki -name '*.md' -exec perl -i -pe \
+            's|\((?!https?://)([^)]+?)\.md(\#[^)]*)?\)|($1$2)|g' \
+            {} +
+
+      - name: Push to wiki
+        working-directory: wiki
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No wiki changes to commit"
+          else
+            git commit -m "Sync wiki from docs/wiki [skip ci]"
+            git push
+          fi

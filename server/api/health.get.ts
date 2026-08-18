@@ -16,6 +16,7 @@
  * what a liveness probe is for.
  */
 import { defineEventHandler, setResponseStatus } from 'h3'
+import { useRuntimeConfig } from 'nitropack/runtime'
 import { sql } from 'drizzle-orm'
 import { consola } from 'consola'
 
@@ -29,7 +30,12 @@ export default defineEventHandler(async (event) => {
     return {
       status: 'ok',
       checks: { db: 'up' },
-      version: process.env.APP_VERSION ?? 'unknown',
+      // The SAME source every other surface uses (shared/build-info.ts):
+      // package.json, baked into runtimeConfig at build. `APP_VERSION` was read
+      // here and set by nothing — no Dockerfile ARG, no Bicep env, no CI step —
+      // so this probe reported "unknown" for the life of the endpoint while
+      // /api/v1/meta/build had the real answer all along.
+      version: String(useRuntimeConfig().public.appVersion || 'unknown'),
     }
   } catch (err) {
     // API-12: the probe is unauthenticated — postgres-js connection errors

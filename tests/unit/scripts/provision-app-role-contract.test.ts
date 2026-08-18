@@ -26,10 +26,36 @@
  *    symptom is a SIGKILL — an exit code the entrypoint contract does not define.
  */
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const ROOT = resolve(__dirname, '../../..')
+
+/**
+ * Read the files that SHIP, not the files we hoped for.
+ *
+ * The public snapshot drops internal paths (tools/publish/internal-only-paths.txt),
+ * so a guard that reads one unconditionally throws ENOENT there — red CI on the
+ * public mirror over a file that was never going to exist. That is exactly how
+ * `infra/parameters/dev.bicepparam` and `docs/design/rls-enforcement.md` broke
+ * the public suite.
+ *
+ * Tolerant of absence, STRICT about coverage: `min` is the number that must be
+ * present, so this can never quietly degrade into checking nothing. Internally
+ * every path is there and the guard is at full strength.
+ */
+function readPresent(paths: readonly string[], min: number): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const p of paths) {
+    const abs = resolve(ROOT, p)
+    if (existsSync(abs)) out[p] = readFileSync(abs, 'utf8')
+  }
+  expect(
+    Object.keys(out).length,
+    `only ${Object.keys(out).length} of ${paths.length} guarded files were found; this guard is degrading`,
+  ).toBeGreaterThanOrEqual(min)
+  return out
+}
 const script = readFileSync(resolve(ROOT, 'drizzle/provision-app-role.ts'), 'utf8')
 
 describe('everything after the COMMIT is inside the post-commit guard', () => {
@@ -107,28 +133,30 @@ describe('everything after the COMMIT is inside the post-commit guard', () => {
    * comment, so it gets a machine.
    */
   it('no file in this contract claims that a boot never rotates', () => {
+    /*
+     * THE DESIGN DOC is in this list because it is where the claim actually
+     * shipped: this guard was written for exactly that false absolute and then
+     * scoped to the code files only, so §9 went on saying "boot does not
+     * rotate" for three more rounds and a claims audit found it rather than the
+     * machine built to. A guard that does not cover the document the operator
+     * reads is guarding the wrong surface.
+     *
+     * `docs/design/` and `infra/parameters/` are dropped from the public
+     * snapshot, hence readPresent: full strength internally, no ENOENT there.
+     */
     const files = {
       'drizzle/provision-app-role.ts': script,
-      'scripts/rls-roles.ts': readFileSync(resolve(ROOT, 'scripts/rls-roles.ts'), 'utf8'),
-      'entrypoint.sh': readFileSync(resolve(ROOT, 'entrypoint.sh'), 'utf8'),
-      'tests/unit/scripts/entrypoint-provision-exit-code.test.ts': readFileSync(
-        resolve(ROOT, 'tests/unit/scripts/entrypoint-provision-exit-code.test.ts'),
-        'utf8',
+      ...readPresent(
+        [
+          'scripts/rls-roles.ts',
+          'entrypoint.sh',
+          'tests/unit/scripts/entrypoint-provision-exit-code.test.ts',
+          'tests/unit/scripts/provision-app-role-contract.test.ts',
+          'docs/design/rls-enforcement.md',
+          'infra/main.bicep',
+        ],
+        5,
       ),
-      'tests/unit/scripts/provision-app-role-contract.test.ts': readFileSync(
-        resolve(ROOT, 'tests/unit/scripts/provision-app-role-contract.test.ts'),
-        'utf8',
-      ),
-      /*
-       * THE DESIGN DOC, because it is where the claim actually shipped. This
-       * guard was written for exactly this false absolute and then scoped to
-       * the code files only — so §9 went on saying "boot does not rotate" for
-       * three more rounds, and a claims audit found it rather than the machine
-       * built to. A guard that does not cover the document the operator reads
-       * is guarding the wrong surface.
-       */
-      'docs/design/rls-enforcement.md': readFileSync(resolve(ROOT, 'docs/design/rls-enforcement.md'), 'utf8'),
-      'infra/main.bicep': readFileSync(resolve(ROOT, 'infra/main.bicep'), 'utf8'),
     }
     // The three spellings that actually shipped, plus the shape they share.
     const falseAbsolute = /\bno boot (rotates|does that)|\bnothing rotates\b|boot no longer rotates/i
@@ -308,11 +336,16 @@ describe('everything after the COMMIT is inside the post-commit guard', () => {
 })
 
 describe('the Bicep prose describes the step that actually runs', () => {
-  const files = {
-    'infra/modules/container-app.bicep': readFileSync(resolve(ROOT, 'infra/modules/container-app.bicep'), 'utf8'),
-    'infra/main.bicep': readFileSync(resolve(ROOT, 'infra/main.bicep'), 'utf8'),
-    'infra/parameters/dev.bicepparam': readFileSync(resolve(ROOT, 'infra/parameters/dev.bicepparam'), 'utf8'),
-  }
+  // dev.bicepparam is dropped from the public snapshot (it carries the real
+  // subscription/VNet identifiers), so it is read only when present.
+  const files = readPresent(
+    [
+      'infra/modules/container-app.bicep',
+      'infra/main.bicep',
+      'infra/parameters/dev.bicepparam',
+    ],
+    2,
+  )
 
   it.each(Object.entries(files))('%s does not claim the sweep is bootstrap-only', (_name, src) => {
     // The exact sentence all three carried, and the belief it creates.
@@ -426,8 +459,12 @@ describe('the Bicep prose describes the step that actually runs', () => {
    * app-db-password secret". Both halves are now false — that exit code is gone,
    * and a boot no longer commits a password onto an existing role.
    */
-  it('dev.bicepparam no longer prints the exit-2 recovery, which described a state that cannot occur', () => {
+  it('dev.bicepparam no longer prints the exit-2 recovery, which described a state that cannot occur', (ctx) => {
+    // Dropped from the public snapshot; nothing to assert about a file that
+    // does not ship there. Skipped rather than silently passing, so the reason
+    // is visible in the run.
     const src = files['infra/parameters/dev.bicepparam']
+    if (!src) return ctx.skip()
     expect(src).not.toContain('COMMITTED AND COULD NOT VERIFY')
     expect(src.toLowerCase()).not.toContain('set provisionappRole\n'.toLowerCase())
     expect(src).not.toMatch(/set provisionAppRole\s*\n?\s*\/\/\s*back to false/)
@@ -436,7 +473,10 @@ describe('the Bicep prose describes the step that actually runs', () => {
 
   it('main.bicep and dev.bicepparam still say the sweep is one-time', () => {
     expect(files['infra/main.bicep']).toContain('ONE-TIME')
-    expect(files['infra/parameters/dev.bicepparam']).toContain('ONE-TIME')
+    // Only when it ships — see above.
+    if (files['infra/parameters/dev.bicepparam']) {
+      expect(files['infra/parameters/dev.bicepparam']).toContain('ONE-TIME')
+    }
   })
 })
 

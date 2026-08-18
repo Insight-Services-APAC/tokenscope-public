@@ -7,6 +7,13 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-08-18 (snapshot ecd23e5b)
+
+- The open-source mirror now publishes the engineering wiki to its own GitHub
+  Wiki tab, instead of leaving it empty while the same pages sat in the repo
+  tree, and its test suite no longer fails on files the mirror deliberately
+  withholds.
+
 ## 2026-08-18 (snapshot 1358d845)
 
 - The published open-source snapshot no longer ships an agent configuration

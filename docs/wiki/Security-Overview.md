@@ -8,14 +8,17 @@
 > [Data Protection](Data-Protection.md). Deployment-specific values for the
 > Insight instance are in your deployment's own configuration.
 
-> **Status: MVP-Beta-1 — in active development.** Claude Code is the primary
-> client; the **MCP/OAuth surface** and a **Copilot CLI** lane (local file-forwarder,
-> indicative tier-2 spend) are built and in the dogfood footprint. The tenant OTLP
-> bridge and FIN connectors are **designed but not built**. Throughout this page,
-> controls are tagged **Today** (as-built, running in the **VNet-integrated**
-> deployment mode — internal ACA behind an upstream WAF, data plane over private
-> endpoints) or **Planned** (roadmap / pre-pilot). Don't review the roadmap as if
-> it shipped.
+> **Status: 1.0.0-rc.1 — release candidate.** Claude Code is the primary client;
+> the **MCP/OAuth surface** and a **Copilot CLI** lane (local file-forwarder,
+> indicative tier-2 spend) are built and running. The tenant OTLP bridge and
+> finance-system connectors are **designed but not built**.
+>
+> Throughout this page, controls are tagged **Today** (as-built, running in the
+> **VNet-integrated** deployment mode — internal ACA behind an upstream WAF, data
+> plane over private endpoints) or **Planned** (roadmap / pre-pilot). **A release
+> candidate is not a claim that every control below is in force** — the register
+> further down lists the residuals that are accepted today, each with its
+> disposition. Read the tags; don't review the roadmap as if it shipped.
 
 ## What it is, and what data it touches
 
@@ -190,7 +193,7 @@ setup-token enrolment it may reference was itself retired in PR #38).
 ## Risk register (current — accepted residuals)
 
 Honest, precise list of known-and-accepted gaps as-built. None blocking for
-MVP-Beta-1; each has a documented disposition.
+1.0.0-rc.1; each has a documented disposition.
 
 | # | Residual | Why accepted today | Closes |
 |---|---|---|---|

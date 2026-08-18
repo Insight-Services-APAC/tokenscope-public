@@ -245,6 +245,13 @@ jobs:
     name: Smoke (playwright-cli)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Job-scoped, not widened at workflow level (S12): only this job asks the
+    # API which files a PR touched, to decide whether the prototype-inventory
+    # guard has anything to guard. Read-only, and the guard runs anyway if the
+    # call fails.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -277,6 +284,29 @@ jobs:
         # parity gate itself (tests/unit/reporting/prototype-parity.test.ts) reads
         # the checked-in inventory.json and needs no browser, so it stays in Unit.
         # This step is what stops that JSON drifting from the artefact it came from.
-        run: npm run check:prototype-inventory
+        #
+        # ONLY WHEN THE PROTOTYPE ACTUALLY CHANGED. The chain this guards is:
+        # `check:prototype-frozen` forces a prototype edit to be its OWN design
+        # PR; this step forces that PR to re-emit inventory.json; the Unit parity
+        # test then holds the build to the NEW inventory. Every link matters, and
+        # the middle one can only fire on a PR that touches prototype.html — a
+        # file untouched since 2026-08-06, i.e. never once in this gate's
+        # lifetime, while it launched chromium on every PR regardless.
+        #
+        # FAILS OPEN TO RUNNING: if the changed-file list cannot be determined
+        # (a push build, an API hiccup), the guard runs. A guard that skips when
+        # it is unsure is not a guard.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROTOTYPE: docs/design/reporting-consolidation/prototype.html
+        run: |
+          if [ -n "${{ github.event.pull_request.number }}" ]; then
+            files=$(gh pr view "${{ github.event.pull_request.number }}" --json files --jq '.files[].path' 2>/dev/null) || files=""
+            if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qxF "$PROTOTYPE"; then
+              echo "$PROTOTYPE unchanged in this PR — inventory cannot have gone stale; skipping."
+              exit 0
+            fi
+          fi
+          npm run check:prototype-inventory
       - name: Smoke
         run: npm run test:smoke

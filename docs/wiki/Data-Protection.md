@@ -47,7 +47,7 @@ What TokenScope holds, ranked by sensitivity.
 
 | Data | Class | Where stored | Retention |
 |---|---|---|---|
-| **Identity** — Entra OID, email (`teammate`, `instance_attestation.principal_email`, `teammate_identity_map`) | **PII** | Postgres | ~12 mo active, then soft-purge **[Planned]** |
+| **Identity** — Entra OID, email (`teammate`, `instance_attestation.principal_email`, `teammate_identity_map`) | **PII** | Postgres | ~12 mo active, then soft-purge **[Current]** |
 | **Session token** (CLI auth handle) | Secret | Postgres — **hashed** (HMAC-SHA-256, KV service key) | session-duration; raw never stored |
 | **Org / project metadata** — units, project codes, `raw_project_code`, client-facing name | Confidential (business) | Postgres | life of project (soft-retire) |
 | **Telemetry-derived usage** — token counts, model, cost, timestamps, session id, token-type (`attribution_record`, `actual_spend`) | Internal (non-PII per row, but joins to a person) | Postgres | ~7 yr finance horizon **[VERIFY w/ finance]** |
@@ -129,8 +129,9 @@ flowchart LR
   (`principal_email`, `raw_project_code`, notes) and sets `ts_purged`, while
   *retaining* the row and `instance_id` so the
   `attribution_record → instance_attestation` FK stays valid across the much
-  longer finance-audit horizon. The schema column
-  exists **[Current]**; the nightly sweep worker is **[Planned]**.
+  longer finance-audit horizon. Both halves are **[Current]**: the schema
+  column, and the nightly `soft-purge` worker that enforces it (03:00 UTC,
+  12-month window, one `session-pii-purged` audit event per row).
 - **Session tokens never stored raw** — only an HMAC-SHA-256 hash (Key-Vault
   service key), enabling en-masse invalidation via key rotation. **[Current]**
 - **k-anonymity suppression on the directory diagnostic.** The Region-rules
@@ -153,16 +154,18 @@ flowchart LR
 |---|---|---|
 | Setup token | short-lived, single-use | **[Current]** |
 | Session token | session-duration, hashed | **[Current]** |
-| `instance_attestation` PII | ~12 mo active → soft-purge (PII cleared, row kept) | column **[Current]**; purge job **[Planned]** |
+| `instance_attestation` PII | ~12 mo active → soft-purge (PII cleared, row kept) | **[Current]** — column + the nightly `soft-purge` worker |
 | `attribution_record` | ~7 yr finance-audit horizon | **[Current]** (no automated purge); ~7 yr **[VERIFY w/ finance]** |
 | `audit_event` | indefinite, append-only (trigger-enforced) | **[Current]** |
 | Log Analytics `OTelLogs` | workspace-configured | **[Current]**, value **[VERIFY]** |
 | Coaching-nudge text | ~30 day purge | **[Planned]** — coach not built |
 
-> **No formal retention/purge jobs run today.** Retention windows are designed
-> and the soft-purge *column* exists, but the sweep workers that enforce them
-> are **[Planned]**. Append-only audit retention is the one enforced-today
-> control (DB trigger denies UPDATE/DELETE).
+> **Two retention jobs run today, and the rest are still windows on paper.**
+> The nightly `soft-purge` worker enforces the 12-month `instance_attestation`
+> PII window, and `archive-ledger` retires cold `attribution_record` partitions
+> (off unless `LEDGER_ARCHIVE_ENABLED=true`). Append-only audit retention is
+> enforced by a DB trigger that denies UPDATE/DELETE. Everything else in the
+> table above is a designed window with no job behind it yet.
 
 ---
 
@@ -191,8 +194,7 @@ flowchart LR
 
 | Control | State |
 |---|---|
-| Soft-purge sweep worker (enforce the `ts_purged` PII window) | **[Planned]** — column exists, job not built |
-| Formal retention/expiry jobs (attribution, Log Analytics tiering) | **[Planned]** |
+| Formal retention/expiry jobs (Log Analytics tiering; attribution beyond the archive worker) | **[Planned]** — `archive-ledger` retires cold `attribution_record` partitions but is off unless `LEDGER_ARCHIVE_ENABLED=true`; nothing tiers Log Analytics |
 | RLS as the live boundary (non-owner DB role + FORCE RLS) | **[Planned]** — policies shipped, inert today. The app connects as the table owner, and an owner bypasses RLS unless the table sets `FORCE`. The enablement path exists and is dormant: a read-only capability probe (`GET /api/v1/admin/diagnostics/rls-posture`), role provisioning, a one-time cutover sweep, and a boot gate that refuses to start the server if binding the non-owner role would break it. All behind Bicep flags that default false; no environment sets them. |
 | Deployment-time region choice (residency) | **[Planned]** — a single region is fixed per deployment today (via `location`) |
 | AI-coaching privacy boundary (hash-only, aggregates-only, 30 d purge) | **[Planned]** — coach not built; the privacy *contract* is documented as the bar any future build must meet |

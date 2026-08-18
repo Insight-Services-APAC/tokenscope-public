@@ -5,12 +5,17 @@ maintainers, and operators. For _why_ the system is shaped this way see the
 design docs (`docs/design/`) and ADRs (`docs/decisions/`); this wiki is _what is
 actually running_.
 
-> **Status: MVP-Beta-1 — in active development.** A working end-to-end slice runs
-> in an internal, IT-hosted Azure dev environment. **Claude Code and the GitHub
-> Copilot CLI are both supported clients today**, on a shared MCP server + OAuth 2.1
-> backbone that is built and live. The tenant OTLP bridge, FIN connectors, and
-> GitHub-billing-API reconciliation (which lifts Copilot spend to tier-1) are
-> designed but **not built** — each page marks _Planned_ items explicitly.
+> **Status: 1.0.0-rc.1 — release candidate.** TokenScope runs end to end in an
+> internal, IT-hosted Azure environment. **Claude Code and the GitHub Copilot CLI
+> are both supported clients**, on a shared MCP server + OAuth 2.1 backbone.
+> Usage is reconciled against the provider APIs on both lanes — Anthropic's
+> Analytics API and GitHub's Copilot billing API — and reporting covers
+> attributed usage, chargeback and budgets.
+>
+> The tenant OTLP bridge and finance-system connectors are designed but **not
+> built**. Every page marks _Planned_ items explicitly, and the
+> [Security Overview](Security-Overview.md) keeps an open register of accepted
+> residual risks — read both before assuming a control is in force.
 
 ## The system at a glance
 

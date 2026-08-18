@@ -18,7 +18,7 @@ import type { DeployEnv } from './env/deploy-env'
 
 export interface BuildInfo {
   environment: DeployEnv
-  /** Semantic version of the app package, e.g. "0.1.0". */
+  /** Semantic version of the app package, e.g. "1.0.0-rc.1". */
   version: string
   /** Short commit sha, or null when nothing baked one in. */
   commit: string | null
