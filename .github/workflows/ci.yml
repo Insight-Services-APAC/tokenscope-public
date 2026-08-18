@@ -253,11 +253,24 @@ jobs:
           cache: 'npm'
       - name: Install
         # `playwright-chromium` downloads chromium during its own postinstall,
-        # so the explicit `npx playwright install` step is unnecessary. We
-        # still need the system deps the Playwright browser links against.
+        # so the explicit `npx playwright install` step is unnecessary.
+        #
+        # `install-deps` shells out to apt, and apt from a hosted runner is the
+        # single biggest source of red CI here: the Azure mirror gets Ign'd, the
+        # public archive.ubuntu.com fallback stalls, and the job dies at the 15
+        # minute cancel having produced no signal about our code. Three times on
+        # two consecutive PRs, one of which changed only CHANGELOG.md.
+        #
+        # BOUNDED AND NON-FATAL, because the runner image already ships the
+        # libraries Chromium links against — this call is belt and braces. If a
+        # library really is missing, the Smoke step below fails on the actual
+        # browser launch with a clear error, which is a better signal than a
+        # 15-minute hang in a package manager. Never `|| true` without saying so:
+        # the line prints when it is skipped.
         run: |
           npm ci --no-audit --no-fund
-          npx playwright install-deps chromium
+          timeout 180 npx playwright install-deps chromium \
+            || echo "::warning::playwright install-deps did not complete (apt); continuing — the runner image ships these libs and Smoke will fail loudly if one is missing"
       - name: Check the prototype inventory is current
         # Lives HERE, not in Static: emitting the inventory RUNS the approved
         # prototype in chromium, and this is the only job with a browser. The

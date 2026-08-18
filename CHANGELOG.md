@@ -7,6 +7,12 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-08-18 (snapshot 1358d845)
+
+- The published open-source snapshot no longer ships an agent configuration
+  whose hook pointed at tooling that is not part of the public tree, so running
+  a coding agent against a public clone no longer fails on its first command.
+
 ## 2026-08-18 (snapshot cbedba50)
 
 - Opening Reporting no longer shows "You don't have access to any reports" to
