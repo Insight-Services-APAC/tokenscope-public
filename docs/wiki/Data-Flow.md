@@ -37,6 +37,13 @@ zero", and is never flagged (`over-emission-detection.ts:173-179`). Zero
 reconciled orgs is a clean no-op, not a report of zero spend
 (`server/workers/registry.ts:148-152`).
 
+Detected rows carry which lane found them, in `over_emission.reason` (mig 0132):
+`api-uncorroborated` is the high-confidence lane — emitted spend materially above
+a bill that *does* exist — and `no-bill-to-corroborate` is the weaker one, where
+no bill has landed to compare against. Only the high-confidence lane reaches a
+developer: every user-facing reader filters on it, so a `no-bill-to-corroborate`
+row is counted and alertable without ever being shown to the person it concerns.
+
 Two adjacent things are **not** the same as absence, and conflating them is its
 own error:
 

@@ -1,21 +1,40 @@
 /*
  * POST /api/v1/admin/reconciliation/github/discover-orgs — onboarding helper that,
- * given a GitHub enterprise, uses its billing PAT to read the Copilot seat roster and
- * AUTO-CREATES the provider_org rows for every license-org it finds. The admin should
- * NOT hand-type (and guess) org slugs when the enterprise PAT already lists them — this
- * is the GitHub counterpart of the Anthropic `discover` probe.
+ * given a GitHub enterprise, uses its credential to enumerate that enterprise's orgs and
+ * AUTO-CREATES the provider_org rows for them. The admin should NOT hand-type (and guess)
+ * org slugs when the credential already lists them — this is the GitHub counterpart of
+ * the Anthropic `discover` probe.
  *
  * Body (zod): { enterpriseId }.
  *
- * Discovery source: the seat roster's license-orgs (the orgs that actually hold Copilot
- * seats = the orgs with cost). Each distinct org is UPSERTED as a github provider_org
- * linked to this enterprise (reconciliation_mode='reconciled', billing='tracked'),
- * idempotently — an existing org is left as-is (its region/notes are preserved) but
- * linked to the enterprise if it wasn't. The admin then just sets each org's region.
+ * DISCOVERY SOURCE IS PER CREDENTIAL KIND (UF-19), because the two credentials can read
+ * different surfaces — and they answer subtly different questions, which the response
+ * states rather than hides:
+ *   - PAT mode: the ENTERPRISE seat roster's license-orgs (the orgs that actually hold
+ *     Copilot seats = the orgs with cost). Unchanged.
+ *   - App mode: `installable_organizations` — the orgs the enterprise OWNS. The
+ *     enterprise seats endpoint presents a Bearer PAT header, which a withApp() client
+ *     does not have (it 401'd), and the per-org seats endpoint cannot be the discovery
+ *     source because it needs the org list this route exists to produce. The census is
+ *     also the more useful answer at cutover: it names orgs the App is not yet installed
+ *     on, which are precisely the ones an admin has to act on. It is NOT filtered to
+ *     seat-bearing orgs — `listOrgCopilotSeats` returns [] for an org the App is not
+ *     installed on, so filtering would discover nothing on a freshly-App'd enterprise.
  *
- * Response 200: { discovered, created, linked, alreadyLinked, orgs: [{login, status}] }.
- * A PAT/credential failure returns 422 with a SAFE { reason } (no key, no raw provider
- * text — the PAT is never echoed or logged).
+ * Each distinct org is UPSERTED as a github provider_org linked to this enterprise
+ * (reconciliation_mode='reconciled', billing='tracked'), idempotently — an existing org
+ * is left as-is (its region/notes are preserved) but linked to the enterprise if it
+ * wasn't. The admin then just sets each org's region.
+ *
+ * Response 200: { discovered, created, linked, alreadyLinked, credentialKind, capped,
+ * orgs: [{login, status}] }. `capped` means the source list was a PREFIX (the provider
+ * pagination cap, or this route's own per-call org bound) — discovery is additive, so a
+ * prefix is safe, but "discovered N" must not read as "the enterprise has N orgs".
+ * A credential failure returns 422 with a SAFE { reason, credentialKind } (no key, no raw
+ * provider text — the credential is never echoed or logged). `credentialKind` rides on the
+ * failure body too, because the SAME status means different remediations per mode (a 403
+ * is "the PAT needs manage_billing" or "the App needs Enterprise organization
+ * installations: read") and the caller must not have to assume one.
  *
  * RBAC: requireRole(admin, global-finops) + assertSameOrigin. Audited (per created/linked org).
  */
@@ -26,7 +45,7 @@ import { requireRole } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
-import { resolveEnterpriseCredential } from '../../../../../reconciliation/credentials'
+import { resolveEnterpriseCredential, MissingGithubAppKeyError } from '../../../../../reconciliation/credentials'
 import { GithubCopilotClient } from '../../../../../reconciliation/adapters/github-client'
 import { GithubAppAuth } from '../../../../../reconciliation/adapters/github-app-auth'
 import { seatLicenseOrg } from '../../../../../reconciliation/adapters/github'
@@ -34,9 +53,25 @@ import { seatLicenseOrg } from '../../../../../reconciliation/adapters/github'
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const Body = z.object({ enterpriseId: z.string().regex(UUID_RE) })
 
+/*
+ * Per-call bound on how many discovered orgs this route will upsert. The App-mode census
+ * is the enterprise's WHOLE org estate (bounded only by the client's own 10,000-org
+ * pagination cap), and every org here costs 1-3 statements inside ONE RLS request
+ * transaction — an unbounded write loop over a large estate is a request timeout holding
+ * locks on provider_org. Mirrors coverage's MAX_ORG_PROBES_PER_PASS. Exceeding it sets
+ * `capped` rather than silently truncating; a second run makes no further progress on its
+ * own, so a capped result is a signal to onboard the remainder another way, not a retry
+ * prompt. PAT mode is bounded by seat-bearing orgs and realistically never reaches it.
+ */
+const MAX_DISCOVER_ORGS = 500
+
 /* Classify a thrown GitHub-client error into the SAFE discover vocabulary (mirrors the
  * anthropic discover reasons). The client throws a 502 createError carrying the upstream
- * status in detail like "seats returned HTTP 401"; map that without echoing the key. */
+ * status in detail like "seats returned HTTP 401" (PAT mode) or
+ * "enterprises/{ent}/apps/installable_organizations returned HTTP 403" / the no-install
+ * 404 (App mode); map that without echoing the key. The buckets are credential-NEUTRAL
+ * on purpose — the same status means different remediations per mode, and the mode rides
+ * back on `credentialKind` so the caller renders the right one rather than assuming a PAT. */
 function classifyGithubError(err: unknown): string {
   const detail = (err as { data?: { detail?: string } } | null)?.data?.detail ?? ''
   if (/HTTP 401/.test(detail)) return '401-unauthorized'
@@ -55,8 +90,8 @@ export default defineEventHandler(async (event) => {
 
   return await withRequestRls(event, async (tx) => {
     // 1. Resolve the enterprise — must exist + be github.
-    const entRows = await tx.execute<{ external_id: string; provider: string }>(sql`
-      SELECT external_id, provider FROM provider_enterprise WHERE id = ${body.enterpriseId}::uuid LIMIT 1
+    const entRows = await tx.execute<{ external_id: string; provider: string; github_app_id: string | null }>(sql`
+      SELECT external_id, provider, github_app_id FROM provider_enterprise WHERE id = ${body.enterpriseId}::uuid LIMIT 1
     `)
     const ent = [...entRows][0]
     if (!ent) {
@@ -74,34 +109,69 @@ export default defineEventHandler(async (event) => {
       })
     }
 
-    // 2. The enterprise PAT (presence only — value used to build the client, never returned).
-    const credential = await resolveEnterpriseCredential(tx, { provider: 'github', externalId: ent.external_id })
+    /*
+     * 2. The enterprise credential (presence only — the value builds the client and is
+     * never returned). `credentialKind` is derived from github_app_id, the SAME App-mode
+     * signal github-health.ts / github-unresolved.ts read, so it is available even on the
+     * no-key path where there is no resolved credential to ask. It always agrees with the
+     * resolved credential.kind (resolveEnterpriseCredential derives both from that column),
+     * and the client construction below still branches on credential.kind per S9.
+     *
+     * An App-opted enterprise with an unwired key makes resolveEnterpriseCredential THROW
+     * (MissingGithubAppKeyError, fail-loud by design). Uncaught, that is a 500 on the very
+     * onboarding screen an admin uses mid-cutover; it is the same operator condition as a
+     * missing PAT, so it answers with the same 422 { reason: 'no-key' }.
+     */
+    const credentialKind = ent.github_app_id?.trim() ? 'github-app' : 'github-pat'
+    let credential
+    try {
+      credential = await resolveEnterpriseCredential(tx, { provider: 'github', externalId: ent.external_id })
+    } catch (err) {
+      if (!(err instanceof MissingGithubAppKeyError)) throw err
+      credential = null
+    }
     if (!credential) {
       setResponseStatus(event, 422)
-      return { reason: 'no-key' }
+      return { reason: 'no-key', credentialKind }
     }
 
-    // 3. Read the seat roster → distinct license-orgs (lowercased, canonical per mig 0064).
+    // 3. Enumerate the enterprise's orgs with the surface THIS credential can read
+    //    (see the header) → distinct logins, lowercased (canonical per mig 0064).
     //    S9: branch on the resolved credential kind exactly as the five correct sibling
     //    call sites do (copilot-pool-bill.ts:593-594 is the model) — this was the SECOND
     //    unbranched site that flattened credential.value and fed the GitHub App private
     //    key to withPat as a Bearer token whenever the enterprise was App-mode.
+    //    UF-19: the same branch now also selects the DATA path, because branching only at
+    //    construction left App mode calling a PAT-only endpoint with an empty bearer.
     let orgs: string[]
+    // Assigned in every non-throwing path below; the catch returns before reading it.
+    let capped: boolean
     try {
-      const client =
-        credential.kind === 'github-app'
-          ? GithubCopilotClient.withApp(ent.external_id, new GithubAppAuth(credential.appId!, credential.value))
-          : GithubCopilotClient.withPat(ent.external_id, credential.value)
-      const seats = await client.listSeats()
       const set = new Set<string>()
-      for (const seat of seats) {
-        const org = seatLicenseOrg(seat)
-        if (org) set.add(org.trim().toLowerCase())
+      if (credential.kind === 'github-app') {
+        const census = await GithubCopilotClient.withApp(
+          ent.external_id,
+          new GithubAppAuth(credential.appId!, credential.value),
+        ).listInstallableOrganizations()
+        // A capped census is a PREFIX of the estate — reported, never presented as the whole.
+        capped = census.pagesCapped
+        for (const org of census.organizations) set.add(org.login.trim().toLowerCase())
+      } else {
+        // listSeatsWithDiagnostics (not listSeats) purely so a truncated roster is
+        // REPORTED: `discovered` would otherwise understate the estate with no signal.
+        const pull = await GithubCopilotClient.withPat(ent.external_id, credential.value).listSeatsWithDiagnostics()
+        capped = pull.pagesCapped
+        for (const seat of pull.seats) {
+          const org = seatLicenseOrg(seat)
+          if (org) set.add(org.trim().toLowerCase())
+        }
       }
-      orgs = [...set].filter((o) => o.length > 0).sort()
+      const all = [...set].filter((o) => o.length > 0).sort()
+      if (all.length > MAX_DISCOVER_ORGS) capped = true
+      orgs = all.slice(0, MAX_DISCOVER_ORGS)
     } catch (err) {
       setResponseStatus(event, 422)
-      return { reason: classifyGithubError(err) }
+      return { reason: classifyGithubError(err), credentialKind }
     }
 
     // 4. Upsert each org as a github provider_org linked to this enterprise. Idempotent:
@@ -156,6 +226,6 @@ export default defineEventHandler(async (event) => {
       }
     }
 
-    return { discovered: orgs.length, created, linked, alreadyLinked, orgs: out }
+    return { discovered: orgs.length, created, linked, alreadyLinked, credentialKind, capped, orgs: out }
   })
 })

@@ -202,16 +202,24 @@ const isReportingRole = computed(() => REPORTING_ROLES.includes(session.value?.r
  * A GRANTED developer (report_access_grant, mig 0129) is not in REPORTING_ROLES
  * and may hold no cou_owner row either, so neither existing check lit up the
  * Reporting entry — a person an admin explicitly granted company-wide access
- * had no way to reach it from the nav. Fetched on the SAME 'reports-meta' key
- * /reporting itself uses (they dedupe), and kept LAZY: `immediate` snapshots
+ * had no way to reach it from the nav. Fetched on its OWN key — see below for
+ * why it must not share the shell's — and kept LAZY: `immediate` snapshots
  * `isReportingRole` at setup so a reporting-role viewer — who already gets the
  * entry unconditionally — never pays for this fetch on first load.
  */
 interface ReportsMetaForNav {
   permissions?: string[]
 }
+/*
+ * ITS OWN KEY. Sharing 'reports-meta' with /reporting looked like free deduping
+ * and was not: this fetch is `immediate: false` for a reporting role and
+ * carries a `default`, so it registered the shared key as RESOLVED with a
+ * truthy `{}` without ever requesting. /reporting then deduped onto that entry,
+ * issued no request at all, read `scopes` as absent and rendered "You don't
+ * have access to any reports" to a platform-admin.
+ */
 const { data: reportsMetaForNav } = useFetch<ReportsMetaForNav>('/api/v1/reports/meta', {
-  key: 'reports-meta',
+  key: 'reports-meta-nav',
   default: () => ({}),
   immediate: !isReportingRole.value,
   watch: [session],

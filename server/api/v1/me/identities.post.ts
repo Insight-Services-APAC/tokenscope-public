@@ -15,7 +15,7 @@ import { z } from 'zod'
 import { sql } from 'drizzle-orm'
 import { requireAuth } from '../../../auth/rbac'
 import { assertSameOrigin } from '../../../auth/csrf'
-import { getDb } from '../../../db'
+import { withRequestRls } from '../../../db/request-rls'
 import { recordAuditEvent } from '../../../db/audit'
 import { translatePgConstraintError } from '../../../utils/pg-constraint-error'
 
@@ -34,7 +34,6 @@ export default defineEventHandler(async (event) => {
   const session = await requireAuth(event)
   const body = await readValidatedBody(event, (d) => Body.parse(d))
   const identifier = body.identifier.trim().toLowerCase()
-  const db = getDb()
 
   const conflict = (detail: string) =>
     createError({
@@ -43,36 +42,44 @@ export default defineEventHandler(async (event) => {
       data: { type: 'https://tokenscope.example.com/errors/identity-conflict', title: 'Cannot link identity', status: 409, detail },
     })
 
-  const [me] = await db.execute<{ email: string }>(
-    sql`SELECT email FROM teammate WHERE id = ${session.teammateId}::uuid`,
-  )
-  if (me && me.email.toLowerCase() === identifier) throw conflict('That is already your primary identity.')
-
-  const [otherPrimary] = await db.execute<{ id: string }>(sql`
-    SELECT id::text AS id FROM teammate
-    WHERE lower(email) = ${identifier} AND id <> ${session.teammateId}::uuid LIMIT 1
-  `)
-  if (otherPrimary) throw conflict('That identity belongs to another teammate.')
-
-  const [existing] = await db.execute<{ teammate_id: string }>(sql`
-    SELECT teammate_id::text AS teammate_id FROM teammate_identity_map
-    WHERE system = ${body.system} AND lower(identifier) = ${identifier} LIMIT 1
-  `)
-  if (existing) {
-    throw conflict(
-      existing.teammate_id === session.teammateId
-        ? 'Already linked to your account.'
-        : 'That identity is linked to another teammate.',
-    )
-  }
-
-  // INSERT + audit in ONE transaction (SYS-3 idiom) so a link never lands
-  // unaudited. The friendly pre-checks above are racy by nature — a
-  // concurrent duplicate claim slips past them and hits the unique index
-  // (system + lower(identifier)); translate that 23505 into the same clean
-  // 409 instead of a raw 500 (API-10).
+  // Pre-checks + INSERT + audit in ONE transaction (SYS-3 idiom) so a link never
+  // lands unaudited, and withRequestRls makes that transaction carry the caller's
+  // RLS identity. The friendly pre-checks are racy by nature — a concurrent
+  // duplicate claim slips past them and hits the unique index (system +
+  // lower(identifier)); translate that 23505 into the same clean 409 instead of a
+  // raw 500 (API-10).
+  //
+  // NOTE the `otherPrimary` probe reads OTHER teammates' rows deliberately: it is
+  // an EXISTENCE check the caller is allowed to make (it can only ever say "taken",
+  // never by whom). Under FORCE, `teammate`'s region policy narrows it for a
+  // developer — a cross-region collision then falls through to the unique index and
+  // surfaces as the SAME 409 via translatePgConstraintError, so the outcome is
+  // unchanged; only which layer produces it moves.
   try {
-    const id = await db.transaction(async (tx) => {
+    const id = await withRequestRls(event, async (tx) => {
+      const [me] = await tx.execute<{ email: string }>(
+        sql`SELECT email FROM teammate WHERE id = ${session.teammateId}::uuid`,
+      )
+      if (me && me.email.toLowerCase() === identifier) throw conflict('That is already your primary identity.')
+
+      const [otherPrimary] = await tx.execute<{ id: string }>(sql`
+        SELECT id::text AS id FROM teammate
+        WHERE lower(email) = ${identifier} AND id <> ${session.teammateId}::uuid LIMIT 1
+      `)
+      if (otherPrimary) throw conflict('That identity belongs to another teammate.')
+
+      const [existing] = await tx.execute<{ teammate_id: string }>(sql`
+        SELECT teammate_id::text AS teammate_id FROM teammate_identity_map
+        WHERE system = ${body.system} AND lower(identifier) = ${identifier} LIMIT 1
+      `)
+      if (existing) {
+        throw conflict(
+          existing.teammate_id === session.teammateId
+            ? 'Already linked to your account.'
+            : 'That identity is linked to another teammate.',
+        )
+      }
+
       const [row] = await tx.execute<{ id: string }>(sql`
         INSERT INTO teammate_identity_map (teammate_id, system, identifier, identifier_kind, source, is_canonical)
         VALUES (${session.teammateId}::uuid, ${body.system}, ${identifier}, ${body.identifier_kind}, 'self', false)

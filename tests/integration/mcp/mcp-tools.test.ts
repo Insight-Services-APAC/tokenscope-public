@@ -158,6 +158,12 @@ function bearerTeammate(opts: {
     displayName: 'MCP User',
     role: 'developer',
     regionId,
+    // The RLS org-path GUC. requireOAuthBearer resolves this from its
+    // token→teammate→org_unit join; the in-memory harness has to state it, and
+    // it MUST match the org_unit this test's teammate is actually placed in
+    // (`mc.svc`) — server/utils/mcp.ts's rlsContextFor fails closed on an empty
+    // path, so a wrong value here silently narrows every tool's scope.
+    orgPath: 'mc.svc',
     scope: opts.scope ?? 'tokenscope.read tokenscope.emit',
     // Hand-built for the in-memory tool harness — not a real
     // requireOAuthBearer resolution (see connectClientForToken below for

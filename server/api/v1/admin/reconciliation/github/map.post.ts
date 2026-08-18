@@ -174,12 +174,12 @@ export default defineEventHandler(async (event) => {
   }
 
   return await withRequestRls(event, async (tx) => {
-    // Exclusion check inside the tx on `tx`, not before it on a second pool handle: the sibling
-    // (admin/teammates.post.ts:101) reads it on a second pool handle, which predates the
-    // handler-RLS guard and is grandfathered in scripts/check-handler-rls-context.mjs. A new
-    // handler taking that shape would both grow that allowlist and read the exclusion list
-    // outside RLS context. Nothing is written before this point, so a refusal here still
-    // rejects with no partial effect.
+    // Exclusion check inside the tx on `tx`, not before it on a second pool handle. This route
+    // was the first to get it right; its three siblings (admin/teammates.post.ts,
+    // admin/org-units/[id]/owners.post.ts, admin/projects/[id]/assignments.post.ts) read the
+    // patterns on a second, context-less handle until the A2 conversion moved them here too, so
+    // all four now share this shape. Nothing is written before this point, so a refusal here
+    // still rejects with no partial effect.
     if (dirUser) {
       assertDirectoryIdentityPickable(dirUser, await loadDirectoryExclusionPatterns(tx))
     }

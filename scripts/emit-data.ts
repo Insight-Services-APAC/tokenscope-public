@@ -21,10 +21,10 @@
  * an interval to verify the at-speed read path.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js'
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
-import { createDbClient } from '../drizzle/connect'
-import * as schema from '../drizzle/schema'
+import { createWorkerDb } from '../server/db/worker-db'
+import type * as schema from '../drizzle/schema'
 import { LocalCollectorReader } from '../server/azure/reader'
 import { runReadJoiner } from '../server/workers/azure-monitor-reader'
 
@@ -207,8 +207,10 @@ async function main() {
     process.exit(1)
   }
 
-  const client = createDbClient(dbUrl, { max: 1, idle_timeout: 5 })
-  const db = drizzle(client, { schema })
+  // Worker lane: emitTick runs the REAL read joiner (runReadJoiner), so this
+  // handle mints worker writes and must carry the lane's estate-wide RLS
+  // identity + UTC pin (server/db/worker-db.ts).
+  const { client, db } = await createWorkerDb(dbUrl, { max: 1, idle_timeout: 5 })
   const reader = new LocalCollectorReader(endpoint)
 
   try {

@@ -8,12 +8,16 @@
  * (readSecret(provider, credential_secret_name) != null). The KEY IS NEVER
  * returned — only the presence boolean.
  *
- * RBAC: requireRole(admin, global-finops). Config table, no RLS → getDb().
+ * RBAC: requireRole(admin, global-finops). `provider_enterprise` is a config
+ * table with no RLS policy, but the read still runs in the request lane
+ * (docs/design/rls-enforcement.md §2): the lane is decided by who is asking,
+ * not by which table the query names. `readSecret` / `readGithubAppKey` are
+ * pure env reads — no I/O inside the transaction.
  */
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireRole } from '../../../../auth/rbac'
-import { getDb } from '../../../../db'
+import { withRequestRls } from '../../../../db/request-rls'
 import { readSecret, readGithubAppKey } from '../../../../reconciliation/credentials'
 import type { ReconcileProvider } from '../../../../reconciliation/types'
 
@@ -35,9 +39,9 @@ interface Row extends Record<string, unknown> {
 
 export default defineEventHandler(async (event) => {
   await requireRole(event, 'admin', 'global-finops')
-  const db = getDb()
 
-  const rows = await db.execute<Row>(sql`
+  const rows = await withRequestRls(event, (tx) =>
+    tx.execute<Row>(sql`
     SELECT pe.id::text AS id,
            pe.provider,
            pe.external_id,
@@ -54,7 +58,8 @@ export default defineEventHandler(async (event) => {
              AS org_count
     FROM provider_enterprise pe
     ORDER BY pe.provider, pe.display_name
-  `)
+  `),
+  )
 
   const enterprises = [...rows].map((r) => {
     // App mode INTENDED iff a github_app_id is set (github only). 'github-app' here is a

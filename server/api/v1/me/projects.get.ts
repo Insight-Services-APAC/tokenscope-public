@@ -6,12 +6,13 @@
 import { defineEventHandler } from 'h3'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { requireAuth } from '../../../auth/rbac'
-import { getDb } from '../../../db'
+import { withRequestRls } from '../../../db/request-rls'
 import { getMyProjects } from '../../../utils/me-queries'
 
 export default defineEventHandler(async (event) => {
   const session = await requireAuth(event)
-  const db = getDb() as unknown as PostgresJsDatabase<Record<string, unknown>>
-  const projects = await getMyProjects(db, session.teammateId)
+  const projects = await withRequestRls(event, (tx) =>
+    getMyProjects(tx as unknown as PostgresJsDatabase<Record<string, unknown>>, session.teammateId),
+  )
   return { projects }
 })

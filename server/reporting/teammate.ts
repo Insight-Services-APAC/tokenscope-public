@@ -39,7 +39,7 @@ import { sql } from 'drizzle-orm'
 import { consola } from 'consola'
 import type { H3Event } from 'h3'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
-import { getDb } from '../db'
+import { withRequestRls } from '../db/request-rls'
 import { recordAuditEvent } from '../db/audit'
 import { costCentreScopeOpts } from '../auth/report-scope'
 import { csvEscape } from '../utils/csv-escape'
@@ -697,15 +697,25 @@ export async function writeDrillAudit(
   input: { actorTeammateId: string; subjectId: string; payload: Record<string, unknown> },
 ): Promise<void> {
   try {
-    await recordAuditEvent(getDb() as unknown as Tx, {
-      eventType,
-      actorTeammateId: input.actorTeammateId,
-      subjectKind: 'teammate',
-      subjectId: input.subjectId,
-      payload: input.payload,
-      ipAddress: getRequestIP(event, { xForwardedFor: true }) ?? null,
-      userAgent: getHeader(event, 'user-agent') ?? null,
-    })
+    /*
+     * Its OWN transaction (withRequestRls opens one on the pool), deliberately
+     * separate from whatever read the caller is running: this audit is the only
+     * record that a named individual's page was opened, so it must not be rolled
+     * back by a later failure in the read it is recording. What it no longer is
+     * is identity-less — the connection carries the caller's RLS context
+     * (docs/design/rls-enforcement.md §4).
+     */
+    await withRequestRls(event, (tx) =>
+      recordAuditEvent(tx as unknown as Tx, {
+        eventType,
+        actorTeammateId: input.actorTeammateId,
+        subjectKind: 'teammate',
+        subjectId: input.subjectId,
+        payload: input.payload,
+        ipAddress: getRequestIP(event, { xForwardedFor: true }) ?? null,
+        userAgent: getHeader(event, 'user-agent') ?? null,
+      }),
+    )
   } catch (err) {
     consola.error('[SECURITY-AUDIT-WRITE-FAILED] teammate-drill audit write failed', {
       eventType,

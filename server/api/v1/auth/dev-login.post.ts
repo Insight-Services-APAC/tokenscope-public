@@ -27,6 +27,18 @@
  * Every override writes an `audit_event` row with
  * `eventType='persona-impersonation'`; if the audit insert fails we
  * fail closed (no override applied).
+ *
+ * NO RLS LANE (docs/design/rls-enforcement.md; tracked as an explicit residue in
+ * scripts/check-handler-rls-context.mjs). This is a LOGIN endpoint: on the
+ * dev-mode branch there is no caller session at all — the persona teammate this
+ * handler looks up is the identity being MINTED, not one being presented — so
+ * there is nothing to put on the connection before the lookup that produces it.
+ * The override branch does have an authenticated admin, but splitting one
+ * handler across two lanes to convert half of it would leave the file on the
+ * pool anyway and make the login path harder to reason about than the debt is
+ * worth. What bounds the exposure is that the whole endpoint 404s off a
+ * demo-capable env (`isDemoCapableEnv`, {local, sandbox} only), so it does not
+ * exist on any environment where FORCE will be enabled.
  */
 import { createError, defineEventHandler, readValidatedBody } from 'h3'
 import { eq } from 'drizzle-orm'

@@ -27,6 +27,7 @@ import { consola } from 'consola'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { requireAuth, type Session } from '../utils/auth'
 import { getDb } from '../db'
+import { withRlsContext, rlsRoleFor } from '../db/rls'
 import { recordAuditEvent } from '../db/audit'
 import { isOrgWideRole } from '../../shared/auth/roles'
 import {
@@ -270,7 +271,26 @@ export async function requireReportScope(
   if (!scopePermitted(scope, grants, opts)) {
     if (isUnclampedRequest(scope, opts)) {
       try {
-        await recordAuditEvent(getDb() as unknown as Tx, {
+        /*
+         * A SEPARATE transaction, on purpose — and NOT the caller's `tx`.
+         *
+         * This deny throws a 403 two statements below, which rolls the caller's
+         * transaction back. Writing the escalation-attempt record inside it
+         * would erase the only evidence the attempt happened, so it has to land
+         * on its own connection. What changed is that the connection now
+         * carries the CALLER's RLS identity (docs/design/rls-enforcement.md §4)
+         * instead of being the bare pool: separate transaction, yes;
+         * identity-less, no.
+         */
+        await withRlsContext(
+          getDb(),
+          {
+            userRegionId: session.regionId,
+            userOrgPath: session.orgPath,
+            userRole: rlsRoleFor(session.role),
+            userTeammateId: session.teammateId,
+          },
+          (auditTx) => recordAuditEvent(auditTx as unknown as Tx, {
           eventType: 'report-scope-denied',
           actorTeammateId: session.teammateId,
           subjectKind: 'report-scope',
@@ -290,7 +310,8 @@ export async function requireReportScope(
           },
           ipAddress: getRequestIP(event, { xForwardedFor: true }) ?? null,
           userAgent: getHeader(event, 'user-agent') ?? null,
-        })
+          }),
+        )
       } catch (err) {
         // Best-effort forensics: an audit failure must never mask the 403 (the
         // deny still returns below). But for across/finance the audit IS the only

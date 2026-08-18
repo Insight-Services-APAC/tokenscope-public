@@ -35,7 +35,7 @@
 import { createError, defineEventHandler, getRouterParam, getRequestIP, getHeader } from 'h3'
 import { requireRole } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
-import { getDb } from '../../../../../db'
+import { getWorkerDb } from '../../../../../db/worker-db'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
 import { dispatchWorker } from '../../../../../workers/dispatch'
@@ -61,7 +61,17 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 404, statusMessage: `Unknown worker: ${name}` })
   }
 
-  const db = getDb()
+  // TWO LANES, deliberately (docs/design/rls-enforcement.md §2). The AUDIT write
+  // below stays on the REQUEST lane (`withRequestRls`), because it records what
+  // THIS admin did and must be scoped to them. The WORKER runs on the worker
+  // lane's pool, which carries the estate-wide `app.user_role=global-finops`
+  // GUC: every UI-triggerable worker operates globally (identity-sync sweeps the
+  // enterprise, reconciliation-sync reconciles all scopes), so under FORCE it
+  // must not inherit the triggering admin's scope. requireRole already limits
+  // this route to global-finops/platform-admin, so this widens nothing — it
+  // stops the scope being an ambient consequence of which pool the code landed
+  // on.
+  const db = await getWorkerDb()
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
   const ua = getHeader(event, 'user-agent') ?? null
 

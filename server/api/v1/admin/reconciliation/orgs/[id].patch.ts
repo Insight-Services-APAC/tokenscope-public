@@ -376,6 +376,13 @@ export default defineEventHandler(async (event) => {
 
     // Targeted governance-key resweep (design §8.4) — linking this org to an
     // enterprise may resolve previously-unresolved rows keyed by it.
+    //
+    // ON THE REQUEST LANE DELIBERATELY (docs/design/rls-enforcement.md §2, "the
+    // six handlers"): its scope is an explicit parameter (org id + provider +
+    // external id), not the caller's region; its tables carry no RLS; and it
+    // must observe the UPDATE above, which no other connection can see until
+    // this transaction commits. Same for recomputeGovernanceVerdicts, scoped by
+    // { providerOrgId }.
     if (has('providerEnterpriseId')) {
       await resweepProviderOrgReferences(tx, {
         providerOrgId: id,

@@ -12,7 +12,7 @@ import { defineEventHandler } from 'h3'
 import { assertSameOrigin } from '../../../auth/csrf'
 import { tryAuth } from '../../../utils/auth'
 import { clearPersonaOverrideCookie } from '../../../utils/persona-override-cookie'
-import { getDb } from '../../../db'
+import { withRequestRls } from '../../../db/request-rls'
 import { recordAuditEvent } from '../../../db/audit'
 
 export default defineEventHandler(async (event) => {
@@ -20,14 +20,19 @@ export default defineEventHandler(async (event) => {
   const session = await tryAuth(event)
   clearPersonaOverrideCookie(event)
   if (session) {
-    await recordAuditEvent(getDb(), {
-      eventType: 'logout',
-      actorTeammateId: session.teammateId,
-      actorSystem: 'dev-login',
-      subjectKind: 'teammate',
-      subjectId: session.teammateId,
-      payload: {},
-    })
+    // Inside the `if (session)` the caller IS authenticated, so withRequestRls's
+    // internal requireAuth resolves the same session tryAuth just cached on the
+    // event — no second lookup, and the audit INSERT carries an RLS identity.
+    await withRequestRls(event, (tx) =>
+      recordAuditEvent(tx, {
+        eventType: 'logout',
+        actorTeammateId: session.teammateId,
+        actorSystem: 'dev-login',
+        subjectKind: 'teammate',
+        subjectId: session.teammateId,
+        payload: {},
+      }),
+    )
   }
   return { ok: true }
 })

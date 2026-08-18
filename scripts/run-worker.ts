@@ -23,9 +23,7 @@
  *   - Friendly output (per-worker result printed as JSON)
  */
 import 'dotenv/config'
-import { drizzle } from 'drizzle-orm/postgres-js'
-import { createDbClient } from '../drizzle/connect'
-import * as schema from '../drizzle/schema'
+import { createWorkerDb } from '../server/db/worker-db'
 import { getWorker, listWorkerNames, WORKERS, type WorkerRunContext } from '../server/workers/registry'
 import { workerOptsSchema } from '../server/workers/run-worker-opts'
 
@@ -75,8 +73,23 @@ async function main() {
     console.error('DATABASE_URL not set')
     process.exit(2)
   }
-  const client = createDbClient(url)
-  const db = drizzle(client, { schema })
+  // THE WORKER LANE'S CONNECTION CONFIG — the same one the in-process dispatch
+  // uses (server/db/worker-db.ts). Two things ride on it, and this CLI had
+  // NEITHER:
+  //   - the estate-wide `app.user_role=global-finops` RLS identity, without
+  //     which a worker run from here reads part of the estate under FORCE and
+  //     reports success (docs/design/rls-enforcement.md §2);
+  //   - `TimeZone: 'UTC'`. This line used to be `createDbClient(url)` with NO
+  //     options at all, so the CLI ran every worker on a connection in the
+  //     SERVER's timezone while the app pool (server/db/index.ts:30) pins UTC.
+  //     ~23 bare `timestamptz::date` day-bucket casts are correct only because
+  //     of that pin (docs/design/clock-rot-audit.md §A), so `npm run worker --
+  //     aggregate-rollup` on a non-UTC host wrote rollup cells keyed to the
+  //     wrong day — silently, and differently from the same worker run by cron.
+  // Pool size is left at the lane default (max 10), NOT narrowed to 1: several
+  // workers open a transaction and issue other statements alongside it, which a
+  // single-connection pool would deadlock rather than merely slow down.
+  const { client, db } = await createWorkerDb(url)
   const startedAt = Date.now()
   try {
     const result = await entry.run(db, ctx)

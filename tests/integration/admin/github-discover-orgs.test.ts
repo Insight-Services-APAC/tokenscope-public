@@ -11,11 +11,22 @@ import { injectTestSession, type Session } from '../../helpers/auth'
 import discoverOrgs from '../../../server/api/v1/admin/reconciliation/github/discover-orgs.post'
 import * as schema from '../../../drizzle/schema'
 
-// Mutable seat roster + optional failure, shared with the hoisted mock. withPatCalls /
-// withAppCalls record every construction so S9's credential-branch fix can be asserted
-// on the CONSTRUCTED client kind, not merely a successful run (Must-not-break).
+/*
+ * Mutable provider surfaces + optional failure, shared with the hoisted mock.
+ * withPatCalls / withAppCalls record every construction so S9's credential-branch fix can
+ * be asserted on the CONSTRUCTED client kind, not merely a successful run
+ * (Must-not-break).
+ *
+ * UF-19: the two modes read DIFFERENT surfaces — PAT the enterprise seat roster, App the
+ * owned-org census — so the stub carries both, keeps them separate, and makes the
+ * PAT-only `listSeats` THROW: an App-mode run reaching it is the defect this test exists
+ * to catch, not something to be quietly satisfied by a shared fixture.
+ */
 const stub = vi.hoisted(() => ({
   seats: [] as Array<{ assignee: { login: string }; organization: { login: string } | null }>,
+  seatsPagesCapped: false,
+  census: [] as Array<{ id: number; login: string }>,
+  censusPagesCapped: false,
   fail: null as unknown,
   withPatCalls: [] as unknown[][],
   withAppCalls: [] as unknown[][],
@@ -25,8 +36,15 @@ const stub = vi.hoisted(() => ({
 vi.mock('../../../server/reconciliation/adapters/github-client', () => {
   class GithubCopilotClient {
     async listSeats() {
+      throw new Error('discover-orgs must read listSeatsWithDiagnostics, never the bare array surface')
+    }
+    async listSeatsWithDiagnostics() {
       if (stub.fail) throw stub.fail
-      return stub.seats
+      return { seats: stub.seats, pagesCapped: stub.seatsPagesCapped, shortPageBreak: !stub.seatsPagesCapped, rosterIncomplete: false }
+    }
+    async listInstallableOrganizations() {
+      if (stub.fail) throw stub.fail
+      return { organizations: stub.census, pagesCapped: stub.censusPagesCapped, shortPageBreak: !stub.censusPagesCapped }
     }
     // S9: the endpoint now branches credential.kind exactly like the five correct
     // sibling call sites — the mock mirrors BOTH factory statics so the test can prove
@@ -113,9 +131,13 @@ beforeEach(async () => {
   await t.client`DELETE FROM provider_org WHERE provider = 'github'`
   await t.client`DELETE FROM provider_enterprise WHERE provider = 'github'`
   stub.seats = []
+  stub.seatsPagesCapped = false
+  stub.census = []
+  stub.censusPagesCapped = false
   stub.fail = null
   stub.withPatCalls = []
   stub.withAppCalls = []
+  delete process.env.NUXT_GITHUB_APP_KEY_DISC
   const [e] = await t.db.insert(schema.providerEnterprise).values({
     provider: 'github', externalId: 'disc-ent', displayName: 'Disc Ent', reconciliationMode: 'reconciled', credentialSecretName: 'disc',
   }).returning()
@@ -141,22 +163,80 @@ describe('github discover-orgs', () => {
     expect(stub.withAppCalls).toHaveLength(0)
   })
 
-  it('S9 App mode: a github_app_id-configured enterprise constructs via withApp, never withPat', async () => {
-    await t.client`UPDATE provider_enterprise SET github_app_id = '424242' WHERE id = ${entId}::uuid`
-    process.env.NUXT_GITHUB_APP_KEY_DISC = 'stub-app-key-mocked-auth-never-parses-it'
+  it('reports credentialKind + capped so a truncated PAT roster is not read as the whole estate', async () => {
     stub.seats = [{ assignee: { login: 'u1' }, organization: { login: 'acme-eng' } }]
+    stub.seatsPagesCapped = true
+    const res = (await discoverOrgs(ev({ session: admin(), body: { enterpriseId: entId } }))) as {
+      discovered: number
+      credentialKind: string
+      capped: boolean
+    }
+    expect(res).toMatchObject({ discovered: 1, credentialKind: 'github-pat', capped: true })
+  })
 
-    const res = (await discoverOrgs(ev({ session: admin(), body: { enterpriseId: entId } }))) as { discovered: number; created: number }
-    expect(res).toMatchObject({ discovered: 1, created: 1 })
+  /*
+   * UF-19. An App-mode enterprise cannot read the enterprise SEAT endpoint (it presents a
+   * Bearer PAT header a withApp() client does not have), so discovery reads the owned-org
+   * CENSUS instead. Before the fix this route called listSeats() in both modes and an
+   * App-mode admin got a 401 — no orgs, no onboarding, no App mode.
+   */
+  describe('App mode (github_app_id set)', () => {
+    beforeEach(async () => {
+      await t.client`UPDATE provider_enterprise SET github_app_id = '424242' WHERE id = ${entId}::uuid`
+      process.env.NUXT_GITHUB_APP_KEY_DISC = 'stub-app-key-mocked-auth-never-parses-it'
+    })
 
-    // Asserted on the CONSTRUCTED client kind, not merely a successful run.
-    expect(stub.withAppCalls).toHaveLength(1)
-    expect(stub.withPatCalls).toHaveLength(0)
-    const [enterpriseArg, appAuthArg] = stub.withAppCalls[0] as [string, { appId: string; value: string }]
-    expect(enterpriseArg).toBe('disc-ent')
-    expect(appAuthArg.appId).toBe('424242')
+    it('discovers from installable_organizations (NOT the PAT seat roster) and constructs via withApp', async () => {
+      // The seat roster is deliberately NON-EMPTY and disjoint from the census: a run that
+      // still read seats would create 'seat-only-org' and miss the census orgs entirely.
+      stub.seats = [{ assignee: { login: 'u1' }, organization: { login: 'seat-only-org' } }]
+      stub.census = [
+        { id: 1, login: 'Acme-Eng' }, // mixed case → lowercased
+        { id: 2, login: 'acme-eng' }, // dupe of the above
+        { id: 3, login: 'acme-quiet' }, // owned but seatless — still onboardable
+      ]
 
-    delete process.env.NUXT_GITHUB_APP_KEY_DISC
+      const res = (await discoverOrgs(ev({ session: admin(), body: { enterpriseId: entId } }))) as {
+        discovered: number
+        created: number
+        credentialKind: string
+        capped: boolean
+      }
+      expect(res).toMatchObject({ discovered: 2, created: 2, credentialKind: 'github-app', capped: false })
+      expect((await orgRows()).map((r) => r.external_org_id)).toEqual(['acme-eng', 'acme-quiet'])
+
+      // Asserted on the CONSTRUCTED client kind, not merely a successful run.
+      expect(stub.withAppCalls).toHaveLength(1)
+      expect(stub.withPatCalls).toHaveLength(0)
+      const [enterpriseArg, appAuthArg] = stub.withAppCalls[0] as [string, { appId: string; value: string }]
+      expect(enterpriseArg).toBe('disc-ent')
+      expect(appAuthArg.appId).toBe('424242')
+    })
+
+    it('a capped census is reported as capped — "discovered N" is a prefix, not the estate', async () => {
+      stub.census = [{ id: 1, login: 'acme-eng' }]
+      stub.censusPagesCapped = true
+      const res = (await discoverOrgs(ev({ session: admin(), body: { enterpriseId: entId } }))) as { capped: boolean; discovered: number }
+      expect(res).toMatchObject({ discovered: 1, capped: true })
+    })
+
+    it('a 403 on the census maps to 403-forbidden-scope and carries credentialKind for the remediation copy', async () => {
+      stub.fail = { data: { detail: 'enterprises/{ent}/apps/installable_organizations returned HTTP 403' } }
+      const e = ev({ session: admin(), body: { enterpriseId: entId } })
+      const res = (await discoverOrgs(e)) as { reason: string; credentialKind: string }
+      expect(res).toMatchObject({ reason: '403-forbidden-scope', credentialKind: 'github-app' })
+      expect((e as unknown as { node: { res: { statusCode: number } } }).node.res.statusCode).toBe(422)
+    })
+
+    it('an App-opted enterprise whose key is unwired answers 422 { no-key }, not a 500', async () => {
+      // resolveEnterpriseCredential throws MissingGithubAppKeyError here (fail-loud by
+      // design). Uncaught it is a 500 on the onboarding screen an admin uses mid-cutover.
+      delete process.env.NUXT_GITHUB_APP_KEY_DISC
+      const e = ev({ session: admin(), body: { enterpriseId: entId } })
+      const res = (await discoverOrgs(e)) as { reason: string; credentialKind: string }
+      expect(res).toMatchObject({ reason: 'no-key', credentialKind: 'github-app' })
+      expect((e as unknown as { node: { res: { statusCode: number } } }).node.res.statusCode).toBe(422)
+    })
   })
 
   it('is idempotent — a second run creates nothing (alreadyLinked)', async () => {

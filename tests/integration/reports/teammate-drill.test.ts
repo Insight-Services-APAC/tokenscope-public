@@ -419,7 +419,16 @@ describe('T32 — read-audit on every request, and no-store on every response', 
     expect(row!.actor).toBe(ccOwner)
     const json = JSON.stringify(row!.payload)
     expect(json).toContain(ids.uApacCto) // the scope token — an id
-    expect(json).not.toContain('100') // no money
+    /*
+     * The money check runs over the payload with UUIDs REMOVED. Searching the
+     * raw JSON for '100' is a coin flip: the payload embeds ids, and a v4 uuid
+     * contains that digit string often enough to fail a full suite at random —
+     * this fired on `48f1100f-96cf-…`, three re-runs later it passed. A test
+     * that fails on the shape of a random id is noise that trains people to
+     * re-run rather than read.
+     */
+    const withoutIds = json.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>')
+    expect(withoutIds).not.toContain('100') // no money
     expect(json).not.toContain('alice@ko.test') // no PII
     expect(json).not.toContain('PROJ-SCHOLARSHIP') // no row contents
   })

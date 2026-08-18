@@ -13,15 +13,25 @@
  * Re-pulls straight from the GitHub enterprise billing usage report (the SAME
  * path server/workers/copilot-pool-bill.ts's scheduled tick uses, scoped to
  * this one enterprise + month via `explicitMonths`), then recomputes the
- * overage allocation for that month in the SAME transaction — both under the
- * reportingSnapshot + copilotOverageAllocation advisory locks.
+ * overage allocation for that month — the worker does both in ONE transaction
+ * per (enterprise, month), under the reportingSnapshot +
+ * copilotOverageAllocation advisory locks.
  *
- * FINANCE-PERIOD INTEGRATION: a CLOSED month is refused outright (409) — the
- * caller must reopen or restate the period first (server/governance/
- * reporting-snapshot.ts). This route never
- * itself reopens/restates — it only ever operates on an OPEN period.
+ * LANES: the worker runs on the WORKER pool (estate-wide RLS identity), the
+ * validation and the audit rows on the REQUEST pool (the caller's). See the
+ * block comment at the worker call for why — docs/design/rls-enforcement.md §2
+ * names the previous shape, which ran the worker inside the request
+ * transaction, as the failure mode this design exists to remove.
  *
- * RBAC: requireRole(admin, global-finops) + assertSameOrigin. Audited
+ * FINANCE-PERIOD INTEGRATION: a CLOSED month is NOT refused. This header used to
+ * say it was 409'd; the refusal was removed (see the block comment on the
+ * request-lane transaction below, and the matching one in copilot-pool-bill.ts)
+ * because we close at +2, the provider corrects at +6 and the bill lands at +10,
+ * so refusing it guaranteed the month stayed wrong. The bill always lands; if
+ * the month was closed, its snapshot is unchanged and the difference is reported
+ * as a delta. This route still never reopens or restates a period itself.
+ *
+ * RBAC: requireRole(global-finops) + assertSameOrigin. Audited
  * (before the pull, and again with the outcome).
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
@@ -30,6 +40,7 @@ import { z } from 'zod'
 import { requireRole } from '../../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../../db/request-rls'
+import { getWorkerDb } from '../../../../../../db/worker-db'
 import { requireUuidParam } from '../../../../../../utils/require-uuid-param'
 import { readValidated } from '../../../../../../utils/validated-body'
 import { recordAuditEvent } from '../../../../../../db/audit'
@@ -74,7 +85,23 @@ function assertMonthInBounds(month: string, now: Date): void {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  // `global-finops` ONLY — deliberately NOT 'admin'. `admin` is a REGION-scoped role
+  // (rbac.ts), but `provider_enterprise` carries no region column, so there is nothing
+  // to clamp a region admin against: any admin could pass any enterprise id and cause
+  // that enterprise's copilot_pool_bill month to be deleted and rewritten, plus its
+  // overage allocations recomputed and its inbox alerts raised, anywhere in the estate.
+  //
+  // That gap predates this branch, but this branch is what removed the accident that
+  // half-covered it: while the worker ran on the caller's RLS context, FORCE would at
+  // least have narrowed the damage (to a wrong, partial bill). Now that the worker
+  // correctly runs estate-wide, the authorization has to carry the weight the lane used
+  // to. Raised by an external review of this sprint.
+  //
+  // Consistent with the standing recommendation in owner-decisions.md §1 — "provider
+  // configuration is estate config, so drop 'admin' from that whole tree". This is one
+  // route of that tree, tightened where a money-of-record write made it urgent; the
+  // ruling for the other 22 handlers is still the owner's.
+  const caller = await requireRole(event, 'global-finops')
   assertSameOrigin(event)
   const providerEnterpriseId = requireUuidParam(event, 'id', 'provider-enterprise id')
   const body = await readValidated(event, Body)
@@ -85,7 +112,9 @@ export default defineEventHandler(async (event) => {
   assertMonthInBounds(body.month, now)
   const monthStart = `${body.month}-01`
 
-  return withRequestRls(event, async (db) => {
+  // ── Request lane: validate the target, then attribute the trigger ─────────
+  // Both belong to the CALLER, so both run under the caller's RLS context.
+  await withRequestRls(event, async (db) => {
     const ent = await db.execute<{
       id: string
       provider: string
@@ -138,18 +167,53 @@ export default defineEventHandler(async (event) => {
       ipAddress: ip,
       userAgent: ua,
     })
+  })
 
-    const result = await runCopilotPoolBill(db, {
-      now,
-      enterpriseId: providerEnterpriseId,
-      explicitMonths: [monthStart],
-    })
+  /*
+   * ── WORKER LANE: the bill is estate-wide, and now says so ─────────────────
+   *
+   * This call used to sit INSIDE the `withRequestRls` transaction above, which
+   * docs/design/rls-enforcement.md §2 names as "the failure mode, not the
+   * precedent". Two things were wrong with it, and this line fixes both:
+   *
+   *   SCOPE. requireRole admits a region-scoped `admin`, so the worker inherited
+   *   THAT admin's region as its RLS context. Under FORCE the bill computation's
+   *   org_unit lookups (org → BU mapping) and its inbox_item alerts would be
+   *   narrowed to one region — a PARTIAL BILL that reports success. The lane now
+   *   decides the scope: `app.user_role=global-finops`, estate-wide, the same
+   *   identity the scheduled tick of this exact worker runs under. The
+   *   COMPUTATION's scope is therefore neither widened nor narrowed by who
+   *   pressed the button — which is a statement about the computation, NOT about
+   *   authorisation. The caller's authority is bounded by requireRole above, and
+   *   an external review of this sprint correctly pointed out that those are two
+   *   different questions and only one of them was being answered here.
+   *
+   *   TRANSACTION NESTING. runCopilotPoolBill opens its own transaction per
+   *   (enterprise, month) and takes `advisoryXactLock('reportingSnapshot', …)`
+   *   + `advisoryXactLock('copilotOverageAllocation', …)` inside it. Nested in a
+   *   request transaction those demote to SAVEPOINTs, so the xact locks scoped
+   *   to the whole request instead of the unit of work they were written to
+   *   guard — and GitHub billing HTTP calls ran mid-transaction.
+   *
+   * Consequence to know: the worker's writes are no longer atomic with the audit
+   * rows. That is the correct trade — the worker already commits per
+   * (enterprise, month) internally, and the previous shape meant a 502 rolled
+   * back the "triggered" AND "failed" audit rows, so a failed re-pull left no
+   * trace at all. It now leaves both.
+   */
+  const workerDb = await getWorkerDb()
+  const result = await runCopilotPoolBill(workerDb, {
+    now,
+    enterpriseId: providerEnterpriseId,
+    explicitMonths: [monthStart],
+  })
 
-    // The raced-close 409 went with the pre-flight one: there is no longer a
-    // state a month can race INTO that would make its bill unwelcome.
+  // The raced-close 409 went with the pre-flight one: there is no longer a
+  // state a month can race INTO that would make its bill unwelcome.
 
-    if (result.enterprisesErrored > 0) {
-      await recordAuditEvent(db, {
+  if (result.enterprisesErrored > 0) {
+    await withRequestRls(event, (db) =>
+      recordAuditEvent(db, {
         eventType: 'copilot-bill-repull-failed',
         actorTeammateId: caller.teammateId,
         subjectKind: 'provider-enterprise',
@@ -162,20 +226,22 @@ export default defineEventHandler(async (event) => {
         },
         ipAddress: ip,
         userAgent: ua,
-      })
-      throw createError({
-        statusCode: 502,
-        statusMessage: 'Copilot bill re-pull failed',
-        data: {
-          type: 'https://tokenscope.example.com/errors/copilot-bill-repull',
-          title: 'Copilot bill re-pull failed',
-          status: 502,
-          detail: `The Copilot bill re-pull for ${body.month} failed before the rewrite committed. No partial result was applied; retry after checking worker diagnostics.`,
-        },
-      })
-    }
+      }),
+    )
+    throw createError({
+      statusCode: 502,
+      statusMessage: 'Copilot bill re-pull failed',
+      data: {
+        type: 'https://tokenscope.example.com/errors/copilot-bill-repull',
+        title: 'Copilot bill re-pull failed',
+        status: 502,
+        detail: `The Copilot bill re-pull for ${body.month} failed before the rewrite committed. No partial result was applied; retry after checking worker diagnostics.`,
+      },
+    })
+  }
 
-    await recordAuditEvent(db, {
+  await withRequestRls(event, (db) =>
+    recordAuditEvent(db, {
       eventType: 'copilot-bill-repull-completed',
       actorTeammateId: caller.teammateId,
       subjectKind: 'provider-enterprise',
@@ -190,8 +256,8 @@ export default defineEventHandler(async (event) => {
       },
       ipAddress: ip,
       userAgent: ua,
-    })
+    }),
+  )
 
-    return { month: body.month, result }
-  })
+  return { month: body.month, result }
 })

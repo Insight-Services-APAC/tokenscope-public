@@ -190,12 +190,16 @@ vendored `copilot-plugin/` copies byte-identical to their sources.
 ## Plugin trust boundary
 
 Claude Code merges a repository's `.claude/settings.local.json` over the device's
-global `~/.claude/settings.json`, and it applies the highest-precedence `env`
-block by **replacement, not key-merge**
-([ADR-0006](../decisions/0006-project-pin-must-not-freeze-upgradeable-client-state.md) §2).
+global `~/.claude/settings.json`, **per key**, with the repo-local value winning
+any key present in both — measured against Claude Code 2.1.232 in
+[`env-precedence-capture.md`](../security-sprint/env-precedence-capture.md).
+([ADR-0006](../decisions/0006-project-pin-must-not-freeze-upgradeable-client-state.md)
+§2 previously described this as wholesale replacement; that claim is amended.)
 Any cloned repository therefore gets a vote on the environment the plugin's own
 scripts run under — which is fine for a project claim and not fine for anything
-that carries a credential.
+that carries a credential. Merge makes the boundary **more** important than
+replacement would: a repo can override a single key and leave every other value
+looking untouched.
 
 - **The repo may supply `OTEL_RESOURCE_ATTRIBUTES`, and nothing else.**
   `repoTagEnv(globalEnv, repoEnv)` in `plugin-runtime.mjs` is a **positive

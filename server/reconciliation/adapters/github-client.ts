@@ -47,7 +47,12 @@ export type GithubSeat = z.infer<typeof SeatSchema>
 
 const SeatsPageSchema = z.object({
   total_seats: z.number().optional(),
-  seats: z.array(SeatSchema).default([]),
+  // NOT `.default([])`: the default erased the difference between "this page carried
+  // an empty seats array" (a real end-of-roster) and "this page had no `seats` key at
+  // all" (a renamed field or a partial outage answering 200). The prune DELETEs money
+  // rows on the strength of the roster, so it needs to tell those apart — `undefined`
+  // here is what makes `rosterIncomplete` possible below.
+  seats: z.array(SeatSchema).optional(),
 })
 
 /*
@@ -67,6 +72,46 @@ export interface SeatsPullDiagnostics {
    *  NORMAL end-of-roster signal for a real pull — but indistinguishable at this layer
    *  from a short/empty page produced by a partial outage or an API-shape change. */
   shortPageBreak: boolean
+  /** The payload itself PROVES this pull did not cover the roster. Two ways, both
+   *  positive evidence rather than the absence of evidence `shortPageBreak` reports:
+   *  a page arrived with no `seats` key at all, or the API reported `total_seats` and
+   *  we collected fewer than that.
+   *
+   *  This is the flag a DELETE may consume. `shortPageBreak` is NOT — it is true for
+   *  every roster under 100 seats, i.e. the normal case, so gating the prune on it
+   *  would block convergence for almost every enterprise forever. */
+  rosterIncomplete: boolean
+}
+
+/*
+ * The per-ORG analogue of SeatsPullDiagnostics (UF-19), for App mode's seat roster.
+ *
+ * `listOrgCopilotSeats()`'s plain array return hides TWO different "no seats" states
+ * behind the same `[]`, and a caller that DELETEs based on the roster (the Copilot
+ * seat-convergence prune) must be able to tell them apart:
+ *   - the App is not installed (or is suspended) on the org, so NO seats call was made
+ *     at all — the org's roster is UNKNOWN, not empty (`installed: false`);
+ *   - the seats call succeeded and the org genuinely holds no seats.
+ * Plus the same pagination ambiguities the enterprise pull has (a short page, the
+ * 100-page hard cap) and the same positive-evidence flag for the two that are
+ * decidable (`rosterIncomplete`).
+ */
+export interface OrgSeatsPullDiagnostics {
+  seats: Array<{ login: string; org: string }>
+  /** False ⇒ the App is not installed/is suspended on this org: no seats call was
+   *  issued, so `seats` is "unknown for this org", NEVER "this org has no seats". */
+  installed: boolean
+  /** The 100-page (10,000-seat) hard cap was hit for THIS org — pagination stopped
+   *  because it ran out of page budget, not because the API signalled the end. */
+  pagesCapped: boolean
+  /** Pagination ended via a short page — the NORMAL end-of-roster signal, but at this
+   *  layer indistinguishable from a partial outage / an API-shape change. */
+  shortPageBreak: boolean
+  /** Positive evidence this org's pull did not cover its roster: a page with no
+   *  `seats` key, or fewer seats collected than the API's own `total_seats`. The flag
+   *  a DELETE may consume — `shortPageBreak` is not, being true for any roster under
+   *  100 seats. */
+  rosterIncomplete: boolean
 }
 
 const UsageItemSchema = z
@@ -550,6 +595,8 @@ export class GithubCopilotClient {
     const out: GithubSeat[] = []
     let shortPageBreak = false
     let pagesCapped = false
+    let rosterIncomplete = false
+    let reportedTotal: number | undefined
     for (let page = 1; page <= 100; page++) {
       // resilientFetch (ING-7): timeout + backoff honouring retry-after — GitHub
       // secondary rate limits are a certainty at seats×days serial calls per tick.
@@ -560,6 +607,14 @@ export class GithubCopilotClient {
       )
       if (!res.ok) this.fail('seats', res.status)
       const body = SeatsPageSchema.parse(await res.json())
+      if (body.total_seats !== undefined) reportedTotal = body.total_seats
+      if (body.seats === undefined) {
+        // A 200 with no `seats` key. Not an end-of-roster — evidence the response was
+        // not the shape we asked for. Stop and mark the roster unknown; do NOT let a
+        // downstream DELETE read this as "these seats are gone".
+        rosterIncomplete = true
+        break
+      }
       out.push(...body.seats)
       if (body.seats.length < 100) {
         shortPageBreak = true
@@ -572,7 +627,11 @@ export class GithubCopilotClient {
         pagesCapped = true
       }
     }
-    return { seats: out, pagesCapped, shortPageBreak }
+    // The API's own count is the one unambiguous integrity check available here: if it
+    // says 200 and we hold 100, the pull is short regardless of WHY. Only ever used to
+    // set the flag to true — a missing total_seats leaves the other evidence standing.
+    if (reportedTotal !== undefined && out.length < reportedTotal) rosterIncomplete = true
+    return { seats: out, pagesCapped, shortPageBreak, rosterIncomplete }
   }
 
   /** All Copilot seats in the enterprise (paginated). The lane authority (§4.2). */
@@ -1037,19 +1096,24 @@ export class GithubCopilotClient {
   }
 
   /*
-   * Per-org Copilot SEAT-HOLDERS for ONE license org (App mode only): GET
-   * /orgs/{org}/copilot/billing/seats (via THAT org's installation token). Returns
-   * { login, org } for each seat, restricting which logins we BIND / bill-provision to
-   * ACTUAL seat-holders (ADR-0010 rule 1 — the bill is proof), so App mode does NOT
-   * provision every SSO org member, only billed users. Paginated. App-not-installed-on-this-org
-   * (orgInstallationId → null) is a clean skip ([]), not an error. Never leaks the token.
+   * Shared per-org seats pagination loop — the SINGLE implementation behind both
+   * listOrgCopilotSeats() (the back-compat array surface) and
+   * listOrgCopilotSeatsWithDiagnostics() (UF-19: the App-mode seat pull the Copilot
+   * flat-seat writer prunes from needs to know whether the roster is trustworthy).
+   * Mirrors pullSeats() exactly, plus the App-only `installed` signal.
    */
-  async listOrgCopilotSeats(orgLogin: string): Promise<{ login: string; org: string }[]> {
+  private async pullOrgSeats(orgLogin: string): Promise<OrgSeatsPullDiagnostics> {
     const app = this.requireApp()
     const installationId = await app.orgInstallationId(orgLogin)
-    if (installationId == null) return [] // App not installed/suspended on this org → no seats
+    // App not installed/suspended on this org → no seats CALL. Reported as
+    // installed:false, never as a confirmed-empty roster.
+    if (installationId == null) return { seats: [], installed: false, pagesCapped: false, shortPageBreak: false, rosterIncomplete: false }
     const token = await app.installationToken(installationId)
     const out: { login: string; org: string }[] = []
+    let shortPageBreak = false
+    let pagesCapped = false
+    let rosterIncomplete = false
+    let reportedTotal: number | undefined
     for (let page = 1; page <= 100; page++) {
       const res = await resilientFetch(
         `${API_BASE}/orgs/${encodeURIComponent(orgLogin)}/copilot/billing/seats?per_page=100&page=${page}`,
@@ -1058,10 +1122,51 @@ export class GithubCopilotClient {
       )
       if (!res.ok) this.fail('orgs/{org}/copilot/billing/seats', res.status)
       const body = SeatsPageSchema.parse(await res.json())
+      if (body.total_seats !== undefined) reportedTotal = body.total_seats
+      if (body.seats === undefined) {
+        // Same hole as pullSeats(): a 200 with no `seats` key is not an empty org.
+        rosterIncomplete = true
+        break
+      }
       for (const seat of body.seats) out.push({ login: seat.assignee.login, org: orgLogin })
-      if (body.seats.length < 100) break
+      if (body.seats.length < 100) {
+        shortPageBreak = true
+        break
+      }
+      if (page === 100) {
+        // 100 full pages consumed with no natural end-of-roster signal — this org may
+        // hold MORE seats that were never fetched.
+        pagesCapped = true
+      }
     }
-    return out
+    if (reportedTotal !== undefined && out.length < reportedTotal) rosterIncomplete = true
+    return { seats: out, installed: true, pagesCapped, shortPageBreak, rosterIncomplete }
+  }
+
+  /*
+   * Per-org Copilot SEAT-HOLDERS for ONE license org (App mode only): GET
+   * /orgs/{org}/copilot/billing/seats (via THAT org's installation token). Returns
+   * { login, org } for each seat, restricting which logins we BIND / bill-provision to
+   * ACTUAL seat-holders (ADR-0010 rule 1 — the bill is proof), so App mode does NOT
+   * provision every SSO org member, only billed users. Paginated. App-not-installed-on-this-org
+   * (orgInstallationId → null) is a clean skip ([]), not an error. Never leaks the token.
+   *
+   * A caller that must distinguish that skip (roster UNKNOWN) from a genuinely seatless
+   * org, or that needs the pagination flags, reads listOrgCopilotSeatsWithDiagnostics()
+   * instead — this array surface cannot express either.
+   */
+  async listOrgCopilotSeats(orgLogin: string): Promise<{ login: string; org: string }[]> {
+    return (await this.pullOrgSeats(orgLogin)).seats
+  }
+
+  /*
+   * Like listOrgCopilotSeats(), but also surfaces whether the App was installed on the
+   * org at all and how pagination ended (UF-19). A separate method (not a changed
+   * listOrgCopilotSeats() signature) for the same reason listSeatsWithDiagnostics() is:
+   * github-identity.ts and github-health.ts call the array form and only need the array.
+   */
+  async listOrgCopilotSeatsWithDiagnostics(orgLogin: string): Promise<OrgSeatsPullDiagnostics> {
+    return this.pullOrgSeats(orgLogin)
   }
 
   /*

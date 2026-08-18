@@ -14,7 +14,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type * as schema from '../../drizzle/schema'
 import { getDb } from './index'
 import { requireAuth } from '../utils/auth'
-import { withRlsContext } from './rls'
+import { withRlsContext, rlsRoleFor } from './rls'
 
 export async function withRequestRls<T>(
   event: H3Event,
@@ -26,11 +26,8 @@ export async function withRequestRls<T>(
     {
       userRegionId: session.regionId,
       userOrgPath: session.orgPath,
-      // platform-admin (cross-region super-admin) maps to the unbounded scope
-      // at the RLS layer — every IN ('admin','global-finops') clause + policy
-      // already treats global-finops as org-wide, so reuse it rather than
-      // touching each clause. (App-level requireRole already lets it through.)
-      userRole: session.role === 'platform-admin' ? 'global-finops' : session.role,
+      // platform-admin → global-finops at the RLS layer; see rlsRoleFor.
+      userRole: rlsRoleFor(session.role),
       userTeammateId: session.teammateId,
     },
     fn,

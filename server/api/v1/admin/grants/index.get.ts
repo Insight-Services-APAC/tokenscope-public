@@ -21,7 +21,8 @@ import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { requireRole, requireRegionScope } from '../../../../auth/rbac'
-import { getDb, schema } from '../../../../db'
+import { schema } from '../../../../db'
+import { withRequestRls } from '../../../../db/request-rls'
 import { getGrantsForTeammate } from '../../../../utils/me-queries'
 
 const Query = z.object({
@@ -32,25 +33,28 @@ export default defineEventHandler(async (event) => {
   await requireRole(event, 'admin', 'global-finops')
   const { teammate_id } = await getValidated(event, Query)
 
-  const db = getDb()
   // Resolve the target teammate's region — the scope axis for oauth_token, which
   // has none of its own. Unknown teammate → 404 (don't leak via an empty list).
-  const [tm] = await db
-    .select({ regionId: schema.teammate.regionId })
-    .from(schema.teammate)
-    .where(eq(schema.teammate.id, teammate_id))
-    .limit(1)
-  if (!tm) {
-    throw createError({ statusCode: 404, statusMessage: 'Teammate not found' })
-  }
+  // Both statements run in ONE transaction carrying the caller's RLS identity;
+  // requireRegionScope throws from inside it, which rolls back a read-only tx.
+  const grants = await withRequestRls(event, async (tx) => {
+    const [tm] = await tx
+      .select({ regionId: schema.teammate.regionId })
+      .from(schema.teammate)
+      .where(eq(schema.teammate.id, teammate_id))
+      .limit(1)
+    if (!tm) {
+      throw createError({ statusCode: 404, statusMessage: 'Teammate not found' })
+    }
 
-  // Region-bound the admin to the teammate's region (platform-admin / global-finops
-  // pass through).
-  await requireRegionScope(event, tm.regionId)
+    // Region-bound the admin to the teammate's region (platform-admin / global-finops
+    // pass through).
+    await requireRegionScope(event, tm.regionId)
 
-  const grants = await getGrantsForTeammate(
-    db as unknown as PostgresJsDatabase<Record<string, unknown>>,
-    teammate_id,
-  )
+    return getGrantsForTeammate(
+      tx as unknown as PostgresJsDatabase<Record<string, unknown>>,
+      teammate_id,
+    )
+  })
   return { teammate_id, grants }
 })

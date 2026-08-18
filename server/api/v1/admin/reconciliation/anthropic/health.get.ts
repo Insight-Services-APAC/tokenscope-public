@@ -16,13 +16,19 @@
  *
  * SAFETY: never throws (the probe is caught + classified), never leaks the key or
  * raw provider error text. RBAC: requireRole(admin, global-finops) — same guard as
- * the records reader. provider_org has no RLS policy → getDb() (regions.get.ts).
+ * the records reader.
+ *
+ * LANES (docs/design/rls-enforcement.md §2): the config READ runs in the request
+ * lane (withRequestRls), even though `provider_org` carries no RLS policy — the
+ * lane is decided by who is asking, not by which table this query names. The
+ * PROBE stays outside that transaction: it is third-party HTTP, and holding a
+ * request transaction across it is the anti-pattern §2 names.
  */
 import { defineEventHandler, getValidatedQuery, createError } from 'h3'
 import { sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { requireRole } from '../../../../../auth/rbac'
-import { getDb } from '../../../../../db'
+import { withRequestRls } from '../../../../../db/request-rls'
 import { computeOrgHealth, type AnthropicOrgRow } from '../../../../../anthropic/org-health'
 import type { AnthropicApiKind } from '../../../../../reconciliation/adapters/registry'
 
@@ -49,16 +55,16 @@ export default defineEventHandler(async (event) => {
     }
     return parsed.data
   })
-  const db = getDb()
-
   const orgClause = query.org ? sql`AND external_org_id = ${query.org}` : sql``
-  const rows = await db.execute<Row>(sql`
-    SELECT external_org_id, display_name, api_kind, credential_secret_name,
-           reconciliation_mode
-    FROM provider_org
-    WHERE provider = 'anthropic' ${orgClause}
-    ORDER BY display_name
-  `)
+  const rows = await withRequestRls(event, (tx) =>
+    tx.execute<Row>(sql`
+      SELECT external_org_id, display_name, api_kind, credential_secret_name,
+             reconciliation_mode
+      FROM provider_org
+      WHERE provider = 'anthropic' ${orgClause}
+      ORDER BY display_name
+    `),
+  )
 
   // Read the endpoint once; empty/undefined => the per-org verdict is
   // amber 'endpoint-unset' (a config gap, NOT a red auth/connect error).

@@ -7,11 +7,19 @@
  * developer can identify the suspect session and either quarantine it or escalate, via
  * /me/over-emission/{id}/resolve. The API has no session ids, so the system never
  * auto-picks the forgery — the developer makes the call.
+ *
+ * HIGH-CONFIDENCE LANE ONLY. Since mig 0132 `over_emission` also carries
+ * `reason = 'no-bill-to-corroborate'` rows: cells with no provider bill to compare
+ * against at all (an unreconciled org looks exactly like genuinely-zero spend from
+ * here). Those are a lower-confidence signal, not an accusation, and they are NOT a
+ * review item — asking a developer to quarantine a session because their org has no
+ * billing feed would be asking them to answer for our configuration.
  */
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireAuth } from '../../../auth/rbac'
 import { withRequestRls } from '../../../db/request-rls'
+import { OVER_EMISSION_REASON_API_UNCORROBORATED } from '../../../usage/over-emission-detection'
 
 interface FlagRow extends Record<string, unknown> {
   id: string
@@ -40,6 +48,7 @@ export default defineEventHandler(async (event) => {
              otel_usd::text AS otel_usd, api_usd::text AS api_usd, over_usd::text AS over_usd
       FROM over_emission
       WHERE teammate_id = ${session.teammateId}::uuid AND state = 'open' AND over_usd > 0
+        AND reason = ${OVER_EMISSION_REASON_API_UNCORROBORATED}
       ORDER BY day DESC
     `)
     const flagList = [...flags]

@@ -33,7 +33,6 @@ import { requireRole, requireRegionScope } from '../../../auth/rbac'
 import { canAssignRole } from '../../../auth/admin-guards'
 import { assertSameOrigin } from '../../../auth/csrf'
 import { withRequestRls } from '../../../db/request-rls'
-import { getDb } from '../../../db'
 import { recordAuditEvent } from '../../../db/audit'
 import { assertOrgUnitInRegion } from '../../../db/org-units'
 import { teammate } from '../../../../drizzle/schema'
@@ -96,14 +95,17 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  // Excluded (privileged/service) identity picks are refused BEFORE the tx
-  // (issue #121). Patterns are admin-config; a fresh install excludes nobody.
-  assertDirectoryIdentityPickable(dir, await loadDirectoryExclusionPatterns(getDb()))
-
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
   const ua = getHeader(event, 'user-agent') ?? null
 
   return await withRequestRls(event, async (tx) => {
+    // Excluded (privileged/service) identity picks are refused FIRST (issue
+    // #121), before any write — inside the tx now, because the pattern read was
+    // the one residual platform-pool read in this otherwise converted handler
+    // (docs/design/rls-enforcement.md, the pattern-load class). Patterns are
+    // admin-config; a fresh install excludes nobody.
+    assertDirectoryIdentityPickable(dir, await loadDirectoryExclusionPatterns(tx))
+
     // The org unit must exist, be ACTIVE, and belong to the requested region.
     await assertOrgUnitInRegion(tx, {
       orgUnitId: body.org_unit_id,

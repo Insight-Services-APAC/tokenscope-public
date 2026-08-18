@@ -12,11 +12,33 @@
  *
  * OBO is mocked locally (server/auth/obo.ts); Epic 10 swaps in the real
  * @azure/identity flow.
+ *
+ * LANES (docs/design/rls-enforcement.md §2). This handler has TWO paths and they
+ * do NOT get the same lane, which is the whole point of naming them:
+ *
+ *   - The AUTHENTICATED path runs in the MACHINE lane (`withMachineRls`) on the
+ *     identity `requireOAuthBearer` just resolved. The OBO mint stays OUTSIDE
+ *     that transaction — it is third-party HTTP.
+ *   - The 401 CATCH path has NO identity, by construction: it exists precisely
+ *     because the presented credential was REFUSED. It therefore runs on the
+ *     platform pool, and is this file's entry in the CI allowlist. What keeps
+ *     that work is that every RLS-enabled table it touches — `oauth_token`,
+ *     `teammate`, `org_unit`, `instance_attestation` — is in server/db/rls-bootstrap.ts::RLS_BOOTSTRAP_TABLES and is
+ *     explicitly DISABLEd before the app connects as a non-owner.
+ *     `instance_attestation` is NOT policy-free (RLS since mig 0002); omission
+ *     from a FORCE phase would protect nothing, because ENABLE alone filters a
+ *     non-owner. Re-enabling any of them breaks this path: `loadInstance` LEFT
+ *     JOINs `teammate`, so the join yields NULLs, `instanceLifecycleSilent` stops
+ *     seeing the deactivation/revocation arms, and an intentionally-retired
+ *     device starts raising false "your emit credential failed" signals. Phase 2
+ *     must answer that before it enables `teammate`.
  */
 import { createError, defineEventHandler, getRouterParam, getRequestHeaders } from 'h3'
 import { eq } from 'drizzle-orm'
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { z } from 'zod'
 import { getDb, schema } from '../../../../db'
+import { withMachineRls } from '../../../../db/machine-rls'
 import { requireOAuthBearer, presentedTokenInfo } from '../../../../auth/oauth-bearer'
 import { mintAzureMonitorBearer } from '../../../../auth/obo'
 import { recordBearerAuthFailed, resolveBearerAuthFailed } from '../../../../db/instance-health'
@@ -54,8 +76,18 @@ interface InstanceRow {
   teammateIsActive: boolean | null
 }
 
-/** The instance + its owner's revocation state (one row or null). */
-async function loadInstance(db: ReturnType<typeof getDb>, sid: string): Promise<InstanceRow | null> {
+/**
+ * The instance + its owner's revocation state (one row or null).
+ *
+ * Takes a bare `PostgresJsDatabase` rather than `ReturnType<typeof getDb>` so it
+ * accepts BOTH lanes: the platform pool (the 401 catch path, which has no
+ * identity) and a `withMachineRls` transaction (the authenticated path). A
+ * transaction handle has no `$client`, which is what the pool type demands.
+ */
+async function loadInstance(
+  db: PostgresJsDatabase<typeof schema>,
+  sid: string,
+): Promise<InstanceRow | null> {
   const [row] = await db
     .select({
       instanceId: schema.instanceAttestation.instanceId,
@@ -183,7 +215,12 @@ export default defineEventHandler(async (event) => {
     throw err
   }
 
-  const row = await loadInstance(db, sid)
+  // From here the caller IS authenticated, so every DB statement runs in the
+  // MACHINE lane on the credential's own identity. The OBO mint is deliberately
+  // left until after the transaction commits — it is third-party HTTP, and
+  // holding a request transaction across it is the anti-pattern design §2 names.
+  const row = await withMachineRls(teammate, async (tx) => {
+  const row = await loadInstance(tx, sid)
   // Not-found AND not-owned collapse to the SAME 404 (mirrors
   // me/instances/[instanceId]/revoke.post.ts's "don't leak a peer's instance
   // existence with a 403" rule) — an unknown id and a peer's real instance
@@ -198,7 +235,7 @@ export default defineEventHandler(async (event) => {
   // The OWNER's credential is valid → clear any prior bearer-auth-failed signal
   // (recovery). After the ownership check, so a stranger's valid token can't
   // resolve someone else's open failure (the mirror of the record abuse guard).
-  await resolveBearerAuthFailed(db, sid)
+  await resolveBearerAuthFailed(tx, sid)
 
   // Lifecycle gate (ended / E2-revoked). ts_expected_end is NOT enforced for
   // OAuth — durability is the whole point; revocation is the gate.
@@ -235,19 +272,30 @@ export default defineEventHandler(async (event) => {
   // version claim was last recorded", not a per-column timestamp, so on a
   // partially-reporting client the un-updated column may be older than the stamp.
   const claim = readClientVersionHeaders(getRequestHeaders(event))
+  // NOTE the savepoint (`tx.transaction`). The stamp is advisory and its catch
+  // must stay a catch — but a caught SQL error inside a transaction leaves the
+  // backend in 25P02 and would fail every later statement (the fault-isolation
+  // inversion design §2 describes for the worker lane). A savepoint keeps the
+  // "never fail the mint over the stamp" promise true now that this runs inside
+  // a transaction; without it the promise would be a comment, not a behaviour.
   try {
-    await db
-      .update(schema.instanceAttestation)
-      .set({
-        lastBearerAt: new Date(),
-        ...(claim.pluginVersion !== null ? { clientPluginVersion: claim.pluginVersion } : {}),
-        ...(claim.cliVersion !== null ? { clientCliVersion: claim.cliVersion } : {}),
-        ...(claim.reported ? { clientVersionAt: new Date() } : {}),
-      })
-      .where(eq(schema.instanceAttestation.instanceId, sid))
+    await tx.transaction(async (sp) => {
+      await sp
+        .update(schema.instanceAttestation)
+        .set({
+          lastBearerAt: new Date(),
+          ...(claim.pluginVersion !== null ? { clientPluginVersion: claim.pluginVersion } : {}),
+          ...(claim.cliVersion !== null ? { clientCliVersion: claim.cliVersion } : {}),
+          ...(claim.reported ? { clientVersionAt: new Date() } : {}),
+        })
+        .where(eq(schema.instanceAttestation.instanceId, sid))
+    })
   } catch {
     /* heartbeat stamp is advisory */
   }
+
+    return row
+  })
 
   return mintFor(row)
 })

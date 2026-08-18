@@ -369,6 +369,109 @@ const {
   immediate: isAdmin.value,
 })
 
+// --- RLS enforcement posture --------------------------------------------
+// The MEASUREMENT that replaces an assumption. Enabling RLS enforcement
+// (docs/design/rls-enforcement.md) needs a non-owner database role, and the plan
+// for creating it rests on Azure's documentation saying the migration runner's
+// admin login can. Nobody can reach the dev database from outside the VNet, so
+// this card is the only place that claim can be checked. Platform-admin only; a
+// 403 renders as a calm scoped-out note, like the two cards above.
+// Shape mirrors scripts/preflight-rls.ts::RlsPostureReport (the page's own
+// convention — see NetCheckReport above).
+interface RlsPostureResp {
+  measuredAt: string
+  capability: {
+    currentUser: string
+    sessionUser: string
+    isSuperuser: boolean
+    canCreateRole: boolean
+    canBypassRls: boolean
+    azurePgAdmin: { rolePresent: boolean; isMember: boolean | null }
+    createRoleViaSetRole: string[]
+    canProvisionRole: boolean
+    provisionBasis: 'superuser' | 'createrole' | 'set-role' | 'none'
+  }
+  appRole: {
+    roleName: string
+    exists: boolean
+    canLogin: boolean | null
+    inherits: boolean | null
+    memberOf: string[]
+    grants: {
+      schemaUsage: boolean
+      tablesTotal: number
+      canSelect: number
+      canInsert: number
+      canUpdate: number
+      canDelete: number
+    } | null
+  }
+  connection: {
+    currentUser: string
+    lane: 'owner' | 'app-role' | 'other'
+    ownedTables: number
+    bypass: { superuser: boolean; bypassRls: boolean; owner: boolean }
+  }
+  summary: {
+    tablesReported: number
+    rlsEnabled: number
+    rlsForced: number
+    policies: number
+    policiesApply: number
+    bootstrapStillEnabled: string[]
+  }
+  tables: Array<{
+    table: string
+    rlsEnabled: boolean
+    rlsForced: boolean
+    policyCount: number
+    owner: string
+    currentUserOwns: boolean
+    bootstrap: boolean
+    policiesApply: boolean
+  }>
+  line: string
+}
+const {
+  data: rlsData,
+  refresh: refreshRls,
+  pending: rlsPending,
+  error: rlsError,
+} = await useFetch<RlsPostureResp>('/api/v1/admin/diagnostics/rls-posture', {
+  default: () => null as unknown as RlsPostureResp,
+  immediate: isAdmin.value,
+})
+
+/*
+ * Reading order, top-down: the BOOTSTRAP tables first (they are step 0 of the
+ * runbook — they must be DISABLED before the app switches role, or every device
+ * fails to authenticate), then anything whose policies are not executing, then
+ * the rest alphabetically.
+ */
+const rlsTables = computed(() => {
+  const rows = rlsData.value?.tables ?? []
+  return [...rows].sort(
+    (a, b) =>
+      Number(b.bootstrap) - Number(a.bootstrap) ||
+      Number(a.policiesApply) - Number(b.policiesApply) ||
+      a.table.localeCompare(b.table),
+  )
+})
+
+// "0 of 23 enforced" is the state the design doc opens with, so it is amber
+// (known, expected, not yet done) rather than red (something broke).
+const rlsEnforcementBadge = computed<{ kind: 'rag-green' | 'rag-amber' | 'neutral'; label: string }>(
+  () => {
+    const s = rlsData.value?.summary
+    if (!s || s.rlsEnabled === 0) return { kind: 'neutral', label: 'no RLS tables' }
+    if (s.policiesApply === 0) return { kind: 'rag-amber', label: `0 of ${s.rlsEnabled} enforced` }
+    if (s.policiesApply < s.rlsEnabled) {
+      return { kind: 'rag-amber', label: `${s.policiesApply} of ${s.rlsEnabled} enforced` }
+    }
+    return { kind: 'rag-green', label: `${s.rlsEnabled} of ${s.rlsEnabled} enforced` }
+  },
+)
+
 // --- Card C: attribution gaps (devices emitting but not attributing) ------
 // The operator surface for the silent-attribution outage class. Calls the SAME
 // predicate the attribution-gap worker alerts on, so this list and the alert can
@@ -1774,6 +1877,169 @@ function pretty(obj: unknown): string {
         </template>
         <p v-else-if="otelPending" class="text-sm text-carbon-3 italic">Loading OTel diagnostics…</p>
         <p v-else class="text-sm text-carbon-3 italic">No OTel diagnostics reported.</p>
+      </UiCard>
+
+      <!-- RLS enforcement posture. The measurement that replaces "Azure docs say
+           the admin login can create roles": can THIS connection provision the
+           non-owner app role, does that role exist yet, and how much of the
+           policy set actually executes. Read-only — the probe runs catalog
+           SELECTs only and changes nothing. -->
+      <UiCard accent="harmony" class="lg:col-span-2" data-testid="admin-diag-rls">
+        <div class="flex items-center justify-between mb-3">
+          <UiEyebrow>RLS enforcement posture</UiEyebrow>
+          <UiButton
+            kind="secondary"
+            size="sm"
+            :disabled="rlsPending"
+            data-testid="admin-diag-rls-refresh"
+            @click="refreshRls()"
+          >
+            {{ rlsPending ? 'Refreshing…' : 'Refresh' }}
+          </UiButton>
+        </div>
+        <p class="text-xs text-carbon-3 mb-3">
+          Requires <strong>platform-admin</strong> — region admins and global-finops will see a 403
+          here. Read-only: catalog queries only — no role is created and no table is changed.
+        </p>
+
+        <p v-if="rlsError && rlsError.statusCode === 403" class="text-sm text-carbon-3" data-testid="admin-diag-rls-scoped">
+          Scoped out — this probe is platform-admin only, so your role can't read database-role
+          capability. Nothing is wrong; every other card above still applies to your region.
+        </p>
+        <p v-else-if="rlsError" class="text-sm text-brand-hunger font-mono" data-testid="admin-diag-rls-error">
+          Could not load RLS posture: {{ rlsError.statusCode ?? '' }} {{ rlsError.statusMessage ?? rlsError.message }}
+        </p>
+        <template v-else-if="rlsData">
+          <pre
+            class="text-[11px] font-mono text-carbon-2 bg-calm-1/60 rounded-md p-2 whitespace-pre-wrap break-all"
+            data-testid="admin-diag-rls-line"
+          >{{ rlsData.line }}</pre>
+
+          <div class="mt-3 flex flex-wrap items-center gap-2 text-xs" data-testid="admin-diag-rls-summary">
+            <UiBadge :kind="rlsData.connection.lane === 'app-role' ? 'rag-green' : 'neutral'">
+              {{ rlsData.connection.lane }} connection
+            </UiBadge>
+            <UiBadge :kind="rlsEnforcementBadge.kind">{{ rlsEnforcementBadge.label }}</UiBadge>
+            <UiBadge kind="neutral">{{ rlsData.summary.rlsForced }} forced</UiBadge>
+            <UiBadge kind="neutral">{{ rlsData.summary.policies }} policies</UiBadge>
+            <UiBadge :kind="rlsData.appRole.exists ? 'rag-green' : 'rag-amber'">
+              app role {{ rlsData.appRole.roleName }}: {{ rlsData.appRole.exists ? 'present' : 'absent' }}
+            </UiBadge>
+            <UiBadge :kind="rlsData.capability.canProvisionRole ? 'rag-green' : 'rag-red'">
+              can create role: {{ rlsData.capability.canProvisionRole ? 'yes' : 'no' }}
+            </UiBadge>
+          </div>
+
+          <!-- The provisioning question, spelled out. This is the story: whether
+               the deploy pipeline can create the role itself, or whether the org
+               needs a database administrator it does not have. -->
+          <dl
+            class="mt-4 grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-2 text-xs"
+            data-testid="admin-diag-rls-capability"
+          >
+            <div>
+              <dt class="text-carbon-3 uppercase tracking-[0.5px] text-[10px]">Connected as</dt>
+              <dd class="font-mono text-carbon break-all">{{ rlsData.capability.currentUser }}</dd>
+            </div>
+            <div>
+              <dt class="text-carbon-3 uppercase tracking-[0.5px] text-[10px]">Basis</dt>
+              <dd class="font-mono text-carbon">{{ rlsData.capability.provisionBasis }}</dd>
+            </div>
+            <div>
+              <dt class="text-carbon-3 uppercase tracking-[0.5px] text-[10px]">CREATEROLE / SUPERUSER</dt>
+              <dd class="font-mono text-carbon">
+                {{ rlsData.capability.canCreateRole ? 'yes' : 'no' }} /
+                {{ rlsData.capability.isSuperuser ? 'yes' : 'no' }}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-carbon-3 uppercase tracking-[0.5px] text-[10px]">azure_pg_admin</dt>
+              <dd class="font-mono text-carbon">
+                <span v-if="!rlsData.capability.azurePgAdmin.rolePresent">role not on this server</span>
+                <span v-else>member: {{ rlsData.capability.azurePgAdmin.isMember ? 'yes' : 'no' }}</span>
+              </dd>
+            </div>
+          </dl>
+          <p
+            v-if="rlsData.capability.createRoleViaSetRole.length"
+            class="mt-2 text-xs text-carbon-3"
+            data-testid="admin-diag-rls-setrole"
+          >
+            CREATEROLE is reachable only via <span class="font-mono">SET ROLE</span>:
+            <span class="font-mono">{{ rlsData.capability.createRoleViaSetRole.join(', ') }}</span>
+            — Postgres does not inherit role attributes through membership.
+          </p>
+          <p
+            v-if="rlsData.appRole.grants"
+            class="mt-2 text-xs text-carbon-3"
+            data-testid="admin-diag-rls-grants"
+          >
+            Grants on <span class="font-mono">{{ rlsData.appRole.roleName }}</span>: schema usage
+            {{ rlsData.appRole.grants.schemaUsage ? 'yes' : 'no' }}; of
+            {{ rlsData.appRole.grants.tablesTotal }} tables it can SELECT
+            {{ rlsData.appRole.grants.canSelect }}, INSERT {{ rlsData.appRole.grants.canInsert }},
+            UPDATE {{ rlsData.appRole.grants.canUpdate }}, DELETE
+            {{ rlsData.appRole.grants.canDelete }}.
+          </p>
+          <p
+            v-if="rlsData.summary.bootstrapStillEnabled.length"
+            class="mt-2 text-xs text-carbon-3"
+            data-testid="admin-diag-rls-bootstrap-note"
+          >
+            <strong>{{ rlsData.summary.bootstrapStillEnabled.length }}</strong> bootstrap table(s)
+            still have RLS enabled. Harmless on the owner connection; on the app role these are the
+            reads that happen before any identity exists, so they must be disabled first.
+          </p>
+
+          <div class="mt-4 overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="bg-brand-harmony-sheer/40 border-b border-calm-2">
+                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Table</th>
+                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">RLS</th>
+                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">FORCE</th>
+                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Policies</th>
+                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Executes here</th>
+                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Owner</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-calm-2">
+                <tr
+                  v-for="row in rlsTables"
+                  :key="row.table"
+                  class="hover:bg-brand-harmony-sheer/30 align-top"
+                  :data-testid="`admin-diag-rls-row-${row.table}`"
+                >
+                  <td class="px-3 py-2 font-mono text-[11px] text-carbon break-all">
+                    {{ row.table }}
+                    <UiBadge v-if="row.bootstrap" kind="harmony" class="ml-1">bootstrap</UiBadge>
+                  </td>
+                  <td class="px-3 py-2">
+                    <UiBadge :kind="row.rlsEnabled ? 'rag-green' : 'neutral'">
+                      {{ row.rlsEnabled ? 'enabled' : 'disabled' }}
+                    </UiBadge>
+                  </td>
+                  <td class="px-3 py-2">
+                    <UiBadge :kind="row.rlsForced ? 'rag-green' : 'neutral'">
+                      {{ row.rlsForced ? 'forced' : '—' }}
+                    </UiBadge>
+                  </td>
+                  <td class="px-3 py-2 font-mono text-[11px] text-carbon">{{ row.policyCount }}</td>
+                  <td class="px-3 py-2">
+                    <UiBadge :kind="row.policiesApply ? 'rag-green' : 'rag-amber'">
+                      {{ row.policiesApply ? 'yes' : 'no' }}
+                    </UiBadge>
+                  </td>
+                  <td class="px-3 py-2 font-mono text-[11px] text-carbon-2 break-all">
+                    {{ row.owner }}<span v-if="row.currentUserOwns"> (this connection)</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+        <p v-else-if="rlsPending" class="text-sm text-carbon-3 italic">Loading RLS posture…</p>
+        <p v-else class="text-sm text-carbon-3 italic">No RLS posture reported.</p>
       </UiCard>
 
       <!--

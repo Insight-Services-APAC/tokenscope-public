@@ -33,15 +33,36 @@
  * showback: the report/theme-5-duplicate-seat finding). runCopilotBillWriter now runs a
  * guarded stale-row prune after the seat loop, in the SAME successful run, scoped to this
  * enterprise's provider_org set (not just orgs seen this tick) — see the guard block below for
- * the three preconditions. It is a DELETE on a money table; every precondition exists because
+ * the preconditions (six, as of UF-19 + the roster-integrity flag). It is a DELETE on a
+ * money table; every precondition exists because
  * an empty/short seats pull is NOT reliably an error signal (github-client.ts's
  * listSeatsWithDiagnostics).
+ *
+ * TWO SEAT SOURCES, ONE PER CREDENTIAL KIND (UF-19). The enterprise seats endpoint
+ * (listSeats / listSeatsWithDiagnostics) is a PAT surface: it always presents a Bearer
+ * PAT header, and a withApp()-constructed client holds no PAT — so an App-mode
+ * enterprise 401'd here and its flat-seat showback never populated. This writer now
+ * branches on credential.kind at the SEAT-DATA path the same way it already branched at
+ * the credential-CONSTRUCTION path. (github.ts and github-identity.ts both branch the
+ * data path too; the per-org SEAT surface used here is github-identity.ts's App path.
+ * github.ts's App path reads a different surface again — the users-1-day metrics
+ * report — because it is after per-user CONSUMPTION, not the seat roster.)
+ *   - PAT mode: ONE enterprise pull (unchanged; seat.organization = the license org).
+ *   - App mode: listOrgCopilotSeatsWithDiagnostics(org) per ONBOARDED license org
+ *     (provider_org), each read with that org's installation token. The license org is
+ *     the org we queried, so the `copilot-seat:<org>` source key is identical in both
+ *     modes and a PAT→App cutover does not orphan a single showback row.
+ * App mode adds a THIRD way the roster can be incomplete — an org whose seats could not
+ * be read at all (App not installed/suspended, or the pull threw). Those orgs are
+ * isolated (their seats simply carry forward) and counted onto
+ * `seatOrgsUnavailable`, which is a prune precondition: an unknown org roster must
+ * never be read as "that org's seats are gone".
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
 import { consola } from 'consola'
 import type * as schema from '../../drizzle/schema'
-import { GithubCopilotClient, type GithubSeat } from '../reconciliation/adapters/github-client'
+import { GithubCopilotClient } from '../reconciliation/adapters/github-client'
 import { GithubAppAuth } from '../reconciliation/adapters/github-app-auth'
 import type { ResolvedCredential } from '../reconciliation/credentials'
 import { seatLicenseOrg } from '../reconciliation/adapters/github'
@@ -55,19 +76,30 @@ import { recordAuditEvent } from '../db/audit'
 
 type Db = PostgresJsDatabase<typeof schema>
 
+/*
+ * The seat surfaces this writer reads, one per credential kind (see the module header).
+ * BOTH optional so a test seam can stub exactly the one its mode uses — and so an
+ * App-mode stub can prove the PAT surface is never touched by omitting it (or by
+ * supplying one that throws). The real GithubCopilotClient satisfies both.
+ */
+export type CopilotBillSeatClient = Partial<
+  Pick<GithubCopilotClient, 'listSeatsWithDiagnostics' | 'listOrgCopilotSeatsWithDiagnostics'>
+>
+
 export interface CopilotBillOptions {
   enterpriseSlug: string
   /** The RESOLVED credential (PAT or App key) — branch on `.kind`, exactly as
    *  copilot-pool-bill.ts does. S9: this used to be flattened to the raw string
    *  (`credential.value`) by the caller and handed to withPat, which — in App mode —
-   *  fed the GitHub App PRIVATE KEY to withPat as if it were a PAT. */
+   *  fed the GitHub App PRIVATE KEY to withPat as if it were a PAT. UF-19: the same
+   *  `.kind` now also selects the SEAT SOURCE (enterprise pull vs per-org pull). */
   credential: ResolvedCredential
   /** Run clock; the bill rows are dated the 1st of this month (D1/M2). */
   now: Date
   /** ADR-0010 D1: whole-month flat per-seat price (provider_enterprise config). NULL → no flat row. */
   flatSeatPriceUsd: number | null
   /** Test seam: stub the seat pull (no live GitHub call). */
-  clientOverride?: Pick<GithubCopilotClient, 'listSeatsWithDiagnostics'>
+  clientOverride?: CopilotBillSeatClient
 }
 
 export interface CopilotBillResult {
@@ -82,15 +114,24 @@ export interface CopilotBillResult {
   /** S9 seat-convergence prune: actual_spend copilot-seat rows deleted this run because
    *  the seat/org they were written for is no longer present for this enterprise (seat
    *  removed, rebind, or org moved off this enterprise entirely) — see the guard block
-   *  in runCopilotBillWriter for the three preconditions that gate this DELETE. */
+   *  in runCopilotBillWriter for the preconditions that gate this DELETE. */
   prunedRows: number
   /** The seats pull hit the 100-page (10,000-seat) hard cap this run — the roster MAY
    *  be truncated (github-client.ts's pullSeats). */
   seatPagesCapped: boolean
+  /** The seat pull carried positive evidence of truncation — a prune precondition. */
+  seatRosterIncomplete: boolean
   /** The seats pull ended via a short page — the normal end-of-roster signal, but
    *  indistinguishable at that layer from a partial/empty pull. Surfaced so a
-   *  suspiciously small seatsTotal can be cross-checked against this. */
+   *  suspiciously small seatsTotal can be cross-checked against this. In App mode this
+   *  is the OR across the per-org pulls (any org that ended short). */
   seatPageShort: boolean
+  /** App mode only (UF-19): onboarded license orgs whose seat roster could NOT be read
+   *  this run — the App is not installed/is suspended on the org, or its pull threw.
+   *  Their seats carry forward. >0 means the roster is INCOMPLETE for reasons the
+   *  pagination flags cannot express, so the seat-convergence prune is skipped. Always
+   *  0 in PAT mode (one enterprise-wide call: it either succeeds or throws). */
+  seatOrgsUnavailable: number
 }
 
 /** Exported (Workstream C): reconciliation-sync.ts uses this to resolve the SAME
@@ -201,8 +242,100 @@ async function enterpriseOrgSet(db: Db, enterpriseSlug: string): Promise<string[
     FROM provider_org po
     JOIN provider_enterprise pe ON pe.id = po.provider_enterprise_id
     WHERE po.provider = 'github' AND pe.provider = 'github' AND lower(pe.external_id) = lower(${enterpriseSlug})
+    ORDER BY org
   `)
   return rows.map((r) => r.org)
+}
+
+/*
+ * One enterprise's seat roster, NORMALISED across both credential kinds: the writer
+ * downstream of this only ever sees (login, licenseOrg) plus the flags that say how far
+ * to trust it, so the seat loop and the prune are mode-agnostic.
+ */
+interface SeatRosterPull {
+  seats: Array<{ login: string; licenseOrg: string | null }>
+  pagesCapped: boolean
+  shortPageBreak: boolean
+  /** Positive evidence the roster was not fully read (missing `seats` key, or fewer
+   *  seats than the API's own `total_seats`). A prune precondition — unlike
+   *  shortPageBreak, which is true for every normal roster under 100 seats. */
+  rosterIncomplete: boolean
+  orgsUnavailable: number
+}
+
+/*
+ * UF-19: read the seat roster with the credential kind's OWN surface.
+ *
+ * PAT mode is the unchanged enterprise pull. App mode iterates the enterprise's
+ * ONBOARDED license orgs (the same provider_org → provider_enterprise enumeration
+ * github-identity.ts's App path walks) and reads each org's seats with that org's
+ * installation token, because the enterprise seats endpoint presents a Bearer PAT header
+ * that an App-mode client does not have.
+ *
+ * Per-org failures are ISOLATED (one bad org must not cost the enterprise every other
+ * org's showback) and COUNTED — a counted org is one whose roster we do not know, which
+ * is a different thing from one we know to be empty, and the prune must not confuse them.
+ */
+async function pullSeatRoster(
+  client: CopilotBillSeatClient,
+  credential: ResolvedCredential,
+  enterpriseSlug: string,
+  orgSet: string[],
+): Promise<SeatRosterPull> {
+  if (credential.kind !== 'github-app') {
+    if (!client.listSeatsWithDiagnostics) {
+      throw new Error('copilot-bill: PAT mode requires a client exposing listSeatsWithDiagnostics')
+    }
+    const pull = await client.listSeatsWithDiagnostics()
+    return {
+      seats: pull.seats.map((s) => ({ login: s.assignee.login, licenseOrg: seatLicenseOrg(s) })),
+      pagesCapped: pull.pagesCapped,
+      shortPageBreak: pull.shortPageBreak,
+      rosterIncomplete: pull.rosterIncomplete,
+      orgsUnavailable: 0,
+    }
+  }
+
+  if (!client.listOrgCopilotSeatsWithDiagnostics) {
+    throw new Error('copilot-bill: App mode requires a client exposing listOrgCopilotSeatsWithDiagnostics')
+  }
+  const readOrgSeats = client.listOrgCopilotSeatsWithDiagnostics.bind(client)
+  if (orgSet.length === 0) {
+    // No license org onboarded ⇒ nothing to read. A legible warn, not a throw and not a
+    // silent success: seatsTotal stays 0, which the prune already refuses to act on.
+    consola.warn(
+      `[copilot-bill] ${enterpriseSlug} App mode: no license orgs onboarded (provider_org) — no seats to bill`,
+    )
+    return { seats: [], pagesCapped: false, shortPageBreak: false, rosterIncomplete: false, orgsUnavailable: 0 }
+  }
+  const seats: SeatRosterPull['seats'] = []
+  let pagesCapped = false
+  let shortPageBreak = false
+  let rosterIncomplete = false
+  let orgsUnavailable = 0
+  for (const org of orgSet) {
+    try {
+      const pull = await readOrgSeats(org)
+      if (!pull.installed) {
+        // The App is not installed (or is suspended) on this org: no seats call was made,
+        // so this org's roster is UNKNOWN. Counted, never read as "no seats here".
+        orgsUnavailable += 1
+        consola.warn(`[copilot-bill] ${enterpriseSlug} App mode: App not installed on license org '${org}' — its seats carry forward`)
+        continue
+      }
+      // The license org is the org we QUERIED, so it agrees with provider_org's canonical
+      // lowercase and with the PAT path's lowercased seat.organization.login → the
+      // `copilot-seat:<org>` source key is identical across a PAT→App cutover.
+      for (const s of pull.seats) seats.push({ login: s.login, licenseOrg: org })
+      pagesCapped = pagesCapped || pull.pagesCapped
+      shortPageBreak = shortPageBreak || pull.shortPageBreak
+      rosterIncomplete = rosterIncomplete || pull.rosterIncomplete
+    } catch (err) {
+      orgsUnavailable += 1
+      consola.warn(`[copilot-bill] ${enterpriseSlug} App mode: seat pull failed for license org '${org}': ${String(err)}`)
+    }
+  }
+  return { seats, pagesCapped, shortPageBreak, rosterIncomplete, orgsUnavailable }
 }
 
 export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Promise<CopilotBillResult> {
@@ -214,7 +347,9 @@ export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Pr
     overageRowsWritten: 0,
     prunedRows: 0,
     seatPagesCapped: false,
+    seatRosterIncomplete: false,
     seatPageShort: false,
+    seatOrgsUnavailable: 0,
   }
 
   const monthStart = monthStartIso(opts.now)
@@ -232,22 +367,32 @@ export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Pr
   // S9: branch on the RESOLVED credential kind exactly as copilot-pool-bill.ts does —
   // never flatten to `.value` and hand it to withPat (that fed the App private key to
   // withPat as a Bearer token at this call site and at discover-orgs.post.ts).
-  const client =
+  const client: CopilotBillSeatClient =
     opts.clientOverride ??
     (opts.credential.kind === 'github-app'
       ? GithubCopilotClient.withApp(opts.enterpriseSlug, new GithubAppAuth(opts.credential.appId!, opts.credential.value))
       : GithubCopilotClient.withPat(opts.enterpriseSlug, opts.credential.value))
-  const [seatPull, roster] = await Promise.all([client.listSeatsWithDiagnostics(), resolveRoster(db, opts.enterpriseSlug)])
+  // The enterprise's provider_org set is read ONCE, BEFORE the pull: App mode enumerates
+  // the orgs to pull seats FROM it (UF-19), and the prune below is scoped to it. One read
+  // for both keeps the two in agreement — re-reading it after a slow pull could hand the
+  // DELETE an org whose seats this run never even attempted.
+  const orgSet = await enterpriseOrgSet(db, opts.enterpriseSlug)
+  const [seatPull, roster] = await Promise.all([
+    pullSeatRoster(client, opts.credential, opts.enterpriseSlug, orgSet),
+    resolveRoster(db, opts.enterpriseSlug),
+  ])
   const seats = seatPull.seats
   result.seatPagesCapped = seatPull.pagesCapped
   result.seatPageShort = seatPull.shortPageBreak
+  result.seatRosterIncomplete = seatPull.rosterIncomplete
+  result.seatOrgsUnavailable = seatPull.orgsUnavailable
 
   const govCtx = await loadGovernanceResolutionContext(db)
   const govKeyCache = createGovernanceKeyCache()
 
-  for (const seat of seats as GithubSeat[]) {
+  for (const seat of seats) {
     result.seatsTotal += 1
-    const login = seat.assignee.login
+    const login = seat.login
     const teammateId = roster.get(login.toLowerCase())
     if (!teammateId) {
       // Unmapped: identity-sync (with bill-driven provisioning) binds the login next run,
@@ -257,7 +402,7 @@ export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Pr
     }
     result.seatsResolved += 1
 
-    const licenseOrg = seatLicenseOrg(seat)
+    const licenseOrg = seat.licenseOrg
     const orgKey = licenseOrg?.toLowerCase() ?? 'unknown'
     const governanceKey = await resolveGithubGovernanceKey(db, govKeyCache, {
       enterpriseSlug: opts.enterpriseSlug,
@@ -308,6 +453,10 @@ export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Pr
    *      seats are gone.
    *   3. listSeats() throwing aborts BEFORE this point, unswallowed — a genuine pull
    *      failure never reaches the prune (there is no try/catch around the pull above).
+   *      App mode weakens that guarantee ON PURPOSE: a per-org pull failure is isolated
+   *      so one bad org cannot cost the enterprise every other org's showback, which
+   *      means a failure CAN reach this point. Precondition 5 is what replaces the
+   *      abort for those — see below.
    *
    * Scope is the ENTERPRISE'S org set from provider_org, not merely the orgs seen in
    * THIS run's roster — so an org that vanished from the roster ENTIRELY is still
@@ -330,13 +479,36 @@ export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Pr
   // based on the roster can tell a truncated pull apart from a genuinely small one"
   // (github-client.ts). Without it, an enterprise above the cap has every seat past
   // page 100 absent from the roster through no fault of identity resolution — so the
-  // skip-ratio stays low, the other three preconditions hold, and the prune deletes
+  // skip-ratio stays low, the other preconditions hold, and the prune deletes
   // real, still-valid showback rows as "stale". Shipping the signal and not consuming
   // it is the exact control-versus-prose gap this sprint exists to close.
+  // Precondition 5 (seatOrgsUnavailable, UF-19) is App mode's replacement for the abort
+  // precondition 3 relies on. Its per-org pull is isolated, so an org the App is not
+  // installed on — or one whose pull threw — yields an UNKNOWN roster for that org while
+  // the run continues. The prune's scope is the whole provider_org set, so without this
+  // guard those orgs' still-valid showback rows would be deleted as "not re-asserted this
+  // run": exactly the seatPagesCapped failure mode, arriving through a different door.
+  // Precondition 6 (seatRosterIncomplete) closes the hole the OTHER two ways
+  // SeatsPullDiagnostics names. Its header lists three ways a small roster is
+  // indistinguishable from a truncated one, and preconditions 4 and 5 consumed only
+  // the page cap. The remaining two are the `seats` key being absent on a 200 — which
+  // `z.array().default([])` used to silently turn into an empty page — and the API's
+  // own `total_seats` exceeding what we collected. Either is POSITIVE evidence the
+  // pull is short, and either would otherwise satisfy all four earlier preconditions:
+  // seatsTotal > 0 from the pages that DID arrive, a low skip ratio, no page cap, no
+  // unavailable org — and the DELETE would remove every still-valid row the truncated
+  // pages would have re-asserted.
+  //
+  // NOT gated on seatPageShort, deliberately: that is true for every roster under 100
+  // seats, so consuming it here would block convergence for nearly every enterprise
+  // permanently. The distinction is evidence-of-truncation versus absence-of-evidence.
   const prunePreconditionsMet =
-    result.seatsTotal > 0 && skipRatio <= PRUNE_MAX_SKIP_RATIO && !result.seatPagesCapped
+    result.seatsTotal > 0 &&
+    skipRatio <= PRUNE_MAX_SKIP_RATIO &&
+    !result.seatPagesCapped &&
+    result.seatOrgsUnavailable === 0 &&
+    !result.seatRosterIncomplete
   if (prunePreconditionsMet) {
-    const orgSet = await enterpriseOrgSet(db, opts.enterpriseSlug)
     if (orgSet.length > 0) {
       const sourceList = sql.join(
         orgSet.map((org) => sql`${`copilot-seat:${org}`}`),
@@ -373,6 +545,7 @@ export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Pr
               seatsCarriedUnmapped: result.seatsCarriedUnmapped,
               seatPagesCapped: result.seatPagesCapped,
               seatPageShort: result.seatPageShort,
+              seatOrgsUnavailable: result.seatOrgsUnavailable,
             },
           })
         }
@@ -389,7 +562,11 @@ export async function runCopilotBillWriter(db: Db, opts: CopilotBillOptions): Pr
           ? 'seatsTotal is 0 (a genuinely empty roster is indistinguishable from a truncated pull — never pruning on it)'
           : result.seatPagesCapped
             ? 'seat pull hit the pagination cap — the roster is TRUNCATED, so seats absent from it are unfetched, not removed'
-            : `${result.seatsCarriedUnmapped}/${result.seatsTotal} seats unmapped (ratio ${skipRatio.toFixed(2)} > ${PRUNE_MAX_SKIP_RATIO}) — identity resolution looks broken`),
+            : result.seatOrgsUnavailable > 0
+              ? `${result.seatOrgsUnavailable} license org(s) could not be read this run (App not installed / pull failed) — their rosters are UNKNOWN, not empty`
+              : result.seatRosterIncomplete
+                ? 'the seat roster came back INCOMPLETE (a page with no `seats` key, or fewer seats than the API\'s own total_seats) — the missing seats are unread, not removed'
+                : `${result.seatsCarriedUnmapped}/${result.seatsTotal} seats unmapped (ratio ${skipRatio.toFixed(2)} > ${PRUNE_MAX_SKIP_RATIO}) — identity resolution looks broken`),
     )
   }
 

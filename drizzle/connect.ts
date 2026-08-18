@@ -30,6 +30,32 @@
 import postgres from 'postgres'
 
 /**
+ * The URL the RUNTIME pools connect with — `server/db/index.ts` (request lane)
+ * and `server/db/worker-db.ts` (worker lane), and nothing else.
+ *
+ * `TOKENSCOPE_APP_DATABASE_URL` names the NON-OWNER role that makes the RLS
+ * policies execute (`docs/design/rls-enforcement.md` §9; the role is minted by
+ * `drizzle/provision-app-role.ts`). When it is unset — which is every
+ * environment until someone deliberately sets it — this returns `DATABASE_URL`
+ * and the app behaves exactly as it does today. **Unsetting it is the rollback**:
+ * one variable, no code change, no migration to reverse.
+ *
+ * It lives beside the client factory for the same reason the factory exists: so
+ * "which credential does this connection use" has ONE answer, in ONE file,
+ * instead of a `process.env` read in each pool that can drift apart.
+ *
+ * `migrate.ts`, the seed scripts and `provision-app-role.ts` deliberately do NOT
+ * call this. They must stay on the OWNER's `DATABASE_URL` — migrations have to
+ * own their objects, and the provisioning script's `ALTER DEFAULT PRIVILEGES`
+ * only covers objects created by the role that runs it.
+ */
+export function runtimeDatabaseUrl(): string | undefined {
+  const appUrl = process.env.TOKENSCOPE_APP_DATABASE_URL?.trim()
+  if (appUrl) return appUrl
+  return process.env.DATABASE_URL
+}
+
+/**
  * Create a postgres.js client. `url` and `options` pass straight through —
  * this factory does not alter connection behaviour, it only makes the call
  * site singular. See the file header for why that matters.

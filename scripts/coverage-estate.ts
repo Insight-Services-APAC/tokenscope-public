@@ -46,10 +46,8 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { drizzle } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
-import { createDbClient } from '../drizzle/connect'
-import * as schema from '../drizzle/schema'
+import { createWorkerDb } from '../server/db/worker-db'
 import { LocalCollectorReader } from '../server/azure/reader'
 import { runReadJoiner } from '../server/workers/azure-monitor-reader'
 import { runAggregateRollup } from '../server/workers/aggregate-rollup'
@@ -262,8 +260,8 @@ async function main() {
     )
     process.exit(1)
   }
-  const client = createDbClient(dbUrl, { max: 1, idle_timeout: 5 })
-  const db = drizzle(client, { schema })
+  // Worker lane: this script drives the real joiner + aggregate-rollup workers.
+  const { client, db } = await createWorkerDb(dbUrl, { max: 1, idle_timeout: 5 })
   const reader = new LocalCollectorReader(endpoint)
   const expectations: Expect[] = []
 

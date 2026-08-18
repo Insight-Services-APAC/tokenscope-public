@@ -5,6 +5,15 @@
  * Returns 200 + {status:'ok'} when the process is alive AND can reach
  * the DB. Returns 503 if the DB ping fails — Container Apps reads the
  * status code to decide replica health.
+ *
+ * NO RLS LANE, deliberately (docs/design/rls-enforcement.md; tracked as an
+ * explicit residue in scripts/check-handler-rls-context.mjs). The probe is
+ * ANONYMOUS — the ACA health probe presents no cookie and no credential, so
+ * there is no identity to carry — and its query is `SELECT 1`, which names no
+ * table and therefore no policy. Giving it a context would mean inventing an
+ * identity for a liveness check; making it require one would mean a replica is
+ * marked unhealthy the moment auth is misconfigured, which is the opposite of
+ * what a liveness probe is for.
  */
 import { defineEventHandler, setResponseStatus } from 'h3'
 import { sql } from 'drizzle-orm'

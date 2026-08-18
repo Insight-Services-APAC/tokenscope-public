@@ -613,44 +613,91 @@ function markDeleting(id: string, busy: boolean) {
 
 // ---- GitHub org discovery (ADR-0010 onboarding) ----
 const discoveringOrgs = ref<Set<string>>(new Set())
-const DISCOVER_REASON: Record<string, string> = {
-  'no-key': 'No PAT wired for this enterprise — set the credential first.',
-  '401-unauthorized': 'The PAT was rejected (401).',
-  '403-forbidden-scope': 'The PAT lacks the required scope (403) — it needs manage_billing.',
-  '404-wrong-endpoint': 'GitHub returned 404 — check the enterprise slug.',
-  '429-rate-limited': 'Rate-limited by GitHub (429) — try again shortly.',
-  'connect-failed': 'Could not reach GitHub.',
+/*
+ * Discovery copy is PER CREDENTIAL KIND (UF-19). The two modes read different surfaces —
+ * a PAT reads the enterprise SEAT roster, a GitHub App reads the enterprise's OWNED-ORG
+ * census — so the same reason bucket has a different remediation and the success line
+ * describes a different set. The route returns `credentialKind` on BOTH the success and
+ * the 422 body so this never has to guess (it used to name "the PAT" unconditionally,
+ * which is the wrong instruction for every App-mode enterprise).
+ */
+type DiscoverCredentialKind = 'github-app' | 'github-pat'
+const DISCOVER_REASON: Record<DiscoverCredentialKind, Record<string, string>> = {
+  'github-pat': {
+    'no-key': 'No PAT wired for this enterprise — set the credential first.',
+    '401-unauthorized': 'The PAT was rejected (401).',
+    '403-forbidden-scope': 'The PAT lacks the required scope (403) — it needs manage_billing.',
+    '404-wrong-endpoint': 'GitHub returned 404 — check the enterprise slug.',
+    '429-rate-limited': 'Rate-limited by GitHub (429) — try again shortly.',
+    'connect-failed': 'Could not reach GitHub.',
+  },
+  'github-app': {
+    'no-key': 'No GitHub App private key wired for this enterprise — set the credential first.',
+    '401-unauthorized': 'GitHub rejected the App credential (401) — check the App id and private key.',
+    '403-forbidden-scope': 'The App lacks the required permission (403) — it needs "Enterprise organization installations: read".',
+    '404-wrong-endpoint': 'GitHub returned 404 — check the enterprise slug, and that the App is installed on the enterprise.',
+    '429-rate-limited': 'Rate-limited by GitHub (429) — try again shortly.',
+    'connect-failed': 'Could not reach GitHub.',
+  },
+}
+/** What the Discover button will actually read, per credential kind — the tooltip used to
+ *  promise a PAT seat pull on every enterprise, including App-mode ones it cannot do it for. */
+function discoverTitle(kind: DiscoverCredentialKind): string {
+  return kind === 'github-app'
+    ? "Reads this enterprise's GitHub App credential and adds every org the enterprise OWNS — no need to type them. Includes orgs with no Copilot seats yet (the App can't see an org's seats until it is installed there)."
+    : "Reads this enterprise's PAT and adds every org that HAS COPILOT SEATS — no need to type them. Orgs with no Copilot seats aren't pulled (they carry no Copilot cost)."
+}
+function discoverReason(kind: DiscoverCredentialKind | undefined, reason: string): string {
+  // Default to the PAT wording only when the route told us nothing — every current
+  // response carries the kind.
+  return DISCOVER_REASON[kind ?? 'github-pat'][reason] ?? `Discovery failed: ${reason}.`
 }
 async function discoverOrgs(e: EnterpriseRow) {
   const next = new Set(discoveringOrgs.value)
   next.add(e.id)
   discoveringOrgs.value = next
   try {
-    const res = await $fetch<{ reason?: string; discovered?: number; created?: number; linked?: number; alreadyLinked?: number }>(
-      '/api/v1/admin/reconciliation/github/discover-orgs',
-      { method: 'POST', body: { enterpriseId: e.id } },
-    )
+    const res = await $fetch<{
+      reason?: string
+      discovered?: number
+      created?: number
+      linked?: number
+      alreadyLinked?: number
+      credentialKind?: DiscoverCredentialKind
+      capped?: boolean
+    }>('/api/v1/admin/reconciliation/github/discover-orgs', { method: 'POST', body: { enterpriseId: e.id } })
     // The endpoint returns 422 { reason } as a 2xx-shaped body only on success; a real
     // 422 throws below. Guard defensively in case the body carries a reason on 200.
     if (res.reason) {
-      flashToast('err', DISCOVER_REASON[res.reason] ?? `Discovery failed: ${res.reason}.`)
+      flashToast('err', discoverReason(res.credentialKind, res.reason))
     } else {
       const found = res.discovered ?? 0
       const added = (res.created ?? 0) + (res.linked ?? 0)
       const orgWord = found === 1 ? 'org' : 'orgs'
+      // What was actually enumerated, per mode — never "orgs with Copilot seats" for an
+      // App-mode enterprise, whose source is the owned-org census (seatless orgs included).
+      const appMode = res.credentialKind === 'github-app'
+      const subject = appMode ? `${orgWord} owned by this enterprise` : `${orgWord} with Copilot seats`
+      // A capped source is a PREFIX — say so rather than let "found N" read as the total.
+      const cappedNote = res.capped ? ' The list was truncated, so this is not the full estate.' : ''
       flashToast(
         'ok',
         found === 0
-          ? 'No orgs with Copilot seats found for this enterprise (check the PAT scope).'
+          ? appMode
+            ? 'No orgs found for this enterprise — check that the App is installed on the enterprise and has "Enterprise organization installations: read".'
+            : 'No orgs with Copilot seats found for this enterprise (check the PAT scope).'
           : added > 0
-            ? `Found ${found} ${orgWord} with Copilot seats — added ${added}. Set each org's region next.`
-            : `All ${found} ${orgWord} with Copilot seats are already onboarded.`,
+            ? `Found ${found} ${subject} — added ${added}. Set each org's region next.${cappedNote}`
+            : `All ${found} ${subject} are already onboarded.${cappedNote}`,
       )
       refreshProviders()
     }
   } catch (err) {
-    const reason = (err as { data?: { reason?: string } } | null)?.data?.reason
-    flashToast('err', reason ? (DISCOVER_REASON[reason] ?? `Discovery failed: ${reason}.`) : apiErrorDetail(err, 'Org discovery failed.'))
+    const data = (err as { data?: { reason?: string; credentialKind?: DiscoverCredentialKind } } | null)?.data
+    flashToast(
+      'err',
+      data?.reason ? discoverReason(data.credentialKind, data.reason) : apiErrorDetail(err, 'Org discovery failed.'),
+    )
     consola.warn('github discover-orgs failed', err)
   } finally {
     const done = new Set(discoveringOrgs.value)
@@ -1464,7 +1511,7 @@ function onBackfillSaved() {
                     kind="ghost"
                     size="sm"
                     :disabled="discoveringOrgs.has(e.id)"
-                    title="Reads this enterprise's PAT and adds every org that HAS COPILOT SEATS — no need to type them. Orgs with no Copilot seats aren't pulled (they carry no Copilot cost)."
+                    :title="discoverTitle(e.credentialKind)"
                     :data-testid="`admin-recon-ent-discover-${e.id}`"
                     @click="discoverOrgs(e)"
                   >

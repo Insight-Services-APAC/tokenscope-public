@@ -84,6 +84,11 @@ function bearerTeammate(): BearerTeammate {
     displayName: 'RB User',
     role: 'developer',
     regionId,
+    // The RLS org-path GUC. requireOAuthBearer resolves this from its
+    // token→teammate→org_unit join; the in-memory harness has to state it, and
+    // it MUST match the org_unit this test's teammate is actually placed in
+    // (`rb.svc`) — server/db/machine-rls.ts fails closed on an empty path.
+    orgPath: 'rb.svc',
     scope: 'tokenscope.read tokenscope.tag',
   }
 }

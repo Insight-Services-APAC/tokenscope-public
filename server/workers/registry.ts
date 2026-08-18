@@ -30,6 +30,7 @@ import {
   selectJoinableInstances,
   shouldDeepRescan,
   recordJoinerSelectionCap,
+  type JoinResult,
 } from './azure-monitor-reader'
 import { runBudgetAlert } from './budget-alert'
 import { runConnectorHealth } from './connector-health'
@@ -54,7 +55,7 @@ import { runGovernanceKeyBackfill } from './governance-key-backfill'
 import { runGovernanceRecompute } from './governance-recompute'
 import { runGithubCoverageSweep } from './github-coverage-sweep'
 import { runProviderTransform } from './provider-transform'
-import { getTelemetryReader } from '../azure/reader'
+import { getTelemetryReader, emptyParseCounters } from '../azure/reader'
 import { UI_TRIGGERABLE_WORKER_NAMES } from '../../shared/workers/ui-triggerable'
 
 type Db = PostgresJsDatabase<typeof schema>
@@ -247,10 +248,24 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
       // a silent outage. The forced flag wins over the cadence.
       const deepRescan = ctx?.opts?.deepRescan ?? (await shouldDeepRescan(db))
       if (sessionIds.length === 0) {
+        // `satisfies JoinResult` is the enforcement of the "never omit the
+        // object" convention below: this literal drifted from JoinResult twice
+        // (parseCounters / telemetryOnlySpend / staleDismissalsReturned were all
+        // added to the interface and never here) because WorkerEntry.run returns
+        // Promise<unknown>, so nothing type-checked the empty tick. Now a new
+        // JoinResult field is a compile error here until it is given its zero.
         return {
           sessionsProcessed: 0,
           attributionRowsWritten: 0,
+          // Nothing was read, so no dismissal could be handed back.
+          staleDismissalsReturned: 0,
           spansSkippedNoRateCard: 0,
+          // No reader was constructed, so the ingest boundary rejected nothing.
+          parseCounters: emptyParseCounters(),
+          // No rows were written, so no (region, day) carries telemetry-only spend
+          // this tick. Empty ARRAY, never omitted — a consumer summing it must not
+          // have to special-case the empty tick.
+          telemetryOnlySpend: [],
           // No spans were considered, so every rung is zero (never omit the
           // object — a consumer reading result.costingRungs.provider must not
           // have to special-case the empty tick).
@@ -267,7 +282,7 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
           lookbackDaysApplied: null,
           scoped: false,
           signalErrors: 0,
-        }
+        } satisfies JoinResult
       }
       // lookbackDays widens the reader's OUTER scan bound (default 7d). Without
       // it, a "recovery" re-run silently reaches back only a week and reports

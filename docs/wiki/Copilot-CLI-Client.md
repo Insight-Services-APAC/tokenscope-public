@@ -321,14 +321,6 @@ the sources they are synced from.
 
 ## Deferred items (not built in v1)
 
-- **Enterprise flat-seat showback under the GitHub App** — the enterprise seats
-  pull still presents a Bearer PAT header regardless of how the client was
-  constructed, so an App-mode enterprise gets a loud `401` (isolated to that
-  scope) and **no flat-seat showback row**. It fails safe, not silently, and
-  chargeback is unaffected — Copilot bills pooled per cost-centre and is
-  firewalled out of every chargeback view by migration `0085`. The fix is to route
-  the seats pull through the per-org App path the identity lanes already use. This
-  becomes live the moment an enterprise flips from PAT to the App.
 - **GitHub-billing-API reconciliation** — lifts Copilot spend to tier-1.
 - **VS Code Copilot Chat** — same file-forwarder approach, pending client-level
   `COPILOT_OTEL_FILE_EXPORTER_PATH` availability in the VS Code extension.

@@ -193,7 +193,7 @@ flowchart LR
 |---|---|
 | Soft-purge sweep worker (enforce the `ts_purged` PII window) | **[Planned]** — column exists, job not built |
 | Formal retention/expiry jobs (attribution, Log Analytics tiering) | **[Planned]** |
-| RLS as the live boundary (non-owner DB role + FORCE RLS) | **[Planned]** — policies shipped, inert today |
+| RLS as the live boundary (non-owner DB role + FORCE RLS) | **[Planned]** — policies shipped, inert today. The app connects as the table owner, and an owner bypasses RLS unless the table sets `FORCE`. The enablement path exists and is dormant: a read-only capability probe (`GET /api/v1/admin/diagnostics/rls-posture`), role provisioning, a one-time cutover sweep, and a boot gate that refuses to start the server if binding the non-owner role would break it. All behind Bicep flags that default false; no environment sets them. |
 | Deployment-time region choice (residency) | **[Planned]** — a single region is fixed per deployment today (via `location`) |
 | AI-coaching privacy boundary (hash-only, aggregates-only, 30 d purge) | **[Planned]** — coach not built; the privacy *contract* is documented as the bar any future build must meet |
 | Strip/keep policy for Claude's own identity attrs in telemetry | **[VERIFY / Planned]** |

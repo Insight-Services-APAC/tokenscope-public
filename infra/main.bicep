@@ -68,6 +68,80 @@ param pgAdminLogin string
 @secure()
 param pgAdminPassword string
 
+// ── RLS enforcement: the non-owner app role (docs/design/rls-enforcement.md §9) ──
+// The 40 RLS policies do not execute today because the app connects as the table
+// OWNER. Enforcement needs a non-owner login, which drizzle/provision-app-role.ts
+// creates at boot using the credentials below.
+//
+// FIVE FLAGS, ALL DEFAULT FALSE — an apply that names none of them changes
+// nothing. They are separate because they fail differently and their ORDER is
+// the safety property. The intended sequence, one infra.yml dispatch each:
+//
+//   1. writeAppDbPassword=true, hasAppRoleSecrets=true, provisionAppRole=true
+//      → generates the password, writes app-db-password + database-url-app, and
+//        the next boot CREATES THE ROLE. It does NOT touch row-level security:
+//        creating a role and cutting the estate over are two decisions. The app
+//        still connects as the OWNER; read the boot log for the
+//        "[provision-app-role] verified" line before going on.
+//   2. writeAppDbPassword BACK TO FALSE, add runRlsCutoverSweep=true → the next boot runs the ONE-TIME cutover
+//        sweep: DISABLE row-level security on every RLS-enabled table that is
+//        not already FORCEd (a non-owner is bound by ENABLE alone, so anything
+//        left enabled filters the app the instant step 3 lands). It NEVER
+//        disables a FORCEd table — that is how a rollout phase says "hands off"
+//        — and it REFUSES, changing nothing, if a bootstrap table is FORCEd.
+//        Stamped in seed_state, so it does not re-run and the flag is safe to
+//        leave on. Read the boot log for "[cutover-rls-sweep] verified".
+//
+//        THE WRITE FLAG MUST GO OFF HERE, and this comment said step 3 for a
+//        whole PR. `appDbPasswordSeed` defaults to `newGuid()`, which yields a
+//        NEW value on every deployment, so a second dispatch with the flag
+//        still true rewrites app-db-password and database-url-app with a
+//        password the ROLE DOES NOT HAVE — provisioning sets a password only
+//        when it CREATEs the role, and moving an existing one needs
+//        rotateAppDbPassword. Step 3 would then bind a credential that cannot
+//        authenticate, and the boot aborts. dev.bicepparam always said this
+//        correctly; this block was the copy that drifted.
+//   3. keep the others, add useAppRoleAtRuntime=true → THE CUTOVER. The runtime
+//      pools connect as the role and the policies start executing.
+//   4. Rollback, if anything looks wrong: useAppRoleAtRuntime=false, re-apply.
+//      One variable, no code change, no migration to reverse. It does NOT
+//      re-enable the swept tables; that is a deliberate step of its own.
+//
+// AND A SIXTH FLAG THAT IS NOT PART OF THAT SEQUENCE: rotateAppDbPassword. The
+// boot step sets the role's password ONCE, when it CREATEs it, and a later boot
+// never touches it UNLESS this flag is on — which is why provisionAppRole is
+// safe to leave on. Rolling the credential is deliberate: writeAppDbPassword=true
+// to mint a new one, then ONE boot with rotateAppDbPassword=true, then both back
+// to false.
+//
+// WHY writeAppDbPassword IS ITS OWN FLAG: newGuid() yields a NEW value on every
+// deployment. Writing it unconditionally would rotate the password on every
+// unrelated apply, and a rotation under a live app leaves draining replicas
+// holding a password the role no longer has. So the write is deliberate, and an
+// ordinary apply passes '' — which keyvault-secrets.bicep treats as a NO-OP that
+// leaves the stored value alone (its SAFETY CONTRACT).
+@description('Generate a NEW app-role password and (re)write the app-db-password + database-url-app Key Vault secrets. This is also how they are created the first time. Leave false on ordinary applies: true mints a new credential, and an EXISTING role only picks it up on a boot with rotateAppDbPassword=true — provisionAppRole alone will not move an existing role password. A role being CREATED for the first time is set to whatever password this apply wrote, which is the intended first-run path and needs no rotation flag.')
+param writeAppDbPassword bool = false
+
+@description('Machine-generated app-role password. NEVER pass this explicitly and never read it — newGuid() makes the deployment generate it, Key Vault stores it, the container consumes it, and no human or log ever sees it. Used only when writeAppDbPassword is true.')
+@secure()
+param appDbPasswordSeed string = newGuid()
+
+@description('The app-db-password + database-url-app KV secrets exist, so the container app may reference them and the boot step gets TOKENSCOPE_APP_DB_PASSWORD. Set true on the same apply that first sets writeAppDbPassword, and keep it true.')
+param hasAppRoleSecrets bool = false
+
+@description('Let the boot step CREATE the non-owner role, grant it and set its ALTER DEFAULT PRIVILEGES. It does NOT change row-level security — that is runRlsCutoverSweep, deliberately separate. Requires hasAppRoleSecrets. Safe to keep true afterwards: a boot that finds the role already there converges its attributes and grants and never touches its password unless rotateAppDbPassword is also on.')
+param provisionAppRole bool = false
+
+@description('Run the ONE-TIME cutover sweep: DISABLE row-level security on every RLS-enabled table that is not already FORCEd, so no unvetted table binds the app when useAppRoleAtRuntime lands (a non-owner is bound by ENABLE alone). It NEVER disables a FORCEd table — that is a rollout phase deliberately enabling one — and it REFUSES, changing nothing, if a BOOTSTRAP table is FORCEd, because §5 and §7 disagree about that table and no boot script may pick a winner. Stamped in seed_state, so it does not re-run and this is safe to leave true; re-sweeping means bumping RLS_CUTOVER_SWEEP_VERSION. Needs no Key Vault secret and no app role — it runs on the OWNER connection — but it does need DATABASE_URL and a migrated schema it recognises, and it is pointless before the role exists.')
+param runRlsCutoverSweep bool = false
+
+@description('ROLL THE APP ROLE PASSWORD — the ONLY path that changes an EXISTING role password to the app-db-password secret. On for ONE deliberate boot after an apply with writeAppDbPassword=true, then back off: left on, every replica restart is a rotation, and a rotation under a live app invalidates the old password for any NEW connection — an established session keeps working, so the symptom is a replica that serves fine until its pool next opens a connection, which is worse to diagnose than an outright failure. Requires provisionAppRole + hasAppRoleSecrets.')
+param rotateAppDbPassword bool = false
+
+@description('THE CUTOVER: point the runtime pools at the non-owner role, so the RLS policies begin to execute. TAKES EFFECT ONLY WITH hasAppRoleSecrets — this parameter is AND-ed with it below, because the runtime url is a Key Vault reference and ACA fails a deploy that references a missing secret; on its own this flag changes nothing at all. Requires a role that already exists (do a provisionAppRole apply first and read its boot log) AND an estate the sweep has already prepared. That second precondition is ENFORCED for every DEPLOYED start rather than documented: once the runtime url is actually emitted, entrypoint.sh runs drizzle/assert-runtime-rls-safe.ts before Nitro and REFUSES TO START if any bootstrap table is still RLS-ENABLED or any enabled table is un-FORCEd, because a non-owner is bound by ENABLE alone and booting anyway stops the emit fleet behind a green deploy. The check is one snapshot taken before the server binds, not a lifetime guarantee. A refusal fails the revision and leaves the previous one serving. Turning this back off is the rollback.')
+param useAppRoleAtRuntime bool = false
+
 // ── Entra OIDC ────────────────────────────────────────────────────────
 
 @description('Entra ID tenant ID for nuxt-oidc-auth. Empty = OIDC not configured (sandbox-bring-up before app reg).')
@@ -250,7 +324,7 @@ param deployRbac bool = false
 //     var. The `require-front-door` middleware starts enforcing —
 //     direct-to-CA requests 403; only AFD-fronted requests succeed.
 
-@description('Provision Azure Front Door + WAF. Sandbox starts false (phase 1 of the three-phase deploy); flip to true on phase 2 once the container app FQDN exists. Staging + production default to true.')
+@description('Provision Azure Front Door + WAF. Sandbox starts false (phase 1 of the three-phase deploy); flip to true on phase 2 once the container app FQDN exists. EVERY environment defaults false and must set it explicitly — an earlier version of this line said staging and production default to true, and no parameter file has ever set it.')
 param enableFrontDoor bool = false
 
 @description('ISO-3166 alpha-2 country codes allowed through the AFD WAF. Empty array = no geo restriction (global access). Forwarded directly to `front-door.bicep`.')
@@ -481,6 +555,10 @@ module kvSecrets 'modules/keyvault-secrets.bicep' = {
     pgAdminLogin: pgAdminLogin
     pgAdminPassword: pgAdminPassword
     pgServerFqdn: postgresql.outputs.serverFqdn
+    // RLS enforcement: '' on an ordinary apply, which is a NO-OP that leaves any
+    // stored app-role password (and the URL built from it) untouched. Only an
+    // apply that deliberately asks for it generates and writes a new one.
+    appDbPassword: writeAppDbPassword ? appDbPasswordSeed : ''
     // Redis — components passed in, URL built inside the module so the
     // primary key never lands in the root template.
     redisHostName: redis.outputs.hostName
@@ -549,6 +627,43 @@ module containerApp 'modules/container-app.bicep' = {
     hasGithubPatApacNfr: !empty(githubPatApacNfr)
     // GitHub App private key (App-credential path; flag false until the base64 PEM is provided).
     hasGithubAppKeyPartnerDemo: !empty(githubAppKeyPartnerDemo)
+    // RLS enforcement (§9). Every consumer is AND-ed with hasAppRoleSecrets so
+    // a flag set out of order narrows to a no-op instead of emitting a KV
+    // reference to a secret that was never written (which ACA rejects at deploy
+    // time, and which would read as "enabled" in the template either way).
+    // rotateAppDbPassword additionally requires provisionAppRole: the boot step
+    // only reads it while it is provisioning, so on its own it is inert and
+    // would read as "rotating" in the template while nothing rotated.
+    hasAppRoleSecrets: hasAppRoleSecrets
+    provisionAppRole: provisionAppRole && hasAppRoleSecrets
+    rotateAppDbPassword: rotateAppDbPassword && provisionAppRole && hasAppRoleSecrets
+    // NOT AND-ed with anything. The sweep runs on the OWNER connection and needs
+    // no secret, so narrowing it would only add another way for a flag to read
+    // as enabled while doing nothing.
+    runRlsCutoverSweep: runRlsCutoverSweep
+    /*
+     * DELIBERATELY NOT AND-ed with provisionAppRole either, though that
+     * combination is a real hazard: useAppRoleAtRuntime=true with
+     * provisionAppRole=false points the runtime at a role nothing maintains. The
+     * fix is in the boot step, not here — drizzle/provision-app-role.ts probes
+     * TOKENSCOPE_APP_DATABASE_URL and aborts on a broken credential EVEN WHEN IT
+     * IS DORMANT. That check has to exist regardless, because the role can be
+     * dropped or the secret can drift with provisioning firmly on, and once it
+     * exists the coupling here would add nothing but a silent no-op.
+     *
+     * AND-ing WITH runRlsCutoverSweep WOULD BE WRONG, not merely redundant —
+     * worth stating because it is the obvious "fix" to reach for. The sweep is
+     * once-per-environment and stamped; the steady state after a successful
+     * cutover is runRlsCutoverSweep=false with useAppRoleAtRuntime=true. A
+     * template AND would make the correct end state un-expressible and every
+     * later deploy silently drop the runtime back to the owner.
+     *
+     * The real precondition is not "was the sweep requested this apply?" but
+     * "is the DATABASE in a state the app can bind to?" — true or false
+     * independently of which apply made it so. Only the boot step can ask that,
+     * and drizzle/assert-runtime-rls-safe.ts does, fatally.
+     */
+    useAppRoleAtRuntime: useAppRoleAtRuntime && hasAppRoleSecrets
     hasEntraClientSecret: !empty(entraIdClientSecret)
     hasOidcModuleSecrets: !empty(oidcSessionSecret) && !empty(oidcAuthSessionSecret) && !empty(oidcTokenKey)
     aiFoundryEndpoint: ''

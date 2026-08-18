@@ -5,10 +5,18 @@ import { project } from './projects'
 
 /*
  * over_emission (mig 0072) — the integrity counterpart of unaccounted_usage: per
- * (teammate, day, tool) UNCORROBORATED OTel excess = max(0, OTel − provider API truth).
- * Flagged for the developer to review and either quarantine the suspect session or
- * escalate. Claude-only until a per-teammate-day Copilot API truth exists. See
- * docs/design/provider-billing-attribution-model.md §A + ADR-0010 rule 2 / ADR-0008.
+ * (teammate, day, tool) OTel emission the provider API does not corroborate. Both
+ * providers since mig 0073. See docs/design/provider-billing-attribution-model.md
+ * §A + ADR-0010 rule 2 / ADR-0008.
+ *
+ * TWO LANES, discriminated by `reason` (mig 0132) and NEVER merged:
+ *   - 'api-uncorroborated' — a bill EXISTS for that cell and OTel materially exceeds
+ *     it. The high-confidence flag: the developer reviews it and either quarantines
+ *     the suspect session or escalates.
+ *   - 'no-bill-to-corroborate' — there is no bill to compare against at all
+ *     (api_usd = 0; the org may simply be unreconciled), so only a much higher
+ *     absolute floor applies. NOT an accusation, and never a review item — every
+ *     developer-facing reader filters to 'api-uncorroborated'.
  */
 export const overEmission = pgTable(
   'over_emission',
@@ -24,6 +32,10 @@ export const overEmission = pgTable(
     otelUsd: numeric('otel_usd', { precision: 14, scale: 6 }).notNull(),
     apiUsd: numeric('api_usd', { precision: 14, scale: 6 }).notNull(),
     overUsd: numeric('over_usd', { precision: 14, scale: 6 }).notNull(),
+    // mig 0132. CHECK IN ('api-uncorroborated','no-bill-to-corroborate'). The
+    // default backfilled pre-0132 rows, which all came from the api-uncorroborated
+    // lane because it was the only lane that wrote.
+    reason: text('reason').notNull().default('api-uncorroborated'),
     state: text('state').notNull().default('open'),
     quarantinedConversationId: text('quarantined_conversation_id'),
     resolvedAt: timestamp('resolved_at', { withTimezone: true }),

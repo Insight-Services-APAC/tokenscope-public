@@ -31,7 +31,8 @@ import { createError, defineEventHandler } from 'h3'
 import { eq } from 'drizzle-orm'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { requireAuth } from '../../../../../auth/rbac'
-import { getDb, schema } from '../../../../../db'
+import { schema } from '../../../../../db'
+import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
 import { revokeGrant } from '../../../../../utils/grant-revoke'
 import { requireUuidParam } from '../../../../../utils/require-uuid-param'
@@ -41,40 +42,45 @@ export default defineEventHandler(async (event) => {
   const session = await requireAuth(event)
   const id = requireUuidParam(event, 'id', 'grant id')
 
-  const db = getDb()
-  const [row] = await db
-    .select({
-      id: schema.oauthToken.id,
-      teammateId: schema.oauthToken.teammateId,
-      scope: schema.oauthToken.scope,
-      revokedAt: schema.oauthToken.revokedAt,
-      instanceId: schema.oauthToken.instanceId,
+  // ONE transaction carrying the caller's RLS identity: read → own-or-404 →
+  // revoke (+ the emit cascade) → audit.
+  const result = await withRequestRls(event, async (tx) => {
+    const [row] = await tx
+      .select({
+        id: schema.oauthToken.id,
+        teammateId: schema.oauthToken.teammateId,
+        scope: schema.oauthToken.scope,
+        revokedAt: schema.oauthToken.revokedAt,
+        instanceId: schema.oauthToken.instanceId,
+      })
+      .from(schema.oauthToken)
+      .where(eq(schema.oauthToken.id, id))
+      .limit(1)
+
+    // Not found OR not the caller's → 404. Do NOT leak a peer's grant existence
+    // with a 403.
+    if (!row || row.teammateId !== session.teammateId) {
+      throw createError({ statusCode: 404, statusMessage: 'Grant not found' })
+    }
+
+    const revoked = await revokeGrant(tx, row)
+
+    await recordAuditEvent(tx, {
+      eventType: 'grant-revoked',
+      actorTeammateId: session.teammateId,
+      actorSystem: 'me',
+      subjectKind: 'grant',
+      subjectId: id,
+      payload: {
+        byUser: true,
+        actorEmail: session.email,
+        isEmit: revoked.isEmit,
+        instancesEnded: revoked.instancesEnded,
+        alreadyRevoked: !revoked.revoked,
+      },
     })
-    .from(schema.oauthToken)
-    .where(eq(schema.oauthToken.id, id))
-    .limit(1)
 
-  // Not found OR not the caller's → 404. Do NOT leak a peer's grant existence
-  // with a 403.
-  if (!row || row.teammateId !== session.teammateId) {
-    throw createError({ statusCode: 404, statusMessage: 'Grant not found' })
-  }
-
-  const result = await revokeGrant(db, row)
-
-  await recordAuditEvent(db, {
-    eventType: 'grant-revoked',
-    actorTeammateId: session.teammateId,
-    actorSystem: 'me',
-    subjectKind: 'grant',
-    subjectId: id,
-    payload: {
-      byUser: true,
-      actorEmail: session.email,
-      isEmit: result.isEmit,
-      instancesEnded: result.instancesEnded,
-      alreadyRevoked: !result.revoked,
-    },
+    return revoked
   })
 
   return { id, revoked: result.revoked, is_emit: result.isEmit, instances_ended: result.instancesEnded }

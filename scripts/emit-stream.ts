@@ -15,9 +15,7 @@
  *
  * Ctrl-C to stop; closes the postgres pool cleanly on SIGINT/SIGTERM.
  */
-import { drizzle } from 'drizzle-orm/postgres-js'
-import { createDbClient } from '../drizzle/connect'
-import * as schema from '../drizzle/schema'
+import { createWorkerDb } from '../server/db/worker-db'
 import { LocalCollectorReader } from '../server/azure/reader'
 import { emitTick } from './emit-data'
 
@@ -40,8 +38,8 @@ async function main() {
     process.exit(1)
   }
 
-  const client = createDbClient(dbUrl, { max: 1, idle_timeout: 5 })
-  const db = drizzle(client, { schema })
+  // Worker lane — this loop calls emitTick, which runs the real read joiner.
+  const { client, db } = await createWorkerDb(dbUrl, { max: 1, idle_timeout: 5 })
   const reader = new LocalCollectorReader(endpoint)
 
   // Per-(teammate, project) session pin. emitTick mutates this map so

@@ -18,7 +18,7 @@
 import { defineEventHandler } from 'h3'
 import { requireAuth } from '../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../auth/csrf'
-import { getDb } from '../../../../db'
+import { withRequestRls } from '../../../../db/request-rls'
 import { readValidated } from '../../../../utils/validated-body'
 import { applyWorklistBulk } from '../../../../utils/worklist-bulk'
 import { WorklistBulkBody } from '#shared/schemas/worklist'
@@ -27,7 +27,8 @@ export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
   const session = await requireAuth(event)
   const body = await readValidated(event, WorklistBulkBody)
-  const db = getDb()
 
-  return await db.transaction((tx) => applyWorklistBulk(tx, session.teammateId, body))
+  // withRequestRls IS the transaction — the batch stays atomic and now carries
+  // the caller's RLS identity for every statement in it.
+  return await withRequestRls(event, (tx) => applyWorklistBulk(tx, session.teammateId, body))
 })

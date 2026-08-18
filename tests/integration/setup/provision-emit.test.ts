@@ -98,6 +98,11 @@ function bearerTeammate(opts: { teammateId: string; scope?: string }): BearerTea
     displayName: 'PE User',
     role: 'developer',
     regionId,
+    // The RLS org-path GUC. requireOAuthBearer resolves this from its
+    // token→teammate→org_unit join; the in-memory harness has to state it, and
+    // it MUST match the org_unit this test's teammate is actually placed in
+    // (`pe.svc`) — server/db/machine-rls.ts fails closed on an empty path.
+    orgPath: 'pe.svc',
     scope: opts.scope ?? 'tokenscope.read tokenscope.tag',
     // Hand-built for the in-memory tool harness — not a real
     // requireOAuthBearer resolution, so there's no real oauth_token row to

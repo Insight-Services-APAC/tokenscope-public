@@ -53,6 +53,15 @@ import { sql, type SQL } from 'drizzle-orm'
  * credential; redeem takes only the credential lock), so no cycle exists. A new
  * path that takes the credential lock BEFORE any namespaced one would create
  * one — put it last, or do the migration properly.
+ *
+ * ── ONE RESERVED CLASSID, HELD OUTSIDE THIS FILE ────────────────────────────
+ * `classid = 100` belongs to the two BOOT steps —
+ * `drizzle/provision-app-role.ts` (key 1) and `drizzle/cutover-rls-sweep.ts`
+ * (key 2), both spelled in `scripts/rls-roles.ts` — which serialise themselves
+ * across replicas. Neither can import this module: the runtime image copies
+ * `drizzle/` and `scripts/` but NOT `server/`. So the two key spaces are kept
+ * disjoint by leaving a gap rather than by anyone remembering. Do not number a
+ * namespace below 100 up to it, and do not use 100 here.
  */
 export const LOCK_NAMESPACE = {
   /** A single device/enrolment row. Keyed on instance id or a device hash. */

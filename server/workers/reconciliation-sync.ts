@@ -67,6 +67,18 @@ export interface ReconcileSyncResult {
   // keys already present instead of asserting what runReconciliationSync returns.
   copilotSeatPagesCapped: number
   copilotSeatPageShort: number
+  // Count (not a flag): license orgs whose seat roster could not be read this run.
+  // In App mode the per-org pull is isolated, so an unreadable org no longer aborts
+  // the enterprise — which means this number is the ONLY thing that distinguishes
+  // "that org has no seats" from "we could not see that org's seats", and it is a
+  // precondition on the seat prune (copilot-bill.ts). Unaggregated it would be
+  // exactly the dead counter the comment above describes.
+  copilotSeatOrgsUnavailable: number
+  /** Enterprises whose seat pull carried positive evidence of truncation (a page with
+   *  no `seats` key, or fewer seats than the API's own total_seats). Same reason to
+   *  aggregate as the counter above: CopilotBillResult is never persisted, so a prune
+   *  precondition that stays on it is invisible to every operator surface. */
+  copilotSeatRosterIncomplete: number
 }
 
 function utcDay(d: Date): string {
@@ -114,6 +126,8 @@ export async function runReconciliationSync(
     githubCredentialMirrorWarnings: 0,
     copilotSeatPagesCapped: 0,
     copilotSeatPageShort: 0,
+    copilotSeatOrgsUnavailable: 0,
+    copilotSeatRosterIncomplete: 0,
   }
 
   // Anthropic — credential grain is the org.
@@ -184,10 +198,26 @@ export async function runReconciliationSync(
       result.scopesSkippedNoAdapter += 1
       continue
     }
-    const credential = await resolveEnterpriseCredential(db, {
-      provider: 'github',
-      externalId: e.external_id,
-    })
+    // UF-20: resolveEnterpriseCredential THROWS (MissingGithubAppKeyError) for an
+    // enterprise that opted into App mode with the key unwired — deliberately
+    // fail-loud, never a silent PAT downgrade. Unguarded, that one enterprise's
+    // config gap aborted every REMAINING scope in the tick and failed the whole
+    // worker_run: a config problem on one enterprise stopped reconciling the
+    // others. Isolated per-enterprise exactly like copilot-pool-bill.ts:611-618,
+    // and onto the SAME scopesErrored counter the pull/engine catch below uses,
+    // so a persistently-unwired enterprise is visible in worker_run.result rather
+    // than only in a log line.
+    let credential
+    try {
+      credential = await resolveEnterpriseCredential(db, {
+        provider: 'github',
+        externalId: e.external_id,
+      })
+    } catch (err) {
+      result.scopesErrored += 1
+      console.warn(`[reconciliation-sync] github credential resolve failed for ${e.external_id}: ${String(err)}`)
+      continue
+    }
     if (!credential) {
       result.scopesSkippedNoCredential += 1
       continue
@@ -241,6 +271,8 @@ export async function runReconciliationSync(
         result.copilotSeatsCarriedUnmapped += bill.seatsCarriedUnmapped
         if (bill.seatPagesCapped) result.copilotSeatPagesCapped += 1
         if (bill.seatPageShort) result.copilotSeatPageShort += 1
+        result.copilotSeatOrgsUnavailable += bill.seatOrgsUnavailable
+        if (bill.seatRosterIncomplete) result.copilotSeatRosterIncomplete += 1
       } catch (err) {
         console.warn(`[reconciliation-sync] copilot bill writer ${e.external_id} failed: ${String(err)}`)
       }

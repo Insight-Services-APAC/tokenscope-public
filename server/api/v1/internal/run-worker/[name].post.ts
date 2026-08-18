@@ -34,7 +34,7 @@
  */
 import { createError, defineEventHandler, getRouterParam } from 'h3'
 import { verifyInternalRequest } from '../../../../auth/internal-request'
-import { getDb } from '../../../../db'
+import { getWorkerDb } from '../../../../db/worker-db'
 import { dispatchWorker } from '../../../../workers/dispatch'
 import { getWorker, listWorkerNames } from '../../../../workers/registry'
 import { parseWorkerOpts } from '../../../../workers/run-worker-opts'
@@ -54,7 +54,14 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  const db = getDb()
+  // THE WORKER LANE'S POOL, not the request pool (docs/design/rls-enforcement.md
+  // §2). There is no identity to derive here — the HMAC authenticates the
+  // SCHEDULER, not a person — and every worker reachable from this surface is
+  // estate-wide by definition. The handle therefore carries the connection-level
+  // `app.user_role=global-finops` GUC, so under FORCE ROW LEVEL SECURITY a
+  // reconciliation tick sees the whole estate instead of silently returning zero
+  // rows and reporting success.
+  const db = await getWorkerDb()
 
   // Operator-forceable per-dispatch options (currently just deepRescan). Parsed
   // AFTER verifyInternalRequest (which validated the body-sha256 inside the

@@ -38,6 +38,23 @@ sequenceDiagram
 
 The registry (`server/workers/registry.ts`) is the single source of truth: a static list mapping each name to its `run(db)` function, `recommendedCron`, and description.
 
+**How a worker connects.** Every worker takes its database handle from the worker
+pool (`server/db/worker-db.ts`), which carries an estate-wide row-level-security
+identity (`app.user_role=global-finops`) on the connection itself, plus the UTC
+clock pin every other connection has. That is deliberate and matches what workers
+are: reconciliation, rollups, retention and fleet-health detectors all operate
+across the whole estate, and none of them acts on behalf of a signed-in person.
+The pool verifies its own identity once at startup and refuses to hand out a
+handle if it is not what was asked for — a mistyped setting connects perfectly
+happily and would otherwise leave the identity silently unset. The same applies
+to `npm run worker`, to the admin "run now" button and to the scheduled HTTP
+trigger: all three take the same pool, so a worker behaves identically however it
+was started.
+
+An admin route that runs worker code runs it on that pool too, not on the
+caller's connection — otherwise a regional administrator pressing a button would
+narrow an estate-wide computation to their own region and report success.
+
 **Kill switch.** Any scheduled worker can be turned off from the admin worker-controls card and stays off from its next tick, with no deploy. The state lives in `worker_enablement`; an absent row means enabled. Reading the fleet's state is open to `admin` and `global-finops`; **writing a toggle is `global-finops` only** — the table has no region column and every worker it governs runs globally, so a toggle reaches past a region admin's scope, and disabling one can stop attribution, budget alerting or spoof detection estate-wide. A region admin therefore sees the card and its states but is offered no toggle. Disabling requires a reason, and every toggle is attributed and audited. Routes: [`GET`/`PUT /api/v1/admin/workers/enablement`](API-Reference.md#admin).
 
 ## Dev / Ops CLI

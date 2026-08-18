@@ -133,10 +133,15 @@ you pick one, and it:
   copy of the device's current global `env`, with `OTEL_RESOURCE_ATTRIBUTES`
   overridden to
   `tokenscope.instance_id=<DEVICE_SID>,project.code_hash=<sha256(code)>,tool=claude-code`.
-  This is mandatory, not a leak (ADR-0006 §2): Claude Code applies the
-  highest-precedence `env` block by **replacement, not key-merge**, so a
-  repo-local block carrying only the resource attrs would drop the
-  endpoint/bearer. The durable OAuth **refresh token** specifically is excluded
+  The full copy is **not** required by the merge semantics: Claude Code merges
+  the blocks **per key**, with the repo-local value winning a conflict (captured
+  against 2.1.232 —
+  [`env-precedence-capture.md`](../docs/security-sprint/env-precedence-capture.md);
+  ADR-0006 §2 previously claimed replacement and is amended). A narrowed block
+  would inherit the endpoint/bearer rather than drop them. The copy is kept
+  because only one client version has been measured and a device on a build that
+  behaved otherwise would silently stop emitting.
+  The durable OAuth **refresh token** specifically is excluded
   from the copy — the one credential a hostile repo could otherwise exfiltrate
   merely by being cloned and opened — and `otel-headers-helper.sh` falls back to
   the device's own state-dir credential store for it.

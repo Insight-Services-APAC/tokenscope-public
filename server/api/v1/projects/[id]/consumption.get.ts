@@ -20,11 +20,18 @@
  * requireRegionScope (API-1 — the same requireRegionScope pattern the
  * admin/* endpoints apply); global-finops /
  * platform-admin are unbounded. This app-level clamp is the live gate —
- * RLS is bypassed at runtime (owner DB connection) until Epic 10's
- * non-owner role lands, so we cannot lean on the attribution_record
- * policy here. Same rationale as server/auth/allocation-scope.ts. An
- * out-of-subtree project id returns 0 (no row) for a manager, never
- * another org's sum.
+ * RLS is bypassed at runtime (owner DB connection) until the non-owner role
+ * lands, so we cannot lean on the attribution_record policy here. Same
+ * rationale as server/auth/allocation-scope.ts. An out-of-subtree project id
+ * returns 0 (no row) for a manager, never another org's sum.
+ *
+ * ONE THING CHANGES WHEN THE NON-OWNER ROLE ARRIVES, and it is asserted in
+ * tests/integration/db/rls-force-lanes.test.ts rather than left to be
+ * discovered: `project` is in the phase-1 FORCE set, so a foreign-region admin
+ * is refused by the POLICY (row hidden → 404) before requireRegionScope can
+ * answer 403. Both refuse; the 404 is the tighter one. The app-level clamp
+ * stays — it is what refuses today, and what refuses a MANAGER (who is not
+ * region-gated) in either world.
  *
  * S3: the in-query clause is orgSubtreeScopePredicate('cou') — the SAME
  * region-clamp + placedBelowRegionRootPredicate() gate every other
@@ -43,7 +50,6 @@ import { defineEventHandler, createError } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireRole, requireRegionScope } from '../../../../auth/rbac'
 import { orgSubtreeScopePredicate } from '../../../../auth/org-subtree-scope'
-import { getDb } from '../../../../db'
 import { withRequestRls } from '../../../../db/request-rls'
 import { requireUuidParam } from '../../../../utils/require-uuid-param'
 import { monthToDateWindow } from '../../../../utils/period'
@@ -53,28 +59,31 @@ export default defineEventHandler(async (event) => {
   const session = await requireRole(event, 'manager', 'admin', 'global-finops')
   const id = requireUuidParam(event, 'id', 'project id')
 
-  const db = getDb()
-  // Region-bound the admin to the PROJECT's region before reading any spend
-  // (API-1): without this, a region-scoped admin could read any project's
-  // consumption cross-region by id — the breakdown/export endpoints close the
-  // identical hole via requireRegionScope. Managers are NOT region-gated here
-  // (requireRegionScope would deny them outright); their bound is the
-  // org-subtree predicate in the admission query below.
-  const projRows = await db.execute<{ region_id: string }>(sql`
-    SELECT region_id::text AS region_id FROM project WHERE id = ${id}::uuid LIMIT 1
-  `)
-  const proj = [...projRows][0]
-  if (!proj) {
-    throw createError({ statusCode: 404, statusMessage: 'Project not found' })
-  }
-  if (session.role !== 'manager') {
-    await requireRegionScope(event, proj.region_id)
-  }
-
   // MONTH TO DATE — ends at now, not at the month end (server/utils/period.ts).
   const window = monthToDateWindow()
 
+  // The project's region lookup moved INSIDE the RLS transaction. It reads
+  // `project`, which is in the design's PHASE-1 FORCE set (§Rollout) — on the bare
+  // pool that SELECT returns zero rows under FORCE and every caller gets a 404
+  // for a project that exists. Silent, and on the money path.
   return await withRequestRls(event, async (tx) => {
+    // Region-bound the admin to the PROJECT's region before reading any spend
+    // (API-1): without this, a region-scoped admin could read any project's
+    // consumption cross-region by id — the breakdown/export endpoints close the
+    // identical hole via requireRegionScope. Managers are NOT region-gated here
+    // (requireRegionScope would deny them outright); their bound is the
+    // org-subtree predicate in the admission query below.
+    const projRows = await tx.execute<{ region_id: string }>(sql`
+      SELECT region_id::text AS region_id FROM project WHERE id = ${id}::uuid LIMIT 1
+    `)
+    const proj = [...projRows][0]
+    if (!proj) {
+      throw createError({ statusCode: 404, statusMessage: 'Project not found' })
+    }
+    if (session.role !== 'manager') {
+      await requireRegionScope(event, proj.region_id)
+    }
+
     // Admission: the org-subtree clamp, unchanged. No row = out of scope, which
     // returns the same zero payload it always did (never another org's sum).
     const admitted = await tx.execute<{ ok: number }>(sql`

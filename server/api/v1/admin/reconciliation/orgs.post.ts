@@ -284,6 +284,14 @@ export default defineEventHandler(async (event) => {
     // reconciliation_record rows that were sitting governance-unresolved ONLY
     // because this org did not exist yet. Bounded to this one org's backlog;
     // safe to run inline.
+    //
+    // ON THE REQUEST LANE DELIBERATELY (docs/design/rls-enforcement.md §2, "the
+    // six handlers"). Its scope is already an explicit PARAMETER, not an ambient
+    // consequence: every predicate is keyed on the org id / provider / external
+    // id passed here, so a region-scoped `admin` caller cannot narrow it. Its
+    // two tables carry no RLS. And it must stay inside this transaction — it
+    // resolves rows against the provider_org row INSERTed above, invisible to
+    // any other connection until commit.
     const resweep = await resweepProviderOrgReferences(tx, {
       providerOrgId: created!.id,
       provider: body.provider,

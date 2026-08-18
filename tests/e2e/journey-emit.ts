@@ -84,6 +84,15 @@ export async function emitSessionForAssignment(opts: {
   teammateEmail: string
   projectCode: string
   spans?: Array<{ tokens: number; tokenType: string }>
+  /*
+   * When the spans are dated. Defaults to now, which is what the original
+   * caller wanted — but "now" is TODAY, and today is the still-filling day that
+   * reporting surfaces deliberately treat as unsettled
+   * (docs/design/clock-and-day-boundary.md). A spec that asserts on a reporting
+   * total therefore has to emit into a SETTLED day or it will read a legitimate
+   * zero and look like a pipeline break.
+   */
+  at?: Date
 }): Promise<EmitResult> {
   const dbUrl = process.env.DATABASE_URL
   const endpoint = process.env.NUXT_AZURE_MONITOR_ENDPOINT
@@ -116,7 +125,7 @@ export async function emitSessionForAssignment(opts: {
     }
 
     const sessionId = randomUUID()
-    const baseTs = Date.now()
+    const baseTs = (opts.at ?? new Date()).getTime()
     const spans = (opts.spans ?? DEFAULT_SPANS).map((s, i) => ({
       tokens: s.tokens,
       tokenType: s.tokenType,

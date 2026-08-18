@@ -19,12 +19,28 @@
  * The minted emit credential is tokenscope.emit ONLY (issueEmitCredential never
  * widens scope) and is bound to the handoff's instance, rotating out any prior
  * live emit credential for that device.
+ *
+ * LANE: machine, ADOPTED MID-TRANSACTION (docs/design/rls-enforcement.md §2).
+ * This is the one handler whose identity cannot be known before the transaction
+ * opens: the teammate is DISCOVERED by consuming the one-time handoff code, and
+ * that consume has to be the first statement of the same transaction as
+ * everything after it — a mid-sequence failure must roll back to a
+ * still-redeemable code rather than bricking the device. So it opens the
+ * transaction, learns who it is from the handoff + attestation join, and then
+ * calls `applyRlsContext` (server/db/rls.ts) before the credential mint and the
+ * audit write, which are the statements that actually touch policy-bearing
+ * tables (`oauth_token`, `audit_event`).
+ *
+ * The identity is REAL, not asserted: the handoff was minted by the read-scoped
+ * `provision_emit` MCP tool behind a completed OAuth consent, so `teammate_id`
+ * comes from a credential the server issued — the opposite of /setup/enroll's
+ * caller-supplied `claimed_email`.
  */
 import { createError, defineEventHandler, readValidatedBody, setResponseHeaders } from 'h3'
 import { assertTrustedPublicOrigin } from '../../../utils/public-url'
 import { z } from 'zod'
 import { sql } from 'drizzle-orm'
-import { getDb } from '../../../db'
+import { withDeferredMachineRls } from '../../../db/machine-rls'
 import { issueEmitCredential } from '../../../auth/emit-credential'
 import {
   consumeEmitHandoff,
@@ -50,7 +66,6 @@ export default defineEventHandler(async (event) => {
   // single-use code they cannot get back, for a purely server-side fault.
   assertTrustedPublicOrigin(event)
   const { handoff_code, instance_id } = await readValidatedBody(event, (d) => Body.parse(d))
-  const db = getDb()
 
   // ONE transaction for consume → attestation check → mint → audit (AUTH-1):
   // any mid-sequence failure (incl. a throwing recordAuditEvent) rolls back to
@@ -58,7 +73,7 @@ export default defineEventHandler(async (event) => {
   // device can simply retry instead of being bricked. The consume CAS and the
   // per-instance advisory xact lock (issueInstanceEmitCredentialTx) both work
   // inside it.
-  const { claimed, att, emit, tool } = await db.transaction(async (tx) => {
+  const { claimed, att, emit, tool } = await withDeferredMachineRls(async (tx, adopt) => {
     // Atomic single-use claim. Unknown / expired / already-used → null → 401.
     const claimed = await consumeEmitHandoff(tx as never, handoff_code)
     if (!claimed) {
@@ -74,17 +89,57 @@ export default defineEventHandler(async (event) => {
 
     // The attestation provision_emit created/located (state derives the bundle's
     // tagged/untagged shape). It must still exist + belong to this teammate.
-    const attRows = await tx.execute<{ project_code_hash: string | null; tool: string | null }>(sql`
-      SELECT project_code_hash, tool
-        FROM instance_attestation
-       WHERE instance_id = ${claimed.instanceId}::uuid
-         AND teammate_id = ${claimed.teammateId}::uuid
+    //
+    // The join to teammate/org_unit rides ALONG — it is what turns the handoff's
+    // `teammate_id` into the four RLS GUCs, at zero extra round-trips. Inner
+    // joins: `teammate.org_unit_id` and `teammate.region_id` are both NOT NULL
+    // with FK targets (drizzle/schema/identity.ts), so they cannot drop the row.
+    const attRows = await tx.execute<{
+      project_code_hash: string | null
+      tool: string | null
+      region_id: string
+      org_path: string
+      role: string
+    }>(sql`
+      SELECT ia.project_code_hash,
+             ia.tool,
+             tm.region_id::text AS region_id,
+             ou.path::text      AS org_path,
+             tm.role            AS role
+        FROM instance_attestation ia
+        JOIN teammate tm ON tm.id = ia.teammate_id
+        JOIN org_unit ou ON ou.id = tm.org_unit_id
+       WHERE ia.instance_id = ${claimed.instanceId}::uuid
+         AND ia.teammate_id = ${claimed.teammateId}::uuid
        LIMIT 1
     `)
     const att = [...attRows][0]
     if (!att) {
       throw createError({ statusCode: 401, statusMessage: 'Handoff references a missing instance' })
     }
+
+    // ADOPT the identity for the REST of this transaction (SET LOCAL — gone when
+    // it ends).
+    //
+    // This comment used to say everything above touched "only policy-free tables
+    // (`emit_handoff`, `instance_attestation`)". `emit_handoff` is policy-free;
+    // `instance_attestation` is NOT — it has had RLS enabled since 0002 (as
+    // `session_attestation`, renamed by 0019), as do `teammate` and `org_unit`
+    // in the join above. Under a non-owner role those reads return no row and
+    // this endpoint 401s a perfectly valid handoff, so all three are in
+    // server/db/rls-bootstrap.ts::RLS_BOOTSTRAP_TABLES and must be DISABLEd
+    // before the role switch. tests/integration/db/rls-bootstrap-set.test.ts
+    // exercises this path as a non-owner and fails if that set is short — with
+    // a COPY of this query's shape, not this query, so an edit here does not
+    // reach it. Its `drift` suite is what actually guards completeness: it
+    // reads this file's SQL and fails if an RLS-enabled table appears here
+    // without being in the constant.
+    await adopt({
+      teammateId: claimed.teammateId,
+      regionId: att.region_id,
+      orgPath: att.org_path,
+      role: att.role,
+    })
     // Narrow the stored tool HERE, inside the transaction, rather than casting
     // it after the commit. A cast asserts instead of checking, and doing the
     // check after the commit would burn the one-time handoff over a broken row.

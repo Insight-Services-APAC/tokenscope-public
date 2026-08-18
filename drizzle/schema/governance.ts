@@ -56,10 +56,18 @@ export const rateLine = pgTable(
 
 export const allocation = pgTable('allocation', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  // CHECK IN ('teammate','project','cou','region') — mig 0131, NOT VALID: the
+  // CANONICAL domain (Data-Model.md §allocation), not the subset today's code
+  // writes. 'cou' is what the Business-Unit epic's S6 exists to write. Readers
+  // clamp on 'project' because the table is shared across scope axes.
   scopeType: text('scope_type').notNull(),
+  // Deliberately no FK: which table it points at depends on scope_type. Tying it
+  // to the project's region is D9 (urgent-follow-sprint.md), not done here.
   scopeId: uuid('scope_id').notNull(),
-  // Per-developer cap (per_dev_fixed mode): a project-scoped allocation
+  // Per-developer cap (per_dev_fixed mode): a project- or CoU-scoped allocation
   // row carrying the teammate it caps. NULL = the shared pool baseline.
+  // CHECK teammate_id IS NULL OR scope_type IN ('project','cou') — mig 0131,
+  // NOT VALID. 'cou' is admitted so S6's unit budgets can carry per-dev caps.
   teammateId: uuid('teammate_id').references(() => teammate.id),
   budgetUsd: numeric('budget_usd', { precision: 14, scale: 2 }).notNull(),
   effective: tstzrange('effective').notNull(),
@@ -71,8 +79,12 @@ export const allocation = pgTable('allocation', {
   lastSyncAt: timestamp('last_sync_at', { withTimezone: true }),
 })
 
+// Schema-only today (docs/design/velocity-limit-semantics.md) — no writer exists.
 export const limitPolicy = pgTable('limit_policy', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  // CHECK IN ('project') — mig 0131, NOT VALID. The velocity ladder
+  // (platform → region → CoU → teammate) widens this in its OWN migration; note
+  // 'platform' also needs scope_id to become nullable, so it is a design change.
   scopeType: text('scope_type').notNull(),
   scopeId: uuid('scope_id').notNull(),
   limitKind: text('limit_kind').notNull(),

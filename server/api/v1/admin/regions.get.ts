@@ -8,13 +8,17 @@
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireRole } from '../../../auth/rbac'
-import { getDb } from '../../../db'
+import { withRequestRls } from '../../../db/request-rls'
 
 export default defineEventHandler(async (event) => {
   await requireRole(event, 'admin', 'global-finops')
-  const db = getDb()
-  const rows = await db.execute<{ id: string; code: string; display_name: string }>(sql`
-    SELECT id::text AS id, code, display_name FROM region ORDER BY display_name, code
-  `)
+  // `region` carries no RLS policy, but the connection still carries the
+  // caller's identity (docs/design/rls-enforcement.md: the lane decides, not
+  // the table this particular query happens to name).
+  const rows = await withRequestRls(event, (tx) =>
+    tx.execute<{ id: string; code: string; display_name: string }>(sql`
+      SELECT id::text AS id, code, display_name FROM region ORDER BY display_name, code
+    `),
+  )
   return { regions: [...rows] }
 })

@@ -17,7 +17,7 @@ import { createError, defineEventHandler } from 'h3'
 import { assertSameOrigin } from '../../../auth/csrf'
 import { tryAuth } from '../../../utils/auth'
 import { clearPersonaOverrideCookie } from '../../../utils/persona-override-cookie'
-import { getDb } from '../../../db'
+import { withRequestRls } from '../../../db/request-rls'
 import { recordAuditEvent } from '../../../db/audit'
 
 export default defineEventHandler(async (event) => {
@@ -50,20 +50,24 @@ export default defineEventHandler(async (event) => {
   }
 
   // Audit BEFORE clearing — fail-closed on audit-insert failure, the
-  // override stays intact for retry.
-  await recordAuditEvent(getDb(), {
-    eventType: 'persona-impersonation-end',
-    actorTeammateId: session.teammateId,
-    actorSystem: 'stop-impersonating',
-    subjectKind: 'teammate',
-    subjectId: session.teammateId,
-    payload: {
-      actualOid: session.impersonatorOid,
-      actualEmail: session.impersonatorEmail,
-      restoredFromTeammateId: session.teammateId,
-      impersonatedAt: session.impersonatedAt ?? null,
-    },
-  })
+  // override stays intact for retry. The session here is the IMPERSONATED
+  // persona (the override is still live), which is exactly the identity the
+  // audit row names as actor, so withRequestRls's context matches the row.
+  await withRequestRls(event, (tx) =>
+    recordAuditEvent(tx, {
+      eventType: 'persona-impersonation-end',
+      actorTeammateId: session.teammateId,
+      actorSystem: 'stop-impersonating',
+      subjectKind: 'teammate',
+      subjectId: session.teammateId,
+      payload: {
+        actualOid: session.impersonatorOid,
+        actualEmail: session.impersonatorEmail,
+        restoredFromTeammateId: session.teammateId,
+        impersonatedAt: session.impersonatedAt ?? null,
+      },
+    }),
+  )
 
   clearPersonaOverrideCookie(event)
 

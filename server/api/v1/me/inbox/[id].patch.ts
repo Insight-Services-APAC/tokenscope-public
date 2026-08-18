@@ -14,7 +14,6 @@ import { assertSameOrigin } from '../../../../auth/csrf'
 import { requireAuth } from '../../../../auth/rbac'
 import { withRequestRls } from '../../../../db/request-rls'
 import { InboxPatchBody } from '../../../../../shared/schemas/inbox'
-import { getDb } from '../../../../db'
 import { recordAuditEvent } from '../../../../db/audit'
 import { requireUuidParam } from '../../../../utils/require-uuid-param'
 
@@ -24,8 +23,12 @@ export default defineEventHandler(async (event) => {
   const id = requireUuidParam(event, 'id', 'inbox item id')
   const body = await readValidatedBody(event, (data) => InboxPatchBody.parse(data))
 
-  const updated = await withRequestRls(event, async (tx) =>
-    tx.execute<{ id: string }>(sql`
+  // The audit row is written INSIDE the same withRequestRls transaction as the
+  // UPDATE. It used to be a second recordAuditEvent on the context-less platform
+  // pool after it — the exact leak docs/design/rls-enforcement.md §4 names: under
+  // FORCE that INSERT errors and the handler 500s AFTER acking the item.
+  await withRequestRls(event, async (tx) => {
+    const updated = await tx.execute<{ id: string }>(sql`
       UPDATE inbox_item
       SET ack_state = ${body.ack_state},
           ack_at = NOW(),
@@ -33,20 +36,20 @@ export default defineEventHandler(async (event) => {
       WHERE id = ${id}::uuid
         AND recipient_teammate_id = ${session.teammateId}::uuid
       RETURNING id::text AS id
-    `),
-  )
+    `)
 
-  if (updated.length === 0) {
-    throw createError({ statusCode: 404, statusMessage: 'Inbox item not found' })
-  }
+    if (updated.length === 0) {
+      throw createError({ statusCode: 404, statusMessage: 'Inbox item not found' })
+    }
 
-  await recordAuditEvent(getDb(), {
-    eventType: 'inbox-acked',
-    actorTeammateId: session.teammateId,
-    actorSystem: 'inbox',
-    subjectKind: 'inbox_item',
-    subjectId: id,
-    payload: { ack_state: body.ack_state },
+    await recordAuditEvent(tx, {
+      eventType: 'inbox-acked',
+      actorTeammateId: session.teammateId,
+      actorSystem: 'inbox',
+      subjectKind: 'inbox_item',
+      subjectId: id,
+      payload: { ack_state: body.ack_state },
+    })
   })
 
   return { id, ack_state: body.ack_state }

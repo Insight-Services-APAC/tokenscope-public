@@ -23,6 +23,7 @@ import { Wait } from 'testcontainers'
 import postgres from 'postgres'
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import * as schema from '../../../drizzle/schema'
+import { WORKER_RLS_STARTUP_OPTIONS } from '../../../server/db/worker-db'
 
 const MIGRATIONS_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -68,8 +69,23 @@ async function runMigrations(client: ReturnType<typeof postgres>): Promise<void>
  *
  * `postgres.js` sends `connection:` keys as wire-protocol STARTUP PARAMETERS, so
  * this applies to every physical connection the pool opens, reconnects included.
+ *
+ * ── AND THE WORKER LANE'S RLS IDENTITY ──────────────────────────────────────
+ * `t.db` is the handle every worker integration test hands to `runXxx(t.db)`, so
+ * it is a worker-handle mint site (docs/design/rls-enforcement.md §2, site 7)
+ * and carries the lane's `app.user_role=global-finops` GUC — imported from
+ * `server/db/worker-db.ts`, never re-spelled here, so the suite cannot certify
+ * an identity production does not use.
+ *
+ * This does NOT weaken the RLS tests. They connect as a separate NON-OWNER role
+ * with its own client (`rls.test.ts`, `aggregate-rollup.test.ts`), and
+ * `withRlsContext`'s `SET LOCAL` still narrows a connection carrying a
+ * connection-level default — measured, design §1.
  */
-const PROD_CONNECTION = { TimeZone: 'UTC' } as const
+const PROD_CONNECTION = {
+  TimeZone: 'UTC',
+  options: WORKER_RLS_STARTUP_OPTIONS,
+} as const
 
 export async function startTestDb(): Promise<TestDb> {
   const external = process.env.TEST_PG_URL

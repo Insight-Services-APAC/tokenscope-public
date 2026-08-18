@@ -29,7 +29,6 @@ import { eq, inArray, sql, and, notLike } from 'drizzle-orm'
 import { z } from 'zod'
 import { requireRole } from '../../../../auth/rbac'
 import { withRequestRls } from '../../../../db/request-rls'
-import { getDb } from '../../../../db'
 import { searchDirectory } from '../../../../azure/directory'
 import { isExcludedUpn, loadDirectoryExclusionPatterns } from '../../../../utils/directory-exclusions'
 import { teammate, region } from '../../../../../drizzle/schema'
@@ -47,15 +46,27 @@ export default defineEventHandler(async (event) => {
   // doesn't shrink the visible list below `limit` — same intent as the #EXT#
   // guest filter, but data-driven (#121). Fresh install has no patterns.
   const rawHits = await searchDirectory(q, Math.min(limit * 2, 50))
-  const patterns = await loadDirectoryExclusionPatterns(getDb())
-  const hits = rawHits.filter((h) => !isExcludedUpn(h.upn, patterns)).slice(0, limit)
-  if (hits.length === 0) return { results: [] }
 
-  // Annotate already-provisioned people by oid so the UI can show "Already a
-  // teammate" + where they sit, rather than letting the admin re-add them.
-  const oids = hits.map((h) => h.oid)
-  const emails = [...new Set(hits.map((h) => h.email).filter(Boolean))]
-  const { existing, byEmail } = await withRequestRls(event, async (tx) => {
+  // The exclusion-pattern read moved INSIDE withRequestRls: it was the entire
+  // residual platform-pool read in this handler (docs/design/rls-enforcement.md — the
+  // pattern-load class). `directory_exclusion_pattern` is RLS-enabled with a
+  // USING(true) read policy, so it is satisfied by any context, but under FORCE
+  // it needs SOME context — which the bare pool does not have.
+  //
+  // The directory search itself stays OUTSIDE: it is a Microsoft Graph HTTP
+  // call, and holding a request transaction across third-party HTTP is the
+  // anti-pattern design §2 names.
+  const { hits, existing, byEmail } = await withRequestRls(event, async (tx) => {
+    const patterns = await loadDirectoryExclusionPatterns(tx)
+    const hits = rawHits.filter((h) => !isExcludedUpn(h.upn, patterns)).slice(0, limit)
+    if (hits.length === 0) {
+      return { hits, existing: new Map<string, { entraOid: string; regionCode: string; role: string }>(), byEmail: new Map<string, string>() }
+    }
+
+    // Annotate already-provisioned people by oid so the UI can show "Already a
+    // teammate" + where they sit, rather than letting the admin re-add them.
+    const oids = hits.map((h) => h.oid)
+    const emails = [...new Set(hits.map((h) => h.email).filter(Boolean))]
     const rows = await tx
       .select({ entraOid: teammate.entraOid, regionCode: region.code, role: teammate.role })
       .from(teammate)
@@ -78,10 +89,13 @@ export default defineEventHandler(async (event) => {
           )
       : []
     return {
+      hits,
       existing: new Map(rows.map((r) => [r.entraOid, r])),
       byEmail: new Map(emailRows.map((r) => [r.email, r.entraOid])),
     }
   })
+
+  if (hits.length === 0) return { results: [] }
 
   return {
     results: hits.map((h) => {

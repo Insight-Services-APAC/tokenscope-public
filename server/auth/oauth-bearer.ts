@@ -34,6 +34,14 @@ export interface BearerTeammate {
   displayName: string | null
   role: string
   regionId: string
+  /**
+   * The bound teammate's org_unit.path — the fourth RLS GUC (`app.user_org_path`).
+   * Comes off the SAME join as the rest of this row, so the machine lane
+   * (server/db/machine-rls.ts) costs zero extra queries. `teammate.org_unit_id`
+   * is NOT NULL (drizzle/schema/identity.ts), so the join is inner and this is
+   * never empty for a real row.
+   */
+  orgPath: string
   scope: string
   /** The instance this credential is bound to (mig 0031); null for read/tag/legacy grants. */
   instanceId: string | null
@@ -69,6 +77,7 @@ interface TokenJoinRow extends Record<string, unknown> {
   display_name: string | null
   role: string
   region_id: string
+  org_path: string
   scope: string
   access_expires_at: string | Date
   token_revoked_at: string | Date | null
@@ -183,6 +192,10 @@ export async function requireOAuthBearer(
            tm.display_name           AS display_name,
            tm.role                   AS role,
            tm.region_id::text        AS region_id,
+           -- The machine lane's app.user_org_path (server/db/machine-rls.ts).
+           -- teammate.org_unit_id is NOT NULL, so this inner join can only drop
+           -- a row if org_unit itself is missing, which the FK forbids.
+           ou.path::text             AS org_path,
            t.scope                   AS scope,
            t.access_expires_at       AS access_expires_at,
            t.revoked_at              AS token_revoked_at,
@@ -201,6 +214,7 @@ export async function requireOAuthBearer(
            (t.prev_valid_until > now()) AS prev_in_grace
       FROM oauth_token t
       JOIN teammate tm ON tm.id = t.teammate_id
+      JOIN org_unit ou ON ou.id = tm.org_unit_id
      WHERE t.access_token_hash = ${accessHash}
         OR t.prev_access_token_hash = ${accessHash}
      ORDER BY (t.access_token_hash = ${accessHash}) DESC
@@ -315,6 +329,7 @@ export async function requireOAuthBearer(
     displayName: row.display_name,
     role: row.role,
     regionId: row.region_id,
+    orgPath: row.org_path,
     scope: row.scope,
     instanceId: row.instance_id,
     clientId: row.client_id,

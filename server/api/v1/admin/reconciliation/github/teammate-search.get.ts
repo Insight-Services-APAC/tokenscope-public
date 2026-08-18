@@ -69,14 +69,20 @@
  * map.post's error response to disambiguate, not a security gap.
  *
  * RBAC: requireRole(admin, global-finops) — same guard as the sibling reconciliation routes.
- * teammate has no RLS policy relevant here → getDb(). GET (read-only) → no assertSameOrigin.
+ * GET (read-only) → no assertSameOrigin.
+ *
+ * LANES (docs/design/rls-enforcement.md §2): both DB reads — the teammate picker
+ * query and the exclusion-pattern load — run in the request lane. The Entra
+ * directory call between them stays OUTSIDE that transaction: holding a request
+ * transaction across third-party HTTP is the anti-pattern §2 names. The explicit
+ * `regionClause` remains the live gate; it is not replaced by RLS.
  */
 import { defineEventHandler, getValidatedQuery, createError } from 'h3'
 import { sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { consola } from 'consola'
 import { requireRole } from '../../../../../auth/rbac'
-import { getDb } from '../../../../../db'
+import { withRequestRls } from '../../../../../db/request-rls'
 import { searchDirectory } from '../../../../../azure/directory'
 import { isExcludedUpn, loadDirectoryExclusionPatterns } from '../../../../../utils/directory-exclusions'
 import { LIKE_ESCAPE, escapeLikeLiteral } from '../../../../../utils/sql-like'
@@ -101,15 +107,14 @@ export default defineEventHandler(async (event) => {
     if (!parsed.success) throw createError({ statusCode: 400, statusMessage: 'invalid query parameter' })
     return parsed.data
   })
-  const db = getDb()
-
   const like = `%${escapeLikeLiteral(query.q)}%`
   // Region-scoped `admin` only searches their own region; global-finops /
   // platform-admin keep the estate-wide picker (RLS on `teammate` is not
   // relied on here — same reasoning as every other explicit clamp in this
   // sprint: the app connection bypasses it).
   const regionClause = session.role === 'admin' ? sql`AND t.region_id = ${session.regionId}::uuid` : sql``
-  const rows = await db.execute<Row>(sql`
+  const { rows, patterns } = await withRequestRls(event, async (tx) => {
+    const rows = await tx.execute<Row>(sql`
     SELECT t.id::text AS id,
            t.email,
            t.display_name,
@@ -125,6 +130,13 @@ export default defineEventHandler(async (event) => {
     ORDER BY t.display_name NULLS LAST, t.email
     LIMIT ${query.limit}
   `)
+    // Loaded in the SAME transaction as the picker query — it is only consumed
+    // after the directory call below, but reading it here keeps every DB
+    // statement in this handler inside one RLS-bearing transaction and the HTTP
+    // call outside it.
+    const patterns = await loadDirectoryExclusionPatterns(tx)
+    return { rows, patterns }
+  })
 
   const teammates = [...rows].map((r) => ({
     id: r.id,
@@ -148,7 +160,6 @@ export default defineEventHandler(async (event) => {
   const knownEmails = new Set(teammates.map((t) => t.email.toLowerCase()))
   try {
     const rawHits = await searchDirectory(query.q, Math.min(query.limit * 2, 50))
-    const patterns = await loadDirectoryExclusionPatterns(db)
     directory = rawHits
       // Excluded here AND asserted again in POST /map: this filter is a UX courtesy (do not
       // offer what cannot be picked), never the enforcement point.

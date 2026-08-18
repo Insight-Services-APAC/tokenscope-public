@@ -45,7 +45,7 @@ import {
 import { consola } from 'consola'
 import { tryAuth } from '../../../utils/auth'
 import { getClient, computeGrantedScopes } from '../../../auth/oauth'
-import { getDb } from '../../../db'
+import { withRequestRls } from '../../../db/request-rls'
 import { authorizeQuerySchema } from '../../../../shared/schemas/oauth'
 
 function oauthJsonError(event: H3Event, code: string, detail: string, status = 400) {
@@ -99,10 +99,13 @@ export default defineEventHandler(async (event) => {
     return sendRedirect(event, loginUrl, 302)
   }
 
-  const db = getDb()
-
-  // Validate the client + redirect_uri BEFORE any redirect to redirect_uri.
-  const client = await getClient(db, q.client_id)
+  // Unlike the token / revoke / register endpoints (design §5's chicken-and-egg
+  // trio), this handler has ALREADY resolved a real Entra session above — the
+  // unauthenticated path returned at the `if (!session)` bounce — so the client
+  // lookup can and does carry that identity. `oauth_client` carries no RLS at
+  // all, so it needs neither a bootstrap disable nor a FORCE phase; the lane is
+  // still the request lane because the caller is a signed-in human.
+  const client = await withRequestRls(event, (tx) => getClient(tx, q.client_id))
   if (!client) {
     return oauthJsonError(event, 'invalid_client', 'Unknown client_id')
   }

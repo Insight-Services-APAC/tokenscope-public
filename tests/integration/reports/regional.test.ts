@@ -577,6 +577,90 @@ interface MetaResp {
 }
 
 describe('GET /reports/meta — granted scopes + floors + copilot mode', () => {
+  /*
+   * The usage floor reads the three BASE tables, not `v_complete_usage`: MIN()
+   * over that 4-arm UNION with GROUP BY CTEs cannot use an index and made every
+   * /reporting load materialise the estate. The floor must still be RIGHT, and
+   * the one direction it may differ is EARLIER (the view's arms carry gates) —
+   * an empty month at the bottom of the picker. Later would hide data.
+   */
+  it('the floor moves for EVERY table the usage arms can start from', async () => {
+    /*
+     * Omitting the two v_teammate_usage_daily sources (actual_spend,
+     * reconciliation_record) made the floor LATER than reality when an
+     * ingest-only lane started earliest, hiding that month. Each case inserts a
+     * row strictly earlier than the last and asserts the floor follows, so
+     * dropping any one source from the view goes red — a fixture whose tables
+     * already share an earliest month cannot show that.
+     *
+     * Self-cleaning: these rows would otherwise move the floor for every later
+     * case in this file.
+     */
+    const floor = async () =>
+      ((await metaHandler(ev(adminA()))) as unknown as MetaResp).monthFloors.usage
+    const original = await floor()
+    try {
+      await t.client`INSERT INTO actual_spend (teammate_id, date, tool, cost_usd, input_tokens, output_tokens, source, pulled_at)
+                     VALUES (${dave}::uuid, DATE '2003-01-15', 'claude-code', 0, 0, 0, 'anthropic', now())`
+      expect(await floor(), 'the floor must follow actual_spend').toBe('2003-01')
+
+      await t.client`INSERT INTO unaccounted_usage (teammate_id, day, tool, cost_usd)
+                     VALUES (${dave}::uuid, DATE '2002-01-15', 'claude-code', 0)`
+      expect(await floor(), 'the floor must follow unaccounted_usage').toBe('2002-01')
+
+      const [anyInst] = await t.client<{ id: string }[]>`SELECT instance_id::text AS id FROM instance_attestation LIMIT 1`
+      await t.client`INSERT INTO attribution_record
+          (instance_id, teammate_id, region_id, org_unit_id, tool, model, token_type, tokens, cost_usd, fidelity_tier, cost_basis, ts_event, claude_session_id)
+        VALUES (${anyInst!.id}::uuid, ${dave}::uuid, ${regionA}::uuid, ${unitA}::uuid, 'claude-code', 'claude-sonnet-4-6', 'input', 0, 0, 'tier-1', 'estimated', '2001-01-15T00:00:00Z'::timestamptz, 'floor-probe')`
+      expect(await floor(), 'the floor must follow attribution_record').toBe('2001-01')
+    } finally {
+      await t.client`DELETE FROM attribution_record WHERE claude_session_id = 'floor-probe'`
+      await t.client`DELETE FROM unaccounted_usage WHERE day = DATE '2002-01-15'`
+      await t.client`DELETE FROM actual_spend WHERE date = DATE '2003-01-15'`
+    }
+    expect(await floor(), 'the fixture is restored for the cases after this one').toBe(original)
+  })
+
+  it('survives an EMPTY source table — LEAST ignores NULLs in Postgres', async () => {
+    /*
+     * A review argued LEAST returns NULL if ANY argument is NULL, which would
+     * make one empty source blank the whole floor. That is true of MySQL and
+     * Oracle and NOT of PostgreSQL, which ignores NULL arguments and returns
+     * NULL only when every one is NULL. Measured on 16.13:
+     *   LEAST(MIN(<empty>), MIN(<populated>)) = the populated MIN.
+     *
+     * Declining a finding is cheap; pinning the behaviour it doubted is
+     * cheaper than re-deriving this the next time someone reads the view.
+     */
+    const [empties] = await t.client<{ n: number }[]>`
+      SELECT (SELECT count(*) FROM provider_usage_fact WHERE 1=0)::int
+           + (CASE WHEN NOT EXISTS (SELECT 1 FROM provider_usage_fact) THEN 1 ELSE 0 END)
+           + (CASE WHEN NOT EXISTS (SELECT 1 FROM reconciliation_record) THEN 1 ELSE 0 END)
+           + (CASE WHEN NOT EXISTS (SELECT 1 FROM unaccounted_usage) THEN 1 ELSE 0 END) AS n
+    `
+    expect(empties!.n, 'this fixture must leave at least one source empty, or the case is vacuous').toBeGreaterThan(0)
+
+    const [floor] = await t.client<{ f: string | null }[]>`SELECT month_floor AS f FROM v_usage_month_floor`
+    expect(floor?.f, 'an empty source must not blank the floor').not.toBeNull()
+
+    const m = (await metaHandler(ev(adminA()))) as unknown as MetaResp
+    expect(m.monthFloors.usage).toBe(floor!.f)
+  })
+
+  it('the usage floor is never LATER than the view it replaced', async () => {
+    const m = (await metaHandler(ev(adminA()))) as unknown as MetaResp
+    const [row] = await t.client<{ view_floor: string | null }[]>`
+      SELECT to_char(MIN(ts_event), 'YYYY-MM') AS view_floor FROM v_complete_usage
+    `
+    const viewFloor = row?.view_floor ?? null
+    expect(viewFloor, 'an empty reference lane would make this vacuous').not.toBeNull()
+    expect(m.monthFloors.usage).not.toBeNull()
+    expect(
+      m.monthFloors.usage! <= viewFloor!,
+      `floor ${m.monthFloors.usage} must be <= the view's ${viewFloor} — later would hide data`,
+    ).toBe(true)
+  })
+
   it('a developer (no CC ownership) is granted ONLY the region scope, landing on their own region', async () => {
     const m = (await metaHandler(ev(sess('developer', 'a.sub', regionA, dave)))) as unknown as MetaResp
     expect(m.scopes).toEqual(['region'])

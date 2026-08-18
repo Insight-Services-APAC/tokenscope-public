@@ -775,6 +775,15 @@ Two views consume this table on the two sides of the §A/§B line
   here for showback and velocity. The view also carries the historical-homing
   dimension snapshot (mig 0101) so `v_complete_usage`'s ingest-only arm homes
   usage as at the usage date.
+- **`v_usage_month_floor`** (mig 0133) — the earliest month the usage lane
+  holds, as one row: `LEAST` of the `MIN` over the five tables
+  `v_complete_usage`'s arms can start from — `attribution_record`,
+  `unaccounted_usage`, `provider_usage_fact`, and `actual_spend` +
+  `reconciliation_record` (the two behind `v_teammate_usage_daily`). Read by
+  `/reports/meta` for the month picker's lower bound, so that bound does not
+  require materialising `v_complete_usage`, whose 4-arm `UNION` with aggregating
+  CTEs admits no index for a `MIN`. `security_invoker`, so RLS applies to the
+  reader and the floor is scoped to what that caller can see.
 - **`v_finance_bill_chargeback`** (mig 0059, redefined migs 0081 and 0085) — the §B
   chargeback lane (mig 0085 splits out the Copilot chargeback lane). It always
   carried `tool` in its grain, so the split flows through unchanged; its consumers
@@ -1163,9 +1172,9 @@ Carries the provenance triple. Every allocation row references an
 | Column | Type | Notes |
 |---|---|---|
 | `id` | UUID PK | |
-| `scope_type` | TEXT NOT NULL | `teammate` / `project` / `cou` |
-| `scope_id` | UUID NOT NULL | |
-| `teammate_id` | UUID → teammate | per-dev cap (mig 0008); NULL = shared-pool baseline |
+| `scope_type` | TEXT NOT NULL | `teammate` / `project` / `cou` / `region` — CHECKed to that domain (mig 0131, `NOT VALID`). `cou` is what the Business-Unit epic's S6 writes |
+| `scope_id` | UUID NOT NULL | no FK: the column is shared across scope axes |
+| `teammate_id` | UUID → teammate | per-dev cap (mig 0008); NULL = shared-pool baseline. CHECKed to `project`/`cou` rows |
 | `budget_usd` | NUMERIC(14,2) NOT NULL | |
 | `effective` | TSTZRANGE NOT NULL | monthly emission computed at query time |
 | `allocation_kind` | TEXT NOT NULL = `baseline` | `baseline` / `top-up` / `burst` |
@@ -1197,8 +1206,8 @@ effective window. Optionally scaled by competency tier.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | UUID PK | |
-| `scope_type` | TEXT NOT NULL | `teammate` / `project` |
-| `scope_id` | UUID NOT NULL | |
+| `scope_type` | TEXT NOT NULL | `teammate` / `project` — deliberately NOT CHECKed: zero writers, and `velocity-limit-semantics.md` proposes a different ladder |
+| `scope_id` | UUID NOT NULL | no FK |
 | `limit_kind` | TEXT NOT NULL | `velocity` / `volume` |
 | `threshold_usd` | NUMERIC(14,2) NOT NULL | |
 | `window_seconds` | INTEGER | for velocity; NULL for volume |

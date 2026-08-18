@@ -28,7 +28,7 @@ import { requireAuth } from '../../../auth/rbac'
 import { assertSameOrigin } from '../../../auth/csrf'
 import { getClient, issueAuthCode, computeGrantedScopes, INTERACTIVE_GRANTABLE_SCOPES } from '../../../auth/oauth'
 import { recordAuditEvent } from '../../../db/audit'
-import { getDb } from '../../../db'
+import { withRequestRls } from '../../../db/request-rls'
 import { authorizeBodySchema } from '../../../../shared/schemas/oauth'
 
 function jsonError(event: H3Event, code: string, detail: string, status = 400) {
@@ -88,10 +88,13 @@ export default defineEventHandler(async (event) => {
     return jsonError(event, 'unsupported_response_type', 'Only response_type=code is supported')
   }
 
-  const db = getDb()
+  // This is the ONE OAuth endpoint that runs on a browser cookie session
+  // (requireAuth above), so — unlike design §5's token / revoke / register trio —
+  // it HAS an identity to carry and uses the request lane throughout.
+  //
   // Validate client + redirect_uri BEFORE any redirect (approve OR deny) — else a
   // crafted deny becomes an open-redirect.
-  const client = await getClient(db, body.client_id)
+  const client = await withRequestRls(event, (tx) => getClient(tx, body.client_id))
   if (!client) return jsonError(event, 'invalid_client', 'Unknown client_id')
   if (!client.redirectUris.includes(body.redirect_uri)) {
     return jsonError(event, 'invalid_request', 'redirect_uri does not match any registered redirect URIs')
@@ -122,20 +125,26 @@ export default defineEventHandler(async (event) => {
     return redirectResult(event, url.toString())
   }
 
-  const code = await issueAuthCode(db, {
-    clientId: client.clientId,
-    teammateId: session.teammateId,
-    redirectUri: body.redirect_uri,
-    scope: granted.join(' '),
-    codeChallenge: body.code_challenge,
-    codeChallengeMethod: body.code_challenge_method,
-  })
+  // Code issue + audit in ONE RLS-bearing transaction: the audit row used to be
+  // a context-less write after the mint (design §4's class), so under FORCE the
+  // consent would have been granted and the handler would then have 500'd.
+  const code = await withRequestRls(event, async (tx) => {
+    const code = await issueAuthCode(tx, {
+      clientId: client.clientId,
+      teammateId: session.teammateId,
+      redirectUri: body.redirect_uri,
+      scope: granted.join(' '),
+      codeChallenge: body.code_challenge,
+      codeChallengeMethod: body.code_challenge_method,
+    })
 
-  await recordAuditEvent(db, {
-    eventType: 'oauth_authorize',
-    actorTeammateId: session.teammateId,
-    subjectKind: 'oauth_client',
-    payload: { client_id: client.clientId, scope: granted.join(' '), via: 'consent-post' },
+    await recordAuditEvent(tx, {
+      eventType: 'oauth_authorize',
+      actorTeammateId: session.teammateId,
+      subjectKind: 'oauth_client',
+      payload: { client_id: client.clientId, scope: granted.join(' '), via: 'consent-post' },
+    })
+    return code
   })
   consola.info('[oauth:authorize.post] code issued', { clientId: client.clientId, teammateId: session.teammateId })
 

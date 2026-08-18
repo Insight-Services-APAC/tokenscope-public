@@ -26,7 +26,7 @@ import { createError, defineEventHandler, readValidatedBody, getRouterParam } fr
 import { z } from 'zod'
 import { requireAuth } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
-import { getDb } from '../../../../../db'
+import { withRequestRls } from '../../../../../db/request-rls'
 import { tagSessionTx } from '../../../../../utils/tag-session'
 
 const Body = z
@@ -49,12 +49,12 @@ export default defineEventHandler(async (event) => {
   if (!sidParsed.success) throw createError({ statusCode: 400, statusMessage: 'Invalid conversation id' })
   const conversationId = sidParsed.data
   const body = await readValidatedBody(event, (d) => Body.parse(d))
-  const db = getDb()
 
   // ONE transaction for the whole re-tag (shared with the MCP tag_session tool):
   // the ownership read, the ENDED-target FOR UPDATE, the boundary-preserving
-  // ledger UPDATE, the session_assignment write, and the audit are atomic.
-  return await db.transaction((tx) =>
+  // ledger UPDATE, the session_assignment write, and the audit are atomic —
+  // and withRequestRls makes that transaction carry the caller's RLS identity.
+  return await withRequestRls(event, (tx) =>
     tagSessionTx(
       tx,
       session.teammateId,

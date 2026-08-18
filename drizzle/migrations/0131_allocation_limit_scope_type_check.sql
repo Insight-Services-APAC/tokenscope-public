@@ -1,0 +1,104 @@
+-- 0131 — allocation / limit_policy: bound `scope_type` to the values the code
+-- actually writes (UF-8, docs/security-sprint/urgent-follow-sprint.md).
+--
+-- WHAT WAS WRONG. `allocation.scope_type` and `limit_policy.scope_type` are bare
+-- `TEXT NOT NULL` (0001_schema.sql:246-264, :266-272) — free text on the money
+-- table. Two tables over the correct shape already exists:
+-- 0028_project_lifecycle_policy.sql:13,20-23 and 0049_governance_setting.sql:13,19-22
+-- both carry `CHECK (scope_type IN (…))` plus a scope-shape CHECK. This is that
+-- shape, applied to the two tables that never got it.
+--
+-- WHY `NOT VALID`, AND WHY THAT IS NOT A HEDGE. `ADD CONSTRAINT … CHECK (…) NOT
+-- VALID` does NOT scan existing rows, so it cannot fail at migrate time whatever
+-- is in the deployed tables — while still constraining every INSERT and UPDATE
+-- from the moment it lands. That is the whole forward-looking guarantee, with
+-- zero deploy risk and no production read required. The `VALIDATE CONSTRAINT`
+-- half is DELIBERATELY NOT HERE: validation is the step that scans and can fail,
+-- and it belongs in a deliberate per-environment run after
+-- `SELECT DISTINCT scope_type FROM allocation;` / `… FROM limit_policy;` has been
+-- read on Dev and production — never on a boot-time migration.
+--
+-- WHERE THE VALUES COME FROM (derived from the writers, not from the design docs):
+--
+--   allocation → ('project', 'region')
+--     'project' is what every writer writes, without exception:
+--       server/api/v1/allocations/index.post.ts:91          literal 'project'
+--       server/api/v1/allocations/[id]/split.post.ts:153-157 literal 'project'
+--       server/api/v1/allocations/[id]/topups.post.ts:113   refuses a base row
+--                                                           whose scope_type <> 'project'
+--       drizzle/seed.ts:486, scripts/seed-demo-homepage.ts:80-82, and every
+--       integration fixture.
+--     'region' is the ONE other value anything in this repo writes:
+--       tests/integration/reports/usage-budget-coverage.test.ts:301 stamps a
+--       REGION-scoped allocation with a project's uuid on purpose, to prove the
+--       `scope_type = 'project'` clamp in the usage-coverage query ("an allocation
+--       on ANOTHER scope axis is not this project's budget"). Every read clamp in
+--       server/ exists for that same reason — the table is shared across scope
+--       axes by design. Narrowing this to ('project') would make that state
+--       unrepresentable and delete a live regression guard on a money query, which
+--       is a product change, not a constraint. It is excluded here and left to D9
+--       (region containment), which is the item that owns that question.
+--
+--   limit_policy → ('project')
+--     This table has NO writer anywhere in the repo — it is schema-only by design
+--     (docs/design/velocity-limit-semantics.md:21: "should stay unused until this
+--     note is approved"). The only code that names its scope_type is the
+--     project-delete cleanup, server/api/v1/admin/projects/[id].delete.ts:154,
+--     which deletes `scope_type = 'project'` rows. So 'project' is the derived
+--     domain, and the constraint's real job is forward-looking: when the velocity
+--     ladder is built it must DECLARE its scope domain in its own migration rather
+--     than writing free text into a money table. That ladder
+--     (velocity-limit-semantics.md:69, platform → region → CoU → teammate) is not
+--     representable here today anyway — 'platform' needs a NULL scope_id and
+--     `limit_policy.scope_id` is NOT NULL — so widening it is a design decision
+--     with its own migration, not a guess to make now.
+--
+-- THE SCOPE-SHAPE HALF. In 0028/0049 the shape CHECK couples scope_type to
+-- scope_id's nullability. Neither table here can carry that: `scope_id` is
+-- `NOT NULL` in both, so the coupling would be a tautology. `allocation` does
+-- carry a real one — `teammate_id` (the per-developer cap, mig 0008) is only
+-- meaningful on a project-scoped row, and every writer that sets it writes
+-- 'project' — so that is the shape constraint this table can honestly assert.
+-- `limit_policy` has no second dimension and therefore gets no shape CHECK
+-- rather than a tautological one.
+--
+-- NOT IN SCOPE. The composite FK / denormalised `allocation.region_id` that would
+-- tie an allocation to its project's region is `D9`, and needs an owner decision
+-- plus a backfill. This migration constrains the TYPE TAG only; `scope_id` remains
+-- a bare uuid.
+
+-- CORRECTED after review. The first version of this migration derived the
+-- permitted set from CURRENT WRITERS — ('project','region') for allocation and
+-- ('project') for limit_policy — which is the exact failure CLAUDE.md's decision
+-- discipline warns about: "the code doesn't write X" is a fact about today's code,
+-- not the domain. The domain is documented, and it is wider:
+--
+--   * `Data-Model.md` §allocation states `teammate | project | cou`.
+--   * docs/design/business-unit-tree/00-epic-design.md S6 ("CoU-scoped
+--     allocations get their reader") is an ACTIVE epic whose whole subject is
+--     writing `scope_type='cou'` — "exists and nothing reads it". Shipping
+--     ('project','region') would have made that planned write illegal and forced
+--     a migration to undo this one.
+--   * `region` is written today by a usage-coverage regression fixture as a
+--     deliberate other-axis row.
+--
+-- So: constrain to the CANONICAL DOMAIN, which still rejects typos and garbage —
+-- the point of UF-8 — without encoding today's implementation gap as a rule.
+ALTER TABLE allocation
+  ADD CONSTRAINT allocation_scope_type_check
+  CHECK (scope_type IN ('teammate', 'project', 'cou', 'region')) NOT VALID;
+
+-- The per-dev cap (mig 0008) rides a scope row via teammate_id. Restricting it to
+-- 'project' would pre-empt S6's unit allocations, where a per-developer cap
+-- inside a CoU budget is at least as sensible as one inside a project budget.
+-- Both are allowed; a cap on a region/teammate-scoped row is still rejected.
+ALTER TABLE allocation
+  ADD CONSTRAINT allocation_scope_shape_check
+  CHECK (teammate_id IS NULL OR scope_type IN ('project', 'cou')) NOT VALID;
+
+-- limit_policy gets NO scope_type CHECK, deliberately. It has zero writers
+-- repo-wide, and its own design note (velocity-limit-semantics.md:69) proposes a
+-- platform → region → CoU → teammate ladder that is BOTH different from what the
+-- table's Data-Model row says AND not representable today ('platform' needs a
+-- nullable scope_id). Constraining an unsettled domain with no writers would
+-- encode a guess and buy nothing; it lands with the ladder, whoever designs it.

@@ -110,11 +110,8 @@
  * estate and a screenshot diff means a code change.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { drizzle } from 'drizzle-orm/postgres-js'
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type postgres from 'postgres'
-import { createDbClient } from '../drizzle/connect'
-import * as schema from '../drizzle/schema'
+import { createWorkerDb } from '../server/db/worker-db'
 import { currentServerDeployEnv, isDemoCapableEnv } from '../shared/env/deploy-env'
 import { costCentreBudgetState } from '../shared/reports/types'
 import { runProviderTransform } from '../server/workers/provider-transform'
@@ -460,8 +457,12 @@ async function main(): Promise<void> {
   }
   assertLocalOnly(url)
 
-  const sql = createDbClient(url, { max: 1, idle_timeout: 10 })
-  const db = drizzle(sql, { schema }) as unknown as PostgresJsDatabase<typeof schema>
+  // Worker lane: this fixture drives runProviderTransform +
+  // reconcileUnaccountedUsage — real worker code writing money rows — so its
+  // handle carries the lane's estate-wide RLS identity and UTC pin
+  // (server/db/worker-db.ts). It also had no UTC pin before, which matters
+  // here: every row it seeds is keyed by a UTC day.
+  const { client: sql, db } = await createWorkerDb(url, { max: 1, idle_timeout: 10 })
   const t0 = Date.now()
 
   // The window. `rangeEnd` runs to the end of the CURRENT month so the wipe

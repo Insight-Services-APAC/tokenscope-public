@@ -20,6 +20,7 @@ import { createError, defineEventHandler, getRouterParam, getQuery } from 'h3'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { getDb, schema } from '../../../../db'
+import { withMachineRls } from '../../../../db/machine-rls'
 import { requireOAuthBearer } from '../../../../auth/oauth-bearer'
 import { resolveRepoProject, getMyProjects } from '../../../../utils/me-queries'
 
@@ -39,47 +40,54 @@ export default defineEventHandler(async (event) => {
   }
   const codeHash = parsedHash.data
 
-  const db = getDb()
-
   // Same gate as /bearer + /health — the emit credential, scope + revocation
   // checked, AND instance-bound (sid) so a different instance's emit
-  // credential 401s instead of degrading to a per-teammate check.
-  const teammate = await requireOAuthBearer(event, 'tokenscope.emit', db as never, sid)
+  // credential 401s instead of degrading to a per-teammate check. The BOOTSTRAP
+  // read, on `oauth_token` — in server/db/rls-bootstrap.ts::RLS_BOOTSTRAP_TABLES and DISABLEd at cutover. Not "kept out of
+  // FORCE": ENABLE alone filters a non-owner, so omission would protect nothing.
+  const teammate = await requireOAuthBearer(event, 'tokenscope.emit', getDb() as never, sid)
 
-  // Ownership: the bound teammate MUST own this instance (mirrors /health).
-  const [row] = await db
-    .select({
-      instanceId: schema.instanceAttestation.instanceId,
-      teammateId: schema.instanceAttestation.teammateId,
-    })
-    .from(schema.instanceAttestation)
-    .where(eq(schema.instanceAttestation.instanceId, sid))
-    .limit(1)
+  // LANE: machine (docs/design/rls-enforcement.md §2) — no cookie session, so
+  // the credential's identity is what goes onto the connection. `project` and
+  // `repo_project_map` are RLS-enabled (project is phase-1 FORCE), so a
+  // context-less resolve would answer `billable:false` for a project the device
+  // IS a member of — a silent wrong answer, not an error.
+  return await withMachineRls(teammate, async (tx) => {
+    // Ownership: the bound teammate MUST own this instance (mirrors /health).
+    const [row] = await tx
+      .select({
+        instanceId: schema.instanceAttestation.instanceId,
+        teammateId: schema.instanceAttestation.teammateId,
+      })
+      .from(schema.instanceAttestation)
+      .where(eq(schema.instanceAttestation.instanceId, sid))
+      .limit(1)
 
-  // Not-found AND not-owned collapse to the SAME 404 (mirrors /bearer, /health,
-  // /end, and me/instances/[instanceId]/revoke.post.ts) — the fourth handler
-  // the original audit missed.
-  if (!row || !row.teammateId || row.teammateId !== teammate.teammateId) {
-    throw createError({ statusCode: 404, statusMessage: 'Instance not found' })
-  }
+    // Not-found AND not-owned collapse to the SAME 404 (mirrors /bearer, /health,
+    // /end, and me/instances/[instanceId]/revoke.post.ts) — the fourth handler
+    // the original audit missed.
+    if (!row || !row.teammateId || row.teammateId !== teammate.teammateId) {
+      throw createError({ statusCode: 404, statusMessage: 'Instance not found' })
+    }
 
-  // Membership-gated resolution. Match → billable; no match (unknown OR not a
-  // member) → not billable, with the caller's own budgets to re-tag against.
-  const project = await resolveRepoProject(db as never, teammate.teammateId, { codeHash })
-  if (project) {
+    // Membership-gated resolution. Match → billable; no match (unknown OR not a
+    // member) → not billable, with the caller's own budgets to re-tag against.
+    const project = await resolveRepoProject(tx as never, teammate.teammateId, { codeHash })
+    if (project) {
+      return {
+        instance_id: sid,
+        code_hash: codeHash,
+        billable: true,
+        project: { id: project.id, code: project.code, display_name: project.display_name, type: project.type },
+      }
+    }
+
+    const yourProjects = await getMyProjects(tx as never, teammate.teammateId)
     return {
       instance_id: sid,
       code_hash: codeHash,
-      billable: true,
-      project: { id: project.id, code: project.code, display_name: project.display_name, type: project.type },
+      billable: false,
+      your_projects: yourProjects.map((p) => ({ id: p.id, code: p.code, display_name: p.display_name, type: p.type })),
     }
-  }
-
-  const yourProjects = await getMyProjects(db as never, teammate.teammateId)
-  return {
-    instance_id: sid,
-    code_hash: codeHash,
-    billable: false,
-    your_projects: yourProjects.map((p) => ({ id: p.id, code: p.code, display_name: p.display_name, type: p.type })),
-  }
+  })
 })

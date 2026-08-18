@@ -256,6 +256,24 @@ describe('legacy scalar / API compatibility + overageAllocationPolicy', () => {
 })
 
 describe('copilot-bill-repull route', () => {
+  it('403s a REGION admin — provider_enterprise has no region to clamp them to', async () => {
+    // External review, sprint 3: `admin` is region-scoped, but provider_enterprise
+    // carries no region column, so admitting it here let any region admin delete and
+    // rewrite ANY enterprise's bill month. Money-of-record; gated to global-finops.
+    const entId = await mkGithubEnterprise(`rbac-ent-${randomUUID().slice(0, 8)}`)
+    const regionAdmin: Session = {
+      teammateId: finopsId,
+      email: 'cm-admin@x.test',
+      displayName: 'Region Admin',
+      role: 'admin',
+      regionId,
+      orgPath: 'cm.svc',
+    }
+    await expect(
+      billRepullPost(ev({ method: 'POST', session: regionAdmin, params: { id: entId }, body: { month: '2026-06', reason: 'test' } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+  })
+
   it('404s for an unknown enterprise', async () => {
     await expect(
       billRepullPost(ev({ method: 'POST', session: finops(), params: { id: randomUUID() }, body: { month: '2026-06', reason: 'test' } })),

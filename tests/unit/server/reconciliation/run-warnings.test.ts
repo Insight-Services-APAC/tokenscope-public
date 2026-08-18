@@ -63,6 +63,25 @@ describe('deriveRunWarnings', () => {
     expect(deriveRunWarnings({ githubCredentialMirrorWarnings: 0 })).toEqual([])
   })
 
+  it('surfaces an incomplete seat roster and an unreadable license org', () => {
+    // Both gate the seat prune (copilot-bill.ts preconditions 5 and 6) and both are
+    // otherwise silent — the run reports success. The wiring guard only proves a
+    // producer mutates a same-named key somewhere; it cannot catch a misspelled
+    // probe or a branch that never fires, which is what these assert.
+    expect(deriveRunWarnings({ copilotSeatRosterIncomplete: 1 })).toContain(
+      '1 enterprise(s) returned an incomplete seat roster — seat counts understated and the seat prune was skipped',
+    )
+    expect(deriveRunWarnings({ copilotSeatOrgsUnavailable: 3 })).toContain(
+      '3 Copilot license org(s) could not be read — roster UNKNOWN (App not installed / pull failed); the seat prune was skipped',
+    )
+    // Zero is the healthy steady state and must stay quiet.
+    expect(deriveRunWarnings({ copilotSeatRosterIncomplete: 0, copilotSeatOrgsUnavailable: 0 })).toEqual([])
+    // Both at once, so neither branch shadows the other.
+    expect(
+      deriveRunWarnings({ copilotSeatRosterIncomplete: 2, copilotSeatOrgsUnavailable: 1 }),
+    ).toHaveLength(2)
+  })
+
   it('surfaces a truncated Copilot seat roster from the AGGREGATED counts', () => {
     expect(deriveRunWarnings({ copilotSeatPagesCapped: 1 })).toContain(
       '1 enterprise(s) hit the seat pagination cap — roster truncated, seat counts understated',

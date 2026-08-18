@@ -15,8 +15,9 @@ import { sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { requireAuth } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
-import { getDb } from '../../../../../db'
+import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
+import { OVER_EMISSION_REASON_API_UNCORROBORATED } from '../../../../../usage/over-emission-detection'
 
 const Body = z
   .object({
@@ -34,14 +35,26 @@ export default defineEventHandler(async (event) => {
   if (!idParsed.success) throw createError({ statusCode: 400, statusMessage: 'Invalid flag id' })
   const id = idParsed.data
   const body = await readValidatedBody(event, (d) => Body.parse(d))
-  const db = getDb()
 
-  return await db.transaction(async (tx) => {
+  // withRequestRls IS the transaction — the ownership FOR UPDATE, the quarantine
+  // write, the flag UPDATE and the audit stay atomic, and now every statement in
+  // them carries the caller's RLS identity (over_emission is a phase-1 FORCE
+  // table; see docs/design/rls-enforcement.md §Rollout).
+  return await withRequestRls(event, async (tx) => {
     // Ownership + open-state (explicit teammate filter). over_usd is the watermark we stamp
     // so a later, materially-larger forgery re-opens the flag (the detector compares).
+    //
+    // The lane filter is part of ownership, not a nicety: a 'no-bill-to-corroborate'
+    // row (mig 0132) is never listed to the developer, so it has no id they were
+    // given — but ids are guessable-shaped and this route takes one from the URL.
+    // Resolving one would let a lane with no review semantics acquire a resolution,
+    // a watermark and an audit trail claiming the developer answered for it. Not
+    // listed, not resolvable: it 404s exactly like someone else's flag.
     const flagRows = await tx.execute<{ state: string; over_usd: string }>(sql`
       SELECT state, over_usd::text AS over_usd FROM over_emission
-      WHERE id = ${id}::uuid AND teammate_id = ${session.teammateId}::uuid FOR UPDATE
+      WHERE id = ${id}::uuid AND teammate_id = ${session.teammateId}::uuid
+        AND reason = ${OVER_EMISSION_REASON_API_UNCORROBORATED}
+      FOR UPDATE
     `)
     const flag = [...flagRows][0]
     if (!flag) throw createError({ statusCode: 404, statusMessage: 'Flag not found or not yours' })

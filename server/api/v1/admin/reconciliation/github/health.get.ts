@@ -12,7 +12,31 @@
  * classifies every stage), never returns/logs the App key, PEM, installation token, PAT,
  * or a raw provider error body. RBAC: requireRole(admin, global-finops) — same guard as the
  * enterprises reader. No assertSameOrigin: this is a GET (read-only probe), not a mutation,
- * matching the Anthropic health route's convention. provider_enterprise has no RLS → getDb().
+ * matching the Anthropic health route's convention.
+ *
+ * NO RLS LANE, tracked as an explicit residue in scripts/check-handler-rls-context.mjs.
+ * Unlike its Anthropic sibling — where the config read and the probe are separable, so the
+ * read moved into the request lane — `computeGithubEnterpriseHealth` INTERLEAVES DB reads
+ * with GitHub HTTP calls across the whole Verify ladder. Wrapping it in `withRequestRls`
+ * would hold a request transaction open across third-party HTTP, which
+ * docs/design/rls-enforcement.md §2 names as the failure mode (citing
+ * copilot-bill-repull.post.ts, "that is the failure mode, not the precedent"). Splitting the
+ * ladder is a restructure of an estate-wide probe, not a lane conversion, and it belongs with
+ * the six worker-invoking admin handlers §2 already lists.
+ *
+ * THE SHAPE IT SHOULD TAKE ALREADY EXISTS in this codebase: admin/diagnostics/
+ * provider-wire-shape.post.ts hands its probe a `DbRunner` (server/diagnostics/
+ * provider-wire-probe.ts:122) — `(fn) => withRequestRls(event, fn)` — so each DB read runs in
+ * its OWN short RLS-bearing transaction that closes before the fetch after it. Converting this
+ * ladder means threading that runner through computeGithubEnterpriseHealth's stages, which is
+ * its own change (a scope-widening refactor of an 800-line module), not part of A2.
+ *
+ * Phase-1 safe, phase-2 NOT: the config tables it reads (`provider_enterprise`, `provider_org`,
+ * `github_coverage_observation`) carry no RLS policy, but the roster stage reaches `teammate`
+ * via `resolveGithubRoster` (server/reconciliation/adapters/github-identity.ts). Once `teammate`
+ * is FORCEd (design §Rollout, phase 2) the roster comes back EMPTY on a context-less connection, and
+ * the ladder would report "no teammate matched" — a plausible-looking verdict that is purely an
+ * artefact of the missing context. Phase 2 has to restructure this route, not just enable a table.
  */
 import { defineEventHandler, getValidatedQuery, createError } from 'h3'
 import { sql } from 'drizzle-orm'

@@ -7,6 +7,15 @@
  * live. Client-authenticated (client_secret_post); no user session.
  *
  * Errors return the RFC 6749 OAuth JSON shape (string `error`).
+ *
+ * NO RLS LANE, by design ruling (docs/design/rls-enforcement.md §5; tracked as
+ * an explicit residue in scripts/check-handler-rls-context.mjs). Two reasons
+ * that compound: the teammate is resolved BY the `oauth_token` lookup RLS would
+ * gate, and RFC 7009 §2.2 requires a 200 for a token that does not exist at all
+ * — so "the row is invisible" and "the row is absent" MUST stay
+ * indistinguishable here. That holds only because `oauth_token` is in server/db/rls-bootstrap.ts::RLS_BOOTSTRAP_TABLES and is
+ * explicitly DISABLEd at the role switch — not because it is "kept out of the
+ * FORCE set", which would protect nothing: ENABLE alone filters a non-owner.
  */
 import { defineEventHandler, readValidatedBody, setResponseHeaders, setResponseStatus, type H3Event } from 'h3'
 import { consola } from 'consola'

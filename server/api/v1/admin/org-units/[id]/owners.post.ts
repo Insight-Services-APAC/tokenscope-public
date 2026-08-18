@@ -32,7 +32,6 @@ import { translatePgConstraintError } from '../../../../../utils/pg-constraint-e
 import { ensureRealIdentity } from '../../../../../auth/ensure-real-identity'
 import { assertDirectoryIdentityPickable, provisionDirectoryTeammate } from '../../../../../auth/provision-directory-teammate'
 import { loadDirectoryExclusionPatterns } from '../../../../../utils/directory-exclusions'
-import { getDb } from '../../../../../db'
 import { getDirectoryUserByOid } from '../../../../../azure/directory'
 import { couOwner } from '../../../../../../drizzle/schema'
 
@@ -72,9 +71,12 @@ export default defineEventHandler(async (event) => {
   }
   // Excluded (privileged/service) identity picks are refused BEFORE the tx
   // (issue #121). Patterns are admin-config; a fresh install excludes nobody.
-  if (dir) assertDirectoryIdentityPickable(dir, await loadDirectoryExclusionPatterns(getDb()))
-
   return await withRequestRls(event, async (tx) => {
+    // Excluded (privileged/service) identity picks are refused inside the tx —
+    // the pattern read used to be the one residual platform-pool read in this
+    // fully-converted handler (docs/design/rls-enforcement.md, the pattern-load
+    // class). Still BEFORE any write, so the refusal costs nothing.
+    if (dir) assertDirectoryIdentityPickable(dir, await loadDirectoryExclusionPatterns(tx))
     const ouRows = await tx.execute<{
       region_id: string
       is_cost_owning_unit: boolean

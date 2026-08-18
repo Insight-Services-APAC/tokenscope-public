@@ -100,6 +100,69 @@ param hasGithubPatApacNfr bool = false
 @description('Whether the github-app-key-partner-demo KV secret was created (the GitHub App PRIVATE KEY, base64 PEM, for the partner-demo enterprise App-credential path; read as NUXT_GITHUB_APP_KEY_PARTNER_DEMO; credential_secret_name "partner-demo"). Default false = no KV ref emitted; flip true ONLY after the key is in Key Vault (ACA rejects a ref to a missing secret).')
 param hasGithubAppKeyPartnerDemo bool = false
 
+// ── RLS enforcement: the non-owner app role (docs/design/rls-enforcement.md §9) ──
+// FOUR FLAGS, FOUR SEPARATE DECISIONS, ALL DEFAULT FALSE (a fifth,
+// rotateAppDbPassword, is a rare deliberate act — see below). They are not one
+// switch because they fail in different ways, and the order between them is the
+// whole safety property:
+//   1. hasAppRoleSecrets  — the KV secrets exist, so reference them and hand the
+//      password to the boot step. Referencing a KV secret that does not exist is
+//      an ACA deploy failure, which is why this mirrors keyvault-secrets.bicep's
+//      if-guard rather than being inferred.
+//   2. provisionAppRole   — let the boot step actually CREATE the role, grant it
+//      and set its ALTER DEFAULT PRIVILEGES. IT DOES NOT TOUCH ROW-LEVEL
+//      SECURITY: creating a role and cutting an estate over to RLS enforcement
+//      are two decisions, and folding the second into the first is what made the
+//      sweep's trigger wrong three adversarial rounds running.
+//   3. runRlsCutoverSweep — THE CUTOVER SWEEP, its own script
+//      (drizzle/cutover-rls-sweep.ts) behind its own flag. DISABLE row-level
+//      security on EVERY RLS-enabled table that is not already FORCEd, not just
+//      the bootstrap ones: a non-owner is bound by ENABLE alone, so anything
+//      left enabled would filter the app the instant (4) lands. The app is still
+//      the owner at this point, so nothing observable changes.
+//      IT NEVER DISABLES A FORCEd TABLE — that is how a rollout phase says
+//      "deliberately enabled, hands off" (§7), and a boot script reverting one
+//      is the defect this split exists to end. A BOOTSTRAP table that is FORCEd
+//      is a real §5-vs-§7 conflict: it REFUSES, changes nothing, and names both
+//      resolutions rather than picking a winner.
+//      THE SWEEP RUNS ONCE. It is stamped in seed_state, so a later boot logs
+//      the sweep it WOULD have run and changes nothing — which is what makes
+//      this flag safe to leave true. Re-sweeping means bumping
+//      RLS_CUTOVER_SWEEP_VERSION, deliberately.
+//   4. useAppRoleAtRuntime — the cutover: the runtime pools connect as the role,
+//      and the RLS policies start executing. Requires the role to EXIST, i.e. a
+//      previous deploy with (2) on and a boot log that verified it.
+// Rollback is turning (4) back off and re-applying. That returns every runtime
+// query to the owner connection; it does NOT re-enable the swept tables, which
+// is a deliberate step of its own.
+//
+// (4) WITHOUT (2) IS NOT BLOCKED HERE, ON PURPOSE. It is a hazard — the runtime
+// points at a role nothing maintains — but the boot step answers it directly:
+// even when dormant, it probes TOKENSCOPE_APP_DATABASE_URL and aborts boot on a
+// credential that is genuinely broken. That probe has to exist anyway (the role
+// can be dropped, or the secret can drift, with (2) firmly on), so AND-ing the
+// two flags would add nothing but another way for a flag to read as enabled
+// while silently doing nothing.
+//
+// THE BOOT STEP SETS THE ROLE'S PASSWORD ONCE, WHEN IT CREATES IT. Leaving
+// provisionAppRole on afterwards is safe precisely because a later boot does NOT
+// touch the password — it converges the role's attributes and grants and stops.
+// Rolling the credential is (5) rotateAppDbPassword, on for one deliberate boot.
+@description('Whether the app-db-password + database-url-app KV secrets exist (created by keyvault-secrets.bicep from a generated password). Default false = no KV ref emitted. Flip true on the SAME apply that first writes them.')
+param hasAppRoleSecrets bool = false
+
+@description('Set TOKENSCOPE_PROVISION_APP_ROLE=true, letting the boot step create the non-owner role, grant it and set its ALTER DEFAULT PRIVILEGES. It does NOT change row-level security — that is runRlsCutoverSweep. Requires hasAppRoleSecrets. Default false = the boot step logs one line and exits. Safe to keep true afterwards: a boot that finds the role already there converges its attributes and grants and never touches its password unless rotateAppDbPassword is also on.')
+param provisionAppRole bool = false
+
+@description('Set TOKENSCOPE_RLS_CUTOVER_SWEEP=true, letting the boot step run the one-time cutover sweep that DISABLEs row-level security on every RLS-enabled table not already FORCEd. It never disables a FORCEd table, and it REFUSES (changing nothing) if a bootstrap table is FORCEd. Stamped in seed_state, so it does not re-run and this is safe to leave true. Default false = the step logs one line and exits.')
+param runRlsCutoverSweep bool = false
+
+@description('ROLL THE APP ROLE PASSWORD. Sets TOKENSCOPE_ROTATE_APP_DB_PASSWORD=true, the ONLY path that changes an EXISTING role password to the app-db-password secret. Turn on for ONE deliberate boot after an apply with writeAppDbPassword=true, then turn it back off — left on, every replica restart is a rotation, and a rotation under a live app takes the credential out from under whichever replica is already serving. Requires provisionAppRole + hasAppRoleSecrets.')
+param rotateAppDbPassword bool = false
+
+@description('THE CUTOVER: set TOKENSCOPE_APP_DATABASE_URL so the runtime pools connect as the non-owner role and the RLS policies begin to execute. Requires a role that already EXISTS — deploy with provisionAppRole first and read the boot log. Default false = the app connects as the owner exactly as today; turning it back off is the rollback.')
+param useAppRoleAtRuntime bool = false
+
 @description('Whether the entra-client-secret KV secret was created.')
 param hasEntraClientSecret bool = false
 
@@ -242,6 +305,22 @@ var githubPatSecrets = concat(
   ] : []
 )
 
+// The app role's two secrets travel together — keyvault-secrets.bicep writes
+// both or neither, so one flag guards both refs. What they are USED for is
+// gated separately, on the env vars below.
+var appRoleSecrets = hasAppRoleSecrets ? [
+  {
+    name: 'app-db-password'
+    keyVaultUrl: '${keyVaultUri}secrets/app-db-password'
+    identity: identityId
+  }
+  {
+    name: 'database-url-app'
+    keyVaultUrl: '${keyVaultUri}secrets/database-url-app'
+    identity: identityId
+  }
+] : []
+
 var entraSecrets = hasEntraClientSecret ? [
   {
     name: 'entra-client-secret'
@@ -270,7 +349,7 @@ var oidcModuleSecrets = hasOidcModuleSecrets ? [
   }
 ] : []
 
-var allSecrets = concat(requiredSecrets, anthropicSecrets, githubPatSecrets, entraSecrets, oidcModuleSecrets)
+var allSecrets = concat(requiredSecrets, anthropicSecrets, githubPatSecrets, appRoleSecrets, entraSecrets, oidcModuleSecrets)
 
 // ── Environment Variables ───────────────────────────────────────────
 
@@ -422,6 +501,41 @@ var githubAppKeyEnvVars = concat(
     { name: 'NUXT_GITHUB_APP_KEY_PARTNER_DEMO', secretRef: 'github-app-key-partner-demo' }
   ] : []
 )
+// RLS enforcement (docs/design/rls-enforcement.md §9). Five env vars, emitted
+// on five separate flags — see the param block for why the order matters.
+// Nothing here is emitted by default, so an apply that does not name these
+// flags leaves the app connecting exactly as it does today.
+var appRoleEnvVars = concat(
+  // Consumed ONLY by drizzle/provision-app-role.ts at boot, on the OWNER's
+  // connection. Present without TOKENSCOPE_PROVISION_APP_ROLE it does nothing.
+  hasAppRoleSecrets ? [
+    { name: 'TOKENSCOPE_APP_DB_PASSWORD', secretRef: 'app-db-password' }
+  ] : [],
+  // The opt-in the boot step gates on. AND-ed with hasAppRoleSecrets because
+  // the step needs the password too — 'true' with no password is a no-op that
+  // would read as enabled in the template.
+  (provisionAppRole && hasAppRoleSecrets) ? [
+    { name: 'TOKENSCOPE_PROVISION_APP_ROLE', value: 'true' }
+  ] : [],
+  // The deliberate rotation. AND-ed with the two above because on its own it is
+  // inert — the boot step only reads it while it is provisioning, and only when
+  // the role already exists. Meant to be on for ONE boot.
+  (rotateAppDbPassword && provisionAppRole && hasAppRoleSecrets) ? [
+    { name: 'TOKENSCOPE_ROTATE_APP_DB_PASSWORD', value: 'true' }
+  ] : [],
+  // The cutover sweep's own opt-in. NOT AND-ed with anything: it runs on the
+  // OWNER's DATABASE_URL and needs no Key Vault secret, so narrowing it would
+  // only create another flag that reads as enabled and does nothing.
+  runRlsCutoverSweep ? [
+    { name: 'TOKENSCOPE_RLS_CUTOVER_SWEEP', value: 'true' }
+  ] : [],
+  // The cutover: the runtime pools (server/db/index.ts, server/db/worker-db.ts)
+  // prefer this over DATABASE_URL. Migrations keep the owner URL.
+  (useAppRoleAtRuntime && hasAppRoleSecrets) ? [
+    { name: 'TOKENSCOPE_APP_DATABASE_URL', secretRef: 'database-url-app' }
+  ] : []
+)
+
 var entraEnvVars = hasEntraClientSecret ? [
   { name: 'NUXT_OIDC_PROVIDERS_ENTRA_CLIENT_SECRET', secretRef: 'entra-client-secret' }
 ] : []
@@ -496,11 +610,36 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json(environment == 'production' ? '1.0' : '0.5')
             memory: environment == 'production' ? '2Gi' : '1Gi'
           }
-          env: concat(baseEnvVars, anthropicEnvVars, githubPatEnvVars, githubAppKeyEnvVars, entraEnvVars, oidcModuleEnvVars, aiFoundryEnvVars, gitCommitShaEnvVars, telemetryReaderEnvVars)
+          env: concat(baseEnvVars, anthropicEnvVars, githubPatEnvVars, githubAppKeyEnvVars, appRoleEnvVars, entraEnvVars, oidcModuleEnvVars, aiFoundryEnvVars, gitCommitShaEnvVars, telemetryReaderEnvVars)
           probes: [
             // Startup probe: gives the Nuxt server time to bind and run
             // any first-touch DB / Redis warmups. 5s initial delay +
-            // 24 × 5s = 125s startup window.
+            // 44 × 5s = 225s startup window.
+            //
+            // WIDENED FROM 125s, because the RLS enablement added bounded boot
+            // steps in front of Nitro and they are SERIAL. Worst case, in
+            // order: pre-flight (30s) + provisioning (30s, plus its exit-3
+            // credential classifier's 10s connect + 10s statement, which only
+            // runs once that deadline has fired) + the cutover sweep (30s) +
+            // the binding gate (25s, covering three serial round trips
+            // including a second connection) + 15s of client teardown that
+            // runs after each step's own deadline is cleared. ~150s of
+            // legitimately-bounded work before the server binds at all — so
+            // against the old 125s window a slow but perfectly healthy estate
+            // could be SIGKILLed with every individual bound behaving exactly
+            // as designed, and the symptom would read as a startup-probe
+            // failure rather than as whichever step was slow.
+            //
+            // THE COST, STATED: a genuinely hung boot now takes 225s rather
+            // than 125s to fail, on every deploy including ones with no RLS
+            // involvement. That is the price of the steps being bounded and
+            // serial, and it is paid in the failure path only.
+            //
+            // This number has been wrong twice — once by omitting the gate
+            // entirely and once by omitting teardown — so it is no longer
+            // maintained by hand: `provision-app-role-contract.test.ts`
+            // derives every term from its own source, adds the teardown, and
+            // requires 60s of headroom for Nitro's own launch.
             {
               type: 'Startup'
               httpGet: {
@@ -509,7 +648,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               }
               initialDelaySeconds: 5
               periodSeconds: 5
-              failureThreshold: 24
+              failureThreshold: 44
               timeoutSeconds: 5
             }
             // Liveness probe: process-only check; MUST NOT touch deps.

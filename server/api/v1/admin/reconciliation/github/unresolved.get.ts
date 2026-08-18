@@ -13,8 +13,21 @@
  * token, or a raw provider body — only logins + numeric context. A credential/roster/upstream
  * failure surfaces as a clean, FIXED-reason status (never a partial list read as "none left").
  * RBAC: requireRole(admin, global-finops) — same guard as the github health route. GET (read-
- * only probe) → no assertSameOrigin, matching health.get.ts. provider_enterprise has no RLS →
- * getDb().
+ * only probe) → no assertSameOrigin, matching health.get.ts.
+ *
+ * NO RLS LANE, tracked as an explicit residue in scripts/check-handler-rls-context.mjs, for
+ * the same reason as its sibling github/health.get.ts: `listUnresolvedCopilotLogins`
+ * interleaves DB reads with GitHub HTTP across the probe, and holding a request transaction
+ * across third-party HTTP is the anti-pattern docs/design/rls-enforcement.md §2 names. Both
+ * routes want the same restructure and should get it together, with the six worker-invoking
+ * admin handlers §2 lists — following the `DbRunner` shape admin/diagnostics/
+ * provider-wire-shape.post.ts already uses (a per-read short transaction, closed before the
+ * fetch that follows it).
+ *
+ * Phase-1 safe, phase-2 NOT: `provider_enterprise` carries no RLS policy, but the probe shares
+ * `resolveGithubRoster` with the reconciler, which reads `teammate`. Once `teammate` is FORCEd
+ * the roster comes back empty on a context-less connection and EVERY login would be reported
+ * as unresolved — a wrong answer that reads as a real finding.
  */
 import { defineEventHandler, getValidatedQuery, createError } from 'h3'
 import { sql } from 'drizzle-orm'

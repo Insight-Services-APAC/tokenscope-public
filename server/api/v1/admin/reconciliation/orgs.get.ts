@@ -15,8 +15,13 @@
  *     null for github (no per-org Anthropic health model — github reconciles via
  *     the enterprise PAT, surfaced by enterprises.get / records).
  *
- * RBAC: requireRole(admin, global-finops). provider_org is a config table (no RLS
- * policy) → getDb() like regions.get.ts / the anthropic reader.
+ * RBAC: requireRole(admin, global-finops). `provider_org` is a config table with
+ * no RLS policy, but the read runs in the request lane anyway
+ * (docs/design/rls-enforcement.md §2) — and it JOINS `org_unit`, which IS
+ * RLS-enabled and is in the design's phase-2 FORCE set, so a context-less read
+ * here would have silently lost the cost_owning_unit_code column. The live
+ * PROBES (computeOrgHealth) stay OUTSIDE the transaction: third-party HTTP
+ * inside a request transaction is the anti-pattern §2 names.
  *
  * Region-scope: a region `admin` sees mapped orgs in their OWN region PLUS
  * every unmapped (region_id IS NULL) org — narrowing unmapped rows would hide
@@ -30,7 +35,7 @@
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireRole } from '../../../../auth/rbac'
-import { getDb } from '../../../../db'
+import { withRequestRls } from '../../../../db/request-rls'
 import { resolveOrgApiKey } from '../../../../workers/analytics-poller'
 import { readSecret } from '../../../../reconciliation/credentials'
 import { computeOrgHealth, apiKindLabel, type AnthropicOrgRow } from '../../../../anthropic/org-health'
@@ -65,13 +70,11 @@ function narrowApiKind(value: string | null): AnthropicApiKind {
 
 export default defineEventHandler(async (event) => {
   const session = await requireRole(event, 'admin', 'global-finops')
-  const db = getDb()
   // ADR-0011 D11 (Required outcome 4): once governance is activated,
   // provider_org.billing is meaningless for GitHub (the enterprise is
   // authoritative) — hidden from the API response rather than echoing a stale
   // value an operator could mistake for live. The key/shape is PRESERVED
   // (billing: null), not removed — backward-compatible response shape.
-  const governanceActivated = await isGovernanceActivated(db)
 
   // Region clamp (sole gate — provider_org has no RLS policy, and RLS is
   // inert at runtime regardless). admin -> own region OR unmapped;
@@ -81,7 +84,9 @@ export default defineEventHandler(async (event) => {
       ? sql`WHERE po.region_id IS NULL OR po.region_id = ${session.regionId}::uuid`
       : sql``
 
-  const rows = await db.execute<Row>(sql`
+  const { governanceActivated, rows } = await withRequestRls(event, async (tx) => {
+    const governanceActivated = await isGovernanceActivated(tx)
+    const rows = await tx.execute<Row>(sql`
     SELECT po.id::text AS id,
            po.provider,
            po.external_org_id,
@@ -106,6 +111,8 @@ export default defineEventHandler(async (event) => {
     ${regionClause}
     ORDER BY po.provider, po.display_name
   `)
+    return { governanceActivated, rows }
+  })
 
   // Read the endpoint once; computeOrgHealth folds an unset endpoint into an
   // amber 'endpoint-unset' verdict (not a throw, not a red error).

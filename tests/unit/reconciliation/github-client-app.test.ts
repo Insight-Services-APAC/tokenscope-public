@@ -719,6 +719,81 @@ describe('listOrgCopilotSeats (App mode, per-org Copilot seats)', () => {
   })
 })
 
+/*
+ * UF-19: the per-org seat pull's diagnostics. `listOrgCopilotSeats()` returns a plain
+ * array, so "the App is not installed on this org" (roster UNKNOWN) and "this org holds
+ * no seats" (roster KNOWN, empty) are the same `[]` — and the Copilot flat-seat writer
+ * DELETEs stale showback rows based on that roster. These pin that the two states are
+ * distinguishable, and that a capped pull says so.
+ */
+describe('listOrgCopilotSeatsWithDiagnostics (App mode — installed + pagination diagnostics)', () => {
+  it('App-only: rejects a PAT-mode client, exactly like the array surface', async () => {
+    const patClient = GithubCopilotClient.withPat(ENT, 'ghp_classic_pat')
+    await expect(patClient.listOrgCopilotSeatsWithDiagnostics(ORG)).rejects.toMatchObject({ statusCode: 500 })
+  })
+
+  it('installed org with seats → installed:true, shortPageBreak:true, pagesCapped:false', async () => {
+    installRouter([
+      { match: `/orgs/${ORG}/installation`, res: () => jsonRes(200, { id: 88, suspended_at: null }) },
+      tokenRoute,
+      { match: `/orgs/${ORG}/copilot/billing/seats`, res: () => jsonRes(200, { seats: [{ assignee: { login: 'octocat' } }] }) },
+    ])
+    expect(await client().listOrgCopilotSeatsWithDiagnostics(ORG)).toEqual({
+      seats: [{ login: 'octocat', org: ORG }],
+      installed: true,
+      pagesCapped: false,
+      shortPageBreak: true,
+      // A complete one-seat roster: short page, but no evidence of truncation.
+      rosterIncomplete: false,
+    })
+  })
+
+  it('DISTINGUISHES a not-installed org (installed:false) from an installed org with zero seats (installed:true)', async () => {
+    installRouter([{ match: `/orgs/${ORG}/installation`, res: () => jsonRes(404, {}) }])
+    const notInstalled = await client().listOrgCopilotSeatsWithDiagnostics(ORG)
+    expect(notInstalled).toEqual({ seats: [], rosterIncomplete: false,
+      installed: false, pagesCapped: false, shortPageBreak: false })
+
+    installRouter([
+      { match: `/orgs/${ORG}/installation`, res: () => jsonRes(200, { id: 88, suspended_at: null }) },
+      tokenRoute,
+      { match: `/orgs/${ORG}/copilot/billing/seats`, res: () => jsonRes(200, { seats: [] }) },
+    ])
+    const emptyButKnown = await client().listOrgCopilotSeatsWithDiagnostics(ORG)
+    expect(emptyButKnown).toEqual({ seats: [], rosterIncomplete: false,
+      installed: true, pagesCapped: false, shortPageBreak: true })
+
+    // The array surface collapses both to the same value — which is exactly why the
+    // diagnostics surface exists and why the prune must not read the array form.
+    expect(notInstalled.seats).toEqual(emptyButKnown.seats)
+  })
+
+  it('hits the 100-page hard cap when every page is full (pagesCapped:true, never an unbounded loop)', async () => {
+    let seatPages = 0
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.endsWith('/installation')) return jsonRes(200, { id: 88, suspended_at: null })
+      if (url.includes('/access_tokens')) return jsonRes(201, { token: INSTALL_TOKEN, expires_at: new Date(Date.now() + 3600_000).toISOString() })
+      seatPages += 1
+      // Every page full ⇒ pagination never sees a natural end signal.
+      return jsonRes(200, { seats: Array.from({ length: 100 }, (_, i) => ({ assignee: { login: `u-${seatPages}-${i}` } })) })
+    })
+    const out = await client().listOrgCopilotSeatsWithDiagnostics(ORG)
+    expect(out.seats).toHaveLength(10_000)
+    expect(out.pagesCapped).toBe(true)
+    expect(out.shortPageBreak).toBe(false)
+    expect(seatPages).toBe(100)
+  })
+
+  it('fails loud (502) on a non-OK seats response — never a silent empty-with-installed:true', async () => {
+    installRouter([
+      { match: `/orgs/${ORG}/installation`, res: () => jsonRes(200, { id: 88, suspended_at: null }) },
+      tokenRoute,
+      { match: `/orgs/${ORG}/copilot/billing/seats`, res: () => jsonRes(403, {}) },
+    ])
+    await expect(client().listOrgCopilotSeatsWithDiagnostics(ORG)).rejects.toMatchObject({ statusCode: 502 })
+  })
+})
+
 describe('listInstallableOrganizations (Workstream D — bounded census pagination)', () => {
   it('App-only: rejects a PAT-mode client', async () => {
     const patClient = GithubCopilotClient.withPat(ENT, 'ghp_classic_pat')
@@ -884,5 +959,56 @@ describe('listSamlIdentities (App mode, per-org externalIdentities via the org t
       { match: '/graphql', res: () => jsonRes(200, { errors: [{ type: 'FORBIDDEN', message: 'x' }] }) },
     ])
     await expect(client().listSamlIdentities(ORG)).rejects.toMatchObject({ statusCode: 502 })
+  })
+})
+
+/*
+ * Roster-integrity detection (external review, sprint 3). The seat-convergence prune
+ * is a DELETE on a money table gated on the roster being trustworthy. Two payload
+ * shapes prove it is NOT, and both used to be invisible: a 200 whose `seats` key is
+ * absent (which `z.array().default([])` flattened into a clean empty page), and a
+ * `total_seats` larger than what we actually collected.
+ *
+ * shortPageBreak deliberately does NOT imply rosterIncomplete — it is true for every
+ * roster under 100 seats, so treating it as evidence would block convergence forever.
+ */
+describe('pullSeats roster-integrity diagnostics', () => {
+  const PAT = 'ghp-test'
+  const seatsOf = (n: number, from = 0) =>
+    Array.from({ length: n }, (_, i) => ({ assignee: { login: `u${from + i}` }, organization: { login: 'acme' } }))
+
+  it('a 200 page with NO `seats` key sets rosterIncomplete', async () => {
+    mockFetch.mockResolvedValue(jsonRes(200, { total_seats: 5 }))
+    const diag = await GithubCopilotClient.withPat('ent', PAT).listSeatsWithDiagnostics()
+    expect(diag.rosterIncomplete).toBe(true)
+    expect(diag.seats).toHaveLength(0)
+  })
+
+  it('a full page followed by a keyless page sets rosterIncomplete and keeps what it read', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonRes(200, { seats: seatsOf(100) }))
+      .mockResolvedValueOnce(jsonRes(200, {}))
+    const diag = await GithubCopilotClient.withPat('ent', PAT).listSeatsWithDiagnostics()
+    expect(diag.rosterIncomplete).toBe(true)
+    expect(diag.seats).toHaveLength(100)
+  })
+
+  it('total_seats greater than the seats collected sets rosterIncomplete', async () => {
+    mockFetch.mockResolvedValue(jsonRes(200, { total_seats: 50, seats: seatsOf(3) }))
+    const diag = await GithubCopilotClient.withPat('ent', PAT).listSeatsWithDiagnostics()
+    expect(diag.rosterIncomplete).toBe(true)
+  })
+
+  it('a COMPLETE small roster is not flagged — shortPageBreak alone is not evidence', async () => {
+    mockFetch.mockResolvedValue(jsonRes(200, { total_seats: 3, seats: seatsOf(3) }))
+    const diag = await GithubCopilotClient.withPat('ent', PAT).listSeatsWithDiagnostics()
+    expect(diag).toMatchObject({ rosterIncomplete: false, shortPageBreak: true })
+    expect(diag.seats).toHaveLength(3)
+  })
+
+  it('a roster with no total_seats reported and a normal short page is not flagged', async () => {
+    mockFetch.mockResolvedValue(jsonRes(200, { seats: seatsOf(7) }))
+    const diag = await GithubCopilotClient.withPat('ent', PAT).listSeatsWithDiagnostics()
+    expect(diag.rosterIncomplete).toBe(false)
   })
 })

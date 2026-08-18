@@ -6,28 +6,30 @@
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireAuth } from '../../../auth/rbac'
-import { getDb } from '../../../db'
+import { withRequestRls } from '../../../db/request-rls'
 
 export default defineEventHandler(async (event) => {
   const session = await requireAuth(event)
-  const db = getDb()
-  const [me] = await db.execute<{ email: string }>(
-    sql`SELECT email FROM teammate WHERE id = ${session.teammateId}::uuid`,
-  )
-  const rows = await db.execute<{
-    id: string
-    system: string
-    identifier: string
-    identifier_kind: string
-    verified: boolean
-    source: string
-  }>(sql`
-    SELECT id::text AS id, system, identifier, identifier_kind,
-           (verified_at IS NOT NULL) AS verified, source
-    FROM teammate_identity_map
-    WHERE teammate_id = ${session.teammateId}::uuid
-    ORDER BY system, identifier
-  `)
+  const { me, rows } = await withRequestRls(event, async (tx) => {
+    const [me] = await tx.execute<{ email: string }>(
+      sql`SELECT email FROM teammate WHERE id = ${session.teammateId}::uuid`,
+    )
+    const rows = await tx.execute<{
+      id: string
+      system: string
+      identifier: string
+      identifier_kind: string
+      verified: boolean
+      source: string
+    }>(sql`
+      SELECT id::text AS id, system, identifier, identifier_kind,
+             (verified_at IS NOT NULL) AS verified, source
+      FROM teammate_identity_map
+      WHERE teammate_id = ${session.teammateId}::uuid
+      ORDER BY system, identifier
+    `)
+    return { me, rows }
+  })
   return {
     primary: me?.email ?? session.email,
     identities: [...rows].map((r) => ({

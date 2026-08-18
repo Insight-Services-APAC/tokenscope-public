@@ -233,11 +233,23 @@ function ensureRepoTagGitignored(root) {
  * reach a pinned repo on its next launch instead of leaving it on a stale,
  * silently-expiring credential.
  *
- * Claude applies the highest-precedence `env` by REPLACEMENT (not key-merge), so
- * the repo-local block must stay SELF-CONTAINED (full env copy, helper restated):
- * a repo-local env block carrying only the resource attrs would drop the
- * endpoint/bearer. The self-heal is achieved by copying the *current* global env
- * each launch, not by trimming the block.
+ * The repo-local block stays SELF-CONTAINED (full env copy, helper restated) and
+ * the self-heal is achieved by copying the *current* global env each launch,
+ * not by trimming the block.
+ *
+ * This comment used to justify that with "Claude applies the highest-precedence
+ * `env` by REPLACEMENT (not key-merge), so a block carrying only the resource
+ * attrs would drop the endpoint/bearer". THAT IS FALSE — captured against Claude
+ * Code 2.1.232, the blocks are merged PER KEY and the repo-local value wins a
+ * conflict, so a narrowed block would inherit the endpoint/bearer rather than
+ * drop them (docs/security-sprint/env-precedence-capture.md; ADR-0006 §2 is
+ * amended to match). The full copy is kept anyway, and is still correct under
+ * merge semantics — replacing with a superset yields the same effective env, and
+ * it additionally evicts keys the global has stopped emitting. What blocks
+ * narrowing now is FLEET VERSION SPREAD: only 2.1.232 was measured, and on a
+ * build where replacement were the behaviour a narrowed block would silently
+ * stop that device emitting. Do not narrow this without establishing the
+ * minimum enrolled client version first.
  *
  * Idempotent + change-detecting: computes the target settings, compares against
  * the existing file's content, and writes ONLY when they differ (so a true

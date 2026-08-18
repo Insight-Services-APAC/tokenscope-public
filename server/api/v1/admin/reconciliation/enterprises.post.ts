@@ -184,6 +184,20 @@ export default defineEventHandler(async (event) => {
       // enterprises are grouping parents; the org itself is the governance
       // unit there, so reconciliation_record's enterprise_ref match is
       // github-specific — see resweepProviderEnterpriseReferences).
+      /*
+       * SCOPE IS ALREADY EXPLICIT, AND THIS MUST STAY IN THE TRANSACTION
+       * (docs/design/rls-enforcement.md §2, "the six handlers"). Unlike the
+       * Copilot bill re-pull, this is not an estate-wide worker inheriting a
+       * caller's region: resweepProviderEnterpriseReferences takes the
+       * enterprise id and slug as ARGUMENTS and every predicate it builds is
+       * keyed on them — there is no ambient region for a region-scoped `admin`
+       * to narrow. Its two tables (reconciliation_record, actual_spend) have no
+       * RLS enabled either, so no FORCE phase in §6 reaches them.
+       *
+       * It also cannot move to the worker lane: it resolves rows against the
+       * provider_enterprise row INSERTed above, which is not visible on any
+       * other connection until this transaction commits.
+       */
       governanceResweep:
         body.provider === 'github'
           ? await resweepProviderEnterpriseReferences(tx, { providerEnterpriseId: created!.id, externalId })

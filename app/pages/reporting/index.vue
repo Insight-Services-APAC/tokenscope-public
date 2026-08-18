@@ -38,7 +38,14 @@ const { data: meta, error: metaError } = await useFetch<ReportMetaResp>('/api/v1
   retry: false,
 })
 
-const granted = computed<ReportScope[]>(() => meta.value?.scopes ?? [])
+/*
+ * A response without a `scopes` ARRAY is not "zero granted scopes" — it is no
+ * answer. `?? []` turned any truthy-but-incomplete payload into an authoritative
+ * refusal, so a shared-key collision rendered the empty state to a granted admin.
+ * Absent ⇒ unresolved; only a real array can say "none".
+ */
+const metaResolved = computed<boolean>(() => Array.isArray(meta.value?.scopes))
+const granted = computed<ReportScope[]>(() => (Array.isArray(meta.value?.scopes) ? meta.value.scopes : []))
 const hasScopes = computed<boolean>(() => granted.value.length > 0)
 const bestScope = computed<ReportScope>(() => meta.value?.defaultScope ?? granted.value[0] ?? 'region')
 
@@ -142,7 +149,7 @@ const tabModel = computed<string>({
 
     <UiFetchErrorBanner v-if="metaError" :error="metaError" class="mb-4" />
 
-    <template v-else-if="meta">
+    <template v-else-if="metaResolved">
       <!-- Zero granted scopes (L3): render a proper empty-state, NOT the 'regional' fallback —
            an ungranted Regional view would only 403-banner. `activeScope` defaults to 'regional'
            when granted=[], so the empty-state gate must sit ahead of the scope render. -->

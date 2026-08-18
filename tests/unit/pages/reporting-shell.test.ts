@@ -62,6 +62,55 @@ async function mountShell(meta: Meta) {
 
 afterEach(() => vi.unstubAllGlobals())
 
+/*
+ * A payload with no `scopes` ARRAY is no answer, not "zero scopes".
+ *
+ * AppHeader fetched /reports/meta on the SAME 'reports-meta' key with
+ * `immediate: false` (for a reporting role) and `default: () => ({})`, so the
+ * key resolved to a truthy `{}` with no request ever issued. The shell deduped
+ * onto it and showed a platform-admin "You don't have access to any reports" —
+ * with no reports/meta row in the network tab at all.
+ */
+describe('/reporting shell — an incomplete payload is not a refusal', () => {
+  async function mountRaw(payload: unknown) {
+    vi.stubGlobal('useFetch', () => ({ data: ref(payload), error: ref(null) }))
+    vi.stubGlobal('useReportState', (init: { scope?: string } = {}) => ({
+      scope: ref(init.scope ?? 'region'),
+      month: ref<string | null>(null),
+      region: ref<string | null>(null),
+      ou: ref<string | null>(null),
+      cc: ref<string | null>(null),
+      patch: vi.fn(),
+    }))
+    const Parent = defineComponent({
+      components: { ReportingIndex },
+      template: '<Suspense><ReportingIndex /></Suspense>',
+    })
+    const w = mount(Parent, { global: { stubs: SCOPE_STUBS } })
+    await flushPromises()
+    return w
+  }
+
+  for (const [name, payload] of [
+    ['the shared-key collision: a truthy empty object', {}],
+    ['a payload missing scopes entirely', { defaultScope: null }],
+    ['scopes present but not an array', { scopes: null }],
+  ] as const) {
+    it(`does NOT render the refusal for ${name}`, async () => {
+      const w = await mountRaw(payload)
+      expect(
+        w.find('[data-testid="reporting-no-scopes"]').exists(),
+        'only a real empty array may say "no access"',
+      ).toBe(false)
+    })
+  }
+
+  it('still renders the refusal for a genuine empty array', async () => {
+    const w = await mountRaw(makeMeta({ scopes: [] }))
+    expect(w.find('[data-testid="reporting-no-scopes"]').exists()).toBe(true)
+  })
+})
+
 const anyScopeMounted = (w: Awaited<ReturnType<typeof mountShell>>) =>
   ['region', 'cost-centre', 'finance'].some((s) => w.find(`[data-testid="scope-${s}-stub"]`).exists())
 

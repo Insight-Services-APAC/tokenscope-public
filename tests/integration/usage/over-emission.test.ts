@@ -77,6 +77,11 @@ describe('over-emission (§A integrity)', () => {
     const res = await detectOverEmission(t.db, WINDOW)
     expect(res.flagged).toBe(1)
     expect(res.totalOverUsd).toBeCloseTo(450, 2)
+    // The high-confidence lane names itself (mig 0132): there IS a bill and OTel
+    // materially exceeds it. Same vocabulary as the conversation_quarantine.reason
+    // a resolve writes.
+    const [row] = await t.client<{ reason: string }[]>`SELECT reason FROM over_emission WHERE teammate_id = ${teammateId}::uuid`
+    expect(row!.reason).toBe('api-uncorroborated')
   })
 
   it('does NOT flag legitimate estimate drift (bill $50, OTel estimate $65 = 1.3x)', async () => {
@@ -101,13 +106,81 @@ describe('over-emission (§A integrity)', () => {
     expect(res.totalOverUsd).toBe(0)
     expect(res.noBillFlagged).toBe(1)
     expect(res.totalNoBillUsd).toBeCloseTo(300, 2)
-    // NOT written to over_emission — over_emission has no `reason` column to
-    // distinguish this weaker-evidence lane (adding one is a migration outside
-    // this story's ownership; see the PERSISTENCE GAP note in
-    // over-emission-detection.ts). The gap is measured + returned, not silently
-    // dropped, but nothing lands in the table for it yet.
-    const rows = await t.client<{ id: string }[]>`SELECT id FROM over_emission WHERE teammate_id = ${teammateId}::uuid`
-    expect(rows).toHaveLength(0)
+    // Persisted since mig 0132 (UF-21) — under its OWN reason, so it can never be
+    // read as the high-confidence flag. Before the column existed this lane had
+    // nowhere honest to live and was returned only in the worker's result.
+    const rows = await t.client<{ reason: string; over: string; state: string }[]>`
+      SELECT reason, over_usd::text AS over, state FROM over_emission WHERE teammate_id = ${teammateId}::uuid`
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.reason).toBe('no-bill-to-corroborate')
+    expect(Number(rows[0]!.over)).toBeCloseTo(300, 2)
+  })
+
+  it('(A) the persisted no-bill row is NOT a review item: the endpoint does not return it, and it cannot be resolved', async () => {
+    /*
+     * The row exists so the number is durable and queryable. It is NOT an
+     * accusation — api_usd = 0 means EITHER an unreconciled org OR genuinely zero
+     * spend, and we cannot tell which. Asking a developer to quarantine a session
+     * over it would be asking them to answer for our own configuration.
+     *
+     * Both doors are checked. The list filters, and the resolve route filters too:
+     * an id it never handed out must not become resolvable just because the URL
+     * takes one.
+     */
+    await otelSession('sess-noapi', '300.00')
+    await detectOverEmission(t.db, WINDOW)
+    const [row] = await t.client<{ id: string }[]>`
+      SELECT id::text AS id FROM over_emission WHERE teammate_id = ${teammateId}::uuid AND reason = 'no-bill-to-corroborate'`
+    expect(row).toBeDefined()
+
+    const out = (await overGet(ev({}) as never)) as { flags: unknown[] }
+    expect(out.flags).toHaveLength(0)
+
+    await expect(
+      resolveHandler(ev({ id: row!.id, body: { action: 'accept' } }) as never),
+    ).rejects.toMatchObject({ statusCode: 404 })
+    // ...and it stays open: a refused resolve must not half-apply.
+    const [after] = await t.client<{ state: string }[]>`SELECT state FROM over_emission WHERE id = ${row!.id}::uuid`
+    expect(after!.state).toBe('open')
+  })
+
+  it('(A) a second detector run does not blank the no-bill row (the refresh step checks BOTH lanes)', async () => {
+    // Step 2 zeroes rows that are no longer material. Keyed on the high-confidence
+    // CTE alone it would blank every no-bill row on the very tick that wrote it —
+    // the two CTEs are disjoint, so "not in material" is not "no longer flagged".
+    await otelSession('sess-noapi', '300.00')
+    await detectOverEmission(t.db, WINDOW)
+    const res = await detectOverEmission(t.db, WINDOW)
+    expect(res.noBillFlagged).toBe(1)
+    const rows = await t.client<{ over: string }[]>`
+      SELECT over_usd::text AS over FROM over_emission WHERE teammate_id = ${teammateId}::uuid AND reason = 'no-bill-to-corroborate'`
+    expect(rows).toHaveLength(1)
+    expect(Number(rows[0]!.over)).toBeCloseTo(300, 2)
+  })
+
+  it('(A) a cell that CHANGES LANE keeps one row and stops describing itself as the lane it left', async () => {
+    // The org starts reconciling: yesterday there was no bill to corroborate against,
+    // today there is one and OTel materially exceeds it. Same (teammate, day, tool) —
+    // the unique key means the same ROW, so its reason has to move with it.
+    await otelSession('sess-big', '450.00')
+    await otelSession('sess-small', '50.00')
+    await detectOverEmission(t.db, WINDOW)
+    const [before] = await t.client<{ reason: string }[]>`SELECT reason FROM over_emission WHERE teammate_id = ${teammateId}::uuid`
+    expect(before!.reason).toBe('no-bill-to-corroborate')
+
+    await bill('50.00') // the bill lands
+    const res = await detectOverEmission(t.db, WINDOW)
+    const rows = await t.client<{ reason: string; over: string }[]>`SELECT reason, over_usd::text AS over FROM over_emission WHERE teammate_id = ${teammateId}::uuid`
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.reason).toBe('api-uncorroborated')
+    expect(Number(rows[0]!.over)).toBeCloseTo(450, 2)
+    // ...and it now counts as the high-confidence flag it has become.
+    expect(res.flagged).toBe(1)
+    expect(res.totalOverUsd).toBeCloseTo(450, 2)
+    expect(res.noBillFlagged).toBe(0)
+    // The endpoint shows it, now that there IS a bill it contradicts.
+    const out = (await overGet(ev({}) as never)) as { flags: unknown[] }
+    expect(out.flags).toHaveLength(1)
   })
 
   it('(A) below the no-bill floor: the lower-confidence lane stays silent too (an unreconciled org must not read every small OTel total as a suspected forger)', async () => {

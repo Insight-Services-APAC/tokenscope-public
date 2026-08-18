@@ -84,19 +84,29 @@ export const OVER_EMISSION_REFLAG_FACTOR = 1.5
  * prior art in this codebase to anchor it to) — flagged as such in the story
  * return value; revisit with real unreconciled-org volume once observed.
  *
- * PERSISTENCE GAP (also flagged in the story return value): the audit's fix
- * text writes these rows to `over_emission` with `reason='no-bill-to-
- * corroborate'`. `over_emission` (drizzle/migrations/0072_over_emission.sql,
- * drizzle/schema/unaccounted.ts) has NO `reason` column, and adding one is a
- * migration + schema change — outside this file's (and this story's)
- * ownership. Rather than either (a) silently skip the no-bill lane, or (b)
- * hack the discriminator onto an existing column with the wrong semantics,
- * this file does not create a high-confidence `over_emission` row. It does,
- * however, persist a non-accusatory `personal-subscription-prompt` inbox item
- * for declarable Claude tools. The prompt asks rather than classifies, and
- * migration 0109 deduplicates it per teammate/tool/signal-month.
+ * PERSISTED SINCE MIG 0132 (UF-21), UNDER ITS OWN NAME. `over_emission.reason`
+ * now discriminates the two lanes, so this one is written as
+ * `reason='no-bill-to-corroborate'` instead of living only in this function's
+ * return value. It is still NOT a high-confidence flag and still not an
+ * accusation: every developer-facing reader (GET /api/v1/me/over-emission, the
+ * resolve route, me-lens's has_open_review) filters to 'api-uncorroborated', so
+ * nothing about a developer's review queue changed when this lane started
+ * landing. What changed is that the number is durable and queryable rather than
+ * observable only in one worker run's result.
+ *
+ * The non-accusatory `personal-subscription-prompt` inbox item is unchanged and
+ * still the only thing this lane says to a human. The prompt asks rather than
+ * classifies, and migration 0109 deduplicates it per teammate/tool/signal-month.
  */
 export const OVER_EMISSION_NO_BILL_FLOOR_USD = 250.0
+
+/**
+ * over_emission.reason (mig 0132) — which lane wrote the row. Exported because
+ * the read side has to filter on it: a reader that forgets puts a
+ * "your org isn't reconciled" row into a forgery review queue.
+ */
+export const OVER_EMISSION_REASON_API_UNCORROBORATED = 'api-uncorroborated'
+export const OVER_EMISSION_REASON_NO_BILL = 'no-bill-to-corroborate'
 
 export interface OverEmissionOptions {
   startDate: string
@@ -115,9 +125,11 @@ export interface OverEmissionResult {
   /**
    * (A) — (teammate, day, tool) combinations with OTel spend but NO bill to
    * corroborate against (api_usd = 0) whose OTel total clears
-   * OVER_EMISSION_NO_BILL_FLOOR_USD. NOT written to `over_emission`; reported
-   * here and used only for the lower-confidence declaration prompt. Never
-   * merged into `flagged`/`totalOverUsd`.
+   * OVER_EMISSION_NO_BILL_FLOOR_USD. Written to `over_emission` under
+   * `reason = 'no-bill-to-corroborate'` since mig 0132 (UF-21), and NEVER merged
+   * into `flagged`/`totalOverUsd` — those two count the high-confidence
+   * 'api-uncorroborated' lane only, which is also the only lane any
+   * developer-facing reader shows.
    */
   noBillFlagged: number
   totalNoBillUsd: number
@@ -204,9 +216,10 @@ export async function detectOverEmission(db: Db, opts: OverEmissionOptions): Pro
   // 1. Upsert the material over-emissions (preserve the dev's state + suspect-session call).
   const flagged = await db.execute<{ id: string }>(sql`
     ${computed}
-    INSERT INTO over_emission (teammate_id, region_id, org_unit_id, day, tool, otel_usd, api_usd, over_usd, computed_at)
+    INSERT INTO over_emission (teammate_id, region_id, org_unit_id, day, tool, otel_usd, api_usd, over_usd, reason, computed_at)
     SELECT m.teammate_id, t.region_id, t.org_unit_id, m.day, m.tool,
-           m.otel_usd::numeric(14,6), m.api_usd::numeric(14,6), m.over_usd::numeric(14,6), now()
+           m.otel_usd::numeric(14,6), m.api_usd::numeric(14,6), m.over_usd::numeric(14,6),
+           ${OVER_EMISSION_REASON_API_UNCORROBORATED}, now()
     FROM material m JOIN teammate t ON t.id = m.teammate_id
     -- PLACEMENT IS ABSENT FROM THIS LIST ON PURPOSE (issue #44). region_id and
     -- org_unit_id are stamped by the INSERT above and never refreshed, so a flag
@@ -215,7 +228,12 @@ export async function detectOverEmission(db: Db, opts: OverEmissionOptions): Pro
     -- would be silently undone on the next tick. Asserted in
     -- tests/integration/usage/placement-freeze.test.ts.
     ON CONFLICT (teammate_id, day, tool) DO UPDATE SET
-      otel_usd = EXCLUDED.otel_usd, api_usd = EXCLUDED.api_usd, over_usd = EXCLUDED.over_usd, computed_at = now(),
+      otel_usd = EXCLUDED.otel_usd, api_usd = EXCLUDED.api_usd, over_usd = EXCLUDED.over_usd,
+      -- A cell CHANGES LANE when its org starts reconciling: yesterday there was no
+      -- bill to corroborate against, today there is one and OTel materially exceeds
+      -- it. Same (teammate, day, tool), so the same row — it must stop describing
+      -- itself as the lane it is no longer in.
+      reason = EXCLUDED.reason, computed_at = now(),
       -- Re-open a resolved flag when a NEW forgery pushes the over materially past what the
       -- dev vouched for (watermark); otherwise the dev's call stands.
       state = CASE
@@ -231,10 +249,33 @@ export async function detectOverEmission(db: Db, opts: OverEmissionOptions): Pro
     RETURNING id::text AS id
   `)
 
+  // 1b. Upsert the no-bill lane under its own `reason` (mig 0132). Separate statement,
+  //     not a UNION into step 1, for two reasons: `flagged` must keep counting the
+  //     high-confidence lane ONLY, and this lane has no developer resolution to
+  //     preserve — it is never offered as a review item, so there is no watermark and
+  //     no re-open rule. Placement is stamped on INSERT and never refreshed, same as
+  //     step 1 (issue #44).
+  await db.execute(sql`
+    ${computed}
+    INSERT INTO over_emission (teammate_id, region_id, org_unit_id, day, tool, otel_usd, api_usd, over_usd, reason, computed_at)
+    SELECT n.teammate_id, t.region_id, t.org_unit_id, n.day, n.tool,
+           n.otel_usd::numeric(14,6), n.api_usd::numeric(14,6), n.over_usd::numeric(14,6),
+           ${OVER_EMISSION_REASON_NO_BILL}, now()
+    FROM material_no_bill n JOIN teammate t ON t.id = n.teammate_id
+    ON CONFLICT (teammate_id, day, tool) DO UPDATE SET
+      otel_usd = EXCLUDED.otel_usd, api_usd = EXCLUDED.api_usd, over_usd = EXCLUDED.over_usd,
+      reason = EXCLUDED.reason, computed_at = now()
+  `)
+
   // 2. Refresh any window row whose over is no longer material to 0 — covers an OPEN flag
   //    falling below threshold AND a row the dev already resolved (e.g. quarantined the
   //    suspect session → OTel dropped → over now 0). State is preserved either way; only
   //    the stored over_usd is corrected to current reality.
+  //
+  //    BOTH lanes are checked. Zeroing a row merely because it is absent from `material`
+  //    would blank every no-bill row on the same tick that wrote it — the two CTEs are
+  //    disjoint by construction, so "not in material" is not the same claim as
+  //    "no longer flagged".
   await db.execute(sql`
     ${computed}
     UPDATE over_emission oe SET over_usd = 0, computed_at = now()
@@ -245,19 +286,28 @@ export async function detectOverEmission(db: Db, opts: OverEmissionOptions): Pro
         SELECT 1 FROM material m
         WHERE m.teammate_id = oe.teammate_id AND m.day = oe.day AND m.tool = oe.tool
       )
+      AND NOT EXISTS (
+        SELECT 1 FROM material_no_bill n
+        WHERE n.teammate_id = oe.teammate_id AND n.day = oe.day AND n.tool = oe.tool
+      )
   `)
 
+  // The HIGH-CONFIDENCE lane only. `totalOverUsd` is the "uncorroborated excess"
+  // figure operators read; folding in rows that had no bill to corroborate against
+  // would make an unreconciled org look like a fleet of forgers.
   const [agg] = await db.execute<{ n: string; usd: string }>(sql`
     SELECT COUNT(*) FILTER (WHERE state = 'open' AND over_usd > 0)::text AS n,
            COALESCE(SUM(over_usd) FILTER (WHERE state = 'open' AND over_usd > 0), 0)::text AS usd
     FROM over_emission
     WHERE day >= ${opts.startDate}::date AND day <= ${opts.endDate}::date
+      AND reason = ${OVER_EMISSION_REASON_API_UNCORROBORATED}
       ${opts.teammateId ? sql`AND teammate_id = ${opts.teammateId}::uuid` : sql``}
   `)
 
-  // 3. (A) — the no-bill lane is freshly recomputed every call. It never
-  // becomes a high-confidence over_emission row; declarable Claude tools are
-  // grouped into the lower-confidence prompt stream below.
+  // 3. (A) — the no-bill lane is freshly recomputed every call, and step 1b has
+  // just persisted it under `reason = 'no-bill-to-corroborate'`. It never becomes
+  // a HIGH-CONFIDENCE row and is never offered as a review item; declarable Claude
+  // tools are grouped into the lower-confidence prompt stream below.
   const promptRows =
     opts.dispatchPersonalPrompts === false
       ? []

@@ -7,6 +7,36 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-08-18 (snapshot cbedba50)
+
+- Opening Reporting no longer shows "You don't have access to any reports" to
+  people who do have access, and the page loads in place of the long wait that
+  used to precede it.
+
+- Administrators can now see, on the Diagnostics page and in the boot log,
+  exactly how much of the database's row-level security is actually in force —
+  which connection the app is using, how many tables are enforced, and whether
+  the deployment can create the restricted database account the enforcement
+  needs. Read-only: it reports, and changes nothing.
+- Copilot per-seat showback no longer deletes valid rows when GitHub returns a
+  partial seat roster: a response that is short, malformed, or smaller than the
+  count GitHub itself reports now skips the clean-up instead of treating the
+  missing seats as removed.
+- Re-pulling a Copilot bill for a month is now restricted to finance
+  administrators. It was open to regional administrators, who could trigger it
+  for any enterprise, not just their own region's.
+- GitHub Copilot reporting now works for an enterprise that has moved from a
+  personal access token to the GitHub App: per-seat Copilot showback populates
+  again, and "Discover Copilot orgs" lists the enterprise's organisations
+  instead of failing. Both used to call an endpoint only a token can read, so
+  an App-mode enterprise saw no seats and no orgs to onboard.
+- Reconciliation keeps going when one GitHub enterprise's credentials are not
+  wired up: previously that single misconfiguration stopped the hourly run
+  before it reached anybody else's data.
+- Budgets can no longer be recorded against a scope the product does not
+  recognise, and a per-developer cap can only sit on a project or business-unit
+  budget.
+
 ## 2026-08-15 (snapshot cd9e2ff0)
 
 - The published repository's own test suite and checks now pass on a fresh

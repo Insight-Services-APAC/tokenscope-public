@@ -29,6 +29,7 @@ import { VENDOR_LABELS, toolToVendor } from '../../shared/usage/vendor'
 import {
   OVER_EMISSION_MIN_USD,
   OVER_EMISSION_NO_BILL_FLOOR_USD,
+  OVER_EMISSION_REASON_API_UNCORROBORATED,
   OVER_EMISSION_REL,
 } from '../usage/over-emission-detection'
 import { quotaProjection, runRate, type QuotaProjection, type RunRate } from '../usage/projections'
@@ -466,6 +467,11 @@ export async function getMyToolGaps(
          AND oe.state = 'open'
          AND oe.over_usd > 0
          AND oe.day >= ${monthStartDay}::date
+         -- Same lane filter as GET /api/v1/me/over-emission (mig 0132). This CTE's
+         -- contract is that it is a SUBSET of that route's result; a
+         -- 'no-bill-to-corroborate' row here would promise a review the dashboard
+         -- never shows.
+         AND oe.reason = ${OVER_EMISSION_REASON_API_UNCORROBORATED}
     )
     SELECT a.tool,
            a.usd::text                     AS attributed_usd,

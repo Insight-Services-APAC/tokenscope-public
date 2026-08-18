@@ -48,6 +48,21 @@ export function deriveRunWarnings(result: unknown): string[] {
     warnings.push(
       `${num('copilotSeatPageShort')} enterprise(s) ended the seat pull on a short page — roster may be incomplete`,
     )
+  // Positive evidence the seat roster was short — a page with no `seats` key, or fewer
+  // seats than GitHub's own total_seats. Blocks the prune (copilot-bill.ts precondition
+  // 6) and, unlike the page cap, can happen on an enterprise of any size.
+  if (num('copilotSeatRosterIncomplete') > 0)
+    warnings.push(
+      `${num('copilotSeatRosterIncomplete')} enterprise(s) returned an incomplete seat roster — seat counts understated and the seat prune was skipped`,
+    )
+  // App mode reads seats per-org and isolates a failing org, so an unreadable org no
+  // longer aborts the enterprise — it just contributes nothing. That is the one case
+  // where an empty roster means "unknown", not "no seats", and it blocks the seat
+  // prune (copilot-bill.ts precondition 5). Silent, otherwise: the run says success.
+  if (num('copilotSeatOrgsUnavailable') > 0)
+    warnings.push(
+      `${num('copilotSeatOrgsUnavailable')} Copilot license org(s) could not be read — roster UNKNOWN (App not installed / pull failed); the seat prune was skipped`,
+    )
   // copilot-pool-bill (§B pooled chargeback). This worker ISOLATES a failing
   // (enterprise, month) — it increments a counter, logs, and continues — so the run
   // still finishes 'success'. Without these probes a §B billing read that fails for

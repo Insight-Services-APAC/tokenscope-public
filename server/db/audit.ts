@@ -6,6 +6,17 @@
  * (drizzle/migrations/0001_schema.sql) means a row, once written, cannot
  * be UPDATEd or DELETEd — so the helper is the only allocation point.
  *
+ * THE HANDLE MUST CARRY AN RLS IDENTITY (docs/design/rls-enforcement.md §4).
+ * `audit_event` has an RLS policy, and `recordAuditEvent(getDb(), …)` — the
+ * global pool, no GUCs — was the single most common leak in server/api/**:
+ * handlers that wrapped their MAIN work in `withRequestRls` and then wrote the
+ * audit row outside it. Under `FORCE ROW LEVEL SECURITY` every one of those
+ * INSERTs errors, so the handler 500s AFTER doing its work. Pass:
+ *   - a request handler → the `tx` from `withRequestRls(event, …)`
+ *   - a machine/credential handler → the `tx` from `withMachineRls(…)`
+ *   - a worker → its own handle, which comes from the worker pool
+ * `scripts/check-handler-rls-context.mjs` is the CI guard for the first case.
+ *
  * Named after a sibling project's `lib/audit/` pattern (R2 F3 of the build plan).
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
@@ -51,11 +62,16 @@ export function normalizeInet(ip: string | null | undefined): string | null {
   return null
 }
 
+/**
+ * @param tx an RLS-bearing handle — a `withRequestRls` / `withMachineRls`
+ *           transaction, or a worker-pool handle. NEVER the bare `getDb()`
+ *           pool from inside a request handler (see the file header).
+ */
 export async function recordAuditEvent(
-  db: PostgresJsDatabase<Record<string, unknown>>,
+  tx: PostgresJsDatabase<Record<string, unknown>>,
   input: AuditEventInput,
 ): Promise<{ id: string }> {
-  const [row] = await db
+  const [row] = await tx
     .insert(auditEvent)
     .values({
       eventType: input.eventType,

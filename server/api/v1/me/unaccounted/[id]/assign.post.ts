@@ -17,7 +17,7 @@ import { defineEventHandler, getRouterParam, createError } from 'h3'
 import { z } from 'zod'
 import { requireAuth } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
-import { getDb } from '../../../../../db'
+import { withRequestRls } from '../../../../../db/request-rls'
 import { readValidated } from '../../../../../utils/validated-body'
 import { tagUnaccountedTx } from '../../../../../utils/tag-unaccounted'
 
@@ -37,9 +37,10 @@ export default defineEventHandler(async (event) => {
   if (!idParsed.success) throw createError({ statusCode: 400, statusMessage: 'Invalid record id' })
   const id = idParsed.data
   const body = await readValidated(event, Body)
-  const db = getDb()
 
-  return await db.transaction((tx) =>
+  // withRequestRls IS the transaction — same atomicity, now carrying the
+  // caller's RLS identity (docs/design/rls-enforcement.md §2, request lane).
+  return await withRequestRls(event, (tx) =>
     tagUnaccountedTx(
       tx,
       session.teammateId,

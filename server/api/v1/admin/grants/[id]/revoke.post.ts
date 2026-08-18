@@ -21,7 +21,8 @@ import { createError, defineEventHandler } from 'h3'
 import { eq } from 'drizzle-orm'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { requireRole, requireRegionScope } from '../../../../../auth/rbac'
-import { getDb, schema } from '../../../../../db'
+import { schema } from '../../../../../db'
+import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
 import { revokeGrant } from '../../../../../utils/grant-revoke'
 import { requireUuidParam } from '../../../../../utils/require-uuid-param'
@@ -31,47 +32,53 @@ export default defineEventHandler(async (event) => {
   const session = await requireRole(event, 'admin', 'global-finops')
   const id = requireUuidParam(event, 'id', 'grant id')
 
-  const db = getDb()
-  // Join the grant to its owning teammate for the region scope axis.
-  const [row] = await db
-    .select({
-      id: schema.oauthToken.id,
-      teammateId: schema.oauthToken.teammateId,
-      scope: schema.oauthToken.scope,
-      revokedAt: schema.oauthToken.revokedAt,
-      instanceId: schema.oauthToken.instanceId,
-      regionId: schema.teammate.regionId,
-      teammateEmail: schema.teammate.email,
+  // ONE transaction carrying the caller's RLS identity: join → region gate →
+  // revoke (+ the emit cascade) → audit. The gate throws before any mutation,
+  // and a throw after one rolls it back.
+  const result = await withRequestRls(event, async (tx) => {
+    // Join the grant to its owning teammate for the region scope axis.
+    const [row] = await tx
+      .select({
+        id: schema.oauthToken.id,
+        teammateId: schema.oauthToken.teammateId,
+        scope: schema.oauthToken.scope,
+        revokedAt: schema.oauthToken.revokedAt,
+        instanceId: schema.oauthToken.instanceId,
+        regionId: schema.teammate.regionId,
+        teammateEmail: schema.teammate.email,
+      })
+      .from(schema.oauthToken)
+      .innerJoin(schema.teammate, eq(schema.teammate.id, schema.oauthToken.teammateId))
+      .where(eq(schema.oauthToken.id, id))
+      .limit(1)
+
+    if (!row) {
+      throw createError({ statusCode: 404, statusMessage: 'Grant not found' })
+    }
+
+    // Region-bound the admin to the GRANT-OWNER's region. A region admin revoking
+    // a peer-region grant is refused here (403), before any mutation.
+    await requireRegionScope(event, row.regionId)
+
+    const revoked = await revokeGrant(tx, row)
+
+    await recordAuditEvent(tx, {
+      eventType: 'grant-revoked',
+      actorTeammateId: session.teammateId,
+      actorSystem: 'admin',
+      subjectKind: 'grant',
+      subjectId: id,
+      payload: {
+        adminEmail: session.email,
+        grantTeammateId: row.teammateId,
+        grantTeammateEmail: row.teammateEmail,
+        isEmit: revoked.isEmit,
+        instancesEnded: revoked.instancesEnded,
+        alreadyRevoked: !revoked.revoked,
+      },
     })
-    .from(schema.oauthToken)
-    .innerJoin(schema.teammate, eq(schema.teammate.id, schema.oauthToken.teammateId))
-    .where(eq(schema.oauthToken.id, id))
-    .limit(1)
 
-  if (!row) {
-    throw createError({ statusCode: 404, statusMessage: 'Grant not found' })
-  }
-
-  // Region-bound the admin to the GRANT-OWNER's region. A region admin revoking
-  // a peer-region grant is refused here (403), before any mutation.
-  await requireRegionScope(event, row.regionId)
-
-  const result = await revokeGrant(db, row)
-
-  await recordAuditEvent(db, {
-    eventType: 'grant-revoked',
-    actorTeammateId: session.teammateId,
-    actorSystem: 'admin',
-    subjectKind: 'grant',
-    subjectId: id,
-    payload: {
-      adminEmail: session.email,
-      grantTeammateId: row.teammateId,
-      grantTeammateEmail: row.teammateEmail,
-      isEmit: result.isEmit,
-      instancesEnded: result.instancesEnded,
-      alreadyRevoked: !result.revoked,
-    },
+    return revoked
   })
 
   return { id, revoked: result.revoked, is_emit: result.isEmit, instances_ended: result.instancesEnded }

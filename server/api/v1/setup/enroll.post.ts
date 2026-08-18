@@ -30,6 +30,29 @@
  * The response carries one-time credential material → Cache-Control: no-store
  * (mirrors /setup/redeem + the OAuth token endpoint). Shape mirrors
  * /setup/redeem so the local write helper is reused verbatim.
+ *
+ * NO RLS LANE, and this is a DESIGN question rather than an oversight
+ * (docs/design/rls-enforcement.md; tracked as an explicit residue in
+ * scripts/check-handler-rls-context.mjs). Its sibling /setup/redeem DOES adopt a
+ * context mid-transaction, and the difference between them is the whole reason:
+ *
+ *   - redeem's `teammate_id` comes from a handoff the server minted behind a
+ *     completed OAuth consent. It is a fact.
+ *   - enroll's identity is `claimed_email` — a string in the request body, by
+ *     design never verified (that is what "provisional until confirmed" means).
+ *     The shadow teammate this handler may CREATE is downstream of that claim.
+ *
+ * Adopting it would let the caller pick its own RLS identity by picking an
+ * email, which is the laundering vector the confirm-on-auth gate
+ * (server/auth/confirm-instance.ts) exists to close. The honest options are a
+ * dedicated bounded enrolment identity, or the RLS-DISABLE of every table this
+ * path touches — both design decisions, not handler decisions. It writes
+ * `teammate`, `instance_attestation`, `oauth_token` and `audit_event`, ALL of
+ * which are RLS-enabled, so it works only because all four are in server/db/rls-bootstrap.ts::RLS_BOOTSTRAP_TABLES and are
+ * DISABLEd before the app becomes a non-owner. An earlier version of this header
+ * said phase 1 left it "unaffected" because its tables were policy-free or out of
+ * the FORCE set: both halves were false, and the audit write in particular would
+ * have 500'd every enrolment at the role switch.
  */
 import {
   createError,

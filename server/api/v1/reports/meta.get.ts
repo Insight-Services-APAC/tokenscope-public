@@ -73,11 +73,17 @@ export default defineEventHandler(async (event) => {
     const scopes = REPORT_SCOPES.filter((s) => grants[s])
     const defaultScope = scopes[0] ?? null
 
-    // Month floors — MIN over the lanes (daily-cacheable, so an unscoped global
-    // read is fine; the picker floor is `overall`).
+    /*
+     * Month floors — the picker's lower bound.
+     *
+     * The usage floor reads `v_usage_month_floor` (mig 0133), not
+     * `MIN(ts_event) FROM v_complete_usage`: MIN over that 4-arm UNION with
+     * GROUP BY CTEs can use no index, so Postgres materialised the whole estate
+     * on every load of the reporting shell — the ~2 minute /reporting load.
+     */
     const [floors] = [
       ...(await tx.execute<FloorRow>(sql`
-        SELECT (SELECT to_char(MIN(ts_event), 'YYYY-MM') FROM v_complete_usage) AS usage,
+        SELECT (SELECT month_floor FROM v_usage_month_floor) AS usage,
                (SELECT to_char(MIN(period_month), 'YYYY-MM') FROM v_finance_bill_totals_month) AS bill,
                (SELECT to_char(MIN(period_date), 'YYYY-MM') FROM reconciliation_record) AS reconciliation`)),
     ]

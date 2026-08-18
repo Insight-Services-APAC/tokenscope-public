@@ -21,12 +21,11 @@
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js'
-import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import consola from 'consola'
 import type { BearerTeammate } from '../auth/oauth-bearer'
 import { getDb } from '../db'
-import { withRlsContext, type RlsContext } from '../db/rls'
+import { withRlsContext, rlsRoleFor, type RlsContext } from '../db/rls'
 import { getMyUsage, getMyProjects, getActivityTypes, resolveRepoProject } from './me-queries'
 import { tagSessionTx } from './tag-session'
 import {
@@ -57,37 +56,29 @@ function hasScope(teammate: BearerTeammate, scope: string): boolean {
 }
 
 /**
- * Map the bearer teammate to an RLS context. `platform-admin` maps to the
- * region-unbounded `global-finops` scope at the RLS layer (same convention as
- * server/db/request-rls.ts). The four GUCs the policies read are region / org
- * path / role / teammate-id — we resolve the org-unit path here because the
- * bearer carries region + teammate but not the ltree path.
+ * Map the bearer teammate to an RLS context — the MACHINE lane
+ * (docs/design/rls-enforcement.md §2), shared with the four
+ * /api/v1/instances/{instanceId}/* routes via server/db/machine-rls.ts.
+ *
+ * `requireOAuthBearer`'s token→teammate→org_unit join now returns `orgPath`, so
+ * this no longer costs a second round-trip. `rlsRoleFor` owns the
+ * platform-admin → global-finops mapping (server/db/rls.ts).
+ *
+ * Fail CLOSED on a missing org path (CORE-2): '' is the universal ltree
+ * ancestor, so `cou.path <@ ''::ltree` would be TRUE for every row and the
+ * manager-scope predicates would become unbounded. Mirrors the cookie path
+ * (jit-teammate.ts loadTeammateByOid), which throws for the same condition.
  */
-async function rlsContextFor(db: Db, teammate: BearerTeammate): Promise<RlsContext> {
-  const rows = await db.execute<{ path: string | null }>(sql`
-    SELECT ou.path::text AS path
-      FROM teammate tm
-      LEFT JOIN org_unit ou ON ou.id = tm.org_unit_id
-     WHERE tm.id = ${teammate.teammateId}::uuid
-     LIMIT 1
-  `)
-  // Fail CLOSED on a missing org path (CORE-2): '' is the universal ltree
-  // ancestor, so `cou.path <@ ''::ltree` would be TRUE for every row and the
-  // manager-scope predicates would become unbounded. Mirrors the cookie path
-  // (jit-teammate.ts loadTeammateByOid), which throws for the same condition.
-  const orgPath = [...rows][0]?.path
-  if (!orgPath) {
+function rlsContextFor(teammate: BearerTeammate): RlsContext {
+  if (!teammate.orgPath) {
     throw new Error(
       `Teammate ${teammate.teammateId} has no org_unit path — refusing to build an RLS context`,
     )
   }
-  const role = (
-    teammate.role === 'platform-admin' ? 'global-finops' : teammate.role
-  ) as RlsContext['userRole']
   return {
     userRegionId: teammate.regionId,
-    userOrgPath: orgPath,
-    userRole: role,
+    userOrgPath: teammate.orgPath,
+    userRole: rlsRoleFor(teammate.role),
     userTeammateId: teammate.teammateId,
   }
 }
@@ -154,7 +145,7 @@ export function createMcpServer(dbOverride?: Db, publicOrigin?: string): McpServ
     }
     if (!hasScope(teammate, MCP_READ_SCOPE)) return scopeError(MCP_READ_SCOPE)
     try {
-      const ctx = await rlsContextFor(db, teammate)
+      const ctx = rlsContextFor(teammate)
       return await withRlsContext(db, ctx, async (tx) => body(tx as unknown as Db, teammate))
     } catch (err) {
       logger.error(`${toolName} failed`, {

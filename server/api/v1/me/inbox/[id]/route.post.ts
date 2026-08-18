@@ -16,7 +16,7 @@ import { assertSameOrigin } from '../../../../../auth/csrf'
 import { requireRole, requireRegionScope } from '../../../../../auth/rbac'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { InboxRouteBody } from '../../../../../../shared/schemas/inbox'
-import { getDb, schema } from '../../../../../db'
+import { schema } from '../../../../../db'
 import { recordAuditEvent } from '../../../../../db/audit'
 import { requireUuidParam } from '../../../../../utils/require-uuid-param'
 
@@ -33,16 +33,21 @@ interface SourceRow extends Record<string, unknown> {
 
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
-  // Admin-only. NOTE: RLS is inert in every deployed environment (no FORCE
-  // ROW LEVEL SECURITY; the app connects as the table owner), so the
-  // inbox_item `FOR ALL` policy never actually executes — this requireRole,
-  // plus the explicit requireRegionScope calls below on BOTH the source
-  // item's recipient and the forward target, are the live gates, not RLS.
+  // Admin-only. NOTE: RLS is still inert in every deployed environment (no
+  // FORCE ROW LEVEL SECURITY; the app connects as the table owner), so the
+  // inbox_item `FOR ALL` policy does not execute TODAY — this requireRole, plus
+  // the explicit requireRegionScope calls below on BOTH the source item's
+  // recipient and the forward target, are the live gates. Every query below
+  // nonetheless carries the caller's RLS identity, so the day `inbox_item` gets
+  // FORCE (design §Rollout, phase 2) the policy composes with these checks rather than
+  // meeting a context-less connection. See the phase-2 note on the forward.
   const session = await requireRole(event, 'admin', 'global-finops')
   const sourceId = requireUuidParam(event, 'id', 'inbox item id')
   const body = await readValidatedBody(event, (data) => InboxRouteBody.parse(data))
 
-  // Read the source inside the RLS context — admins bypass via role.
+  // Read the source inside the RLS context. `inbox_item_self` admits it via the
+  // per-recipient arm for one's own item, or the role arm (global-finops /
+  // platform-admin post-0098) for someone else's.
   const sources = await withRequestRls(event, async (tx) =>
     tx.execute<SourceRow>(sql`
       SELECT ii.id::text AS id, ii.category, ii.severity, ii.subject, ii.body,
@@ -64,45 +69,59 @@ export default defineEventHandler(async (event) => {
   // endpoint never becomes an existence oracle for other regions' item ids.
   await requireRegionScope(event, source.region_id)
 
-  // Validate the target teammate is active. Forwarding to a deactivated
-  // teammate creates an item that nobody can resolve (and may leak to
-  // their RBAC replacement).
-  const db = getDb()
-  const [target] = await db
-    .select({
-      id: schema.teammate.id,
-      isActive: schema.teammate.isActive,
-      regionId: schema.teammate.regionId,
-    })
-    .from(schema.teammate)
-    .where(eq(schema.teammate.id, body.recipient_teammate_id))
-    .limit(1)
-  if (!target) {
-    throw createError({ statusCode: 404, statusMessage: 'Target teammate not found' })
-  }
-  // Region-scope the TARGET: stops the mirror-image leak — a region-A admin
-  // injecting a forwarded item into region B. Same 404-before-403 ordering.
-  await requireRegionScope(event, target.regionId)
-  if (!target.isActive) {
-    throw createError({
-      statusCode: 422,
-      statusMessage: 'Target teammate is inactive',
-      data: {
-        type: 'https://tokenscope.example.com/errors/inactive-teammate',
-        title: 'Cannot forward inbox item to inactive teammate',
-        status: 422,
-        detail:
-          `Teammate ${body.recipient_teammate_id} is is_active=false. ` +
-          'Pick an active teammate or reactivate the target first.',
-      },
-    })
-  }
+  // Validate the target teammate is active, then forward — ONE transaction for
+  // the target check + forward + resolve + audit (API-2): a partial failure
+  // would otherwise leave a forwarded copy with the source still open
+  // (double-forwarding) or an unaudited cross-recipient insert.
+  //
+  // THE CROSS-RECIPIENT INSERT, MADE EXPLICIT. This handler writes an
+  // inbox_item addressed to SOMEONE ELSE, which is the one thing the
+  // `inbox_item_self` policy's per-recipient arm exists to stop. It was
+  // previously done on the bare pool ("Insert outside RLS — the new recipient
+  // isn't this session's user"), i.e. by having no RLS identity at all; under
+  // FORCE that INSERT simply errors. It now runs under the ADMIN's identity and
+  // is authorised by the policy's ROLE arm, not by an absence of context.
+  //
+  // KNOWN PHASE-2 GAP, stated so it is not discovered in production: mig 0098
+  // rewrote `inbox_item_self`'s role arm from `IN ('global-finops','admin')` to
+  // `IN ('global-finops','platform-admin')`, and `FOR ALL` with no WITH CHECK
+  // means that USING expression also gates INSERT. So once `inbox_item` enters
+  // the FORCE set (design §Rollout, phase 2) a REGION `admin` — whom requireRole above
+  // still admits — will be refused by the policy, while global-finops /
+  // platform-admin succeed. That is a policy question for phase 2, not
+  // something a handler can paper over: reaching for the context-less pool to
+  // dodge it is exactly the leak this change removes.
+  const forwardedId = await withRequestRls(event, async (tx) => {
+    const [target] = await tx
+      .select({
+        id: schema.teammate.id,
+        isActive: schema.teammate.isActive,
+        regionId: schema.teammate.regionId,
+      })
+      .from(schema.teammate)
+      .where(eq(schema.teammate.id, body.recipient_teammate_id))
+      .limit(1)
+    if (!target) {
+      throw createError({ statusCode: 404, statusMessage: 'Target teammate not found' })
+    }
+    // Region-scope the TARGET: stops the mirror-image leak — a region-A admin
+    // injecting a forwarded item into region B. Same 404-before-403 ordering.
+    await requireRegionScope(event, target.regionId)
+    if (!target.isActive) {
+      throw createError({
+        statusCode: 422,
+        statusMessage: 'Target teammate is inactive',
+        data: {
+          type: 'https://tokenscope.example.com/errors/inactive-teammate',
+          title: 'Cannot forward inbox item to inactive teammate',
+          status: 422,
+          detail:
+            `Teammate ${body.recipient_teammate_id} is is_active=false. ` +
+            'Pick an active teammate or reactivate the target first.',
+        },
+      })
+    }
 
-  // Insert outside RLS — the new recipient isn't this session's user.
-  // ONE transaction for the forward + resolve + audit (API-2): a partial
-  // failure would otherwise leave a forwarded copy with the source still
-  // open (double-forwarding) or an unaudited cross-recipient insert.
-  const forwardedId = await db.transaction(async (tx) => {
     const [forwarded] = await tx
       .insert(schema.inboxItem)
       .values({

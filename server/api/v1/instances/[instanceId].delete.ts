@@ -10,7 +10,8 @@ import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { assertSameOrigin } from '../../../auth/csrf'
 import { requireRole, requireRegionScope } from '../../../auth/rbac'
-import { getDb, schema } from '../../../db'
+import { schema } from '../../../db'
+import { withRequestRls } from '../../../db/request-rls'
 import { recordAuditEvent } from '../../../db/audit'
 
 const SidSchema = z.string().uuid()
@@ -27,37 +28,49 @@ export default defineEventHandler(async (event) => {
   }
   const sid = parsed.data
 
-  const db = getDb()
-  const [row] = await db
-    .select({
-      instanceId: schema.instanceAttestation.instanceId,
-      tsActualEnd: schema.instanceAttestation.tsActualEnd,
-      regionId: schema.instanceAttestation.regionId,
-    })
-    .from(schema.instanceAttestation)
-    .where(eq(schema.instanceAttestation.instanceId, sid))
-    .limit(1)
-  if (!row) throw createError({ statusCode: 404, statusMessage: 'Instance not found' })
-
-  // Region-bound the admin to the session's region. RLS's region policy
-  // is inert at runtime (owner DB connection), so without this any admin
-  // could force-end a session in any region by id.
-  await requireRegionScope(event, row.regionId)
-
-  if (!row.tsActualEnd) {
-    await db
-      .update(schema.instanceAttestation)
-      .set({ tsActualEnd: new Date() })
+  // ONE transaction carrying the caller's RLS identity: read → region gate →
+  // force-end → audit.
+  await withRequestRls(event, async (tx) => {
+    const [row] = await tx
+      .select({
+        instanceId: schema.instanceAttestation.instanceId,
+        tsActualEnd: schema.instanceAttestation.tsActualEnd,
+        regionId: schema.instanceAttestation.regionId,
+      })
+      .from(schema.instanceAttestation)
       .where(eq(schema.instanceAttestation.instanceId, sid))
-  }
+      .limit(1)
+    if (!row) throw createError({ statusCode: 404, statusMessage: 'Instance not found' })
 
-  await recordAuditEvent(db, {
-    eventType: 'session-admin-deleted',
-    actorTeammateId: session.teammateId,
-    actorSystem: 'admin',
-    subjectKind: 'session',
-    subjectId: sid,
-    payload: { adminEmail: session.email },
+    // Region-bound the admin to the session's region. RLS is inert at runtime
+    // while the app connects as the table OWNER, so without this any admin could
+    // force-end a session in any region by id.
+    //
+    // It does NOT become redundant once enforcement lands, but not for the reason
+    // this comment used to give — it claimed `instance_attestation` "carries no
+    // RLS policy at all", which is false: 0002 enabled it (as
+    // `session_attestation`), 0019 renamed it and 0098 altered the live
+    // `instance_attestation_region_scope`. The real reason is that the policy's
+    // region arm and this check are the SAME boundary asserted twice, and the
+    // table is in RLS_BOOTSTRAP_TABLES — DISABLEd at the role switch — so for
+    // that window this app-level gate is the only one running.
+    await requireRegionScope(event, row.regionId)
+
+    if (!row.tsActualEnd) {
+      await tx
+        .update(schema.instanceAttestation)
+        .set({ tsActualEnd: new Date() })
+        .where(eq(schema.instanceAttestation.instanceId, sid))
+    }
+
+    await recordAuditEvent(tx, {
+      eventType: 'session-admin-deleted',
+      actorTeammateId: session.teammateId,
+      actorSystem: 'admin',
+      subjectKind: 'session',
+      subjectId: sid,
+      payload: { adminEmail: session.email },
+    })
   })
 
   setResponseStatus(event, 204)

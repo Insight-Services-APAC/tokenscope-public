@@ -8,6 +8,17 @@
  * its own JSON rather than throwing createError.
  *
  * No assertSameOrigin — programmatic (CLI) endpoint, not a browser-cookie path.
+ *
+ * NO RLS LANE, by design ruling (docs/design/rls-enforcement.md §5; tracked as
+ * an explicit residue in scripts/check-handler-rls-context.mjs). The teammate is
+ * resolved BY the very `oauth_auth_code` / `oauth_token` lookup RLS would gate —
+ * there is no identity to set before the query that discovers the identity. §5's
+ * decision is that `oauth_token` is in server/db/rls-bootstrap.ts::RLS_BOOTSTRAP_TABLES and is explicitly DISABLEd before the
+ * app connects as a non-owner. NOT "omitted from the FORCE set" — that protects
+ * nothing, because a non-owner is filtered by ENABLE alone whatever any FORCE
+ * phase says. (`oauth_client` / `oauth_auth_code` carry no RLS at all, so they
+ * need nothing.) Access here is already gated by possession of a secret, and this
+ * is the bootstrap path every other lane depends on.
  */
 import {
   defineEventHandler,

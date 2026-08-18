@@ -82,6 +82,23 @@ jobs:
         # Found the hard way: removing the §A/§B lane firewall left the main
         # typecheck green. This is the checker that actually fails.
         run: npm run typecheck:types
+      - name: Typecheck the Nitro entry points nothing imports
+        # Same class as the step above, different blind spot. `npm run typecheck`
+        # covers server/ only INCIDENTALLY — the Nuxt tsconfig's `include` never
+        # names server/**, so a server file is checked only if something reachable
+        # imports it. 425 of 432 are. The 7 that are not are Nitro's own entry
+        # points, which the framework loads by convention: server/plugins/*,
+        # server/middleware/*, server/notifications/deliverers.ts,
+        # server/auth/my-identities.ts, server/auth/org-roles.ts. Nitro builds
+        # them with esbuild, which strips types without checking them, so a type
+        # error in one surfaces at RUNTIME, in production, and nowhere earlier.
+        # Two of the seven are security controls: server/plugins/secret-strength.ts
+        # and server/middleware/require-front-door.ts.
+        #
+        # Verified non-vacuous 2026-08-15: a deliberate `const x: number = "…"` in
+        # require-front-door.ts leaves `npm run typecheck` GREEN and fails this
+        # step with TS2322.
+        run: npm run typecheck:server
       - name: Lint
         run: npm run lint
       - name: Check copilot-plugin/scripts/ in sync with plugin/scripts/

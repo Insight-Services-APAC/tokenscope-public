@@ -91,10 +91,19 @@ export function interpretEmissionProbe({ status, stdoutHasAuth, sentinel }) {
  *
  * S1 fix 2: `env` MUST be the caller's `safeProcessEnv()` result, never raw
  * `process.env` — Claude Code has already applied a TAGGED repo's
- * `settings.local.json` onto `process.env` by REPLACEMENT before spawning
- * this script (ADR-0006 §2), so `process.env` may be entirely repo-
- * controlled by the time this runs. `safeProcessEnv()` re-derives the
- * trustworthy env once in main() and every read here goes through it.
+ * `settings.local.json` onto `process.env` before spawning this script, so
+ * `process.env` may be repo-controlled by the time this runs.
+ * `safeProcessEnv()` re-derives the trustworthy env once in main() and every
+ * read here goes through it.
+ *
+ * The control is unchanged; the MECHANISM named here used to say "by
+ * REPLACEMENT (ADR-0006 §2)" and that is false — the blocks are merged PER KEY
+ * with the repo-local value winning a conflict, captured against Claude Code
+ * 2.1.232 (docs/security-sprint/env-precedence-capture.md). Merge makes this
+ * control MORE important, not less: replacement is conspicuous (a repo block
+ * missing a key removes it), whereas merge lets a repo override ONE key —
+ * TOKENSCOPE_BEARER_ENDPOINT, say — and leave every other value looking
+ * untouched.
  */
 function probeEmissionAuth(env) {
   const endpoint = (env.TOKENSCOPE_BEARER_ENDPOINT ?? '').trim()

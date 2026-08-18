@@ -45,7 +45,14 @@ const { getTelemetryReader } = vi.hoisted(() => ({
 }))
 vi.mock('../../../server/azure/reader', async () => {
   const actual = await vi.importActual<typeof import('../../../server/azure/reader')>('../../../server/azure/reader')
-  return { getTelemetryReader, resolveLookbackDays: actual.resolveLookbackDays }
+  // emptyParseCounters is the REAL one: the zero-session branch reports it, and a
+  // hand-rolled stub here would let the branch's counters drift from the interface
+  // silently — the very drift UF-22 is about.
+  return {
+    getTelemetryReader,
+    resolveLookbackDays: actual.resolveLookbackDays,
+    emptyParseCounters: actual.emptyParseCounters,
+  }
 })
 
 // vi.mock is hoisted above this import, so it must follow — the import/first rule
@@ -217,5 +224,33 @@ describe('registry azure-monitor-read — selection cap-hit + recovery threading
     // to report — reporting one would be a fabricated recovery record.
     expect(res.lookbackDaysApplied).toBeNull()
     expect(res.scoped).toBe(false)
+  })
+
+  it('ZERO-SESSION branch: reports EVERY JoinResult field, never omits one (UF-22)', async () => {
+    /*
+     * The branch's own convention is "never omit the object" — a consumer of
+     * worker_run.result must not have to special-case the empty tick. Three
+     * fields had drifted out of it (parseCounters, telemetryOnlySpend,
+     * staleDismissalsReturned) because WorkerEntry.run returns Promise<unknown>,
+     * so no gate could see the omission. `satisfies JoinResult` in the registry
+     * is the permanent fix; this asserts the observable half of it.
+     */
+    selectJoinableInstances.mockResolvedValue({ ids: [], capHit: null })
+    const res = (await azureMonitorRead().run(fakeDb, { runId: null })) as Record<string, unknown>
+    // Zero, not absent: `undefined` reads as "unknown" to a consumer, and a tick
+    // that read nothing KNOWS the answer is nothing.
+    expect(res.staleDismissalsReturned).toBe(0)
+    expect(res.telemetryOnlySpend).toEqual([])
+    // The whole counter object, all-zero — a consumer reading
+    // result.parseCounters.rejectedModel must not have to guard for undefined.
+    expect(res.parseCounters).toEqual({
+      skippedNoTimestamp: 0,
+      rejectedClaudeSessionId: 0,
+      rejectedModel: 0,
+      rejectedProjectCodeHash: 0,
+      rejectedSourceRunId: 0,
+      rejectedEmittingEmail: 0,
+      rejectedOrganizationId: 0,
+    })
   })
 })

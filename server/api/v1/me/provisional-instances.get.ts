@@ -13,6 +13,20 @@
  * returns ONLY instances that claimed the caller's own email and leaks NOTHING
  * about any other email (no existence info, no peer rows).
  *
+ * NO RLS LANE — a CROSS-IDENTITY read, tracked as an explicit residue in
+ * scripts/check-handler-rls-context.mjs. Said precisely, because "deliberate"
+ * above is not the same as "safe under FORCE": the two subqueries read
+ * `attribution_record`, a PHASE-1 FORCE table, for rows owned by the SHADOW
+ * teammate. Under FORCE this handler is wrong EITHER way — on the pool the
+ * subqueries yield NULL, and under the session's context they also yield NULL,
+ * because the rows belong to a different teammate in a different placement.
+ * Converting it would therefore buy nothing and would DISGUISE the problem
+ * behind a context that looks correct. The real fix is a SECURITY DEFINER
+ * function scoped to `lower(claimed_email) = <session email>` — the same shape
+ * as `owner_active_unit_counts()` (mig 0111) — which is a migration, and so out
+ * of this story's scope. Until then `provisional_spend_usd` / `last_seen` are
+ * the fields to watch when phase 1 lands.
+ *
  * Per row we return just enough for the user to recognise + decide:
  *   instance_id, tool, device_hint (a non-reversible prefix of the hashed
  *   device-binding so multiple devices are distinguishable), first_seen
