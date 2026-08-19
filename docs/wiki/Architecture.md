@@ -151,7 +151,7 @@ flowchart TB
 - **The upstream WAF** is the only public ingress; it terminates TLS and forwards to the internal ACA VIP. Whether that edge is a shared corporate WAF (no per-app Front Door, no `X-Azure-FDID` dependency) or a per-app Azure Front Door is a per-environment choice (`enableFrontDoor`).
 - **ACA ingress is internal** (`internal: true`, private VIP) — the app is not publicly reachable except through the WAF. `/api/health` remains the ACA probe target.
 - **External scheduler** (ACA cron jobs) drives the workers via the HMAC-signed `run-worker/{name}` endpoint — there is no standing worker pool and no BullMQ/Redis queue.
-- **PostgreSQL Flexible Server** (private endpoint) holds derived state (RLS + audit-trigger append-only). **Log Analytics** is the read-only attribution surface. **Key Vault** (private endpoint) is the single secrets surface; **Redis** (private endpoint) holds sessions/cache only; **ACR** (private endpoint) serves container images.
+- **PostgreSQL Flexible Server** (private endpoint) holds derived state (audit-trigger append-only). **Log Analytics** is the read-only attribution surface. **Key Vault** (private endpoint) is the single secrets surface; **Redis** (private endpoint) holds sessions/cache only; **ACR** (private endpoint) serves container images.
 - The concrete region and the exact private-endpoint resource set for the Insight instance are in your deployment's own configuration.
 
 ## The ingestion paths
@@ -187,14 +187,14 @@ The table describes the **Claude** lane. `tool = 'copilot-cli'` skips the `provi
 
 - **Region:** multi-region operating model on the surface; the as-built dev deployment lands in a single region (see your deployment's own configuration for the instance's region). A region-local stack is design-surface only.
 - **Region derivation (placement).** A cost-bearing teammate's home region/unit is derived by a fixed precedence (highest wins): **cost-centre** (exact directory cost-centre → cost-owning unit) > **chain-unit** (manager-chain resolves to an owned unit/practice) > **attribute-rule** (a configurable directory-attribute → region rule) > **chain-region** (manager-chain resolves to a region leader) > **billing-region** (provider license-org → region fallback) > **global** (the unassigned holding node). `placement-sync` runs this bill-driven placement; `region-reenrichment` re-derives it on a `0 */6 * * *` cadence to heal stale/unplaced homes (2026-07-17 change). See [Background Workers](Background-Workers.md).
-- **RBAC:** roles (cost-owning unit owner, regional/global FinOps, manager, admin) scoped by region + org-unit path, enforced at two layers — PostgreSQL RLS (ground truth) plus app-level `requireRole`; dashboard auth is Entra via `nuxt-oidc-auth`. The admin area is a persistent admin shell (sidebar-navigated) with an Overview launcher, first-class Providers, a Settings split into System info + Policies, and a roles glossary.
+- **RBAC:** roles (cost-owning unit owner, regional/global FinOps, manager, admin) scoped by region + org-unit path, enforced in the **application** — `requireRole` plus per-resource scope predicates, with report reach as a revocable per-teammate grant (see [Authentication & Security](Authentication-and-Security.md)); dashboard auth is Entra via `nuxt-oidc-auth`. The admin area is a persistent admin shell (sidebar-navigated) with an Overview launcher, first-class Providers, a Settings split into System info + Policies, and a roles glossary.
 
 ## Built vs Planned
 
 **Built (shipped):**
 - **Claude Code client** — MCP server + OAuth 2.1 client backbone (PKCE consent, dynamic registration, grant lifecycle / revoke), `provision_emit`→`/setup/redeem` device provisioning + bearer-refresh, native OTel log-event ingestion, logs→LAW→KQL read joiner with membership gate + org-lane reconciliation.
 - **GitHub Copilot CLI client** — same MCP/OAuth backbone + `copilot-plugin/` (three skills, `hooks.json`), singleton file-forwarder (`copilot-forwarder.mjs`) that tails the Copilot OTEL file, filters `chat` spans (double-count guard), transcodes to `api_request` OTLP-logs protobuf, and forwards to Azure Monitor every ~60s. Provisioning writes `~/.tokenscope/config.json`. Copilot v1 spend is **indicative** (tier-2/telemetry-only), priced at 1 AI credit = $0.01 USD.
-- 31-worker scheduler-driven registry, dashboard with budgets/rollups/untagged worklist, RLS + trigger-enforced audit log, internal ACA ingress behind an upstream WAF.
+- 31-worker scheduler-driven registry, dashboard with budgets/rollups/untagged worklist, trigger-enforced audit log, internal ACA ingress behind an upstream WAF.
 
 **Planned (future-state, not built):**
 - **F2 — promoting Copilot telemetry from tier-2 to tier-1.** Note the *reconciliation itself is built*: the GitHub billing adapter, `copilot-bill` and `copilot-pool-bill` all ship today and produce the §B pooled chargeback. What remains is lifting the **telemetry** lane's fidelity, and re-confirming the estate-global identity links before Copilot becomes §B-chargeable.

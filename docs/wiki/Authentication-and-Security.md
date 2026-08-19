@@ -40,7 +40,7 @@ flowchart TB
         OAUTH["/api/v1/mcp + /oauth/*<br/>OAuth 2.1 (read/tag)"]
         SETUP["/setup/redeem<br/>handoff-is-auth"]
         BEARER["/bearer<br/>MI token mint"]
-        RLS[(Postgres + RLS GUCs)]
+        DB[(Postgres — scoped transaction)]
     end
     AZ["Azure Monitor (OTLP ingest)"]
 
@@ -48,7 +48,7 @@ flowchart TB
     C -->|OAuth consent + provision_emit handoff| WAF
     C -->|OTLP + MI bearer| AZ
     W -->|HMAC-signed| WAF
-    FD --> OIDC --> RBAC --> RLS
+    FD --> OIDC --> RBAC --> DB
     FD --> HMACI
     FD --> OAUTH
     FD --> SETUP
@@ -56,9 +56,11 @@ flowchart TB
     W -.read joiner.-> AZ
 ```
 
-**Defence in depth:** the **app gate** (`requireRole`, `requireRegionScope`, scope predicates) runs first and denies *loudly* — `403` RFC-9457 body + audit. **DB Row-Level Security** is the ground-truth backstop and denies *quietly* — empty result sets where it disagrees with the app.
-
-> **As-built caveat:** RLS policies are shipped but **inert at runtime** — the app connects as the table owner (owner connections bypass RLS unless `FORCE ROW LEVEL SECURITY`). Until the non-owner DB role lands, the **app-level scope predicates are the live authorization boundary** (`allocationScopePredicate`, `assertProjectScope`, `requireReportScope`). Do not rely on RLS as the sole boundary today.
+**Authorization is enforced in the application.** The **app gate** (`requireRole`,
+`requireRegionScope`, per-resource scope predicates) is the authorization boundary:
+it runs before the query and denies *loudly* — `403` RFC-9457 body + audit entry.
+Report reach is a revocable per-teammate grant (`report_access_grant`, mig 0129)
+resolved by `requireReportScope`.
 
 ## Web authentication (Entra OIDC)
 
@@ -176,7 +178,7 @@ distinct from the retired `finance` = "Finance (retired)".
 - `requireRole(event, ...allowed)` — variadic; permits if role ∈ `allowed`. `platform-admin` short-circuits every check. `403` RFC-9457 on denial.
 - `requireRegionScope(event, regionId)` — binds an `admin` to their home region; `global-finops`/`platform-admin` are region-unbounded.
 
-Per-resource scope helpers (the *live* boundary while RLS is inert):
+Per-resource scope helpers — the data-scope boundary:
 
 | Helper | Effect |
 |---|---|
@@ -303,11 +305,8 @@ positive grants and revokes are the per-person overrides on top.
   at BASELINE by the org-wide roles (`global-finops` / `platform-admin`), and
   every other caller — a region `admin` included — reaches it only via an active
   `finance` grant.
-- **Pure app gate — RLS-inert for report enforcement.** Like every scope
-  helper, `requireReportScope` is the *live* boundary; the GUC/RLS layer is
-  untouched by this feature and inert at runtime (see caveat below), and stays
-  purely role-shaped for surfaces this feature does not touch (`/rollups/*`,
-  `me/*`). The grant is threaded as an explicit JS-computed scope argument, not
+- **Pure app gate.** `requireReportScope` is the boundary, like every scope
+  helper. The grant is threaded as an explicit JS-computed scope argument, not
   a GUC change. For the ORG-WIDE roles the whole-company reach is explicit
   (`costCentre: 'all'` → the resolvers' unbounded arm, a literal `TRUE`
   visibility predicate, and the project path's own `return null`), so the
@@ -384,21 +383,24 @@ positive grants and revokes are the per-person overrides on top.
   shows each holder's current role so a stale grant is visible, and
   revocation is one click.
 
-## Row-Level Security (RLS)
+## Request transaction lanes (RLS context)
 
-Four session GUCs set per transaction via `withRlsContext` / `withRequestRls` using `SET LOCAL` (settings vanish on transaction return; next checkout doesn't inherit):
-`app.user_region_id`, `app.user_org_path`, `app.user_role`, `app.user_teammate_id`.
+Every authenticated request does its DB work inside a transaction opened by
+`withRequestRls(event, fn)`. It resolves the session via `requireAuth` and
+`SET LOCAL`s four session variables — `app.user_region_id`, `app.user_org_path`,
+`app.user_role`, `app.user_teammate_id` — mapping `platform-admin` onto the
+unbounded `global-finops` value. `SET LOCAL` is what makes this safe on a pooled
+connection: the settings vanish when the transaction returns, so the next
+checkout cannot inherit the previous caller's identity. Workers use
+`withMachineRls` on their own pool.
 
-- `withRequestRls(event, fn)` resolves the session via `requireAuth`, maps `platform-admin` → unbounded `global-finops` at the RLS layer (every policy already treats `global-finops` as org-wide), runs `fn` in the scoped transaction.
-- Shipped policies (e.g. `allocation_admin_only`, `allocation_manager_scope`) read these GUCs.
-- **Inert today** under the owner connection (see caveat above) — app-level scope predicates are the live boundary until the non-owner role ships.
+`scripts/check-handler-rls-context.mjs` enforces it in CI — every `server/api/**`
+handler carries a lane, with 14 explicitly-reasoned exceptions (auth-bootstrap
+paths that resolve an identity and so cannot already have one).
 
-**What the policies say** (correctness of the inert layer — none of this changes runtime behaviour):
-
-- **Role lists are converged.** `admin` is a **region-scoped** role, so it must never appear in an *unscoped* bypass disjunct — one that grants reach into every other region. About twenty such clauses, written across the `0002`-era migrations and their successors, read `('global-finops', 'admin')`; `0098_rls_policy_convergence.sql` `ALTER POLICY`s every one of them to `('global-finops', 'platform-admin')`. Two deliberate non-changes: `session_quarantine_self_scope` keeps `admin` in its own `region_id = … AND role IN (…)` arm (that arm was never unbounded — only its separate unconditional bypass was, and that one is converged), and `directory_exclusion_pattern_write` is untouched because that table has no `region_id` column at all, making it global config rather than a region bypass — a narrower question about who may write global exclusion policy, still open.
-- **New policies on three previously-uncovered tables** — `org_unit`, `teammate`, `oauth_token` — each mirroring the app-level predicate it backstops (`orgSubtreeScopePredicate`, `managerScopePredicate`'s teammate adaptation, and the `requireOAuthBearer` / region-scoped revoke-sessions pair respectively). 35 tables still have **no policy at all**; a policy-less table denies every row to a non-owner, so those are part of why `FORCE` cannot be flipped yet.
-- **One definition of the org boundary.** Five policies hard-coded the pre-clamp `path <@ current_setting('app.user_org_path')` test with no gate on whether the caller's own placement is a genuine subtree home rather than the region root. They now carry `placed_below_region_root()`, a `STABLE SECURITY DEFINER` function that mirrors `placedBelowRegionRootPredicate()` conjunct-for-conjunct (`SECURITY DEFINER` here is not a privilege grant — it is what breaks the self-referential recursion the predicate would otherwise cause inside `org_unit`'s own policy). Without it the two layers would encode different boundaries, which is exactly the drift the "cite the app predicate you mirror" convention exists to prevent.
-- **CI no longer certifies a control production lacks.** Both integration suites that create a non-owner role to exercise policies (`tests/integration/db/rls.test.ts`, `tests/integration/workers/aggregate-rollup.test.ts`) now *also* assert the **production topology** — that the owner connection bypasses RLS entirely and sees every row. Previously a green suite proved only that the policies would work under a role no deployed environment has.
+The schema also carries row-level-security policies that read these variables.
+They do not execute: the app connects as the table owner, and owners bypass RLS.
+Authorization is the app gate described above.
 
 ## MCP/CLI auth + telemetry (OAuth 2.1)
 
@@ -619,7 +621,6 @@ Each of these has a disposition in the [Security Overview](Security-Overview.md)
 risk register; this is the mechanism-level view of the same list.
 
 - **CSP `style-src` allows `'unsafe-inline'`** (`nuxt.config.ts`) — baseline gap `@nuxt/ui` v4 requires for injected styles. Rest of CSP is tighter: `frame-ancestors 'none'` (clickjacking — never iframed by design), constrained `img-src`/`font-src`.
-- **RLS is inert at runtime** under the owner DB connection; app-level scope predicates are the live boundary until the non-owner role ships. The policies are converged and three more tables are covered, but flipping `FORCE` today would break the 47 API handlers and all 19 RLS-touching workers that set no GUCs — their reads would return empty and their writes would error. A CI check pins the handler count so the debt cannot grow.
 - **Origin enforcement is not running anywhere.** `AZURE_FRONT_DOOR_REQUIRED` ships in code; no environment sets it, and none supplies a real `AZURE_FRONT_DOOR_ID`. The same emptiness leaves nuxt-security's global rate limiter keyed on a spoofable forwarded hop.
 - **`appPublicOrigin` is pinned in dev only.** `dev.bicepparam` is the only parameter file that sets it, and it is also the only environment this repo deploys; anything stood up from the `example-*` templates derives its public origin from forwarded headers instead. That origin is baked into every device's durable emit credential and the OAuth issuer.
 - **Postgres connections encrypt but do not authenticate the server.** The `verify-full` change and a single connection factory are in code and the pre-flight **warns**; it takes effect only on an `infra.yml` apply that rewrites the `DATABASE_URL` secret.

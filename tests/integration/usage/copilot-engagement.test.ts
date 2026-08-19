@@ -16,7 +16,8 @@
  *   - PAT-mode envelopes (`items`, no `record`) contribute nothing;
  *   - the window bounds both sides;
  *   - vocabulary discipline (T9's module half): the Copilot shape carries NO
- *     session count — no fake symmetry with the Claude column.
+ *     session count — no fake symmetry with the Claude column. The harness mix
+ *     is weighted on `request_count` for that reason, not `session_count`.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
@@ -215,6 +216,150 @@ describe('copilotEngagement — T7', () => {
     ])
   })
 
+  it('the REAL wire shape yields a mix: language entries carry code_generation_activity_count, never user_initiated_interaction_count', async () => {
+    /*
+     * The shape capture 2026-08-19 actually observed on both language arrays —
+     * `user_initiated_interaction_count` is ABSENT (0/74) and
+     * `code_generation_activity_count` is present on every entry.
+     *
+     * The rungs used to weight by the absent field alone, so BOTH ended empty and
+     * the language mix was permanently null while the card had data to show. Every
+     * other test here fabricates the absent field, which is exactly why the bug
+     * survived them.
+     *
+     * MUTATION: drop the code_generation_activity_count fallback from
+     * languageEntryWeight → this goes red with `languages` null.
+     */
+    await ledgerRow({
+      day: '2026-06-18',
+      record: {
+        totals_by_language_model: [
+          { language: 'typescript', model: 'gpt-5', code_generation_activity_count: 30 },
+          { language: 'python', model: 'gpt-5', code_generation_activity_count: 10 },
+        ],
+      },
+    })
+    const out = (await copilotEngagement(t.db, teammateId, WINDOW))!
+    expect(out.languages).toEqual([
+      { language: 'typescript', sharePct: 75 },
+      { language: 'python', sharePct: 25 },
+    ])
+  })
+
+  it('harness mix splits CLI vs App by requests, and flags IDE activity as excluded', async () => {
+    /*
+     * The App is a harness peer of the CLI, and `session_count` is the only human
+     * unit BOTH subtrees carry. `totals_by_ide[]` carries none of them, so it
+     * cannot share the denominator — the flag is what lets the card SAY that
+     * instead of showing a mix that silently omits the IDE.
+     *
+     * MUTATION: fold totals_by_ide into harnessWeights on any of its own measures
+     * → the shares move off 75/25 and the IDE lands in a bar it shares no scale
+     * with.
+     */
+    await ledgerRow({
+      day: '2026-06-20',
+      record: {
+        totals_by_cli: { session_count: 99, request_count: 30 },
+        totals_by_copilot_app: { session_count: 99, request_count: 10 },
+        totals_by_ide: [{ ide: 'vscode', user_initiated_interaction_count: 999 }],
+      },
+    })
+    const out = (await copilotEngagement(t.db, teammateId, WINDOW))!
+    // session_count is EQUAL on both subtrees here, so a mix weighted on sessions
+    // would read 50/50 — the shares below can only come from request_count.
+    expect(out.harnesses).toEqual([
+      { harness: 'Copilot CLI', sharePct: 75 },
+      { harness: 'Copilot App', sharePct: 25 },
+    ])
+    expect(out.ideActivityExcluded).toBe(true)
+  })
+
+  it('a window with no Copilot App use yields a CLI-only mix and no IDE note', async () => {
+    await ledgerRow({
+      day: '2026-06-21',
+      record: { totals_by_cli: { request_count: 4 } },
+    })
+    const out = (await copilotEngagement(t.db, teammateId, WINDOW))!
+    expect(out.harnesses).toEqual([{ harness: 'Copilot CLI', sharePct: 100 }])
+    expect(out.ideActivityExcluded).toBe(false)
+  })
+
+  it('harness mix is ABSENT, never zeroed, when neither subtree reports requests', async () => {
+    await ledgerRow({
+      day: '2026-06-22',
+      record: { totals_by_cli: { session_count: 3, token_usage: { prompt_tokens_sum: 10 } } },
+    })
+    const out = (await copilotEngagement(t.db, teammateId, WINDOW))!
+    // session_count IS present — the mix must still be absent, because the measure
+    // is request_count and nothing carried it.
+    expect(out.harnesses).toBeNull()
+  })
+
+  it('a harness that was USED but reported no count suppresses the mix, never shows its sibling at 100%', async () => {
+    /*
+     * The App subtree is PRESENT — the harness was used — but carries no
+     * request_count. Weighting only what is measurable would render "Copilot CLI
+     * 100%", i.e. "you never used the App", from data that says the opposite.
+     *
+     * MUTATION: drop the harnessUnmeasured guard → harnesses becomes
+     * [{Copilot CLI, 100}] and this goes red.
+     */
+    await ledgerRow({
+      day: '2026-06-23',
+      record: {
+        totals_by_cli: { request_count: 30 },
+        totals_by_copilot_app: { session_count: 4 }, // used, but no request_count
+      },
+    })
+    const out = (await copilotEngagement(t.db, teammateId, WINDOW))!
+    expect(out.harnesses).toBeNull()
+  })
+
+  it('a negative count cannot push a surviving share past 100%', async () => {
+    /*
+     * `sharesOf` filters non-positive weights out of the NUMERATOR, so summing one
+     * into the denominator alone inflated everything that survived: CLI 10 against
+     * App -5 gave a total of 5 and rendered CLI at 200%.
+     *
+     * MUTATION: sum every weight into `total` regardless of sign → 200%.
+     */
+    await ledgerRow({
+      day: '2026-06-24',
+      record: {
+        totals_by_language_model: [
+          { language: 'typescript', model: 'gpt-5', code_generation_activity_count: 10 },
+          { language: 'python', model: 'gpt-5', code_generation_activity_count: -5 },
+        ],
+      },
+    })
+    const out = (await copilotEngagement(t.db, teammateId, WINDOW))!
+    expect(out.languages).toEqual([{ language: 'typescript', sharePct: 100 }])
+  })
+
+  it('never mixes the two measures into one denominator when only SOME entries carry the preferred one', async () => {
+    /*
+     * A per-ENTRY fallback would sum 30 interactions (typescript) against 900
+     * code-generations (python) — two different scales in one denominator, giving
+     * python a ~97% share that means nothing. The measure is chosen per ARRAY, so
+     * only the entries carrying the preferred measure form the mix.
+     *
+     * MUTATION: pick the weight per entry (uiic ?? gen) → typescript/python come
+     * out ~3%/97% and this goes red.
+     */
+    await ledgerRow({
+      day: '2026-06-19',
+      record: {
+        totals_by_language_model: [
+          { language: 'typescript', model: 'gpt-5', user_initiated_interaction_count: 30 },
+          { language: 'python', model: 'gpt-5', code_generation_activity_count: 900 },
+        ],
+      },
+    })
+    const out = (await copilotEngagement(t.db, teammateId, WINDOW))!
+    expect(out.languages).toEqual([{ language: 'typescript', sharePct: 100 }])
+  })
+
   it('language ladder rung 2: falls back to totals_by_language_feature when the language×model entries carry no measure', async () => {
     await ledgerRow({
       day: '2026-06-17',
@@ -295,6 +440,10 @@ describe('copilotEngagement — T7', () => {
     await ledgerRow({ day: '2026-06-21', record: { user_initiated_interaction_count: 1 } })
     const out = (await copilotEngagement(t.db, teammateId, WINDOW))!
     expect(Object.keys(out)).not.toContain('sessions')
+    // The harness mix is weighted on `request_count` for this reason: both harness
+    // subtrees also carry `session_count`, and using it would have put the word
+    // "sessions" on the Copilot card beside a Claude column reporting OTel
+    // conversations — the comparison D22 exists to prevent.
     expect(Object.keys(out)).toEqual([
       'interactions',
       'locKept',
@@ -306,6 +455,8 @@ describe('copilotEngagement — T7', () => {
       'acceptanceActivity',
       'languages',
       'models',
+      'harnesses',
+      'ideActivityExcluded',
     ])
   })
 })

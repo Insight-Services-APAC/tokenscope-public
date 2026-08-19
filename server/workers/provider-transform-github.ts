@@ -67,44 +67,30 @@
  *
  * ══ WHAT THE WIRE ACTUALLY GIVES ════════════════════════════════════════════
  *
- * Every claim below is from the OBSERVED capture
- * docs/design/provider-wire-captures/2026-08-02-provider-wire-shape.json, never
- * from a Zod schema and never from a worker. Code is only ever evidence of CODE.
+ * Grounded in the observed captures under docs/design/provider-wire-captures/
+ * (latest 2026-08-19), never in a Zod schema or a worker.
  *
- *   | wire path                                                  | observed      |
- *   |------------------------------------------------------------|---------------|
- *   | ndjson_records[].ai_credits_used                            | 100%, ROOT    |
- *   | ndjson_records[].totals_by_model_feature[].model            | 487/487       |
- *   | ndjson_records[].totals_by_model_feature[].user_initiated_… | with it       |
- *   | ndjson_records[].totals_by_language_model[].model           | 756/756       |
- *   | ndjson_records[].totals_by_cli.token_usage.*_tokens_sum     | 47/200 SPARSE |
+ * `ai_credits_used` sits at the RECORD ROOT: the money is at DAY GRAIN with no
+ * model on it, while the model rows carry activity and LOC only. Splitting a day's
+ * credits across models by activity share would be a RATIO — a number the provider
+ * never sent and indistinguishable at read time from one it did. So each truth is
+ * written at the grain it actually has:
  *
- * `ai_credits_used` sits at the RECORD ROOT. **The money is at DAY GRAIN and
- * there is no model on it.** The model rows carry activity counts and LOC sums,
- * never credits.
+ *   row      | tool          | model | cost_type    | measure
+ *   ---------|---------------|-------|--------------|---------------------------
+ *   CREDITS  | from category | NULL  | 'ai-credits' | cost_usd — the day's money
+ *   MODEL    | from category | model | NULL         | requests
+ *   TOKENS   | per harness   | NULL  | NULL         | input_tokens/output_tokens
  *
- * ══ SO: TWO TRUTHS, NEVER ONE INVENTED ONE ══════════════════════════════════
+ * mig 0120's `provider_usage_fact_github_money_grain_chk` REJECTS a github row
+ * carrying both a model and a cost, so a future ratio is a constraint violation
+ * rather than a silent number.
  *
- * Splitting a day's credits across its models by activity share would be a
- * RATIO — a number the provider never sent, indistinguishable at read time from
- * one it did. This module writes each truth at the grain it actually has:
- *
- *   row       | model      | cost_type    | measure
- *   ----------|------------|--------------|-------------------------------------
- *   CREDITS   | NULL       | 'ai-credits' | cost_usd — the day's money
- *   MODEL     | the model  | NULL         | requests — user-initiated interactions
- *   CLI TOKENS| NULL       | NULL         | input_tokens / output_tokens
- *
- * The prohibition is not left to good intentions: mig 0120's
- * `provider_usage_fact_github_money_grain_chk` REJECTS a `provider='github'` row
- * that carries both a model and a cost. A future ratio is a constraint
- * violation, not a silent number.
- *
- * MEASURES ARE SINGLE-HOMED, which is what makes a plain SUM over the arm safe.
- * Within one (source, teammate, date, tool): cost is on the CREDITS row alone,
- * tokens on the CLI TOKENS row alone, and `requests` only ever on MODEL rows.
- * `totals_by_cli.request_count` is deliberately NOT written — it would put a
- * second meaning into `requests` and make `SUM(requests)` double count.
+ * MEASURES ARE SINGLE-HOMED within one (source, teammate, date, tool), which is
+ * what makes a plain SUM over the arm safe: cost on the CREDITS row alone, tokens
+ * on a TOKENS row alone, `requests` only on MODEL rows. `request_count` is
+ * deliberately not written — it would give `requests` a second meaning and make
+ * SUM double count.
  *
  * ══ THE INVARIANTS THIS ARM CLAIMS ══════════════════════════════════════════
  *
@@ -132,7 +118,11 @@
  */
 import { sql } from 'drizzle-orm'
 import { consola } from 'consola'
-import { COPILOT_AGENT_TOOL, COPILOT_CLI_TOOL } from '../../shared/usage/github-surface'
+import {
+  COPILOT_AGENT_TOOL,
+  COPILOT_APP_TOOL,
+  COPILOT_CLI_TOOL,
+} from '../../shared/usage/github-surface'
 import { accumulate, blankFact, nonNegInt, type DerivedFacts, type Db, type FactRow } from './provider-fact'
 
 /**
@@ -196,6 +186,7 @@ export function copilotToolForCategory(category: string): string {
 interface MetricsRecordShape {
   totals_by_model_feature?: unknown
   totals_by_cli?: unknown
+  totals_by_copilot_app?: unknown
 }
 
 /** One envelope of `reconciliation_record.raw`. The adapter writes two shapes
@@ -285,19 +276,17 @@ function deriveModelRows(record: MetricsRecordShape): Map<string, number> {
 }
 
 /**
- * CLI prompt/output token sums from ONE App-mode record, or null when the record
- * carries none.
+ * Prompt/output token sums from ONE harness subtree of an App-mode record, or null
+ * when it carries none.
  *
- * SPARSE BY NATURE — 47/200 stored records carry `totals_by_cli` (2/12 live).
- * Absence is the ordinary case and means "this user did not use the CLI that
- * day", never "tokens were lost". These are DAY GRAIN: `totals_by_cli` sits at
- * the record root with no model beneath it, so the tokens are written with
- * `model NULL` rather than attributed to a model that did not send them.
+ * Sparse by nature — absence means "did not use that harness that day", never
+ * "tokens were lost". Day grain: the subtree sits at the record root with no model
+ * beneath it, so callers write `model NULL` rather than attributing tokens to a
+ * model that did not send them.
  */
-function deriveCliTokens(record: MetricsRecordShape): { input: number; output: number } | null {
-  const cli = record.totals_by_cli
-  if (!cli || typeof cli !== 'object') return null
-  const usage = (cli as Record<string, unknown>).token_usage
+function deriveSurfaceTokens(subtree: unknown): { input: number; output: number } | null {
+  if (!subtree || typeof subtree !== 'object') return null
+  const usage = (subtree as Record<string, unknown>).token_usage
   if (!usage || typeof usage !== 'object') return null
   const u = usage as Record<string, unknown>
   const input = nonNegInt(u.prompt_tokens_sum)
@@ -305,6 +294,17 @@ function deriveCliTokens(record: MetricsRecordShape): { input: number; output: n
   if (input === 0 && output === 0) return null
   return { input, output }
 }
+
+/**
+ * The harness surfaces that carry tokens, and the `tool` each one's row is written
+ * under. CLI keeps the category-derived tool for continuity; the App surface is
+ * always `copilot-app` (capture 2026-08-19 — it is its own harness, and merging it
+ * into the CLI row would make the two indistinguishable).
+ */
+const TOKEN_SURFACES = [
+  { key: 'totals_by_cli', tool: null },
+  { key: 'totals_by_copilot_app', tool: COPILOT_APP_TOOL },
+] as const
 
 type LedgerRow = {
   date: string
@@ -468,10 +468,12 @@ export async function deriveGithubFacts(
         })
       }
 
-      // ── CLI TOKEN ROW — day grain, model NULL (the wire has no model here) ─
-      const tokens = deriveCliTokens(shape)
-      if (tokens) {
-        accumulate(facts, blankFact({ ...base, model: null, costType: null }), (into) => {
+      // Token rows — one per harness surface, day grain, model NULL.
+      for (const surface of TOKEN_SURFACES) {
+        const tokens = deriveSurfaceTokens(shape[surface.key])
+        if (!tokens) continue
+        const tool = surface.tool ?? base.tool
+        accumulate(facts, blankFact({ ...base, tool, model: null, costType: null }), (into) => {
           into.inputTokens = (into.inputTokens ?? 0) + tokens.input
           into.outputTokens = (into.outputTokens ?? 0) + tokens.output
         })

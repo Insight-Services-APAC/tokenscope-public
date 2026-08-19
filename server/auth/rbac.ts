@@ -1,8 +1,8 @@
 /*
  * RBAC — requireRole / requireRegionScope.
  *
- * Per AGENTS.md §Conventions: app-level gate runs first, RLS is the
- * DB-side ground truth. requireRole returns 403 with the RFC-9457
+ * This gate IS the authorization boundary — the RLS policies do not execute, so
+ * nothing sits behind it. requireRole returns 403 with the RFC-9457
  * Problem-Details body. Audit-on-denial belongs in the per-actor inbox
  * dispatcher (Epic 7) so it can route the alert.
  *

@@ -142,6 +142,8 @@ interface CopilotEngagementLeg {
   acceptanceActivity: number | null
   languages: { language: string; sharePct: number }[] | null
   models: { model: string; sharePct: number }[] | null
+  harnesses: { harness: string; sharePct: number }[] | null
+  ideActivityExcluded: boolean
 }
 
 interface ConsumptionResp {
@@ -456,16 +458,21 @@ const copilotLanguages = computed(() =>
     colour: LANG_COLOURS[i % LANG_COLOURS.length],
   })),
 )
+/* CLI vs App by requests (D22 keeps session vocabulary off this card). Own palette
+ * so two bars are not read as one dimension. */
+const HARNESS_COLOURS = ['bg-brand-zeal', 'bg-calm-2']
+const copilotHarnesses = computed(() =>
+  (copilotEng.value?.harnesses ?? []).map((h, i) => ({
+    ...h,
+    colour: HARNESS_COLOURS[i % HARNESS_COLOURS.length],
+  })),
+)
 /*
  * Does the card have anything to SAY, as opposed to an object to render from?
- *
- * The template branched on `copilotEng` itself, but an object whose every field
- * is null is the normal shape for most spenders — these counters ride
- * `reconciliation_record.raw` and are not read yet. So that case fell between
- * the v-if and the v-else and produced a card holding a heading and nothing
- * else: 29 characters, on a persona with live Copilot spend. An empty card is
- * the one outcome the design rules out — a field the provider does not report
- * is ABSENT and SAID SO, never a blank and never a zero.
+ * An all-null object is the normal shape for many spenders, and branching on
+ * `copilotEng` alone left that case between the v-if and the v-else — a card
+ * holding a heading and nothing else. An empty card is the one outcome the
+ * design rules out: absent is SAID, never blank and never zero.
  */
 const copilotHasDetail = computed(() => {
   const c = copilotEng.value
@@ -474,7 +481,9 @@ const copilotHasDetail = computed(() => {
     c.interactions != null ||
     (c.locKept != null && c.locSuggested != null) ||
     (c.locDeleted != null && c.locSuggestedToDelete != null) ||
-    copilotLanguages.value.length > 0
+    copilotLanguages.value.length > 0 ||
+    copilotHarnesses.value.length > 0 ||
+    c.ideActivityExcluded
   )
 })
 function fmtLines(n: number): string {
@@ -1166,6 +1175,42 @@ async function onWorklistChanged() {
             >
               {{ fmtLines(copilotEng.locDeleted) }} lines deleted of
               {{ fmtLines(copilotEng.locSuggestedToDelete) }} suggested deletions
+            </p>
+            <!-- HARNESS, not SURFACE: the Claude card's SURFACE bar splits MONEY, which
+                 Copilot's one-per-day figure cannot be. The basis is printed on the bar. -->
+            <template v-if="copilotHarnesses.length">
+              <div class="flex items-center gap-2 mt-3">
+                <span class="text-[10px] font-bold uppercase tracking-wide text-carbon-3 w-[64px]">Harness</span>
+                <span class="flex-1 flex h-[12px] rounded overflow-hidden" data-testid="engagement-copilot-harness-bar">
+                  <span
+                    v-for="h in copilotHarnesses"
+                    :key="h.harness"
+                    :class="h.colour"
+                    :style="{ width: `${h.sharePct}%` }"
+                    :title="`${h.harness} ${Math.round(h.sharePct)}% of requests`"
+                  />
+                </span>
+                <span class="text-[10px] text-carbon-3 whitespace-nowrap">by requests</span>
+              </div>
+              <div
+                class="flex flex-wrap gap-x-4 gap-y-1 mt-1.5 ml-[72px] text-[11px] text-carbon-2"
+                data-testid="engagement-copilot-harness-legend"
+              >
+                <span v-for="h in copilotHarnesses" :key="h.harness">
+                  <span class="inline-block w-2 h-2 rounded-full align-middle mr-1" :class="h.colour" />
+                  {{ h.harness }} {{ Math.round(h.sharePct) }}%
+                </span>
+              </div>
+            </template>
+            <!-- OUTSIDE the bar: most Copilot days are IDE-only, so this is usually the
+                 only harness line there is. Nested, it would never have rendered. -->
+            <p
+              v-if="copilotEng.ideActivityExcluded"
+              class="text-[11px] text-carbon-3 mt-1"
+              :class="copilotHarnesses.length ? 'ml-[72px]' : 'mt-3'"
+              data-testid="engagement-copilot-harness-ide-note"
+            >
+              IDE activity reported on a different measure
             </p>
             <template v-if="copilotLanguages.length">
               <div class="flex items-center gap-2 mt-3">

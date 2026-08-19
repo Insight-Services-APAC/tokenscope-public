@@ -31,7 +31,7 @@ import {
   CLAUDE_TOOL_LABELS,
   INGEST_ONLY_USAGE_TOOLS,
 } from '../../../shared/usage/surface'
-import { GITHUB_USAGE_TOOLS, COPILOT_AGENT_TOOL } from '../../../shared/usage/github-surface'
+import { GITHUB_USAGE_VIEW_TOOLS, COPILOT_AGENT_TOOL } from '../../../shared/usage/github-surface'
 
 /* The documented product enum (platform.claude.com/docs/en/api/admin/analytics,
  * verified 2026-07-14) and the lane each maps to. */
@@ -172,7 +172,7 @@ describe('migration 0084 pin (the TS↔SQL drift guard)', () => {
  * Migration 0086 supersedes 0084's view definition (D4 copilot usage-lane
  * split) — pin the DEPLOYED definition's exclusion list too. The Claude list
  * is unchanged; the delta is 'copilot-agent' joining 'copilot-cli' (both
- * copilot usage tools source from reconciliation_record — GITHUB_USAGE_TOOLS
+ * copilot usage tools source from reconciliation_record — GITHUB_USAGE_VIEW_TOOLS
  * in shared/usage/github-surface.ts — so neither may ever double-count from
  * actual_spend).
  */
@@ -187,13 +187,13 @@ describe('migration 0086 pin (the TS↔SQL drift guard, deployed view)', () => {
     '0086_teammate_usage_daily_copilot_agent_lane.sql',
   )
 
-  it("the view's a.tool NOT IN list == [...GITHUB_USAGE_TOOLS, ...NON_CODE_CLAUDE_TOOLS] EXACTLY", () => {
+  it("the view's a.tool NOT IN list == [...GITHUB_USAGE_VIEW_TOOLS, ...NON_CODE_CLAUDE_TOOLS] EXACTLY", () => {
     const raw = readFileSync(MIGRATION, 'utf8')
     const stripped = raw.replace(/--[^\n]*/g, '')
     const clause = stripped.match(/a\.tool\s+NOT\s+IN\s*\(([^)]*)\)/)
     expect(clause, 'migration 0086 must carry an `a.tool NOT IN (...)` exclusion').not.toBeNull()
     const literals = [...clause![1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
-    expect(literals).toEqual([...GITHUB_USAGE_TOOLS, ...NON_CODE_CLAUDE_TOOLS])
+    expect(literals).toEqual([...GITHUB_USAGE_VIEW_TOOLS, ...NON_CODE_CLAUDE_TOOLS])
   })
 
   it('the copilot branch lanes by category: coding agent → copilot-agent, default → copilot-cli', () => {
@@ -225,13 +225,13 @@ describe('migration 0101 pin (the TS↔SQL drift guard, deployed views)', () => 
   const raw = readFileSync(MIGRATION, 'utf8')
   const stripped = raw.replace(/--[^\n]*/g, '')
 
-  it("A1: v_teammate_usage_daily's actual_spend branch (a.tool NOT IN) == [...GITHUB_USAGE_TOOLS] EXACTLY — the seven non-Code tools are GONE from this exclusion", () => {
+  it("A1: v_teammate_usage_daily's actual_spend branch (a.tool NOT IN) == [...GITHUB_USAGE_VIEW_TOOLS] EXACTLY — the seven non-Code tools are GONE from this exclusion", () => {
     const clause = stripped.match(/a\.tool\s+NOT\s+IN\s*\(([^)]*)\)/)
     expect(clause, '0101 must carry an `a.tool NOT IN (...)` exclusion on the actual_spend branch').not.toBeNull()
     const literals = [...clause![1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
-    expect(literals).toEqual([...GITHUB_USAGE_TOOLS])
+    expect(literals).toEqual([...GITHUB_USAGE_VIEW_TOOLS])
     // Explicitly NOT the 0084/0086 shape any more (drift the other direction).
-    expect(literals).not.toEqual([...GITHUB_USAGE_TOOLS, ...NON_CODE_CLAUDE_TOOLS])
+    expect(literals).not.toEqual([...GITHUB_USAGE_VIEW_TOOLS, ...NON_CODE_CLAUDE_TOOLS])
   })
 
   it('A3: v_complete_usage arm 1 (attribution_record, ar.tool NOT IN) == INGEST_ONLY_USAGE_TOOLS EXACTLY', () => {

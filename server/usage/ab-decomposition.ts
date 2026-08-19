@@ -40,7 +40,7 @@ import { corroboratedOtelDaily } from './corroborated-otel'
 import { unhomedByMonthSql } from './unhomed-causes'
 import {
   GITHUB_FIREWALL_EXCLUSIONS,
-  GITHUB_USAGE_TOOLS,
+  GITHUB_USAGE_VIEW_TOOLS,
   COPILOT_CLI_TOOL,
   COPILOT_AGENT_TOOL,
 } from '../../shared/usage/github-surface'
@@ -553,7 +553,8 @@ export async function computeAbDecomposition(
    * because they model the WORKER, and the worker keeps them.
    *
    * The tool list is the inverse of what `v_teammate_usage_daily`'s first arm
-   * excludes, and MUST mirror it exactly (it IS `GITHUB_USAGE_TOOLS`) — a tool
+   * excludes, and MUST mirror it exactly (`GITHUB_USAGE_VIEW_TOOLS`, never the
+   * wider `GITHUB_USAGE_TOOLS`, which carries provider_usage_fact's own) — a tool
    * excluded from that view's actual_spend branch never reaches §A from
    * `actual_spend` by any path, so its exempt rows are absent from BOTH sides
    * and including them here would invent a gap:
@@ -582,7 +583,7 @@ export async function computeAbDecomposition(
    *
    * Effect: NEGATIVE (raises §A with no §B counterpart, so it reduces §B−§A).
    */
-  const sectionAReachingExclusions = [...GITHUB_USAGE_TOOLS]
+  const sectionAReachingExclusions = [...GITHUB_USAGE_VIEW_TOOLS]
   const [exemptRow] = await db.execute<{ total: string }>(sql`
     SELECT (-COALESCE(SUM(a.cost_usd), 0))::numeric(14,6)::text AS total
     FROM actual_spend a

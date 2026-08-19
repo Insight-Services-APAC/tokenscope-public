@@ -1449,18 +1449,21 @@ sync path): `attribution_record`, `attribution_aggregate`, `spill_record`,
 
 ### Row-level security
 
-Region- and org-scoped access is enforced at the DB layer (mig 0002, plus
-0007), with the app's `requireRole` checks as defence-in-depth. Policies match
-on PostgreSQL session variables set at connection checkout:
-`app.user_region_id`, `app.user_org_path` (an LTREE), `app.user_role`. RLS
-denial returns an empty result set — the client can't distinguish "no data"
-from "no permission", by design.
+Region- and org-scoped access is enforced in the **application** (`requireRole`
+plus the shared scope predicates) — see
+[Authentication & Security](Authentication-and-Security.md).
 
-Tables with RLS enabled and their policies:
+The schema also carries row-level-security policies, inventoried below. They
+match on session variables the request transaction sets (`app.user_region_id`,
+`app.user_org_path` as an LTREE, `app.user_role`), but they do not execute: the
+app connects as the table owner, and owners bypass RLS.
+
+Tables with policies defined:
 
 - `attribution_record` — `attribution_record_region_scope` and
   `attribution_record_org_scope` (the org policy matches on `org_unit.path <@
-  app.user_org_path`); both fall through for `global-finops` / `admin`.
+  app.user_org_path`); both fall through for `global-finops` / `platform-admin`
+  (mig 0098 removed the region-scoped `admin` from that arm).
 - `instance_attestation` — `instance_attestation_region_scope`.
 - `project` — `project_region_scope`.
 - `attribution_aggregate`, `limit_policy`, `tier_assignment`, `spill_record`,

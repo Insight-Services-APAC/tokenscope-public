@@ -19,19 +19,10 @@
  * region `admin` is bounded to the project's region via
  * requireRegionScope (API-1 — the same requireRegionScope pattern the
  * admin/* endpoints apply); global-finops /
- * platform-admin are unbounded. This app-level clamp is the live gate —
- * RLS is bypassed at runtime (owner DB connection) until the non-owner role
- * lands, so we cannot lean on the attribution_record policy here. Same
- * rationale as server/auth/allocation-scope.ts. An out-of-subtree project id
- * returns 0 (no row) for a manager, never another org's sum.
- *
- * ONE THING CHANGES WHEN THE NON-OWNER ROLE ARRIVES, and it is asserted in
- * tests/integration/db/rls-force-lanes.test.ts rather than left to be
- * discovered: `project` is in the phase-1 FORCE set, so a foreign-region admin
- * is refused by the POLICY (row hidden → 404) before requireRegionScope can
- * answer 403. Both refuse; the 404 is the tighter one. The app-level clamp
- * stays — it is what refuses today, and what refuses a MANAGER (who is not
- * region-gated) in either world.
+ * platform-admin are unbounded. This app-level clamp is the ONLY gate: RLS is
+ * dormant by decision, so the attribution_record policy cannot be leaned on.
+ * Same rationale as server/auth/allocation-scope.ts. An out-of-subtree project
+ * id returns 0 (no row) for a manager, never another org's sum.
  *
  * S3: the in-query clause is orgSubtreeScopePredicate('cou') — the SAME
  * region-clamp + placedBelowRegionRootPredicate() gate every other

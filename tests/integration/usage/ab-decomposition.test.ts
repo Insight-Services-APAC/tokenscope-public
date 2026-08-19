@@ -109,7 +109,7 @@
  *                                 term's exclusion list from
  *                                 [...NON_CODE_CLAUDE_TOOLS, copilot-cli, copilot-agent]
  *                                 to just [copilot-cli, copilot-agent]
- *                                 (=GITHUB_USAGE_TOOLS — the two tools whose §A
+ *                                 (=GITHUB_USAGE_VIEW_TOOLS — the two tools whose §A
  *                                 truth is STILL reconciliation_record, never
  *                                 actual_spend). Alice's $19 exempt claude-ai row
  *                                 (planted as "term-neutral" pre-cutover, since
@@ -332,7 +332,7 @@ describe('§A/§B decomposition — term recovery', () => {
      * it) and out of §B (every lane does). POST-CUTOVER this is -50, not -31:
      * migration 0101 narrows the exclusion list from
      * [...NON_CODE_CLAUDE_TOOLS, copilot-cli, copilot-agent] to just
-     * [copilot-cli, copilot-agent] (GITHUB_USAGE_TOOLS — the two tools whose §A
+     * [copilot-cli, copilot-agent] (GITHUB_USAGE_VIEW_TOOLS — the two tools whose §A
      * truth is STILL reconciliation_record, never actual_spend), so alice's
      * planted $19 exempt claude-ai row (pre-cutover "term-neutral", since the
      * lane was absent from §A) is now counted alongside carol's $31 exempt

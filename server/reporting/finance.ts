@@ -57,7 +57,7 @@ import {
   GITHUB_ALL_CHARGEBACK_LANES,
   GITHUB_CHARGEABLE_LANES,
   GITHUB_FIREWALL_EXCLUSIONS,
-  GITHUB_USAGE_TOOLS,
+  GITHUB_USAGE_VIEW_TOOLS,
 } from '../../shared/usage/github-surface'
 import type { UsageWindow } from './params'
 import {
@@ -778,8 +778,8 @@ export async function fetchOverageDrivers(
   const perSeatShareUsd = opts.seats > 0 ? opts.poolUsd / opts.seats : 0
 
   // Per-teammate Copilot USAGE (the §A display weight) homed to the CoU (current org).
-  // ALL Copilot usage lanes weigh in (registry-derived GITHUB_USAGE_TOOLS: copilot-cli
-  // interactive + copilot-agent coding agent, mig 0086) — the paid overage_net the shares
+  // ALL Copilot usage lanes weigh in (GITHUB_USAGE_VIEW_TOOLS: copilot-cli + copilot-agent,
+  // i.e. what mig 0086's view — `ud` here — can emit) — the paid overage_net the shares
   // distribute is the AI-credit/agent SKU pool (mig 0085 copilot-usage lane), which the
   // coding agent draws from exactly like interactive use.
   const rows = await tx.execute<{
@@ -811,7 +811,7 @@ export async function fetchOverageDrivers(
     -- cost-owning ancestor is excluded either way — an outer join would only
     -- add NULL rows for the predicate to discard.
     JOIN v_org_unit_cost_owner cc ON cc.org_unit_id = t.org_unit_id
-    WHERE ud.tool IN (${laneListSql(GITHUB_USAGE_TOOLS)}) AND cc.cost_owning_unit_id = ${couId}::uuid
+    WHERE ud.tool IN (${laneListSql(GITHUB_USAGE_VIEW_TOOLS)}) AND cc.cost_owning_unit_id = ${couId}::uuid
       AND ud.day >= ${start}::date AND ud.day < ${end}::date
     GROUP BY ud.teammate_id, t.display_name, t.email
     ORDER BY SUM(ud.usage_usd) DESC NULLS LAST`)

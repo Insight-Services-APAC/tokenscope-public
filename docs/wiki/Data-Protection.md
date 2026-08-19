@@ -175,12 +175,10 @@ flowchart LR
   group (chosen via `location` / passed at `-g`); all stores live in that region.
   The concrete region, RG, and tenant for the Insight instance are in
   your deployment's own configuration. **[Current]**
-- **Region-scoped RLS still applies.** Multi-tenant tables carry `region_id` /
-  `org_unit_id` and are designed for **Row-Level Security** (region +
-  org-subtree) at the DB layer. **[Planned-enforcement]:** RLS policies ship but
-  are inert at runtime today (app connects as table owner; needs a non-owner
-  role + `FORCE ROW LEVEL SECURITY`). The **app-level scope predicates are the
-  live authorization boundary** until then. **[Current]**
+- **Region and org-subtree scoping.** Multi-tenant tables carry `region_id` /
+  `org_unit_id`, and every scoped surface clamps on them in-query through shared
+  scope-predicate helpers. This is the authorization boundary; see
+  [Authentication & Security](Authentication-and-Security.md). **[Current]**
 - **Sovereignty posture:** all stores (Postgres, Key Vault, Log Analytics) are
   Azure PaaS within the deploying tenant and the single deployment region — data
   does not leave Azure / the deployment region. Cross-region data isolation is
@@ -195,7 +193,6 @@ flowchart LR
 | Control | State |
 |---|---|
 | Formal retention/expiry jobs (Log Analytics tiering; attribution beyond the archive worker) | **[Planned]** — `archive-ledger` retires cold `attribution_record` partitions but is off unless `LEDGER_ARCHIVE_ENABLED=true`; nothing tiers Log Analytics |
-| RLS as the live boundary (non-owner DB role + FORCE RLS) | **[Planned]** — policies shipped, inert today. The app connects as the table owner, and an owner bypasses RLS unless the table sets `FORCE`. The enablement path exists and is dormant: a read-only capability probe (`GET /api/v1/admin/diagnostics/rls-posture`), role provisioning, a one-time cutover sweep, and a boot gate that refuses to start the server if binding the non-owner role would break it. All behind Bicep flags that default false; no environment sets them. |
 | Deployment-time region choice (residency) | **[Planned]** — a single region is fixed per deployment today (via `location`) |
 | AI-coaching privacy boundary (hash-only, aggregates-only, 30 d purge) | **[Planned]** — coach not built; the privacy *contract* is documented as the bar any future build must meet |
 | Strip/keep policy for Claude's own identity attrs in telemetry | **[VERIFY / Planned]** |

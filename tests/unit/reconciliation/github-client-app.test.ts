@@ -260,6 +260,65 @@ describe('the declared dimensions never cost a record its credits (#48)', () => 
     expect((row!.raw as { totals_by_cli: { prompt_count: number } }).totals_by_cli.prompt_count).toBe(4)
   })
 
+  it('parses the Copilot App token sums as a surface distinct from the CLI', async () => {
+    /*
+     * `totals_by_copilot_app` is the second harness surface (capture 2026-08-19,
+     * 2/74 records). Both subtrees carry the same token_usage shape, so the risk
+     * is reading one and silently attributing it to the other.
+     *
+     * A ROUND-TRIP check only: the root schema is `.passthrough()`, so this passes
+     * with or without the declaration. What the declaration buys is pinned by the
+     * wrong-shape test below — do not read this one as proving it exists.
+     */
+    installRouter(
+      routes(
+        JSON.stringify({
+          user_login: 'octocat',
+          day,
+          ai_credits_used: 100,
+          totals_by_cli: { token_usage: { prompt_tokens_sum: 900, output_tokens_sum: 100 } },
+          totals_by_copilot_app: {
+            session_count: 1,
+            token_usage: { prompt_tokens_sum: 40, output_tokens_sum: 60 },
+          },
+        }),
+      ),
+    )
+
+    const [row] = await client().getUserDailyCredits(day)
+    const raw = row!.raw as Record<string, { token_usage?: { prompt_tokens_sum?: number | null } }>
+    expect(raw.totals_by_cli!.token_usage!.prompt_tokens_sum).toBe(900)
+    expect(raw.totals_by_copilot_app!.token_usage!.prompt_tokens_sum).toBe(40)
+  })
+
+  it('keeps the credits AND normalises the subtree to absent when Copilot App arrives in the WRONG SHAPE', async () => {
+    /*
+     * Two mutations, and the pair is the point — either alone leaves a hole:
+     *   - remove `.catch(undefined)` → the record fails to parse, the line is
+     *     skipped, and this user-day's credits vanish. First assertion goes red.
+     *   - delete the `totals_by_copilot_app` declaration outright → the root
+     *     `.passthrough()` carries the bad array through verbatim, so the subtree
+     *     is NOT normalised to absent. Last assertion goes red.
+     * Without the second assertion the declaration can be deleted with every test
+     * still green (measured), because passthrough hides its absence.
+     */
+    installRouter(
+      routes(
+        JSON.stringify({
+          user_login: 'octocat',
+          day,
+          ai_credits_used: 100,
+          totals_by_copilot_app: ['not', 'an', 'object'],
+        }),
+      ),
+    )
+
+    const rows = await client().getUserDailyCredits(day)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.credits).toBe(100)
+    expect((rows[0]!.raw as Record<string, unknown>).totals_by_copilot_app).toBeUndefined()
+  })
+
   it('keeps the credits when a declared dimension arrives in the WRONG SHAPE', async () => {
     /*
      * The hazard #48 introduces, in its sharpest form. `totals_by_cli` as an

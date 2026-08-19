@@ -486,7 +486,8 @@ describe('the burn drill is the §A usage axis — it RECONCILES to the tracker 
      * needing reconciliation_record + provider_org + provider_enterprise.
      *
      * It is covered by CONSTRUCTION rather than by fixture: the classifier binds
-     * `GITHUB_USAGE_TOOLS`, composed from the surface adapter, and copilot-agent
+     * `GITHUB_USAGE_TOOLS`, composed from the surface adapter (it also carries
+     * copilot-app since 2026-08-19), and copilot-agent
      * is in that list. Recorded so the coverage claim here is not overstated.
      */
     /*

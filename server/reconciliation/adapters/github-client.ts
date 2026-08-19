@@ -280,8 +280,9 @@ const MetricsReportSchema = z.object({
  * records carry `totals_by_cli` at all) AND carries `.catch(undefined)`, which
  * makes a wrongly-shaped subtree degrade to "this dimension is absent" instead
  * of failing the record. A declaration buys types and validation; it must never
- * buy them with the figure the surface exists to deliver.
- * tests/unit/reconciliation/github-metrics-record-schema.test.ts pins that.
+ * buy them with the figure the surface exists to deliver. Pinned by
+ * tests/unit/reconciliation/github-client-app.test.ts ("the declared dimensions
+ * never cost a record its credits").
  */
 const cliTokenUsage = z
   .object({
@@ -292,66 +293,40 @@ const cliTokenUsage = z
   .passthrough()
 
 /*
- * One per-user record in the users-1-day NDJSON.
+ * One per-user record in the users-1-day NDJSON. Field frequencies and the full
+ * path inventory live in docs/design/provider-wire-captures/ (latest 2026-08-19);
+ * declaring a field changes nothing at rest — everything already reaches
+ * `reconciliation_record.raw` through .passthrough() — it buys the consumer a type
+ * and a validated shape instead of a cast.
  *
- * FOUR FIELDS WERE DECLARED (user_login, user_id, day, ai_credits_used) while
- * ~90 more arrived and survived unread through .passthrough(). The 2026-08-02
- * wire capture is what made that visible
- * (docs/design/provider-wire-captures/) and #48 is declaring the ones the
- * transform actually consumes. Observed frequencies, from that capture:
- *
- *   ai_credits_used                                        100%, AT THE RECORD ROOT
- *   totals_by_model_feature[].model                        487/487 stored, 34/34 live
- *   totals_by_cli.token_usage.{prompt,output}_tokens_sum   47/200 stored — SPARSE
- *   loc_{added,deleted,suggested_to_add,suggested_to_delete}_sum   number, 100%
- *   code_{generation,acceptance}_activity_count                    number, 100%
- *   user_initiated_interaction_count                               number, 100%
- *   totals_by_language_model[].{model,language}            756/756 stored, 45/45 live
- *   totals_by_language_feature[]                           813 rows stored (language × feature)
- *
- * The ENGAGEMENT fields (developer-pages W0b, D7) — the LOC sums, the three
- * activity counts, and the two language arrays — are declared for the
- * self-depth engagement card's derived read
- * (server/usage/copilot-engagement.ts). The TRANSFORM still bands on
- * `totals_by_model_feature` only: a model's share of DELIBERATE user
- * interactions is the closest Copilot has to "how much work ran on this model"
- * and the language dimension answers a different question
- * (04-prototype-delta.md §5). Declaring the language arrays here does not
- * change that choice — it types what the engagement read consumes.
- *
- * WIRE-CHECK CAVEAT on the language-array ENTRY MEASURES (W0b's D1-style
- * check): the 2026-08-02 capture inventories `totals_by_language_model`
- * entries' `model`/`language` keys but NOT their entry-level numeric measures,
- * and no raw capture file exists to name one. The per-entry
- * `user_initiated_interaction_count` declared below is therefore a CANDIDATE
- * weighting measure, `.nullish()` like everything else: absence parses, and
- * the read side (copilot-engagement.ts) weights by it only when the wire
- * actually sends it, falling back per D9's ladder — never equal-splitting,
- * never fabricating weights.
- *
- * NOTE ON WHAT #48 DOES AND DOES NOT UNLOCK: these fields were ALREADY reaching
- * `reconciliation_record.raw` verbatim. Declaring them changes nothing at rest;
- * it gives the consumer a type and a validated shape instead of a cast.
- * Every declared field keeps the `.catch(undefined)` discipline of the header
- * above — a shape surprise degrades to "this dimension is absent" and can
- * never cost the record its `ai_credits_used`.
+ * Two consumers, deliberately reading different axes: the TRANSFORM bands on
+ * `totals_by_model_feature` only (a model's share of deliberate interactions is
+ * the closest Copilot has to "work run on this model"; the language dimension
+ * answers a different question — 04-prototype-delta.md §5), while the engagement
+ * card (server/usage/copilot-engagement.ts) reads the LOC sums, the activity
+ * counts and both language arrays.
  */
-/** One `totals_by_language_model` entry: the language × model dimension pair
- *  plus the candidate per-entry weighting measure (see the schema header). */
+/*
+ * The two language arrays and their weighting measures (D9's ladder, consumed by
+ * copilot-engagement.ts). `code_generation_activity_count` is what the wire
+ * actually carries; `user_initiated_interaction_count` is declared because it is
+ * preferred WHERE sent, but capture 2026-08-19 observed it on neither array.
+ */
 const languageModelEntry = z
   .object({
     model: z.string().nullable().optional(),
     language: z.string().nullable().optional(),
     user_initiated_interaction_count: z.number().nullish().catch(undefined),
+    code_generation_activity_count: z.number().nullish().catch(undefined),
   })
   .passthrough()
 
-/** One `totals_by_language_feature` entry — D9's fallback weighting rung. */
 const languageFeatureEntry = z
   .object({
     language: z.string().nullable().optional(),
     feature: z.string().nullable().optional(),
     user_initiated_interaction_count: z.number().nullish().catch(undefined),
+    code_generation_activity_count: z.number().nullish().catch(undefined),
   })
   .passthrough()
 
@@ -392,10 +367,18 @@ const UserMetricsRecordSchema = z
     // The LANGUAGE × FEATURE dimension — D9's fallback weighting rung when the
     // language × model entries carry no numeric measure.
     totals_by_language_feature: z.array(languageFeatureEntry).optional().catch(undefined),
-    // TOKENS, and only on the CLI surface. Day grain — there is no model
-    // beneath this subtree, so tokens can never be attributed to a model from
-    // here. Sparse: absence means "no CLI use that day", never "tokens lost".
+    // TOKENS, on TWO harness surfaces. Both are day grain with no model beneath,
+    // so tokens can never be attributed to a model from here. Sparse: absence
+    // means "did not use that harness that day", never "tokens lost".
+    // (capture 2026-08-19: cli 14/74, copilot_app 2/74 — measured on the ORG
+    // variant of this report; this method reads the ENTERPRISE variant, which was
+    // not separately probed.)
     totals_by_cli: z
+      .object({ token_usage: cliTokenUsage.nullable().optional() })
+      .passthrough()
+      .optional()
+      .catch(undefined),
+    totals_by_copilot_app: z
       .object({ token_usage: cliTokenUsage.nullable().optional() })
       .passthrough()
       .optional()

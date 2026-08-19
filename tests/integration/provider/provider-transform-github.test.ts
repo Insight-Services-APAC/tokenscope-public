@@ -58,6 +58,7 @@ function metricsRecord(opts: {
   credits: number
   modelFeatures?: Array<{ model: string; feature: string; interactions: number }>
   cliTokens?: { prompt: number; output: number }
+  appTokens?: { prompt: number; output: number }
   login?: string
 }): Record<string, unknown> {
   const record: Record<string, unknown> = {
@@ -85,6 +86,18 @@ function metricsRecord(opts: {
         prompt_tokens_sum: opts.cliTokens.prompt,
         output_tokens_sum: opts.cliTokens.output,
         avg_tokens_per_request: 100,
+      },
+    }
+  }
+  if (opts.appTokens) {
+    record.totals_by_copilot_app = {
+      prompt_count: 2,
+      request_count: 4,
+      session_count: 1,
+      token_usage: {
+        prompt_tokens_sum: opts.appTokens.prompt,
+        output_tokens_sum: opts.appTokens.output,
+        avg_tokens_per_request: 50,
       },
     }
   }
@@ -401,7 +414,7 @@ describe('G2 — the money is at DAY grain and a ratio cannot be written', () =>
      * fabricated zero row.
      *
      * MUTATION: return `{input: 0, output: 0}` instead of null from
-     * deriveCliTokens when the subtree is absent → the second case gains a
+     * deriveSurfaceTokens when the subtree is absent → the second case gains a
      * phantom token row and goes red.
      */
     await reconcile([metricsRecord({ credits: 100, cliTokens: { prompt: 900, output: 100 } })])
@@ -418,6 +431,52 @@ describe('G2 — the money is at DAY grain and a ratio cannot be written', () =>
     await reconcile([metricsRecord({ credits: 100 })]) // no totals_by_cli
     await transformGithub()
     expect((await facts('github')).filter((f) => f.input_tokens !== null)).toHaveLength(0)
+  })
+
+  it('Copilot App tokens land on their OWN tool, never merged into the CLI row', async () => {
+    /*
+     * `totals_by_copilot_app` is a second harness surface with its own token_usage
+     * (capture 2026-08-19). Both subtrees are day grain with no model beneath, so
+     * both write model NULL — but they must stay separable, or "how much of this
+     * is App vs CLI" is unanswerable and the two harnesses look like one.
+     *
+     * MUTATION: drop the `tool` override from TOKEN_SURFACES so the App row reuses
+     * base.tool → the two rows collapse into one summed row and the per-tool
+     * assertions below go red.
+     */
+    await reconcile([
+      metricsRecord({
+        credits: 100,
+        cliTokens: { prompt: 900, output: 100 },
+        appTokens: { prompt: 40, output: 60 },
+      }),
+    ])
+    await transformGithub()
+
+    const tokenRows = (await facts('github')).filter((f) => f.input_tokens !== null)
+    expect(tokenRows).toHaveLength(2)
+
+    const byTool = new Map(tokenRows.map((r) => [r.tool, r]))
+    expect([...byTool.keys()].sort()).toEqual(['copilot-app', 'copilot-cli'])
+
+    const app = byTool.get('copilot-app')!
+    expect(app.input_tokens).toBe('40')
+    expect(app.output_tokens).toBe('60')
+    expect(app.model).toBeNull()
+    expect(app.cost_type).toBeNull()
+    // The money stays on the credits row under the category-derived tool: an App
+    // token row carrying cost would be a surface split of an unsplit figure.
+    expect(app.cost_usd).toBeNull()
+
+    expect(byTool.get('copilot-cli')!.input_tokens).toBe('900')
+  })
+
+  it('a record with no Copilot App subtree writes no copilot-app row', async () => {
+    // Sparse by nature (2/74 in the capture): absence means "did not use the App
+    // that day", never a fabricated zero row.
+    await reconcile([metricsRecord({ credits: 100, cliTokens: { prompt: 900, output: 100 } })])
+    await transformGithub()
+    expect((await facts('github')).filter((f) => f.tool === 'copilot-app')).toHaveLength(0)
   })
 
   it('every measure is single-homed, so one GROUP BY cannot double count', async () => {

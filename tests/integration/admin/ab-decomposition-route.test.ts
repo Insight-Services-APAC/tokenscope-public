@@ -129,7 +129,7 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
     expect(res.terms.unreconciledApiStale).toBe('-11.000000')
     // chargebackExemptUsage widens post-cutover (mig 0101 narrows its exclusion
     // list to match v_teammate_usage_daily's actual_spend-branch exclusion —
-    // GITHUB_USAGE_TOOLS only), so alice's exempt non-Code row is now named here
+    // GITHUB_USAGE_VIEW_TOOLS only), so alice's exempt non-Code row is now named here
     // instead of reaching neither side: -31 (carol, claude-code) + -19 (alice,
     // claude-ai) = -50.
     expect(res.terms.chargebackExemptUsage).toBe('-50.000000')

@@ -183,6 +183,11 @@ const fixture = (over: Record<string, unknown> = {}) => ({
         { language: 'Go', sharePct: 17 },
       ],
       models: [{ model: 'gpt-5', sharePct: 100 }],
+      harnesses: [
+        { harness: 'Copilot CLI', sharePct: 75 },
+        { harness: 'Copilot App', sharePct: 25 },
+      ],
+      ideActivityExcluded: true,
     },
   },
   ...over,
@@ -541,6 +546,73 @@ describe('/usage rebuild — engagement side-by-side (D22/T9)', () => {
     expect(copilot.text().toLowerCase()).not.toContain('session') // Copilot has no sessions
     // Deleted-LOC legs are ABSENT when the wire lacks them (honest numbers).
     expect(copilot.find('[data-testid="engagement-copilot-deleted"]').exists()).toBe(false)
+  })
+
+  it('the harness bar splits CLI vs App, names its basis, and never says "session"', async () => {
+    // The Copilot App is a harness peer of the CLI. Without this the whole bar
+    // could be deleted and every other page test would still pass (measured).
+    const w = await mountPage()
+    const copilot = w.find('[data-testid="engagement-copilot"]')
+    expect(copilot.find('[data-testid="engagement-copilot-harness-bar"]').exists()).toBe(true)
+    const legend = copilot.find('[data-testid="engagement-copilot-harness-legend"]')
+    expect(legend.text()).toContain('Copilot CLI 75%')
+    expect(legend.text()).toContain('Copilot App 25%')
+    // The basis is PRINTED: the Claude card's bar beside it splits money.
+    expect(copilot.text()).toContain('by requests')
+    // D22 again, on the new surface specifically — `session_count` was available
+    // and rejected as the weight for exactly this reason.
+    expect(copilot.text().toLowerCase()).not.toContain('session')
+  })
+
+  it('the IDE note stands alone when there is no harness bar — the COMMON case', async () => {
+    /*
+     * 60 of 74 observed user-days carry IDE activity and neither CLI nor App
+     * (capture 2026-08-19), so nesting this note inside the bar hid it from most
+     * users — they saw no harness line and no reason why.
+     */
+    const w = await mountPage(
+      fixture({
+        engagement: {
+          claude: null,
+          copilot: {
+            interactions: null, locKept: null, locSuggested: null, locDeleted: null,
+            locSuggestedToDelete: null, keptPct: null, generationActivity: null,
+            acceptanceActivity: null, languages: null, models: null,
+            harnesses: null, ideActivityExcluded: true,
+          },
+        },
+      }),
+    )
+    const copilot = w.find('[data-testid="engagement-copilot"]')
+    expect(copilot.find('[data-testid="engagement-copilot-harness-bar"]').exists()).toBe(false)
+    expect(copilot.find('[data-testid="engagement-copilot-harness-ide-note"]').text()).toContain(
+      'different measure',
+    )
+    // ideActivityExcluded alone must count as detail, or this renders the
+    // "no detail" empty state while holding something to say.
+    expect(copilot.find('[data-testid="engagement-copilot-nodetail"]').exists()).toBe(false)
+  })
+
+  it('a single harness renders at 100% with no note when no IDE activity exists', async () => {
+    const w = await mountPage(
+      fixture({
+        engagement: {
+          claude: null,
+          copilot: {
+            interactions: 5, locKept: null, locSuggested: null, locDeleted: null,
+            locSuggestedToDelete: null, keptPct: null, generationActivity: null,
+            acceptanceActivity: null, languages: null, models: null,
+            harnesses: [{ harness: 'Copilot App', sharePct: 100 }],
+            ideActivityExcluded: false,
+          },
+        },
+      }),
+    )
+    const copilot = w.find('[data-testid="engagement-copilot"]')
+    expect(copilot.find('[data-testid="engagement-copilot-harness-legend"]').text()).toContain(
+      'Copilot App 100%',
+    )
+    expect(copilot.find('[data-testid="engagement-copilot-harness-ide-note"]').exists()).toBe(false)
   })
 
   it('a provider with no rows renders an empty state, not zeros (D22 empty states)', async () => {

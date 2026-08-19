@@ -169,7 +169,7 @@ beforeAll(async () => {
   // copilot branch), the Overage-Drivers weight. May: alice 250, bob 150, carol 50.
   // Alice's 250 is deliberately SPLIT across the two §A usage lanes (mig 0086:
   // copilot_interactive → copilot-cli, copilot_coding_agent → copilot-agent): the
-  // Overage-Drivers weight is ALL Copilot usage (registry GITHUB_USAGE_TOOLS), so her
+  // Overage-Drivers weight is ALL view-emitted Copilot usage (GITHUB_USAGE_VIEW_TOOLS), so her
   // May expectations below only foot if BOTH lanes weigh in.
   const rr = async (tm: string, usd: number, day: string, category = 'copilot_interactive') => {
     await t.client`INSERT INTO reconciliation_record

@@ -30,6 +30,9 @@ const render = (q: SQL): { sql: string; params: unknown[] } => new PgDialect().s
 const LANED: Array<[tool: string, lane: Vendor]> = [
   [CLAUDE_CODE_TOOL, 'claude'],
   ['copilot-cli', 'copilot'],
+  // The Copilot App harness shares the 'copilot' lane — provider_usage_fact only,
+  // so the lane sums two tools (see COPILOT_APP_TOOL).
+  ['copilot-app', 'copilot'],
   // D4 usage-lane split: the coding-agent DISPLAY lane (lane id == the
   // view-emitted tool literal, mig 0086 — never an OTel emission).
   ['copilot-agent', 'copilot-agent'],
@@ -82,10 +85,18 @@ describe('vendorCostSql', () => {
     expect(new Set(Object.keys(lanes))).toEqual(new Set(VENDOR_LANES))
   })
 
-  it.each(LANED)('the %s filter sums exactly WHERE tool = that tool', (tool, lane) => {
+  it.each(LANED)('the %s filter sums its lane over exactly that lane\'s tools', (tool, lane) => {
     const q = render(vendorCostSql()[lane])
-    expect(q.sql).toContain('COALESCE(SUM(ar.cost_usd) FILTER (WHERE ar.tool =')
-    expect(q.params).toEqual([tool])
+    const laneTools = LANED.filter(([, l]) => l === lane).map(([t]) => t)
+    // A one-tool lane keeps the `=` form; a multi-tool lane must widen to IN, or
+    // all but one of its tools vanish from the split while still footing.
+    expect(q.sql).toContain(
+      laneTools.length === 1
+        ? 'COALESCE(SUM(ar.cost_usd) FILTER (WHERE ar.tool ='
+        : 'COALESCE(SUM(ar.cost_usd) FILTER (WHERE ar.tool IN (',
+    )
+    expect(new Set(q.params)).toEqual(new Set(laneTools))
+    expect(q.params).toContain(tool)
   })
 
   it("the 'other' catch-all is NOT IN (EVERY laned tool) OR IS NULL — nothing can vanish", () => {

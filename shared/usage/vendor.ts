@@ -75,11 +75,8 @@ export const SECTION_A_USAGE_TOOLS = [
   COPILOT_AGENT_TOOL,
 ] as const
 
-/*
- * The tools with a DEDICATED lane — everything else falls to 'other'. An
- * explicit map (not string surgery) so the SQL catch-all below and the JS
- * mapper can never disagree.
- */
+/* Tools with a DEDICATED lane — everything else falls to 'other'. An explicit map
+ * (not string surgery) so the SQL catch-all and the JS mapper cannot disagree. */
 const TOOL_TO_LANE: Readonly<Record<string, Vendor>> = REGISTRY.toolToLane
 const LANED_TOOLS: readonly string[] = REGISTRY.lanedTools
 
@@ -93,12 +90,8 @@ export function toolToVendor(tool: string | null): Vendor {
   return (tool && TOOL_TO_LANE[tool]) || 'other'
 }
 
-/*
- * Lane id → itself. The §B chargeback views (v_finance_chargeback_month and its
- * copilot arm, mig 0085) emit LANE IDS in their `tool` column for the
- * billing-fed lanes (copilot-license / copilot-usage / copilot-unclassified —
- * no OTel tool exists for them), while the Anthropic arm emits raw tool ids.
- */
+/* Lane id → itself. The §B chargeback views (mig 0085) emit LANE IDS in `tool` for
+ * the billing-fed lanes, while the Anthropic arm emits raw tool ids. */
 const LANE_SELF: Readonly<Record<string, Vendor>> = Object.fromEntries(
   VENDOR_LANES.map((lane) => [lane, lane]),
 )
@@ -142,10 +135,25 @@ export function vendorCostSql(costCol = 'ar.cost_usd'): Record<Vendor, SQL> {
   const qualifier = costCol.includes('.') ? costCol.slice(0, costCol.lastIndexOf('.') + 1) : ''
   const cost = sql.raw(costCol)
   const tool = sql.raw(`${qualifier}tool`)
+  // Group by lane FIRST: keying off TOOL_TO_LANE let the last tool of a multi-tool
+  // lane overwrite the rest, which then vanished from the split while still footing.
+  const toolsByLane = new Map<Vendor, string[]>()
+  for (const [toolId, lane] of Object.entries(TOOL_TO_LANE)) {
+    const bucket = toolsByLane.get(lane)
+    if (bucket) bucket.push(toolId)
+    else toolsByLane.set(lane, [toolId])
+  }
   const lanes = Object.fromEntries(
-    Object.entries(TOOL_TO_LANE).map(([toolId, lane]) => [
+    [...toolsByLane].map(([lane, tools]) => [
       lane,
-      sql`COALESCE(SUM(${cost}) FILTER (WHERE ${tool} = ${toolId}), 0)`,
+      sql`COALESCE(SUM(${cost}) FILTER (WHERE ${
+        tools.length === 1
+          ? sql`${tool} = ${tools[0]!}`
+          : sql`${tool} IN (${sql.join(
+              tools.map((t) => sql`${t}`),
+              sql.raw(', '),
+            )})`
+      }), 0)`,
     ]),
   ) as Record<Vendor, SQL>
   const lanedList = sql.join(

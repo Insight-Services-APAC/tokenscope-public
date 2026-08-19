@@ -1,17 +1,76 @@
 {
-  "endpoint": "github-user-daily-credits",
-  "provenance": "schema-derived",
-  "capturedAt": null,
-  "note": "Transcribed from MetricsReportSchema (the report envelope) and UserMetricsRecordSchema (one NDJSON line) in server/reconciliation/adapters/github-client.ts. This records what TokenScope ASSUMES, not what has been observed. `ndjson_records` is NOT a key GitHub sends: it is the probe's own name for the downloaded NDJSON file's lines, which arrive as a separate HTTP response and have no place in the envelope. UserMetricsRecordSchema declares four fields — user_login, user_id, day, ai_credits_used — and no model dimension, so none is declared here; whether one arrives is answered by the undeclared-paths section of a live run, not by this file. Copilot meters in AI credits rather than tokens, so a model dimension may or may not exist on this surface; the baseline takes no position either way. The record schema is .passthrough(), so every field the wire carries beyond these four survives into the report as undeclared.",
-  "paths": [
-    { "path": "download_links", "types": ["array"], "presentRate": null, "defaulted": true },
-    { "path": "download_links[]", "types": ["string"], "presentRate": null },
-    { "path": "ndjson_records", "types": ["array"], "presentRate": null },
-    { "path": "ndjson_records[]", "types": ["object"], "presentRate": 1 },
-    { "path": "ndjson_records[].ai_credits_used", "types": ["number", "null"], "presentRate": null },
-    { "path": "ndjson_records[].day", "types": ["string", "null"], "presentRate": null },
-    { "path": "ndjson_records[].user_id", "types": ["number", "null"], "presentRate": null },
-    { "path": "ndjson_records[].user_login", "types": ["string", "null"], "presentRate": null },
-    { "path": "report_day", "types": ["string"], "presentRate": null }
-  ]
+ "endpoint": "github-user-daily-credits",
+ "provenance": "schema-derived",
+ "capturedAt": null,
+ "note": "Transcribed from MetricsReportSchema (the report envelope) and UserMetricsRecordSchema (one NDJSON line) in server/reconciliation/adapters/github-client.ts. This records what TokenScope ASSUMES, not what has been observed. `ndjson_records` is NOT a key GitHub sends: it is the probe's own name for the downloaded NDJSON file's lines, which arrive as a separate HTTP response and have no place in the envelope. STALE: this file's paths[] transcribe the FOUR fields the record schema declared before #48 (user_login, user_id, day, ai_credits_used). The schema has since declared the engagement scalars, the model and language arrays, totals_by_cli and (2026-08-19) totals_by_copilot_app, none of which are listed below \u2014 so a live run will report them as undeclared paths that are in fact declared. Regenerating this baseline from the current schema is tracked separately; until then read the undeclared-paths section against the schema, not against this file. What the observed captures have SETTLED (docs/design/provider-wire-captures/): Copilot does send a model dimension, and does send tokens on the totals_by_cli and totals_by_copilot_app surfaces \u2014 the earlier 'may or may not exist' wording here is superseded. The record schema is .passthrough(), so every field the wire carries beyond the declared set survives into the report.",
+ "paths": [
+  {
+   "path": "download_links",
+   "types": [
+    "array"
+   ],
+   "presentRate": null,
+   "defaulted": true
+  },
+  {
+   "path": "download_links[]",
+   "types": [
+    "string"
+   ],
+   "presentRate": null
+  },
+  {
+   "path": "ndjson_records",
+   "types": [
+    "array"
+   ],
+   "presentRate": null
+  },
+  {
+   "path": "ndjson_records[]",
+   "types": [
+    "object"
+   ],
+   "presentRate": 1
+  },
+  {
+   "path": "ndjson_records[].ai_credits_used",
+   "types": [
+    "number",
+    "null"
+   ],
+   "presentRate": null
+  },
+  {
+   "path": "ndjson_records[].day",
+   "types": [
+    "string",
+    "null"
+   ],
+   "presentRate": null
+  },
+  {
+   "path": "ndjson_records[].user_id",
+   "types": [
+    "number",
+    "null"
+   ],
+   "presentRate": null
+  },
+  {
+   "path": "ndjson_records[].user_login",
+   "types": [
+    "string",
+    "null"
+   ],
+   "presentRate": null
+  },
+  {
+   "path": "report_day",
+   "types": [
+    "string"
+   ],
+   "presentRate": null
+  }
+ ]
 }

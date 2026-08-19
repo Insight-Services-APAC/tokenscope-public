@@ -113,7 +113,7 @@ describe('the real adapters', () => {
   it("github adapter: the 'copilot' + 'copilot-agent' usage lanes own their tools; the three §B chargeback lanes are billing-fed (no tools)", () => {
     expect(githubSurfaceAdapter.provider).toBe('github')
     expect(githubSurfaceAdapter.lanes).toEqual([
-      { id: 'copilot', label: 'Copilot', tools: ['copilot-cli'] },
+      { id: 'copilot', label: 'Copilot', tools: ['copilot-cli', 'copilot-app'] },
       // D4 §A usage-lane split: the coding-agent DISPLAY lane, right after the
       // interactive usage lane and before the §B chargeback lanes.
       { id: 'copilot-agent', label: 'Copilot Coding Agent', tools: ['copilot-agent'] },
@@ -124,8 +124,8 @@ describe('the real adapters', () => {
   })
 
   it('GITHUB_FIREWALL_EXCLUSIONS = every lane id ∪ every §A usage tool, deduped — the ONE §B Anthropic-arm exclusion set (r1 finding 1)', () => {
-    // Exact contents, pinned: the five lane ids + the copilot-cli tool literal
-    // ('copilot-agent' is both a lane id and its tool literal — deduped once).
+    // Exact contents, pinned: the five lane ids + the two §A tool literals that
+    // are not already lane ids ('copilot-agent' is both — deduped once).
     expect(GITHUB_FIREWALL_EXCLUSIONS).toEqual([
       'copilot',
       'copilot-agent',
@@ -133,6 +133,7 @@ describe('the real adapters', () => {
       'copilot-usage',
       'copilot-unclassified',
       'copilot-cli',
+      'copilot-app',
     ])
     // Derivation invariants: covers BOTH source sets, nothing else, no dupes.
     const set = new Set(GITHUB_FIREWALL_EXCLUSIONS)

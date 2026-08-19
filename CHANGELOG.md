@@ -7,6 +7,16 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-08-19 (snapshot 74cf5c7c)
+
+- Copilot usage now counts the tokens spent in the Copilot app, not just the
+  Copilot CLI, and reports them as their own surface rather than folding them
+  into CLI totals.
+- Your usage page now shows how your Copilot work splits between the CLI and the
+  Copilot app, and says when IDE activity cannot be shown on the same measure.
+- The Copilot engagement card shows its language mix again. It had been blank
+  for everyone, because it was weighted on a figure GitHub does not send.
+
 ## 2026-08-18 (snapshot ecd23e5b)
 
 - The open-source mirror now publishes the engineering wiki to its own GitHub

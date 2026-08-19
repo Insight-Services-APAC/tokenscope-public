@@ -36,6 +36,16 @@ import type { ProviderSurfaceAdapter } from './lanes'
 export const COPILOT_CLI_TOOL = 'copilot-cli'
 export const COPILOT_AGENT_TOOL = 'copilot-agent'
 
+/*
+ * The Copilot App harness, peer of the CLI. Written only to `provider_usage_fact`
+ * (token row; model and cost_usd NULL), never emitted by v_teammate_usage_daily.
+ * Rides the 'copilot' lane: the wire splits App from CLI for tokens but not money
+ * (capture 2026-08-19), so a per-harness credit share would be a ratio. Mig 0120's
+ * CHECK does NOT prevent that — it guards the model axis; the writer does, keeping
+ * cost on the credits row alone.
+ */
+export const COPILOT_APP_TOOL = 'copilot-app'
+
 /** The §B chargeback lane ids (view-emitted; no OTel tool). */
 export const COPILOT_LICENSE_LANE = 'copilot-license'
 export const COPILOT_USAGE_LANE = 'copilot-usage'
@@ -60,29 +70,21 @@ export type GithubChargebackLane = (typeof GITHUB_ALL_CHARGEBACK_LANES)[number]
  * line is money we cannot yet attribute to a SKU class, so it is surfaced
  * (lane + column + alert) but NEVER charged (design D2, r1-F10).
  *
- * copilot-license IS chargeable, and that is not in tension with Copilot
- * being usage-billed. Two different things get conflated here (a reviewer
- * has read it the wrong way, which is why this paragraph exists):
- *
- *   - FORBIDDEN is DERIVING license money as seats x flat rate. That is
- *     "WRONG model #2" in copilot-pool-bill.ts, and it is why
- *     `flat_seat_price_usd` may never reach a chargeback figure.
- *   - REQUIRED is charging the license NET that is READ off the invoice's
- *     own "Copilot Enterprise" SKU line (copilot-pool-bill.ts: "READ, never
- *     recompute"). It is real money someone must pay.
- *
- * Dropping it would break the load-bearing finance invariant that
- * Sigma v_finance_chargeback_month = Sigma v_finance_bill_totals_month
- * (00-build-design.md §invariant 1): license + overage + unclassified must
- * equal the raw Copilot net exactly. Removing this lane turns 9 tests red,
- * four of them named "fold license+usage, never unclassified".
+ * copilot-license IS chargeable despite Copilot being usage-billed — the two
+ * easily-conflated rules: DERIVING license money as seats x flat rate is
+ * forbidden (copilot-pool-bill.ts "WRONG model #2"), READING the license net off
+ * the invoice's own "Copilot Enterprise" SKU line is required. Dropping the lane
+ * breaks Σ v_finance_chargeback_month = Σ v_finance_bill_totals_month
+ * (00-build-design.md §invariant 1).
  */
 export const GITHUB_CHARGEABLE_LANES = [COPILOT_LICENSE_LANE, COPILOT_USAGE_LANE] as const
 
 export const githubSurfaceAdapter = {
   provider: 'github',
   lanes: [
-    { id: 'copilot', label: 'Copilot', tools: [COPILOT_CLI_TOOL] },
+    // COPILOT_APP_TOOL rides this lane rather than owning one — see its constant
+    // for why the wire cannot support an App lane that carries money.
+    { id: 'copilot', label: 'Copilot', tools: [COPILOT_CLI_TOOL, COPILOT_APP_TOOL] },
     // §A coding-agent usage lane (D4): view-fed (mig 0086) — display-only,
     // never taggable; its tool literal never appears in OTel emission.
     { id: 'copilot-agent', label: 'Copilot Coding Agent', tools: [COPILOT_AGENT_TOOL] },
@@ -96,26 +98,28 @@ export const githubSurfaceAdapter = {
 } as const satisfies ProviderSurfaceAdapter
 
 /*
- * Every §A usage tool the v_teammate_usage_daily copilot branch can emit, in
- * canonical display order — derived from the adapter (the §B lanes own no
- * tools, so they contribute nothing). §A readers that want "ALL Copilot
- * usage" (e.g. the Overage-Drivers weight) build their IN lists from this —
- * never hand literals in SQL (copilot-surface-lanes checklist).
+ * Every §A GitHub usage tool literal, in canonical display order — derived from
+ * the adapter (the §B lanes own no tools, so they contribute nothing). §A readers
+ * that want "ALL Copilot usage" (e.g. the Overage-Drivers weight) build their IN
+ * lists from this — never hand literals in SQL (copilot-surface-lanes checklist).
+ *
+ * Mixed origin: copilot-cli / copilot-agent from `v_teammate_usage_daily`,
+ * copilot-app only from `provider_usage_fact`.
  */
 export const GITHUB_USAGE_TOOLS: readonly string[] = githubSurfaceAdapter.lanes.flatMap((l) => [
   ...l.tools,
 ])
 
 /*
- * SUPERSEDED (Workstream A, migration 0101): the DISPLAY-ONLY subset used to
- * live here as GitHub-only (`[COPILOT_AGENT_TOOL]`). It is now the
- * provider-neutral `INGEST_ONLY_USAGE_TOOLS` in `shared/usage/surface.ts`
- * (`[COPILOT_AGENT_TOOL, ...NON_CODE_CLAUDE_TOOLS]`), because the non-Code
- * Claude surfaces are the identical shape (ingest_only, OTel-invisible, never
- * taggable) and belong in the SAME exclusion set `reconcileUnaccountedUsage`
- * reads — two sets would have let one drift from the other. Import
- * `INGEST_ONLY_USAGE_TOOLS` from `shared/usage/surface.ts` instead.
+ * What `v_teammate_usage_daily` emits — its actual_spend branch's exclusion list
+ * (mig 0086), which ab-decomposition.ts's chargeback-exempt term must mirror
+ * exactly. Pinned by the mig 0086/0101 guards in tests/unit/usage/surface.test.ts.
  */
+export const GITHUB_USAGE_VIEW_TOOLS: readonly string[] = GITHUB_USAGE_TOOLS.filter(
+  (t) => t !== COPILOT_APP_TOOL,
+)
+
+/* The display-only subset now lives as INGEST_ONLY_USAGE_TOOLS in ./surface.ts. */
 
 /** Every GitHub lane id (usage + chargeback). Prefer GITHUB_FIREWALL_EXCLUSIONS
  * for Anthropic-remainder predicates — the lane ids alone miss 'copilot-cli'. */
@@ -126,13 +130,14 @@ export const GITHUB_LANES: readonly string[] = githubSurfaceAdapter.lanes.map((l
  * §B site uses to compute "the non-GitHub (Anthropic) remainder" of a
  * chargeback split: every GitHub id a tool-shaped column can carry, i.e. the
  * lane ids (usage 'copilot' / 'copilot-agent' + the three chargeback lanes)
- * ∪ the §A usage tool literals ('copilot-cli' / 'copilot-agent'). NEVER use the
- * narrower GITHUB_ALL_CHARGEBACK_LANES for an exclusion: a stray §A copilot row
- * (tool 'copilot-cli' or 'copilot-agent') landing on a bill surface must fall
- * OUT of the Anthropic arm everywhere, not just in finance.ts (r1 finding 1).
- * Mirrored by the SQL NOT IN lists in mig 0085 (a view cannot import TS); the
- * pg_get_viewdef integration test pins both §A tool literals to exclusion-only
- * appearances in every chargeback view.
+ * ∪ the §A usage tool literals. NEVER use the narrower
+ * GITHUB_ALL_CHARGEBACK_LANES for an exclusion: a stray §A copilot row landing on
+ * a bill surface must fall OUT of the Anthropic arm everywhere, not just in
+ * finance.ts (r1 finding 1).
+ *
+ * The SQL NOT IN lists in migs 0085/0115 mirror this for the VIEW-EMITTED tools
+ * only. copilot-app is absent from them by construction: it reaches no chargeback
+ * view. Anything that writes copilot-app to `actual_spend` must add it there too.
  */
 export const GITHUB_FIREWALL_EXCLUSIONS: readonly string[] = [
   ...new Set<string>([...GITHUB_LANES, ...GITHUB_USAGE_TOOLS]),
