@@ -82,7 +82,7 @@
     "prettier": "^3.9.6",
     "typescript": "^5.7.0",
     "vitest": "^4.1.1",
-    "vue-tsc": "^3.3.8"
+    "vue-tsc": "^3.3.10"
   },
   "engines": {
     "node": ">=24",
