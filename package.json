@@ -75,7 +75,7 @@
     "@vitejs/plugin-vue": "^6.0.5",
     "@vue/test-utils": "^2.4.6",
     "drizzle-kit": "^0.31.10",
-    "eslint": "^10.8.0",
+    "eslint": "^10.9.1",
     "happy-dom": "^20.11.0",
     "patch-package": "^8.0.1",
     "playwright-chromium": "^1.62.0",
