@@ -15,10 +15,16 @@ const { isAdmin, isOrgWide } = useAdminAccess()
 interface LifecycleResp {
   platform: { grace_hours: number; warn_days: number }
 }
-const { data: lifecycle, refresh: refreshLifecycle } = await useFetch<LifecycleResp>(
-  '/api/v1/admin/settings/project-lifecycle',
-  { default: () => null as unknown as LifecycleResp, immediate: isAdmin.value },
-)
+// Lazy, client-only, null default: docs/design/admin-nav-responsiveness.md D1/D2.
+const {
+  data: lifecycle,
+  error: lifecycleFetchError,
+  refresh: refreshLifecycle,
+} = useLazyFetch<LifecycleResp | null>('/api/v1/admin/settings/project-lifecycle', {
+  server: false,
+  default: () => null,
+  immediate: isAdmin.value,
+})
 
 const graceHours = ref<number | null>(null)
 const warnDays = ref<number | null>(null)
@@ -57,13 +63,15 @@ async function saveLifecycle() {
 </script>
 
 <template>
-  <div class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-policy-project-lifecycle">
+  <div class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-policy-project-lifecycle" data-admin-page="/admin/policies/project-lifecycle">
     <UiPageHead
       eyebrow="Policies"
       title="Project lifecycle"
       sub="Platform defaults for the project end-date model. Regions can override these on their region page."
     />
-    <UiCard accent="zeal" class="max-w-2xl" data-testid="admin-settings-lifecycle">
+    <UiFetchErrorBanner v-if="lifecycleFetchError" :error="lifecycleFetchError" label="the project lifecycle policy" @retry="refreshLifecycle" />
+    <AdminPageSkeleton v-else-if="lifecycle == null" :rows="3" :toolbar="false" class="max-w-2xl" />
+    <UiCard v-else accent="zeal" class="max-w-2xl" data-testid="admin-settings-lifecycle">
       <UiEyebrow>End-date cadence</UiEyebrow>
       <div class="space-y-3 text-sm mt-3">
         <div>

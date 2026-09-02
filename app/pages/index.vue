@@ -121,7 +121,8 @@ interface UsageResponse {
   unallocated: UnallocatedSummary
   tagged_spend: TaggedSpendRow[]
   surfaces: SurfaceRow[]
-  freshness_minutes_ago: number
+  /** null = no event to measure against — renders "freshness unknown" (§A6.1). */
+  freshness_minutes_ago: number | null
   note: string
   // ── ADR 0012 (additive: getMyUsage's own shape is also the MCP contract) ──
   headline: Headline
@@ -133,6 +134,8 @@ interface UsageResponse {
    * never "no".
    */
   has_ever_emitted?: boolean
+  /** §A6.2 — the degradation banner's signal; null = healthy, banner hidden. */
+  attribution_stall?: { since: string } | null
 }
 
 
@@ -189,7 +192,8 @@ const { data: usage, refresh: refreshUsage, error: usageError } = await useFetch
       },
       tagged_spend: [],
       surfaces: [],
-      freshness_minutes_ago: 0,
+      // §A6.1: a failed fetch is UNKNOWN freshness, never "Updated 0 min ago".
+      freshness_minutes_ago: null,
       note: '',
       // The zero-state hero. A failed fetch still raises the retry banner
       // below, so this is never a confident "$0.00" standing on its own.
@@ -788,6 +792,10 @@ const softCapTickPct = computed(() =>
       </div>
     </UiCard>
 
+    <!-- §A6.2 degradation banner — above the hero, so the trust caveat frames
+         every figure below it. Renders nothing while the signal is null. -->
+    <UiAttributionStallBanner :stall="usage?.attribution_stall" class="mb-4" />
+
     <!-- Band header: the month, its TOTAL, and where in the month we are. The
          month total appeared nowhere on this page before — the two hero cards
          below split it (project spend, then everything outside a budget) and
@@ -935,7 +943,9 @@ const softCapTickPct = computed(() =>
         </div>
       </div>
 
-      <UiFreshness :minutes="usage?.freshness_minutes_ago ?? 0" class="mt-4" />
+      <!-- §A6.1: the REAL minutes or nothing — a `?? 0` here is the fabricated
+           green the design kills; null renders the neutral unknown state. -->
+      <UiFreshness :minutes="usage?.freshness_minutes_ago" class="mt-4" />
     </UiCard>
 
     <!-- What does and does not reach the cost centre: ONE line, with an (i)

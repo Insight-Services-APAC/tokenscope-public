@@ -7,8 +7,11 @@
  * `default:` or `immediate:` — that registers the key as RESOLVED with a truthy
  * value and issues no request, so the shell dedupes onto it, reads `scopes` as
  * absent and renders "You don't have access to any reports" to a granted admin,
- * with no reports/meta row in the network tab. AppHeader did exactly this.
- * Nothing type-checks a fetch key.
+ * with no reports/meta row in the network tab. AppHeader did exactly this, and
+ * its offending fetch is gone (reporting visibility is now resolved server-side
+ * and rides the session — server/auth/nav-visibility.ts). The guard stays
+ * because the shared key still has three live callers. Nothing type-checks a
+ * fetch key.
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
@@ -71,7 +74,7 @@ describe("the shared 'reports-meta' fetch key", () => {
     expect(
       offenders,
       "A caller shares the shell's 'reports-meta' key AND may resolve it without fetching. " +
-        "Give it its own key (see AppHeader's 'reports-meta-nav').",
+        'Give it its own key, or let it ride the shell request without a default/immediate.',
     ).toEqual([])
   })
 })

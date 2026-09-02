@@ -9,6 +9,7 @@
 
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { consola } from 'consola'
+import { withReportingEntry } from '#shared/nav/reporting-entry'
 
 const { session, devLogin, logout, stopImpersonating } = useSession()
 const router = useRouter()
@@ -114,10 +115,20 @@ const userInitials = computed(() => {
 // homepage drawer) refresh THIS fetch via refreshNuxtData('inbox-open-count')
 // so the badge updates the moment an item is resolved/dismissed — without it the
 // count was stale until a hard reload. Also re-synced on navigation as a backstop.
-const { data: inbox, refresh: refreshInboxCount } = useFetch<{ items: unknown[]; total: number }>(
-  '/api/v1/me/inbox?ack_state=open&limit=1',
-  { key: 'inbox-open-count', default: () => ({ items: [], total: 0 }), watch: [session] },
-)
+// LAZY + client-only, deliberately. A plain `useFetch` here is awaited by
+// suspense, so this badge held up first paint of EVERY page for a number that
+// is decoration until it arrives — the pattern docs/design/
+// admin-nav-responsiveness.md outlawed for admin pages and never applied to the
+// global chrome. `default` keeps the badge at 0 until the count lands.
+const { data: inbox, refresh: refreshInboxCount } = useLazyFetch<{
+  items: unknown[]
+  total: number
+}>('/api/v1/me/inbox?ack_state=open&limit=1', {
+  key: 'inbox-open-count',
+  server: false,
+  default: () => ({ items: [], total: 0 }),
+  watch: [session],
+})
 const unreadCount = computed(() => inbox.value?.total ?? 0)
 const route = useRoute()
 watch(() => route.fullPath, () => {
@@ -180,76 +191,35 @@ const NAV_BY_ROLE: Record<string, Array<{ to: string; label: string; disabled?: 
   ],
 }
 
-// CC ownership is a RELATIONSHIP, not a role (J3, mig 0048) — the nav
-// entry appears for whoever holds active cou_owner rows, whatever their
-// role. count=1 is the dedicated fast path (R1 F9): one indexed COUNT,
-// owner or not — never the P&L aggregation from the chrome.
-const { data: myCcs } = useFetch<{ total: number }>('/api/v1/me/cost-centres?count=1', {
-  key: 'my-cost-centres-count',
-  default: () => ({ total: 0 }),
-  watch: [session],
-})
-
-// The consolidated Reporting area (/reporting) is the SINGLE reporting surface — it
-// replaced the former Team / Practices / Finance / My cost centres pages at the reporting
-// cutover (legacy pages deleted; no redirects — internal links now point at the scopes).
-// It appears for the reporting roles PLUS any cou_owner (CC ownership is a RELATIONSHIP,
-// not a role — J3). No feature flag: at pilot scale we ship directly and git-revert.
-const REPORTING_ROLES = ['manager', 'admin', 'global-finops', 'platform-admin']
-const isReportingRole = computed(() => REPORTING_ROLES.includes(session.value?.role ?? ''))
+// Reporting visibility is decided SERVER-SIDE and arrives on the session
+// (server/auth/nav-visibility.ts). CC ownership is still a RELATIONSHIP, not a
+// role (J3, mig 0048) and report-access grants are a third input — but the
+// chrome no longer fetches those inputs and OR-s them itself. It used to, over
+// two blocking round-trips, and the browser could disagree with the server
+// about who may see what.
 
 /*
- * A GRANTED developer (report_access_grant, mig 0129) is not in REPORTING_ROLES
- * and may hold no cou_owner row either, so neither existing check lit up the
- * Reporting entry — a person an admin explicitly granted company-wide access
- * had no way to reach it from the nav. Fetched on its OWN key — see below for
- * why it must not share the shell's — and kept LAZY: `immediate` snapshots
- * `isReportingRole` at setup so a reporting-role viewer — who already gets the
- * entry unconditionally — never pays for this fetch on first load.
+ * The consolidated Reporting area (/reporting) is the SINGLE reporting surface — it
+ * replaced the former Team / Practices / Finance / Business-Unit pages at the reporting
+ * cutover (legacy pages deleted; no redirects — internal links now point at the scopes).
+ *
+ * Three things open it, and only ONE of them is a role: a reporting role, an
+ * active cou_owner row (a RELATIONSHIP, not a role — J3, mig 0048), or a
+ * report-access grant (mig 0129 — a granted developer is in neither of the
+ * other two, and without this arm an admin could grant access the nav never
+ * showed). All three are combined server-side in
+ * server/auth/nav-visibility.ts and arrive as `session.reporting`; the role
+ * list itself now lives in shared/auth/roles.ts so client and server cannot
+ * drift. No feature flag: at pilot scale we ship directly and git-revert.
  */
-interface ReportsMetaForNav {
-  permissions?: string[]
-}
-/*
- * ITS OWN KEY. Sharing 'reports-meta' with /reporting looked like free deduping
- * and was not: this fetch is `immediate: false` for a reporting role and
- * carries a `default`, so it registered the shared key as RESOLVED with a
- * truthy `{}` without ever requesting. /reporting then deduped onto that entry,
- * issued no request at all, read `scopes` as absent and rendered "You don't
- * have access to any reports" to a platform-admin.
- */
-const { data: reportsMetaForNav } = useFetch<ReportsMetaForNav>('/api/v1/reports/meta', {
-  key: 'reports-meta-nav',
-  default: () => ({}),
-  immediate: !isReportingRole.value,
-  watch: [session],
-  retry: false,
-})
-const isGrantHolder = computed(() => (reportsMetaForNav.value?.permissions?.length ?? 0) > 0)
-
 const navLinks = computed(() => {
   const r = session.value?.role ?? 'developer'
   const base = NAV_BY_ROLE[r] ?? NAV_BY_ROLE.developer ?? []
-  const isOwner = (myCcs.value?.total ?? 0) > 0
-  const reportingRole = REPORTING_ROLES.includes(r)
-  const isGranted = isGrantHolder.value
 
-  // Splice the single Reporting entry after the personal views, before Admin.
-  if (!(reportingRole || isOwner || isGranted)) return base
-  // Reporting-roles open their default scope. A non-reporting-role owner (a plain developer
-  // who holds cou_owner rows) is deep-linked to the cost-centre scope — that IS their P&L
-  // view, the affordance the old "My cost centres" entry gave; a bare /reporting would open
-  // Regional (their defaultScope), not their P&L. Owner deep-link behaviour is UNCHANGED by
-  // the grant check: a granted-but-not-owner developer lands on plain /reporting instead — the
-  // shell self-lands on its own meta defaultScope, so this must never hardcode one.
-  const reporting: { to: string; label: string; disabled?: boolean } = {
-    to: reportingRole ? '/reporting' : isOwner ? '/reporting?scope=cost-centre' : '/reporting',
-    label: 'Reporting',
-  }
-  const adminIdx = base.findIndex((l) => l.to === '/admin')
-  return adminIdx === -1
-    ? [...base, reporting]
-    : [...base.slice(0, adminIdx), reporting, ...base.slice(adminIdx)]
+  // Splicing and the link target live in shared/nav/reporting-entry.ts so they
+  // are testable without mounting the chrome — a server test cannot see the
+  // client inverting the verdict or dropping the owner deep-link.
+  return withReportingEntry(base, session.value?.reporting)
 })
 </script>
 

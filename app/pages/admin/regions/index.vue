@@ -15,6 +15,7 @@
 
 import { computed, ref, watch, nextTick, onBeforeUnmount } from 'vue'
 import { consola } from 'consola'
+import AdminPageSkeleton from '../../../components/admin/AdminPageSkeleton.vue'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface RegionRow {
@@ -23,8 +24,7 @@ interface RegionRow {
   display_name: string
 }
 
-const { session, ensure } = useSession()
-await ensure()
+const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
@@ -32,14 +32,19 @@ const isAdmin = computed(() => {
 })
 const isPlatformAdmin = computed(() => session.value?.role === 'platform-admin')
 
-const { data, refresh } = await useFetch<{ regions: RegionRow[] }>(
+// Declared lazily, never awaited: navigation is never gated on data, and the
+// skeleton keys on ABSENT data, not `pending` (docs/design/admin-nav-responsiveness.md D1/D2).
+// `fetchError` — the dialog owns the `error` name below.
+const { data, error: fetchError, refresh } = useLazyFetch<{ regions: RegionRow[] } | null>(
   '/api/v1/admin/regions',
   {
-    default: () => ({ regions: [] }),
+    server: false,
+    default: () => null,
     immediate: isAdmin.value,
   },
 )
 const regions = computed(() => data.value?.regions ?? [])
+const skeleton = computed(() => !fetchError.value && data.value == null)
 
 // ── Create dialog ─────────────────────────────────────────────────────
 // a11y modelled on TagSessionDialog: role=dialog + aria-modal +
@@ -131,7 +136,7 @@ async function createRegion() {
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-regions">
+  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-regions" data-admin-page="/admin/regions">
     <UiPageHead
       eyebrow="Administration"
       title="Regions"
@@ -154,7 +159,9 @@ async function createRegion() {
       </UiButton>
     </div>
 
-    <UiCard flush data-testid="regions-list">
+    <UiFetchErrorBanner v-if="fetchError" :error="fetchError" label="regions" @retry="refresh" />
+    <AdminPageSkeleton v-else-if="skeleton" :rows="4" :toolbar="false" />
+    <UiCard v-else flush data-testid="regions-list">
       <div v-if="regions.length === 0">
         <UiEmptyState
           headline="No regions yet"
@@ -255,7 +262,7 @@ async function createRegion() {
       </div>
     </div>
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/regions">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

@@ -60,9 +60,26 @@ export function runtimeDatabaseUrl(): string | undefined {
  * this factory does not alter connection behaviour, it only makes the call
  * site singular. See the file header for why that matters.
  */
+/*
+ * Every client made here is remembered against the URL it was opened with, so
+ * a module holding only the client (server/workers/dispatch-lock.ts) can open a
+ * SIBLING pool to the same database. postgres.js hides the password on
+ * `sql.options` (`pass: null`), so the URL cannot be recovered from the client
+ * itself — this registry is the only way back. WeakMap: a closed client is
+ * collected with its entry.
+ */
+const clientUrls = new WeakMap<object, string>()
+
 export function createDbClient(
   url: string,
   options?: postgres.Options<Record<string, postgres.PostgresType>>,
 ): postgres.Sql<Record<string, unknown>> {
-  return postgres(url, options)
+  const client = postgres(url, options)
+  clientUrls.set(client, url)
+  return client
+}
+
+/** The URL `client` was opened with, or undefined for a client not made by createDbClient. */
+export function clientUrl(client: object): string | undefined {
+  return clientUrls.get(client)
 }

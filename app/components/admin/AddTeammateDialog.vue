@@ -18,9 +18,11 @@
 import { ref, onBeforeUnmount, computed, type Ref } from 'vue'
 import { consola } from 'consola'
 import UiButton from '../ui/Button.vue'
+import UiAuxFetchError from '../ui/AuxFetchError.vue'
 import { useModalA11y } from '../../composables/useModalA11y'
 import { apiErrorDetail } from '../../composables/useApiError'
 import { SELECTABLE_ROLES, roleLabel, type Role } from '#shared/auth/roles'
+import { BU_LABEL } from '#shared/reports/vocabulary'
 
 interface DirectoryHit {
   oid: string
@@ -42,10 +44,17 @@ interface DirectoryHit {
 const props = defineProps<{
   regionId: string
   orgUnits: { id: string; display_name: string }[]
+  /*
+   * The caller's org-units read failed. An empty picker over a failed read is
+   * the false empty D2 forbids (admin-nav-responsiveness.md): the submit is
+   * gated on a unit, so without this the dialog is simply unusable and silent
+   * about why.
+   */
+  orgUnitsError?: unknown
   open: boolean
   callerRole: string
 }>()
-const emit = defineEmits<{ close: []; added: [] }>()
+const emit = defineEmits<{ close: []; added: []; retryOrgUnits: [] }>()
 
 const query = ref('')
 const results = ref<DirectoryHit[]>([])
@@ -264,15 +273,24 @@ function errText(e: unknown, fallback: string): string {
             <template v-if="selected.department">{{ selected.department }}</template>
             <span class="italic"> (Entra hint — pick the matching unit below)</span>
           </p>
-          <select
-            id="at-orgunit"
-            v-model="orgUnitId"
-            class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
-            data-testid="at-orgunit"
-          >
-            <option value="" disabled>Select an org unit…</option>
-            <option v-for="u in orgUnits" :key="u.id" :value="u.id">{{ u.display_name }}</option>
-          </select>
+          <div class="mt-1 mb-3">
+            <select
+              id="at-orgunit"
+              v-model="orgUnitId"
+              :disabled="!!orgUnitsError"
+              class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none disabled:bg-calm/40 disabled:cursor-not-allowed"
+              data-testid="at-orgunit"
+            >
+              <option value="" disabled>Select an org unit…</option>
+              <option v-for="u in orgUnits" :key="u.id" :value="u.id">{{ u.display_name }}</option>
+            </select>
+            <UiAuxFetchError
+              :error="orgUnitsError"
+              :label="`${BU_LABEL}s`"
+              testid="at-orgunit-error"
+              @retry="emit('retryOrgUnits')"
+            />
+          </div>
 
           <label for="at-role" class="text-[12px] font-semibold text-carbon">Role</label>
           <select

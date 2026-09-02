@@ -42,6 +42,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import { fetchAcrossDrivers } from '../../../server/reporting/across-regions'
 import { getUnallocatedSummary } from '../../../server/utils/me-queries'
 import {
@@ -229,6 +230,10 @@ beforeAll(async () => {
   // models none of the day's 2000 vtd tokens → same rule, same $0 row.
   await surface(tmE, '2026-10-06', 'claude-ai', 8)
   await fact(tmE, '2026-10-06', 'claude-ai', 'claude-haiku-4-6', 8)
+
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {

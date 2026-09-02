@@ -91,6 +91,11 @@ export async function refreshLanded({ env = {}, stateDir } = {}) {
   // last_emission is EXPECTED, not a fault). Without it, now−last_emission alone
   // false-alarms red on any idle session.
   const lastBearer = body?.last_bearer_at ?? null
+  // The enrolment's own start. Lets the statusline age a NEVER-landed instance:
+  // null last_emission on a minutes-old enrolment is a first record still in
+  // flight; the same null hours later is a fault. Absent from an older server →
+  // null → the statusline keeps its previous (neutral) behaviour.
+  const tsStart = body?.ts_start ?? null
   const silent = !!body?.silent
   const revoked = !!body?.revoked
   try {
@@ -102,13 +107,13 @@ export async function refreshLanded({ env = {}, stateDir } = {}) {
       // from an unreachable endpoint (unknown). `checkedAt` doubles as the poll
       // throttle stamp the statusline reads to decide when a background refresh
       // is due; `revoked` carries the enrolment-revoked flag through to the render.
-      `${JSON.stringify({ ok: true, instanceId, lastEmission, lastBearer, silent, revoked, checkedAt: new Date().toISOString() })}\n`,
+      `${JSON.stringify({ ok: true, instanceId, lastEmission, lastBearer, tsStart, silent, revoked, checkedAt: new Date().toISOString() })}\n`,
       { mode: 0o600 },
     )
   } catch {
     /* cache write is best-effort */
   }
-  return { ok: true, lastEmission, lastBearer, silent, revoked }
+  return { ok: true, lastEmission, lastBearer, tsStart, silent, revoked }
 }
 
 // CLI: refresh using the global settings.json env (best-effort, prints the result).

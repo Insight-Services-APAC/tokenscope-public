@@ -28,8 +28,9 @@ import { useModalA11y } from '../../composables/useModalA11y'
 import { UI_TRIGGERABLE_WORKER_NAMES, UI_MONEY_WORKER_NAMES } from '#shared/workers/ui-triggerable'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
-const { session, ensure } = useSession()
-await ensure()
+// No `await ensure()`: the `admin` middleware guarantees the session before
+// the page instantiates (docs/design/admin-nav-responsiveness.md D1).
+const { session } = useSession()
 const isAdmin = computed(() => {
   const r = session.value?.role
   return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
@@ -123,11 +124,14 @@ interface RunRow {
   hasError: boolean
   warnings: string[]
 }
-const { data: runs, refresh: refreshRuns, pending: runsPending } = await useFetch<{
-  runs: RunRow[]
-  total: number
-}>(() => runsUrl.value, {
-  default: () => ({ runs: [], total: 0 }),
+// Every read on this page is DECLARED, never awaited (admin-nav-responsiveness
+// D1): lazy, client-only, `null` until it lands. The page renders skeleton /
+// error / empty / data keyed on the ABSENCE of data, never on `pending` (D2),
+// so a filter refetch keeps loaded rows on screen. Getter URLs keep Nuxt's
+// URL-derived key, which is what makes a filter change refetch.
+const { data: runs, error: runsError, refresh: refreshRuns, pending: runsPending } = useLazyFetch<{ runs: RunRow[]; total: number } | null>(() => runsUrl.value, {
+  server: false,
+  default: () => null,
   immediate: isAdmin.value,
 })
 
@@ -265,27 +269,9 @@ interface RecordsResp {
   regionScoped: boolean
   scopeNote: string | null
 }
-const { data: recs, refresh: refreshRecs, pending: recsPending } = await useFetch<RecordsResp>(
+const { data: recs, error: recsError, refresh: refreshRecs, pending: recsPending } = useLazyFetch<RecordsResp | null>(
   () => recsUrl.value,
-  {
-    default: () => ({
-      summary: {
-        statusScope: 'proposed',
-        total: 0,
-        byDisposition: {},
-        bySpendClass: {},
-        untaggedUsd: '0.00',
-        walkBackUsd: '0.00',
-        noInstallUsd: '0.00',
-        netDeltaUsd: '0.00',
-      },
-      records: [],
-      total: 0,
-      regionScoped: false,
-      scopeNote: null,
-    }),
-    immediate: isAdmin.value,
-  },
+  { server: false, default: () => null, immediate: isAdmin.value },
 )
 const statusLabel = computed(() => {
   const s = recs.value?.summary.statusScope ?? 'proposed'
@@ -299,12 +285,16 @@ function toggleRecord(id: string) {
 // ================= PROVIDERS (onboarding) =================
 // The managed onboarding surface: two CRUD tables across anthropic + github.
 //   Enterprises (provider_enterprise) — the credential-custody unit.
-//   Orgs        (provider_org)        — joined to its enterprise, with the live
-//                                       anthropic health verdict (folded inline by
-//                                       orgs.get's computeOrgHealth — no separate
-//                                       probe call). The key is NEVER carried; only
-//                                       a presence flag + a safe verdict.
+//   Orgs        (provider_org)        — joined to its enterprise. The live anthropic
+//                                       health verdict is NOT on the list row: it is
+//                                       read once from anthropic/health (per org,
+//                                       keyed by externalOrgId) and joined onto the
+//                                       row here, with its own loading/error state
+//                                       (admin-nav-responsiveness D5). The key is
+//                                       NEVER carried; only a presence flag + a safe
+//                                       verdict.
 interface OrgHealth {
+  externalOrgId: string
   color: 'green' | 'amber' | 'red'
   reason: string | null
   apiKindLabel: string | null
@@ -325,7 +315,6 @@ interface OrgRow {
   regionId: string | null
   regionCode: string | null
   keyPresent: boolean
-  health: OrgHealth | null
 }
 interface EnterpriseRow {
   id: string
@@ -346,18 +335,14 @@ interface EnterpriseRow {
   keyPresent: boolean
   orgCount: number
 }
-const { data: orgsData, refresh: refreshOrgs, pending: orgsPending } = await useFetch<{
-  orgs: OrgRow[]
-  total: number
-}>(() => '/api/v1/admin/reconciliation/orgs', {
-  default: () => ({ orgs: [], total: 0 }),
+const { data: orgsData, error: orgsError, refresh: refreshOrgs, pending: orgsPending } = useLazyFetch<{ orgs: OrgRow[]; total: number } | null>(() => '/api/v1/admin/reconciliation/orgs', {
+  server: false,
+  default: () => null,
   immediate: isAdmin.value,
 })
-const { data: entData, refresh: refreshEnterprises, pending: entPending } = await useFetch<{
-  enterprises: EnterpriseRow[]
-  total: number
-}>(() => '/api/v1/admin/reconciliation/enterprises', {
-  default: () => ({ enterprises: [], total: 0 }),
+const { data: entData, error: entError, refresh: refreshEnterprises, pending: entPending } = useLazyFetch<{ enterprises: EnterpriseRow[]; total: number } | null>(() => '/api/v1/admin/reconciliation/enterprises', {
+  server: false,
+  default: () => null,
   immediate: isAdmin.value,
 })
 
@@ -383,9 +368,9 @@ interface EnterpriseCoverage {
   }
   orgs: CoverageOrgObservation[]
 }
-const { data: coverageData, refresh: refreshCoverage } = await useFetch<{ coverage: EnterpriseCoverage[] }>(
+const { data: coverageData, error: coverageError, refresh: refreshCoverage } = useLazyFetch<{ coverage: EnterpriseCoverage[] } | null>(
   () => '/api/v1/admin/reconciliation/github/coverage',
-  { default: () => ({ coverage: [] }), immediate: isAdmin.value },
+  { server: false, default: () => null, immediate: isAdmin.value },
 )
 const coverageByEnterprise = computed(() => new Map(coverageData.value?.coverage.map((c) => [c.enterpriseId, c]) ?? []))
 /** This org's coverage observation, found by external_org_id across every enterprise's
@@ -469,30 +454,49 @@ async function recheckCoverage(e: EnterpriseRow) {
 }
 
 // Regions for the GitHub org→region home picker (ADR-0010 D4).
-const { data: regionsData } = await useFetch<{ regions: { id: string; code: string; displayName: string }[] }>(
+interface RegionsRaw {
+  regions: { id: string; code: string; display_name?: string; displayName?: string }[]
+}
+// It keeps its `error`: collapsed into `[]` the org dialog's region picker holds
+// only "— unmapped —" and reads as "there is nowhere to map this org" — the
+// false empty D2 forbids (docs/design/admin-nav-responsiveness.md).
+const { data: regionsData, error: regionsError, refresh: refreshRegions } = useLazyFetch<RegionsRaw | null>(
   () => '/api/v1/admin/regions',
-  {
-    default: () => ({ regions: [] }),
-    immediate: isAdmin.value,
-    transform: (r: { regions: { id: string; code: string; display_name?: string; displayName?: string }[] }) => ({
-      regions: r.regions.map((x) => ({ id: x.id, code: x.code, displayName: x.displayName ?? x.display_name ?? x.code })),
-    }),
-  },
+  { server: false, default: () => null, immediate: isAdmin.value },
+)
+const regionOptions = computed(() =>
+  (regionsData.value?.regions ?? []).map((x) => ({ id: x.id, code: x.code, displayName: x.displayName ?? x.display_name ?? x.code })),
 )
 
-// Endpoint-configured note (live probes are amber until NUXT_ANTHROPIC_API_ENDPOINT
-// is set) — read from the existing health route's flag.
-const { data: anthHealth } = await useFetch<{ endpointConfigured: boolean }>(
+// The ONE source of the per-org anthropic health verdict (key format + live
+// probe) and of the endpoint-configured flag (live probes are amber until
+// NUXT_ANTHROPIC_API_ENDPOINT is set). It probes every org over HTTPS, so it
+// is its own read with its own loading/error state, joined onto the Orgs rows
+// by externalOrgId — the orgs list never waits on it (D5).
+const {
+  data: anthHealth,
+  error: anthHealthError,
+  refresh: refreshAnthHealth,
+} = useLazyFetch<{ orgs: OrgHealth[]; total: number; endpointConfigured: boolean } | null>(
   () => '/api/v1/admin/reconciliation/anthropic/health',
-  { default: () => ({ endpointConfigured: false }), immediate: isAdmin.value },
+  { server: false, default: () => null, immediate: isAdmin.value },
 )
+const anthHealthByOrg = computed(
+  () => new Map((anthHealth.value?.orgs ?? []).map((h) => [h.externalOrgId, h])),
+)
+/** This anthropic org's verdict from the health read. null for github rows,
+ *  and until the read lands — the template tells those apart via anthHealth. */
+function orgHealth(o: OrgRow): OrgHealth | null {
+  return o.provider === 'anthropic' ? (anthHealthByOrg.value.get(o.externalOrgId) ?? null) : null
+}
 
 // Workstream B: whether the governance cutover is activated (ADR-0011 D11) —
 // global-finops-only endpoint, so gated the same way as canRunWorkers below
 // (a region admin simply sees the pre-activation org-level billing field,
 // which is harmless — they are not the audience for the cutover anyway).
-const { data: cutoverData } = await useFetch<{ status: string }>(() => '/api/v1/admin/governance-cutover', {
-  default: () => ({ status: 'not_started' }),
+const { data: cutoverData } = useLazyFetch<{ status: string } | null>(() => '/api/v1/admin/governance-cutover', {
+  server: false,
+  default: () => null,
   immediate: session.value?.role === 'global-finops' || session.value?.role === 'platform-admin',
 })
 const governanceActivated = computed(() => cutoverData.value?.status === 'activated')
@@ -534,7 +538,18 @@ function refreshProviders() {
   refreshOrgs()
   refreshEnterprises()
   refreshCoverage()
+  refreshAnthHealth()
 }
+
+// First paint (D2): the active tab's primary read has neither landed nor
+// failed → the page-level skeleton. Everything else on the page keys its own
+// skeleton / error / empty / data on its own read the same way.
+const showPageSkeleton = computed(() => {
+  const t = tab.value
+  const data = t === 'runs' ? runs.value : t === 'records' ? recs.value : orgsData.value
+  const error = t === 'runs' ? runsError.value : t === 'records' ? recsError.value : orgsError.value
+  return !error && data == null
+})
 
 // ---- toast (mirrors grants.vue / rate-cards.vue) ----
 const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
@@ -1067,9 +1082,9 @@ interface BackfillRequest {
   requestedAt: string
   finishedAt: string | null
 }
-const { data: backfills, refresh: refreshBackfills } = await useFetch<{ requests: BackfillRequest[] }>(
+const { data: backfills, error: backfillsError, refresh: refreshBackfills } = useLazyFetch<{ requests: BackfillRequest[] } | null>(
   () => '/api/v1/admin/reconciliation/backfill',
-  { default: () => ({ requests: [] }), immediate: isAdmin.value },
+  { server: false, default: () => null, immediate: isAdmin.value },
 )
 const hasInflightBackfill = computed(() =>
   (backfills.value?.requests ?? []).some((r) => r.status === 'pending' || r.status === 'running'),
@@ -1126,7 +1141,12 @@ function onBackfillSaved() {
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-reconciliation">
+  <div
+    v-if="isAdmin"
+    class="max-w-[1600px] mx-auto px-10 py-8 pb-20"
+    data-testid="admin-reconciliation"
+    data-admin-page="/admin/reconciliation"
+  >
     <UiPageHead
       eyebrow="Administration"
       title="Reconciliation"
@@ -1188,6 +1208,10 @@ function onBackfillSaved() {
       </button>
     </div>
 
+    <!-- First paint: the active tab's primary read is absent and not failed →
+         skeleton (D2). A refetch never re-enters this branch. -->
+    <AdminPageSkeleton v-if="showPageSkeleton" :tiles="4" :rows="8" />
+    <template v-else>
     <!-- ======================= RUNS ======================= -->
     <div v-show="tab === 'runs'" data-testid="admin-recon-runs">
       <!-- on-demand trigger: force a reconciliation-family worker to run now
@@ -1226,6 +1250,7 @@ function onBackfillSaved() {
         </select>
       </div>
 
+      <UiFetchErrorBanner :error="runsError" label="worker runs" @retry="refreshRuns()" />
       <UiCard>
         <ul v-if="runs?.runs.length" class="divide-y divide-carbon-6">
           <li v-for="r in runs.runs" :key="r.id" :data-testid="`admin-recon-run-${r.id}`">
@@ -1262,12 +1287,13 @@ function onBackfillSaved() {
             </div>
           </li>
         </ul>
-        <p v-else class="text-sm text-carbon-3 italic">No worker runs match. Runs appear once the scheduler dispatches a worker.</p>
+        <p v-else-if="!runsError" class="text-sm text-carbon-3 italic">No worker runs match. Runs appear once the scheduler dispatches a worker.</p>
       </UiCard>
     </div>
 
     <!-- ======================= RECORDS ======================= -->
     <div v-show="tab === 'records'" data-testid="admin-recon-records">
+      <UiFetchErrorBanner :error="recsError" label="reconciliation records" @retry="refreshRecs()" />
       <p v-if="recs?.scopeNote" class="text-xs text-carbon-3 mb-3 italic">{{ recs.scopeNote }}</p>
 
       <!-- KPI summary -->
@@ -1375,7 +1401,7 @@ function onBackfillSaved() {
         >
           Showing first {{ recs.records.length }} of {{ recs.total }} matching records (the KPI cards above reflect the full total).
         </p>
-        <p v-if="!recs?.records.length" class="text-sm text-carbon-3 italic">
+        <p v-if="!recsError && !recs?.records.length" class="text-sm text-carbon-3 italic">
           No reconciliation records match. (Note: <strong>matched</strong> deltas — within rounding noise — never produce a record.)
         </p>
       </UiCard>
@@ -1392,6 +1418,7 @@ function onBackfillSaved() {
         </span>
       </p>
 
+      <UiFetchErrorBanner :error="coverageError" label="GitHub org coverage" @retry="refreshCoverage()" />
       <!-- ---------- COVERAGE BANNER (Workstream D) ---------- -->
       <!-- Persisted-only (no live network call on page load) — an org whose coverage was
            never observed contributes to neither count, so a fresh/never-swept enterprise
@@ -1428,8 +1455,9 @@ function onBackfillSaved() {
         <h2 class="text-sm font-bold text-carbon">Enterprises</h2>
         <span class="text-[11px] text-carbon-3">credential-custody unit · github holds the billing PAT here</span>
       </div>
+      <UiFetchErrorBanner :error="entError" label="provider enterprises" @retry="refreshEnterprises()" />
       <UiCard class="mb-6">
-        <div v-if="entPending && !entData?.enterprises.length" class="text-sm text-carbon-3 italic py-2">Loading…</div>
+        <AdminPageSkeleton v-if="!entError && entData == null" :rows="3" :toolbar="false" />
         <div v-else-if="entData?.enterprises.length" class="overflow-x-auto">
           <table class="w-full text-sm">
             <thead>
@@ -1572,7 +1600,7 @@ function onBackfillSaved() {
             </tbody>
           </table>
         </div>
-        <div v-else class="py-6 text-center" data-testid="admin-recon-ent-empty">
+        <div v-else-if="!entError" class="py-6 text-center" data-testid="admin-recon-ent-empty">
           <div class="text-sm font-bold text-carbon">No enterprises registered</div>
           <p class="text-xs text-carbon-2 mt-1">Register a GitHub or Anthropic enterprise to hold its billing credential.</p>
           <UiButton kind="secondary" size="sm" class="mt-3" data-testid="admin-recon-ent-empty-add" @click="openCreateEnterprise">
@@ -1586,8 +1614,10 @@ function onBackfillSaved() {
         <h2 class="text-sm font-bold text-carbon">Orgs</h2>
         <span class="text-[11px] text-carbon-3">what events attribute to · anthropic carries the live health badge</span>
       </div>
+      <UiFetchErrorBanner :error="orgsError" label="provider orgs" @retry="refreshOrgs()" />
+      <UiFetchErrorBanner :error="anthHealthError" label="Anthropic org health" @retry="refreshAnthHealth()" />
       <UiCard>
-        <div v-if="orgsPending && !orgsData?.orgs.length" class="text-sm text-carbon-3 italic py-2">Loading…</div>
+        <AdminPageSkeleton v-if="!orgsError && orgsData == null" :rows="3" :toolbar="false" />
         <div v-else-if="orgsData?.orgs.length" class="overflow-x-auto">
           <table class="w-full text-sm">
             <thead>
@@ -1639,20 +1669,30 @@ function onBackfillSaved() {
                 <td class="py-2 pr-3 font-mono text-xs">{{ o.reconciliationMode }}</td>
                 <td class="py-2 pr-3">
                   <UiBadge :kind="o.keyPresent ? 'rag-green' : 'rag-red'">{{ o.keyPresent ? '✓' : '✗' }}</UiBadge>
-                  <span v-if="o.health?.keyFormatOk === false" class="ml-1">
+                  <span v-if="orgHealth(o)?.keyFormatOk === false" class="ml-1">
                     <UiBadge kind="rag-red">format</UiBadge>
                   </span>
                 </td>
                 <td class="py-2 pr-3">
+                  <span v-if="o.provider === 'github'" class="text-carbon-3 italic text-xs" title="GitHub reconciles via the enterprise PAT — health is at the enterprise, not per-org. The Key column shows the PAT is wired.">via enterprise</span>
+                  <!-- anthropic: the verdict is joined from the health read by
+                       externalOrgId, so it has its own loading and error state. -->
                   <UiBadge
-                    v-if="o.health"
-                    :kind="colorBadge[o.health.color]"
-                    :title="reasonLabel(o.health.reason)"
+                    v-else-if="orgHealth(o)"
+                    :kind="colorBadge[orgHealth(o)!.color]"
+                    :title="reasonLabel(orgHealth(o)!.reason)"
                     :data-testid="`admin-recon-org-health-${o.id}`"
                   >
-                    {{ reasonLabel(o.health.reason) }}
+                    {{ reasonLabel(orgHealth(o)!.reason) }}
                   </UiBadge>
-                  <span v-else-if="o.provider === 'github'" class="text-carbon-3 italic text-xs" title="GitHub reconciles via the enterprise PAT — health is at the enterprise, not per-org. The Key column shows the PAT is wired.">via enterprise</span>
+                  <span
+                    v-else-if="anthHealth == null && !anthHealthError"
+                    class="inline-block h-5 w-16 rounded-full bg-calm-2 animate-pulse align-middle"
+                    role="status"
+                    aria-busy="true"
+                    :data-testid="`admin-recon-org-health-loading-${o.id}`"
+                  ><span class="sr-only">Checking health…</span></span>
+                  <span v-else-if="anthHealthError" class="text-brand-hunger italic text-xs" title="The health read failed — Retry above.">unavailable</span>
                   <span v-else class="text-carbon-3 italic text-xs">—</span>
                 </td>
                 <td class="py-2 pr-3" :data-testid="`admin-recon-org-coverage-${o.id}`">
@@ -1700,7 +1740,7 @@ function onBackfillSaved() {
             </tbody>
           </table>
         </div>
-        <div v-else class="py-6 text-center" data-testid="admin-recon-org-empty">
+        <div v-else-if="!orgsError" class="py-6 text-center" data-testid="admin-recon-org-empty">
           <div class="text-sm font-bold text-carbon">No orgs registered</div>
           <p class="text-xs text-carbon-2 mt-1">
             Onboard an Anthropic org (use Discover to read its id from the key) or a GitHub org.
@@ -1716,9 +1756,11 @@ function onBackfillSaved() {
         <h2 class="text-sm font-bold text-carbon">Recent backfills</h2>
         <span class="text-[11px] text-carbon-3">on-demand historical pulls · last 25 · auto-refreshes while in flight</span>
       </div>
+      <UiFetchErrorBanner :error="backfillsError" label="recent backfills" @retry="refreshBackfills()" />
       <UiCard>
+        <AdminPageSkeleton v-if="!backfillsError && backfills == null" :rows="2" :toolbar="false" />
         <ul
-          v-if="backfills?.requests.length"
+          v-else-if="backfills?.requests.length"
           class="divide-y divide-carbon-6"
           data-testid="backfill-requests"
         >
@@ -1743,11 +1785,12 @@ function onBackfillSaved() {
             </div>
           </li>
         </ul>
-        <p v-else class="text-sm text-carbon-3 italic">
+        <p v-else-if="!backfillsError" class="text-sm text-carbon-3 italic">
           No backfills requested yet. Use the Backfill action on a reconciled scope above to pull older provider usage.
         </p>
       </UiCard>
     </div>
+    </template>
 
     <!-- Onboarding dialogs -->
     <ProviderEnterpriseDialog
@@ -1760,10 +1803,13 @@ function onBackfillSaved() {
       :open="orgDialogOpen"
       :target="orgEditTarget"
       :enterprises="enterpriseOptions"
-      :regions="regionsData.regions"
+      :regions="regionOptions"
+      :regions-error="regionsError"
+      :regions-loading="!regionsError && regionsData == null"
       :governance-activated="governanceActivated"
       @close="orgDialogOpen = false"
       @saved="onOrgSaved"
+      @retry-regions="refreshRegions"
     />
     <BackfillDialog
       :target="backfillTarget"
@@ -2045,7 +2091,7 @@ function onBackfillSaved() {
       </div>
     </div>
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/reconciliation">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

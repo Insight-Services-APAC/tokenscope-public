@@ -93,6 +93,14 @@ export default defineEventHandler(async (event) => {
         ON CONFLICT (conversation_id, instance_id) DO UPDATE SET
           reason = 'api-uncorroborated', resolved_at = NULL, updated_at = now()
       `)
+      // The flip removes this session's arm-1 history from v_complete_usage with no
+      // timestamp a trailing window can see — same tx, queue the teammate for a
+      // full-history rollup recompute (docs/design/usage-rollup-lane.md R4).
+      await tx.execute(sql`
+        INSERT INTO usage_rollup_refresh (teammate_id, requested_at)
+        VALUES (${session.teammateId}::uuid, statement_timestamp())
+        ON CONFLICT (teammate_id) DO UPDATE SET requested_at = GREATEST(usage_rollup_refresh.requested_at + interval '1 microsecond', statement_timestamp())
+      `)
       await tx.execute(sql`
         UPDATE over_emission SET state = 'quarantined', quarantined_conversation_id = ${body.conversation_id},
           resolved_at = now(), resolved_by = ${session.teammateId}::uuid, resolved_over_usd = ${watermark}::numeric

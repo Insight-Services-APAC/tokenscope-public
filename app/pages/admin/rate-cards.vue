@@ -20,6 +20,7 @@
 import { computed, ref, watch, type Ref } from 'vue'
 import { consola } from 'consola'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
+import AdminPageSkeleton from '../../components/admin/AdminPageSkeleton.vue'
 import { useModalA11y } from '../../composables/useModalA11y'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
@@ -40,8 +41,7 @@ interface CardRow extends Record<string, unknown> {
   in_use: boolean
 }
 
-const { session, ensure } = useSession()
-await ensure()
+const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
@@ -53,14 +53,26 @@ const isOrgWide = computed(() => {
 })
 const regionId = computed(() => session.value?.regionId ?? '')
 
-const { data, refresh, pending } = await useFetch<{ rate_cards: CardRow[] }>(
+// Both reads are declared lazily and never awaited: navigation is never gated
+// on data, and the skeleton keys on ABSENT data, not `pending`
+// (docs/design/admin-nav-responsiveness.md D1/D2).
+const { data, error, refresh } = useLazyFetch<{ rate_cards: CardRow[] } | null>(
   '/api/v1/admin/rate-cards',
-  { default: () => ({ rate_cards: [] }), immediate: isAdmin.value },
+  { server: false, default: () => null, immediate: isAdmin.value },
 )
+const skeleton = computed(() => !error.value && data.value == null)
 
-const { data: regionsData } = await useFetch<{ regions: { id: string; code: string; display_name: string }[] }>(
+// The create dialog's region tier picker. Its `error` is kept: a region admin
+// whose read failed sees a select with NO option at all (the "Global" option is
+// org-wide only) and cannot tell that from "you may not pick a region" — the
+// false empty D2 forbids (docs/design/admin-nav-responsiveness.md).
+const {
+  data: regionsData,
+  error: regionsError,
+  refresh: refreshRegions,
+} = useLazyFetch<{ regions: { id: string; code: string; display_name: string }[] } | null>(
   '/api/v1/admin/regions',
-  { default: () => ({ regions: [] }), immediate: isAdmin.value },
+  { server: false, default: () => null, immediate: isAdmin.value },
 )
 
 // Cards grouped by scope_key (server orders scope_key, effective desc).
@@ -277,7 +289,7 @@ async function createCard() {
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-rate-cards">
+  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-rate-cards" data-admin-page="/admin/rate-cards">
     <UiPageHead
       eyebrow="Administration"
       title="Rate cards"
@@ -301,7 +313,8 @@ async function createCard() {
       {{ toast.message }}
     </div>
 
-    <div v-if="pending" class="text-sm text-carbon-3 py-8 text-center">Loading…</div>
+    <UiFetchErrorBanner v-if="error" :error="error" label="rate cards" @retry="refresh" />
+    <AdminPageSkeleton v-else-if="skeleton" :rows="6" :toolbar="false" />
     <UiCard v-else-if="groups.length === 0">
       <div class="py-8 text-center">
         <div class="text-sm font-bold text-carbon">No rate cards</div>
@@ -309,6 +322,7 @@ async function createCard() {
       </div>
     </UiCard>
 
+    <template v-else>
     <div v-for="group in groups" :key="group.scopeKey" class="mb-6" :data-testid="`rate-card-group-${group.scopeKey}`">
       <div class="flex items-baseline gap-2 mb-2">
         <h2 class="text-sm font-bold text-carbon font-mono">{{ group.scopeKey }}</h2>
@@ -372,6 +386,7 @@ async function createCard() {
         </template>
       </AdminDataTable>
     </div>
+    </template>
 
     <!-- New-card dialog -->
     <div
@@ -418,13 +433,19 @@ async function createCard() {
               <select
                 id="rc-region"
                 v-model="newRegionId"
-                :disabled="!isOrgWide"
+                :disabled="!isOrgWide || !regionsData"
                 class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none disabled:bg-calm/30"
                 data-testid="rc-region"
               >
                 <option v-if="isOrgWide" value="">Global (all regions)</option>
                 <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
               </select>
+              <UiAuxFetchError
+                :error="regionsError"
+                label="regions"
+                testid="rc-region-error"
+                @retry="refreshRegions"
+              />
               <p v-if="!isOrgWide" class="text-[11px] text-carbon-3 mt-1">
                 Region admins create cards for their own region. Global cards need global-finops.
               </p>
@@ -564,7 +585,7 @@ async function createCard() {
       </div>
     </div>
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/rate-cards">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

@@ -237,6 +237,10 @@ describe('POST confirm — the merge', () => {
     const inst = await enrollProvisional(ALICE, 'confirm-dev-1')
     const shadow = await shadowTeammateOf(inst)
     await seedSpend(inst, shadow, '1.000000')
+    // Backdate the write instant so the dr-H4 assertion below can only pass if
+    // the merge itself bumps it (performance-observability-baseline.md O5).
+    await t.client`UPDATE attribution_record
+      SET ts_recorded = now() - interval '3 days' WHERE instance_id = ${inst}::uuid`
 
     const out = await call<{ id: string; confirmed: boolean; already_confirmed: boolean }>(
       confirmHandler,
@@ -269,16 +273,27 @@ describe('POST confirm — the merge', () => {
     // teammate AND upgraded to identity_state='confirmed' (+ re-stamped dims),
     // so the pre-confirm spend isn't orphaned on the retired shadow.
     const ar = await t.client<
-      { teammate_id: string; identity_state: string; region_id: string; org_unit_id: string }[]
+      {
+        teammate_id: string
+        identity_state: string
+        region_id: string
+        org_unit_id: string
+        bumped: boolean
+      }[]
     >`
       SELECT teammate_id::text AS teammate_id, identity_state,
-             region_id::text AS region_id, org_unit_id::text AS org_unit_id
+             region_id::text AS region_id, org_unit_id::text AS org_unit_id,
+             (ts_recorded > now() - interval '1 minute') AS bumped
         FROM attribution_record WHERE instance_id = ${inst}::uuid`
     expect(ar.length).toBe(1)
     expect(ar[0]!.teammate_id).toBe(aliceId)
     expect(ar[0]!.identity_state).toBe('confirmed')
     expect(ar[0]!.region_id).toBe(regionId)
     expect(ar[0]!.org_unit_id).toBe(ouId)
+    // dr-H4: the historical rewrite bumps ts_recorded in the SAME update — the
+    // ledger-mutation contract (tag-session.ts:181-200) the usage-rollup
+    // source-write signal depends on. Seeded 3 days stale above; must be fresh.
+    expect(ar[0]!.bumped).toBe(true)
     // No attribution row remains bound to the shadow teammate.
     const orphan = await t.client<{ c: string }[]>`
       SELECT COUNT(*)::text AS c FROM attribution_record WHERE teammate_id = ${shadow}::uuid`

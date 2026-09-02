@@ -80,6 +80,14 @@ const PRODUCERS: {
   attributionRecord: number
   attributionAggregate: number
   completeUsage: number
+  /**
+   * Token count of `usage_rollup_daily` — the §A day-grain rollup the region
+   * reports' non-project axes read (docs/design/usage-rollup-lane.md R5). It
+   * CARRIES project_id in its grain, so an unpinned read is exactly the hole
+   * this suite guards: a project figure computed inline from the rollup would
+   * be a second definition of project spend beside the seam. Defaults to 0.
+   */
+  usageRollup?: number
   /** The module this file obtains the project figure from. Defaults to the seam. */
   via?: string
   why?: string
@@ -186,7 +194,12 @@ const PRODUCERS: {
     // day-grained LANE series over a scope predicate — neither is a project-spend
     // producer, so neither earns a row of its own here; their clamp is executed
     // per scope by tests/integration/reports/cost-centre-engine-wrappers.test.ts.
-    completeUsage: 5,
+    // 5 → 1: the vendor split, practices ranking, provider split and exceptions
+    // strip moved onto usage_rollup_daily (usage-rollup-lane.md R5) — counted in
+    // `usageRollup` below. Seasonality is the ONE read left on the live view
+    // (off the page's request path, design R5).
+    completeUsage: 1,
+    usageRollup: 5,
     why: 'region-scoped usage figures on other axes, not project spend',
   },
   {
@@ -212,7 +225,12 @@ const PRODUCERS: {
     // into engine/per-person.ts — each scope-clamped, each read once. This file's
     // invariant is unchanged and the surface it can be broken on is smaller:
     // every read left here is a whole-company figure on a NON-project axis.
-    completeUsage: 6,
+    // 6 → 1: the region cards, provider split, trend, concentration scan and
+    // active-users trend moved onto usage_rollup_daily (usage-rollup-lane.md R5)
+    // — counted in `usageRollup` below. Seasonality is the ONE read left on the
+    // live view (off the page's request path, design R5).
+    completeUsage: 1,
+    usageRollup: 5,
     why: 'whole-company usage figures on other axes, not project spend',
   },
   {
@@ -235,9 +253,15 @@ const PRODUCERS: {
     attributionRecord: 0,
     attributionAggregate: 0,
     // The other five driver axes (teammate, surface, region, model, practice)
-    // read the lane inline: each is a scope-grain ranking, not a project total.
-    // A sixth inline read is a new axis and has to be argued for here.
-    completeUsage: 5,
+    // read the §A lane inline: each is a scope-grain ranking, not a project
+    // total. Since the rollup swap (usage-rollup-lane.md R5) those five read
+    // usage_rollup_daily — counted in `usageRollup` — while the PROJECT axis
+    // reads THROUGH the seam, which scans the rollup for this caller
+    // (`source: 'rollup'`, R5b) and the live view for every non-report
+    // consumer. A sixth inline read is a new axis and has to be argued for
+    // here.
+    completeUsage: 0,
+    usageRollup: 5,
     why: 'the other five driver axes, each a scope-grain ranking',
   },
   {
@@ -325,7 +349,7 @@ describe('project spend has ONE source, at every call site', () => {
 
   it.each(PRODUCERS)(
     '$file has no second spend source it could read instead',
-    ({ file, attributionRecord, attributionAggregate, completeUsage, why }) => {
+    ({ file, attributionRecord, attributionAggregate, completeUsage, usageRollup, why }) => {
       const code = stripComments(read(file))
       const note = why ? ` (allowed: ${why})` : ''
       expect(count(code, 'attribution_record'), `${file}: attribution_record reads${note}`).toBe(
@@ -341,6 +365,12 @@ describe('project spend has ONE source, at every call site', () => {
         `${file}: inline lane reads${note} — a project total belongs to the seam, ` +
           'so that one definition can be changed in one place',
       ).toBe(completeUsage)
+      expect(
+        count(code, 'usage_rollup_daily'),
+        `${file}: inline §A rollup reads${note} — the rollup carries project_id ` +
+          '(usage-rollup-lane.md R2), so an unpinned read is where a second ' +
+          'definition of project spend would land quietly',
+      ).toBe(usageRollup ?? 0)
     },
   )
 

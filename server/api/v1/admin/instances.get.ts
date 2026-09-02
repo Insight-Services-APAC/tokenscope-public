@@ -39,6 +39,7 @@ interface AdminInstanceRow extends InstanceMetricRow, Record<string, unknown> {
   teammate_id: string
   teammate_email: string
   teammate_display_name: string | null
+  last_bearer_at: string | null
 }
 
 export default defineEventHandler(async (event) => {
@@ -60,6 +61,13 @@ export default defineEventHandler(async (event) => {
         ia.raw_project_code                                         AS raw_project_code,
         ia.ts_start::text                                           AS ts_start,
         ia.ts_actual_end::text                                      AS ts_actual_end,
+        -- THE OTHER HALF OF THE ATTRIBUTION-STALL EVIDENCE. Stamped by every
+        -- /bearer mint, which Claude Code issues at startup and every ~29
+        -- minutes for the life of the process — so a fresh value means "a
+        -- client is running", NOT "a client is emitting". An operator asking
+        -- why a stall paged needs to see that distinction, and until this
+        -- column was exposed no page carried it at all.
+        ia.last_bearer_at::text                                     AS last_bearer_at,
         ia.teammate_id::text                                        AS teammate_id,
         t.email                                                     AS teammate_email,
         t.display_name                                              AS teammate_display_name,

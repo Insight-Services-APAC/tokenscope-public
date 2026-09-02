@@ -58,6 +58,7 @@
 import { createHash } from 'node:crypto'
 import { setHeader } from 'h3'
 import type { H3Event } from 'h3'
+import { appendServerTiming } from '../observability/request-timing'
 import { copilotFinanceMode } from '../reports/copilot-mode'
 import { requestClock } from '../utils/request-clock'
 import type { Session } from '../utils/auth'
@@ -197,10 +198,16 @@ function write(key: string, json: string, ttlMs: number, now: number): void {
 
 type Kind = 'response' | 'memo'
 
+/** The path `cached` took — O1's `cache;desc=<outcome>` Server-Timing marker. */
+type CacheOutcome = 'hit' | 'miss' | 'join'
+
 async function cached<T>(
   kind: Kind,
   keyMaterial: readonly (string | null | undefined)[],
   compute: () => Promise<T>,
+  // Out-param, not a return-shape change: the stats path already knows which
+  // branch ran, and every existing caller keeps its `Promise<T>` contract.
+  onOutcome?: (outcome: CacheOutcome) => void,
 ): Promise<T> {
   const ttlMs = reportCacheTtlMs()
   if (ttlMs <= 0) return compute()
@@ -210,16 +217,19 @@ async function cached<T>(
   const fresh = readFresh(key, now)
   if (fresh !== undefined) {
     stats[kind === 'response' ? 'responseHits' : 'memoHits']++
+    onOutcome?.('hit')
     return JSON.parse(fresh) as T
   }
 
   const joined = inflight.get(key)
   if (joined) {
     stats[kind === 'response' ? 'responseJoins' : 'memoJoins']++
+    onOutcome?.('join')
     return JSON.parse(await joined) as T
   }
 
   stats[kind === 'response' ? 'responseMisses' : 'memoMisses']++
+  onOutcome?.('miss')
   const startedAt = generation
   const run = (async () => {
     const value = await compute()
@@ -276,11 +286,23 @@ export async function withReportCache<T>(
    * (clock-rot-audit.md §H.6).
    */
   const utcDay = requestClock(event).today
-  const value = await cached('response', [...keyMaterial, utcDay, copilotFinanceMode()], compute)
+  let outcome: CacheOutcome | undefined
+  const value = await cached(
+    'response',
+    [...keyMaterial, utcDay, copilotFinanceMode()],
+    compute,
+    (o) => {
+      outcome = o
+    },
+  )
   // Headers only AFTER a successful body (v2-M1): a thrown 5xx must never
   // leave with `max-age` on it — an error is not a fact worth keeping.
   setHeader(event, 'cache-control', `private, max-age=${Math.floor(ttlMs / 1000)}`)
   setHeader(event, 'vary', 'Cookie')
+  // O1 (performance-observability-baseline.md §O1): the cache marker rides
+  // Server-Timing. This lands DURING the handler; the plugin's beforeResponse
+  // write appends after it — both sides append, neither clobbers.
+  if (outcome !== undefined) appendServerTiming(event, `cache;desc=${outcome}`)
   return value
 }
 

@@ -87,12 +87,12 @@ describe('parseLogAnalyticsRows', () => {
     const cols = [...COLS, 'QuerySource', 'LawCostUsd']
     const out = parseLogAnalyticsRows(cols, [
       ['sid-1', 'm', 'input', 100, '2026-06-01T00:00:00Z', 'r', 'main', 0.0123],
-      ['sid-1', 'm', 'output', 5, '2026-06-01T00:00:00Z', 'r', 'generate_session_title', '0.0004'],
+      ['sid-1', 'm', 'output', 5, '2026-06-01T00:00:00Z', 'r', 'side_question', '0.0004'],
     ])
     expect(out[0]!.querySource).toBe('main')
     expect(out[0]!.lawCostUsd).toBe(0.0123)
     // string-typed cost coerces (LAW dynamic columns can stringify)
-    expect(out[1]!.querySource).toBe('generate_session_title')
+    expect(out[1]!.querySource).toBe('side_question')
     expect(out[1]!.lawCostUsd).toBe(0.0004)
 
     // Absent columns / empty values → undefined (legacy emission shape).

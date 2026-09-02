@@ -143,6 +143,39 @@ describe('refreshLanded (Claude) — success writes the cache the statusline rea
     expect(cache.checkedAt).toBeTruthy() // the poll-throttle stamp
   })
 
+  it('200 → carries ts_start into the cache, so the statusline can AGE a never-landed enrolment', async () => {
+    writeAccess()
+    mockFetch(() => ({
+      ok: true,
+      json: async () => ({
+        last_emission: null,
+        last_bearer_at: '2026-07-01T00:30:28.697Z',
+        ts_start: '2026-06-28T09:00:00.000Z',
+        silent: true,
+        revoked: false,
+      }),
+    }))
+    const r = await refreshLanded({ env, stateDir: dir })
+    expect(r.tsStart).toBe('2026-06-28T09:00:00.000Z')
+    const cache = JSON.parse(readFileSync(join(dir, 'last-landed.json'), 'utf8'))
+    // Without this the null last_emission above is indistinguishable from a
+    // seconds-old enrolment, which is how a dead device reads as benign cyan.
+    expect(cache.tsStart).toBe('2026-06-28T09:00:00.000Z')
+  })
+
+  it('200 from an OLDER server with no ts_start → tsStart null, cache still written (back-compat)', async () => {
+    writeAccess()
+    mockFetch(() => ({
+      ok: true,
+      json: async () => ({ last_emission: null, silent: true, revoked: false }),
+    }))
+    const r = await refreshLanded({ env, stateDir: dir })
+    expect(r.ok).toBe(true)
+    expect(r.tsStart).toBeNull()
+    const cache = JSON.parse(readFileSync(join(dir, 'last-landed.json'), 'utf8'))
+    expect(cache.tsStart).toBeNull() // classifyLanding then keeps its old neutral behaviour
+  })
+
   it('200 revoked instance → cache carries revoked:true', async () => {
     writeAccess()
     mockFetch(() => ({

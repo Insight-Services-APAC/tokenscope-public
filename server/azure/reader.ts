@@ -40,6 +40,14 @@ const SESSION_ID_RE = /^[0-9a-f-]{36}$/i
 const DEFAULT_LOOKBACK_DAYS = 7
 const MAX_LOOKBACK_DAYS = 90
 
+/*
+ * Default healthCheck request bound. Callers with a tighter budget pass their
+ * own (the ops-alert evaluator probes at 5 s per ar-H6); this default keeps the
+ * interactive diagnostics page from hanging on a wedged query endpoint while
+ * staying generous enough that a healthy-but-slow workspace never reads as red.
+ */
+const HEALTHCHECK_TIMEOUT_MS = 10_000
+
 /**
  * ISO-8601 duration for a day count. `Durations` only aliases up to 7 days, but
  * the query API takes any ISO-8601 string — so a wider recovery read is
@@ -121,9 +129,12 @@ const UsageRecordSchema = z.object({
   // Used by the joiner for Copilot cost: cost_usd = nano_aiu × 1e-11.
   // Undefined for Claude records (those use token rate cards).
   nanoAiu: z.number().optional(),
-  // Claude's per-event query_source attr (mig 0045): 'main' or an auxiliary
-  // lane like 'generate_session_title'. Undefined for legacy/local data —
-  // the joiner stores NULL, which consumers must treat as unknown.
+  // Claude's per-event query_source attr (mig 0045), stored RAW. It is NOT the
+  // word 'main': Claude emits its own token ('repl_main_thread', 'agent:custom',
+  // 'compact', …) — vocabulary + evidence in
+  // docs/development/claude-code-telemetry-contract.md §Query-source vocabulary.
+  // Classify with shared/usage/query-source.ts, never by equality. Undefined for
+  // legacy/local data — the joiner stores NULL, which consumers treat as unknown.
   querySource: z.string().optional(),
   // Claude's own per-event cost_usd (informational, belt-and-braces). The KQL
   // mv-expand duplicates it onto every token-type row of the span; the joiner
@@ -306,14 +317,18 @@ export interface TelemetryReader {
    */
   instancePresence?(instanceId: string, hours: number): Promise<InstancePresence>
   /**
-   * Reachability probe of the telemetry READ path. For Log Analytics this runs a
-   * trivial KQL (`print`) that touches no table — validating DNS → the
-   * (AMPLS-private) query endpoint and that the MI token is accepted by the
-   * workspace API. NOTE: `print` needs no table-read grant, so this does NOT
-   * exercise the Log Analytics Reader role; it is a reachability probe, not an
-   * RBAC check (a real read could still 403). Resolves (never throws).
+   * Health probe of the telemetry READ path. For Log Analytics this is a
+   * BOUNDED READ OF THE REAL TABLE the joiner queries (`OTelLogs | take 1`
+   * over a short window) — NOT `print` (ops-alerting ar-H1: `print probe=1`
+   * needs no table and passed while `PrivateLinkValidationFailedError` killed
+   * every table read; the probe must fail exactly when the joiner would). It
+   * therefore exercises DNS → the (AMPLS-private) query endpoint, MI token
+   * acceptance AND the table-read grant. An EMPTY result is healthy — the
+   * probe asserts readability, not data freshness (that is the
+   * attribution-stall condition's job). Resolves (never throws); `timeoutMs`
+   * bounds the request (ops-alerting ar-H6 probe budget).
    */
-  healthCheck(): Promise<ReaderHealth>
+  healthCheck(opts?: { timeoutMs?: number }): Promise<ReaderHealth>
   /**
    * The OUTER scan bound this reader actually applies, in days, or undefined when
    * the concept does not apply to it (the local collector fetches the full set
@@ -328,11 +343,17 @@ export interface TelemetryReader {
 export class LocalCollectorReader implements TelemetryReader {
   constructor(private readonly endpoint: string) {}
 
-  async healthCheck(): Promise<ReaderHealth> {
+  async healthCheck(opts: { timeoutMs?: number } = {}): Promise<ReaderHealth> {
     // Local collector (dev/test) — confirm the endpoint answers at all.
     const start = Date.now()
     try {
-      const res = await resilientFetch(`${this.endpoint}/v1/health`)
+      const res = await resilientFetch(
+        `${this.endpoint}/v1/health`,
+        {},
+        // Caller-bounded probe (ops-alerting ar-H6). Default behaviour when no
+        // timeout is passed is unchanged (resilientFetch's own defaults).
+        opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs, retries: 0 } : {},
+      )
       return { ok: res.ok, kind: 'local', latencyMs: Date.now() - start, error: res.ok ? undefined : `HTTP ${res.status}` }
     } catch (err) {
       // S8 found + fixed the THROWING path's caller (diagnostics/index.get.ts);
@@ -1192,10 +1213,9 @@ export class LogAnalyticsReader implements TelemetryReader {
           this.opts.miClientId ? { managedIdentityClientId: this.opts.miClientId } : {},
         )
         // Log Analytics QUERY endpoint. The SDK default is `api.loganalytics.io`.
-        // VERIFIED on dev (2026-07-01): on the AMPLS/private-query workspace that
-        // hostname resolves to the SAME private-endpoint IP as api.monitor.azure.com
-        // (10.0.0.55), so the SDK DEFAULT already reaches the private query path
-        // (all Diagnostics probes green). Do NOT override to
+        // On the AMPLS/private-query workspace that hostname resolves to the SAME
+        // private-endpoint IP as api.monitor.azure.com, so the SDK DEFAULT already
+        // reaches the private query path. Do NOT override to
         // `https://api.monitor.azure.com`: that host does NOT serve the LA query API
         // path and returns 404 PathNotFoundError (even for `print`). queryEndpoint
         // stays an escape hatch but MUST be left empty on dev/sandbox — the earlier
@@ -1432,14 +1452,31 @@ export class LogAnalyticsReader implements TelemetryReader {
     )
   }
 
-  async healthCheck(): Promise<ReaderHealth> {
+  async healthCheck(opts: { timeoutMs?: number } = {}): Promise<ReaderHealth> {
     const start = Date.now()
+    const timeoutMs = opts.timeoutMs ?? HEALTHCHECK_TIMEOUT_MS
     try {
       const { client, LogsQueryResultStatus } = await this.getClient()
-      // `print` touches no table — exercises DNS → the (AMPLS-private) query
-      // endpoint and workspace-API token acceptance. It does NOT exercise
-      // table-read RBAC (a real read could still 403); reachability only.
-      const result = await client.queryWorkspace(this.workspaceId, 'print probe=1', { duration: 'PT5M' })
+      // A bounded read of the SAME table the joiner queries (buildSessionUsageKql
+      // reads OTelLogs). ops-alerting ar-H1: the previous `print probe=1` needed
+      // no table and stayed green through the 2026-08 AMPLS incident while
+      // PrivateLinkValidationFailedError killed every real read — the probe must
+      // fail exactly when the joiner would, which means touching the table (and
+      // with it the Reader-role grant). `take 1` + the 1h window bound the scan;
+      // an empty result is HEALTHY (readable-but-quiet — freshness is the
+      // attribution-stall condition's concern, not this probe's).
+      const result = await client.queryWorkspace(
+        this.workspaceId,
+        'OTelLogs | where TimeGenerated > ago(1h) | take 1',
+        { duration: 'PT1H' },
+        {
+          // Request-bounded on BOTH ends (ar-H6): the client aborts at timeoutMs
+          // and the service is told the same budget, so a wedged query can never
+          // hold the probe's caller.
+          abortSignal: AbortSignal.timeout(timeoutMs),
+          serverTimeoutInSeconds: Math.max(1, Math.ceil(timeoutMs / 1000)),
+        },
+      )
       const ok = result.status === LogsQueryResultStatus.Success
       return {
         ok,
@@ -1515,9 +1552,12 @@ export class LogAnalyticsReader implements TelemetryReader {
     const isPrivateIp = (ip: string) =>
       /^10\./.test(ip) || /^192\.168\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
     // Every FQDN from the AMPLS DNS request, so we can see per-record which
-    // privatelink zone is actually linked (resolves to a 10.0.0.x PE ip) vs
-    // missing (resolves public). api.loganalytics.io is the SDK default and has
-    // NO private-link path — expected public.
+    // privatelink zone is actually linked (resolves to the PE) vs missing
+    // (resolves public). The PE is IT's central one, outside our VNet, so the
+    // linked case is any RFC1918 address. api.loganalytics.io is the SDK default
+    // and resolves private too on an AMPLS env — it is listed first because a
+    // PUBLIC answer there while the rest are private is the exact shape of a
+    // query egressing outside the perimeter.
     const dnsTargets = [
       'api.loganalytics.io',
       `${this.workspaceId}.oms.opinsights.azure.com`,
@@ -1680,17 +1720,49 @@ export function getTelemetryReader(opts: { lookbackDays?: number } = {}): Teleme
     if (!workspaceId) {
       throw new Error('NUXT_LOG_ANALYTICS_WORKSPACE_ID not set — LogAnalyticsReader has no workspace')
     }
-    return new LogAnalyticsReader(workspaceId, {
+    const readerOpts = {
       lookbackDays: opts.lookbackDays,
       miClientId: process.env.NUXT_AZURE_MI_CLIENT_ID,
       // Private-link envs set this to https://api.monitor.azure.com (the LA query
       // endpoint over AMPLS). Empty = SDK default api.loganalytics.io.
       queryEndpoint: process.env.NUXT_AZURE_MONITOR_QUERY_ENDPOINT,
-    })
+    }
+    return memoisedReader(
+      ['log-analytics', workspaceId, readerOpts.miClientId, readerOpts.queryEndpoint, readerOpts.lookbackDays],
+      () => new LogAnalyticsReader(workspaceId, readerOpts),
+    )
   }
   const endpoint = process.env.NUXT_AZURE_MONITOR_ENDPOINT
   if (!endpoint) {
     throw new Error('NUXT_AZURE_MONITOR_ENDPOINT not set — local telemetry reader has no source')
   }
-  return new LocalCollectorReader(endpoint)
+  return memoisedReader(['local', endpoint], () => new LocalCollectorReader(endpoint))
+}
+
+/*
+ * One reader per resolved config, for the life of the process. The
+ * credential/client memo (ING-11) lives on the LogAnalyticsReader INSTANCE, so
+ * a factory that built a new instance per call discarded it on every request
+ * and re-ran the managed-identity chain each time
+ * (docs/design/admin-nav-responsiveness.md D4). Keyed on everything the
+ * constructor reads — workspace, MI client id, query endpoint, lookback — so
+ * a widened recovery reader and the steady-state one are distinct entries and
+ * a changed env resolves to a new reader rather than a stale one. The set of
+ * distinct configs a process ever sees is a handful, so the map is unbounded.
+ */
+const readerCache = new Map<string, TelemetryReader>()
+
+function memoisedReader(key: ReadonlyArray<string | number | undefined>, build: () => TelemetryReader): TelemetryReader {
+  const k = JSON.stringify(key)
+  let reader = readerCache.get(k)
+  if (!reader) {
+    reader = build()
+    readerCache.set(k, reader)
+  }
+  return reader
+}
+
+/** Tests only: forget every memoised reader (a mocked SDK or a changed env must not see a reader built under the previous one). */
+export function resetTelemetryReaderCache(): void {
+  readerCache.clear()
 }

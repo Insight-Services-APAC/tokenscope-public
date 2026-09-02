@@ -67,6 +67,7 @@ beforeEach(async () => {
   await t.client`DELETE FROM session_quarantine WHERE teammate_id = ${teammateId}::uuid`
   await t.client`DELETE FROM attribution_record WHERE teammate_id = ${teammateId}::uuid`
   await t.client`DELETE FROM actual_spend WHERE teammate_id = ${teammateId}::uuid`
+  await t.client`DELETE FROM usage_rollup_refresh WHERE teammate_id = ${teammateId}::uuid`
 })
 
 describe('over-emission (§A integrity)', () => {
@@ -250,6 +251,13 @@ describe('over-emission (§A integrity)', () => {
     // session_quarantine written with the api-uncorroborated reason.
     const [sq] = await t.client<{ reason: string }[]>`SELECT reason FROM session_quarantine WHERE teammate_id = ${teammateId}::uuid AND conversation_id = 'sess-big'`
     expect(sq!.reason).toBe('api-uncorroborated')
+    // The flip retro-mutates v_complete_usage with no timestamp signal, so the SAME
+    // transaction must queue the teammate for a full-history rollup recompute
+    // (docs/design/usage-rollup-lane.md R4).
+    const refresh = await t.client<{ teammate_id: string }[]>`
+      SELECT teammate_id::text AS teammate_id FROM usage_rollup_refresh WHERE teammate_id = ${teammateId}::uuid`
+    expect(refresh).toHaveLength(1)
+    expect(refresh[0]!.teammate_id).toBe(teammateId)
     // Re-detect: OTel (excl. the forgery) = $50 = API → over clears.
     await detectOverEmission(t.db, WINDOW)
     const [cleared] = await t.client<{ state: string; over: string }[]>`SELECT state, over_usd::text AS over FROM over_emission WHERE id = ${flag!.id}::uuid`
@@ -295,5 +303,8 @@ describe('over-emission (§A integrity)', () => {
     // next read; reading at the event's own timestamp asserted against that.
     const usage = await getMyUsage(t.db, teammateId, new Date(`${DAY}T12:00:01.000Z`))
     expect(Number(usage.unallocated.untagged_cost_usd)).toBeCloseTo(500, 2) // both sessions still counted
+    // accept changes NOTHING in v_complete_usage — it must not queue a rollup recompute.
+    const refresh = await t.client`SELECT 1 FROM usage_rollup_refresh WHERE teammate_id = ${teammateId}::uuid`
+    expect(refresh).toHaveLength(0)
   })
 })

@@ -296,6 +296,15 @@ export async function rehomePlacement(
      WHERE teammate_id = ${teammateId}::uuid AND ${since('period_start')} AND ${notAlready}
     RETURNING id::text AS id`)
 
+  // The restated dims change v_complete_usage on ALL arms (unaccounted_usage,
+  // actual_spend and reconciliation_record carry no ts_recorded a trailing window
+  // can see) — same tx, queue the teammate for a full-history usage_rollup_daily
+  // recompute (docs/design/usage-rollup-lane.md R4).
+  await tx.execute(sql`
+    INSERT INTO usage_rollup_refresh (teammate_id, requested_at)
+    VALUES (${teammateId}::uuid, statement_timestamp())
+    ON CONFLICT (teammate_id) DO UPDATE SET requested_at = GREATEST(usage_rollup_refresh.requested_at + interval '1 microsecond', statement_timestamp())`)
+
   return {
     attributionRows: [...attribution].length,
     unaccountedRows: [...unaccounted].length,

@@ -161,13 +161,11 @@ export async function runTelemetryRecovery(
     /*
      * ONE reader for the whole run, not one per slice.
      *
-     * `getTelemetryReader` builds a fresh LogAnalyticsReader — and with it a new
-     * Azure client and credential chain — on every call. Its memoisation is
-     * PER READER INSTANCE, so rebuilding per slice defeats it entirely and pays
-     * the credential handshake again each time; across a large recovery campaign
-     * that is real overhead and a throttling risk. (An earlier comment here
-     * claimed rebuilding was cheap BECAUSE of that memoisation, which had it
-     * exactly backwards.)
+     * The Azure client/credential memo is PER READER INSTANCE. `getTelemetryReader`
+     * now returns one instance per config (reader.ts memoisedReader), so a per-slice
+     * call would resolve to the same reader anyway — but `readerFor` is injectable
+     * and a test double need not memoise, so the hoist stays: one reader, one
+     * credential handshake per run.
      *
      * Safe to hoist: `req.lookback_days` is a column of this request row and does
      * not change while we drain it, so the applied window still cannot drift from

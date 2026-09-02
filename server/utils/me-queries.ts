@@ -17,6 +17,7 @@
  * moved here.
  */
 import { sql } from 'drizzle-orm'
+import { splitBounds, type RollupGate } from '../usage/rollup-gate'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { activeProjectPredicate, endedProjectExpr } from '../db/project-predicates'
 import { oauthScopeLabel } from '../../shared/oauth-scopes'
@@ -166,7 +167,12 @@ export interface UsageSummary {
  * allocation, activity) plus the additive-quota summary. Extracted from
  * GET /api/v1/me/usage — identical SQL and response shape.
  */
-export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Date()): Promise<UsageSummary> {
+export async function getMyUsage(
+  tx: Tx,
+  teammateId: string,
+  now: Date = new Date(),
+  gate: RollupGate | null = null,
+): Promise<UsageSummary> {
   const monthStartIso = monthStartIsoFor(now)
   const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
   const monthEndIso = monthEnd.toISOString()
@@ -187,10 +193,60 @@ export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Dat
   const spendEndIso = monthToDateWindow(now).endIso
   const activeCutoff = new Date(now.getTime() - ACTIVE_NOW_WINDOW_MINUTES * 60_000).toISOString()
 
+  /*
+   * The split source for the project money, on getMyUsage's OWN gate. It cannot
+   * borrow the page's: that one is validated against the page window, and
+   * coverage is a property of the WINDOW — this read uses month-to-date, which
+   * can reach further back. Borrowing it would open the rollup for a range its
+   * contract never covered, and a false open produces wrong money.
+   */
+  const gb = gate ? splitBounds(gate, { startIso: monthStartIso, endIso: spendEndIso }) : null
+  const projectUsageSource = gate && gb
+    ? sql`
+        SELECT r.project_id, r.cost_usd, r.tokens, r.tool
+          FROM usage_rollup_daily r
+         WHERE r.teammate_id = ${teammateId}::uuid
+           AND r.day >= ${gb.rollupFrom}::date
+           AND r.day <= ${gb.rollupTo}::date
+        UNION ALL
+        SELECT u.project_id, u.cost_usd, u.tokens, u.tool
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.ts_event >= ${gb.liveFrom}::timestamptz
+           AND u.ts_event <  ${spendEndIso}::timestamptz`
+    : sql`
+        SELECT u.project_id, u.cost_usd, u.tokens, u.tool
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.ts_event >= ${monthStartIso}::timestamptz
+           AND u.ts_event <  ${spendEndIso}::timestamptz`
+
   const rows = await tx.execute<BucketRow>(
     sql`
       -- candidate projects: union of assigned-to-user AND contributed-by-user-this-month
-      WITH user_project AS (
+      WITH
+      /*
+       * ONE scan of the seam, feeding BOTH the contributor lane and the money.
+       * This query used to read v_complete_usage twice on the same teammate and
+       * window: once for DISTINCT project_id, then again in the LEFT JOIN for
+       * the sums. The join's project_id = p.id implies the lane's
+       * project_id IS NOT NULL, so the second read was a strict SUBSET of the
+       * first and one GROUP BY yields both.
+       *
+       * Not licensed by D2 (usage-read-path-performance.md), whose shortcut is
+       * for TEXTUALLY identical predicates; these are only semantically
+       * related, so the equivalence is argued above and pinned by the golden.
+       */
+      project_usage AS (
+        SELECT p2.project_id,
+               SUM(p2.cost_usd) AS cost_usd,
+               SUM(p2.tokens)   AS tokens,
+               array_agg(DISTINCT p2.tool ORDER BY p2.tool) AS tools
+          FROM (${projectUsageSource}) p2
+         WHERE p2.project_id IS NOT NULL
+         GROUP BY p2.project_id
+      ),
+      user_project AS (
         -- ASSIGNMENT lane — gated on end_date (D5): an open assignment to an
         -- ENDED project must NOT keep a $0 bucket in "My usage" (the reported
         -- leak). Ended projects with real pre-end spend still surface via the
@@ -209,12 +265,8 @@ export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Dat
         -- (provider-only) carries a NULL project_id by construction and so
         -- cannot produce a bucket — which is correct, it has no project to
         -- belong to.
-        SELECT DISTINCT u.project_id, FALSE AS is_assigned, TRUE AS is_contributor
-          FROM v_complete_usage u
-         WHERE u.teammate_id = ${teammateId}::uuid
-           AND u.project_id IS NOT NULL
-           AND u.ts_event >= ${monthStartIso}::timestamptz
-           AND u.ts_event <  ${spendEndIso}::timestamptz
+        SELECT pu.project_id, FALSE AS is_assigned, TRUE AS is_contributor
+          FROM project_usage pu
       ),
       candidate AS (
         SELECT project_id,
@@ -232,8 +284,8 @@ export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Dat
         -- project surfaces onto that seam and left this one behind, so the
         -- homepage hero and the project page could disagree about the same
         -- project BY CONSTRUCTION (ADR 0012 decision 1).
-        COALESCE(SUM(u.cost_usd), 0)::text AS cost_usd,
-        COALESCE(SUM(u.tokens), 0)::text AS tokens,
+        COALESCE(pu.cost_usd, 0)::text AS cost_usd,
+        COALESCE(pu.tokens, 0)::text AS tokens,
         COALESCE(
           (SELECT SUM(al.budget_usd)::text
              FROM allocation al
@@ -273,21 +325,19 @@ export async function getMyUsage(tx: Tx, teammateId: string, now: Date = new Dat
         -- flag it so the UI can collapse it into an "Ended" section. Dropping
         -- it would under-report the dev's month + corrupt the quota math.
         ${endedProjectExpr('p')} AS ended,
-        -- Distinct contributing clients this month. LEFT JOIN → NULL when the
-        -- project has an assignment but no spend; array_remove drops it so an
-        -- empty bucket reports [] not [null].
-        array_remove(array_agg(DISTINCT u.tool ORDER BY u.tool), NULL) AS tools
+        -- Distinct contributing clients this month. The pre-aggregate already
+        -- computed them per project; COALESCE covers the assigned-but-no-spend
+        -- bucket, which must report [] rather than [null] — the same guarantee
+        -- array_remove gave when this was aggregated here.
+        COALESCE(pu.tools, ARRAY[]::text[]) AS tools
       FROM project p
       JOIN candidate c ON c.project_id = p.id
       -- The quarantine exclusion that used to be spelled out here lives INSIDE
       -- v_complete_usage (mig 0082/0101), so it cannot drift out of step with
       -- every other §A surface the way a copy would.
-      LEFT JOIN v_complete_usage u
-        ON u.project_id = p.id
-       AND u.teammate_id = ${teammateId}::uuid
-       AND u.ts_event >= ${monthStartIso}::timestamptz
-       AND u.ts_event <  ${spendEndIso}::timestamptz
-      GROUP BY p.id, p.code, p.display_name, p.allocation_mode, c.is_assigned, c.is_contributor
+      -- The SAME pre-aggregate the contributor lane read. LEFT, so a project
+      -- with an assignment and no spend keeps its zero bucket.
+      LEFT JOIN project_usage pu ON pu.project_id = p.id
       ORDER BY p.code
     `,
   )
@@ -885,8 +935,13 @@ export async function getActivityTypes(
   regionId: string,
   teammateId: string,
 ): Promise<ActivityType[]> {
-  // (1) The caller's own activities, most-used first.
-  const mineRows = await tx.execute<{ label: string }>(sql`
+  // (1) the caller's own activities, most-used first; (2) the standard / region
+  // vocabulary. Concurrent issuance on ONE tx connection: postgres-js pipelines
+  // and answers in order — no per-query await gaps (fully one wave on
+  // prepared statements), no cross-dependencies
+  // (docs/design/request-floor-performance.md F5).
+  const [mineRows, stdRows] = await Promise.all([
+    tx.execute<{ label: string }>(sql`
     SELECT activity AS label
       FROM session_assignment
      WHERE teammate_id = ${teammateId}::uuid
@@ -894,15 +949,15 @@ export async function getActivityTypes(
        AND btrim(activity) <> ''
      GROUP BY activity
      ORDER BY COUNT(*) DESC, lower(activity)
-  `)
-  // (2) The standard / region vocabulary.
-  const stdRows = await tx.execute<{ label: string; is_standard: boolean }>(sql`
+  `),
+    tx.execute<{ label: string; is_standard: boolean }>(sql`
     SELECT label, is_standard
       FROM activity_type
      WHERE is_active = TRUE
        AND (region_id IS NULL OR region_id = ${regionId}::uuid)
      ORDER BY sort_order, lower(label)
-  `)
+  `),
+  ])
   const stdByLower = new Map([...stdRows].map((r) => [r.label.toLowerCase(), r]))
 
   const seen = new Set<string>()

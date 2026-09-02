@@ -78,19 +78,44 @@ export async function applyRlsContext<TSchema extends Record<string, unknown>>(
   tx: PostgresJsDatabase<TSchema>,
   ctx: RlsContext,
 ): Promise<void> {
-  await tx.execute(sql`SELECT set_config('app.user_region_id', ${ctx.userRegionId}, true)`)
-  await tx.execute(sql`SELECT set_config('app.user_org_path', ${ctx.userOrgPath}, true)`)
-  await tx.execute(sql`SELECT set_config('app.user_role', ${ctx.userRole}, true)`)
-  await tx.execute(sql`SELECT set_config('app.user_teammate_id', ${ctx.userTeammateId}, true)`)
+  // All four GUCs in ONE statement — every RLS request pays this roundtrip
+  // (docs/design/request-floor-performance.md F1). `true` keeps each
+  // transaction-local (SET LOCAL semantics).
+  await tx.execute(sql`SELECT
+    set_config('app.user_region_id', ${ctx.userRegionId}, true),
+    set_config('app.user_org_path', ${ctx.userOrgPath}, true),
+    set_config('app.user_role', ${ctx.userRole}, true),
+    set_config('app.user_teammate_id', ${ctx.userTeammateId}, true)`)
 }
+
+/**
+ * ONE SNAPSHOT for the whole request, for a handler that needs its own figures
+ * to agree with each other.
+ *
+ * READ COMMITTED gives every statement a fresh snapshot, so a handler issuing
+ * fifteen queries reads fifteen moments in time and a commit landing between
+ * two of them can make one figure contradict another. Most handlers do not
+ * care. A handler that derives one figure from a cached basis and another from
+ * the live one does: it can prove the two bases agree and then read them either
+ * side of the write that makes them disagree.
+ *
+ * Opt-in, and only for READ-ONLY handlers: a repeatable-read snapshot is free
+ * to take and holds no locks, but a writer under it can abort with a
+ * serialisation failure, which a read has no way to reach.
+ */
+export type RlsIsolation = 'read committed' | 'repeatable read'
 
 export async function withRlsContext<TSchema extends Record<string, unknown>, T>(
   db: PostgresJsDatabase<TSchema>,
   ctx: RlsContext,
   fn: (tx: PostgresJsDatabase<TSchema>) => Promise<T>,
+  opts: { isolationLevel?: RlsIsolation } = {},
 ): Promise<T> {
-  return db.transaction(async (tx) => {
-    await applyRlsContext(tx as unknown as PostgresJsDatabase<TSchema>, ctx)
-    return fn(tx as unknown as PostgresJsDatabase<TSchema>)
-  })
+  return db.transaction(
+    async (tx) => {
+      await applyRlsContext(tx as unknown as PostgresJsDatabase<TSchema>, ctx)
+      return fn(tx as unknown as PostgresJsDatabase<TSchema>)
+    },
+    opts.isolationLevel ? { isolationLevel: opts.isolationLevel } : undefined,
+  )
 }

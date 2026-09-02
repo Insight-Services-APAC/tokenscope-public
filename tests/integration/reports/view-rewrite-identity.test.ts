@@ -1,10 +1,11 @@
 // @vitest-environment node
 /*
- * Migration 0126 is PERF-ONLY: v_complete_usage's output is byte-identical to
- * 0125's. This file is the committed half of that proof
+ * Migrations 0126 and 0135 are PERF-ONLY: v_complete_usage's output is
+ * byte-identical to 0125's. This file is the committed half of that proof
  * (docs/design/reporting-consolidation/09-reports-performance-plan.md D3/D4;
- * the other half ran on the 207-person reporting fixture pre-cut: EXCEPT ALL
- * empty both directions over 23,699 in-window rows).
+ * docs/design/request-floor-performance.md for 0135; the fixture halves ran
+ * pre-cut: EXCEPT ALL empty both directions over 23,699 rows for 0126 and
+ * 24,717 for 0135).
  *
  * T1 — identity: the 0125 definition is rebuilt VERBATIM FROM ITS MIGRATION
  *      FILE under a scratch name, and `EXCEPT ALL` must be empty in BOTH
@@ -20,16 +21,24 @@
  *      mutation in the build: guard `<=`→`<` and a dropped partition column
  *      both fail here).
  *
- * T2 — plan-shape guard: the 0126 SHAPE, asserted structurally so a revert to
- *      the fk×fm double CTE join (the #235 nested loop, 10.8M discarded row
- *      comparisons on the fixture estate) cannot land silently:
+ * T2 — plan-shape guard: the 0126/0135 SHAPE, asserted structurally so a
+ *      revert to either predecessor cannot land silently:
  *        (a) WindowAgg present — 0125 has no window function;
- *        (b) ≤1 `CTE Scan on arm3_fact_key` — 0125 references the CTE twice
- *            (arms 3a+3b ⇒ materialized ⇒ 2 CTE scans), 0126 once (inlined);
- *        (c) the three 0126 expression indexes exist with their exact
- *            expressions (r1-M3 — reverting D2 alone must fail too);
+ *        (b) ZERO CTE scans on any arm3 operand — 0135 declares them
+ *            single-referenced NOT MATERIALIZED, so the planner inlines both
+ *            (0125 materialized arm3_fact_key twice; 0126 materialized the
+ *            shared arm3_fact_model — the fence that made every scan
+ *            aggregate ALL of provider_usage_fact);
+ *        (c) the three 0126 expression indexes AND 0134's two
+ *            provider_usage_fact date indexes exist (reverting the index
+ *            halves alone must fail too);
  *        (d) a GENEROUS wall-clock bound (5 s at this fixture's scale is
- *            ≥50x headroom — the regression signal is (a)/(b), not the clock).
+ *            ≥50x headroom — the regression signal is (a)/(b)/(e), not the
+ *            clock);
+ *        (e) 0135's reason for existing: a teammate-scoped read shows the
+ *            teammate qual INSIDE the provider_usage_fact index condition —
+ *            the pushdown the fence used to block. Reverting 0135's view
+ *            body (re-fencing) fails this even with every index present.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { readFile } from 'node:fs/promises'
@@ -250,10 +259,44 @@ describe('T2 — the 0126 plan shape cannot silently revert', () => {
     const plan = await planFor()
     // (a) the window carry exists — 0125's shape has no WindowAgg anywhere.
     expect(plan).toMatch(/WindowAgg/)
-    // (b) arm3_fact_key is referenced once (arm 3b) ⇒ inlined ⇒ at most one
-    // CTE scan. 0125 references it twice ⇒ materialized ⇒ exactly two.
-    const fkScans = plan.match(/CTE Scan on arm3_fact_key/g)?.length ?? 0
-    expect(fkScans).toBeLessThanOrEqual(1)
+    // (b) NO arm-3 CTE is materialized (0135): both operands are
+    // single-referenced NOT MATERIALIZED ⇒ inlined ⇒ zero CTE scans. 0126's
+    // shared arm3_fact_model shows here as a `CTE Scan on arm3_fact_model`;
+    // 0125's double-referenced arm3_fact_key as two `CTE Scan on
+    // arm3_fact_key`. Either marker is a re-fencing revert.
+    expect(plan).not.toMatch(/CTE Scan on arm3_fact/)
+  })
+
+  it('0135: a teammate-scoped read pushes the qual into provider_usage_fact', async () => {
+    // The reason 0135 exists (docs/design/request-floor-performance.md): with
+    // the fence down, the caller's teammate equality reaches the arm-3
+    // aggregates and 0121's partial index serves them — per-teammate reads
+    // stop aggregating the whole enterprise table. Re-fencing (a materialized
+    // shared CTE) makes the qual stop at the CTE boundary and this goes red
+    // even with every index in place.
+    const rows = await t.client<{ 'QUERY PLAN': string }[]>`
+      EXPLAIN (COSTS OFF)
+      SELECT SUM(cost_usd) FROM v_complete_usage
+      WHERE teammate_id = ${tmA}::uuid
+        AND ts_event >= '2026-09-01T00:00:00Z'::timestamptz
+        AND ts_event <  '2026-10-01T00:00:00Z'::timestamptz`
+    const lines = rows.map((r) => r['QUERY PLAN'])
+    // Every provider_usage_fact scan node must carry the teammate qual ON THE
+    // SCAN ITSELF (Index Cond at real scale; Filter/Recheck at this estate's
+    // tiny scale — the planner's access-method choice is cost-based and not
+    // the point). A re-fenced revert scans the table UNQUALIFIED under the
+    // materialized CTE and filters only above the aggregate, so no scan node
+    // carries the qual and this goes red. On the fixture estate (24,717 rows)
+    // the same plan shows Bitmap Index Scan on
+    // provider_usage_fact_teammate_date_tool_idx with the qual as Index Cond.
+    const scanIdx = lines
+      .map((l, i) => (/(Scan (on|using) [^ ]*provider_usage_fact)/.test(l) ? i : -1))
+      .filter((i) => i >= 0)
+    expect(scanIdx.length).toBeGreaterThanOrEqual(2) // both arm-3 operands scan it
+    for (const i of scanIdx) {
+      const window = lines.slice(i, i + 4).join('\n')
+      expect(window).toMatch(/teammate_id = /) // qual on the scan node
+    }
   })
 
   it('the 0125 shape (the comparison operand) really does show the old markers', async () => {
@@ -283,6 +326,17 @@ describe('T2 — the 0126 plan shape cannot silently revert', () => {
     for (const r of rows) {
       expect(r.indexdef).toMatch(/::timestamp without time zone AT TIME ZONE 'UTC'::text/)
     }
+  })
+
+  it('the 0134 provider_usage_fact date indexes exist (the pushdown targets)', async () => {
+    const rows = await t.client<{ indexname: string }[]>`
+      SELECT indexname FROM pg_indexes
+      WHERE indexname IN ('provider_usage_fact_date_idx', 'provider_usage_fact_date_utc_idx')
+      ORDER BY indexname`
+    expect(rows.map((r) => r.indexname)).toEqual([
+      'provider_usage_fact_date_idx',
+      'provider_usage_fact_date_utc_idx',
+    ])
   })
 
   it('a window-bounded scan completes inside a generous bound', async () => {

@@ -23,6 +23,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { sql } from 'drizzle-orm'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import { wholeCompanyFinance, clampedFinance, clampedUsage } from '../../../server/reporting/engine/scope'
 import { fetchTierExposure } from '../../../server/reporting/engine/tier-exposure'
 import { fetchDailyMetrics } from '../../../server/reporting/engine/usage-series'
@@ -173,6 +174,9 @@ beforeAll(async () => {
   await ar(alice, regionA, unitA, 'claude-code', 12)
   await ar(alice, regionA, unitA, 'copilot-cli', 4)
   await ar(bob, regionB, unitB, 'claude-code', 9)
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {

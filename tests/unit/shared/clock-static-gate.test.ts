@@ -53,12 +53,16 @@ const WINDOWING_PATHS = [
   // The §A / §B day-series SQL — where `CURRENT_DATE` was the third clock.
   'server/reporting/engine/usage-series.ts',
   'server/reporting/engine/chargeback-series.ts',
+  // The diagnostics cost windows. Split out of the snapshot handler, which is
+  // how their SQL `now()` came to be read afresh: a NEW file starts outside
+  // this list, so the gate that would have caught it never looked.
+  'server/api/v1/admin/diagnostics/costing.get.ts',
 ] as const
 
 /** `new Date()` / `Date.now()` — a clock read with no argument to anchor it. */
 const BARE_CLOCK = /\bnew\s+Date\s*\(\s*\)|\bDate\s*\.\s*now\s*\(\s*\)/g
 /** SQL's own clock. Word-bounded so `CURRENT_DATE` in prose still trips it. */
-const SQL_CLOCK = /\bCURRENT_DATE\b|\bCURRENT_TIMESTAMP\b|\bNOW\s*\(\s*\)/g
+const SQL_CLOCK = /\bCURRENT_DATE\b|\bCURRENT_TIMESTAMP\b|\bNOW\s*\(\s*\)/gi
 
 /**
  * Strip comments before scanning. These files DOCUMENT the defect they retired
@@ -72,9 +76,19 @@ const SQL_CLOCK = /\bCURRENT_DATE\b|\bCURRENT_TIMESTAMP\b|\bNOW\s*\(\s*\)/g
  */
 const stripComments = (src: string) => stripCommentsShared(src)
 
+function scanSource(src: string, re: RegExp): string[] {
+  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`
+  return stripComments(src).match(new RegExp(re.source, flags)) ?? []
+}
+
 function scan(rel: string, re: RegExp): string[] {
   const src = stripComments(readFileSync(resolve(ROOT, rel), 'utf8'))
-  return src.match(new RegExp(re.source, 'g')) ?? []
+  // Preserve the pattern's OWN flags. Rebuilding with a bare 'g' silently
+  // dropped `i`, so the SQL clock was matched case-sensitively while this
+  // codebase writes `now()` lowercase — the gate looked at the right files and
+  // saw nothing. `g` is added, never substituted.
+  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`
+  return src.match(new RegExp(re.source, flags)) ?? []
 }
 
 describe('T5 — the windowing and labelling paths hold no clock', () => {
@@ -93,6 +107,13 @@ describe('T5 — the windowing and labelling paths hold no clock', () => {
     expect(stripComments('const x = Date.now()').match(BARE_CLOCK)).toHaveLength(1)
     expect(stripComments('GREATEST(CURRENT_DATE, x)').match(SQL_CLOCK)).toHaveLength(1)
     expect(stripComments("date_trunc('week', NOW())").match(SQL_CLOCK)).toHaveLength(1)
+    // SQL keywords are case-INSENSITIVE and this codebase writes them lowercase.
+    // Asserting only the uppercase spelling is how a blind gate passed its own
+    // honesty check: scan() rebuilt the pattern without `i`, so every real
+    // `now()` in a scanned file went unseen.
+    expect(stripComments("ts_event >= now() - interval '7 days'").match(SQL_CLOCK)).toHaveLength(1)
+    expect(stripComments('GREATEST(current_date, x)').match(SQL_CLOCK)).toHaveLength(1)
+    expect(scanSource("ts_event >= now() - interval '1 day'", SQL_CLOCK)).toHaveLength(1)
     // …and does NOT punish an anchored construction, which is not a clock read.
     expect(stripComments('new Date(Date.parse(day))').match(BARE_CLOCK)).toBeNull()
     expect(stripComments('new Date(ms)').match(BARE_CLOCK)).toBeNull()

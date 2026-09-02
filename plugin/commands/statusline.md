@@ -15,9 +15,11 @@ clear not-working state, never a benign colour:
   - `TokenScope ⚠ landed · emit-only` (yellow) — delivery confirmed, but the MCP
     server isn't connected, so query tools/prompts can't run (connect it to query);
   - `TokenScope ✗ not landing` (red) — DEAD EXPORT: the client is actively emitting
-    (a recent bearer mint) but the server's landed watermark isn't keeping up
-    (nothing is being attributed) — investigate. An IDLE client with an old last
-    emission is NOT flagged (a stale watermark is expected when nobody's emitting);
+    (a recent bearer mint) but nothing is being attributed — investigate. Two shapes
+    reach it: the landed watermark has stopped keeping up (it was landing, then
+    stopped), OR the enrolment is more than a couple of hours old and has NEVER
+    landed anything at all. An IDLE client with an old last emission is NOT flagged
+    (a stale watermark is expected when nobody's emitting);
   - `TokenScope ✗ enrolment revoked` (red) — this device's enrolment was revoked
     server-side (re-provision emit via the `tokenscope-setup` MCP prompt);
   - `TokenScope ✗ emit-auth failing` (red) — the emit credential can't mint a
@@ -25,8 +27,11 @@ clear not-working state, never a benign colour:
   - `TokenScope ⚠ emit-only` (yellow) — auth fine but landing UNCONFIRMED (health
     endpoint unreachable) AND MCP not connected;
   - `TokenScope ◎ emit-auth` (cyan) — auth fine, MCP connected, but landing
-    UNCONFIRMED (health endpoint unreachable) — a neutral fallback, distinct from
-    the green "landed";
+    UNCONFIRMED — the health endpoint is unreachable, or this enrolment is new
+    enough that a first record could still legitimately be in flight. A neutral
+    fallback, distinct from the green "landed". It is deliberately time-limited:
+    an enrolment that goes on never landing stops reading neutral and becomes
+    `✗ not landing`;
 - the current **session id** (`#65d2c64f`) — same "Conversation" id as the
   TokenScope web dashboard, so you can tell which row you're in.
 

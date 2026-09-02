@@ -493,7 +493,14 @@ export function selfHealPluginPaths({
   }
 }
 
-/** Job 1: reconcile the repo-local tag from the current global enrolment. */
+/**
+ * Job 1: reconcile the repo-local tag from the current global enrolment.
+ *
+ * Returns writeRepoTag's `{ settingsPath, changed, healed, instanceDrifted }`, or
+ * undefined when there was nothing to reconcile (device not enrolled, no
+ * `.tokenscope`, or the resolved code did not come from one). Callers must treat
+ * an absent result as "no drift".
+ */
 function selfHealRepoTag() {
   const cwd = process.cwd()
   const enrolment = readGlobalEnrolment()
@@ -524,7 +531,39 @@ function selfHealRepoTag() {
   }
   // SELF-HEAL (ADR-0006): always re-derive from the CURRENT global enrolment.
   // writeRepoTag is change-detecting, so a true no-op leaves the file untouched.
-  writeRepoTag({ cwd, enrolment, codeHash })
+  // The result is RETURNED, not discarded: when it reports `instanceDrifted` this
+  // very session is emitting under the superseded instance (see the job-1 note at
+  // the top of this file — resource attrs froze at startup, before this write), and
+  // main() turns that into the one warning that tells the developer to relaunch.
+  return writeRepoTag({ cwd, enrolment, codeHash })
+}
+
+/**
+ * PURE: the warning shown when the repo tag we just reconciled had pinned a
+ * DIFFERENT instance than the device's current enrolment.
+ *
+ * THE INVARIANT: a session whose repo pin named a different instance than the
+ * device's current enrolment is misattributing for its whole life, and must be
+ * told so. Job 1 above can only fix the FILE (resource attrs froze at startup),
+ * so the running session's only remedy is a relaunch.
+ *
+ * Deliberately NOT gated on `healed`: that is also true for a helper-path move,
+ * which does not change which instance records land against.
+ *
+ * Full incident timeline (2026-09-01 dogfood) in ADR-0006 decision 3 — kept there
+ * rather than restated here, so the two cannot drift apart.
+ *
+ * Exported for tests. Returns a string, or null when there is nothing to say.
+ */
+export function staleInstancePinWarning(repoTagResult) {
+  if (!repoTagResult || repoTagResult.instanceDrifted !== true) return null
+  return [
+    'TokenScope: this session is emitting under a SUPERSEDED device enrolment.',
+    "This repo's .claude/settings.local.json pinned an older tokenscope.instance_id;",
+    'it has just been reconciled, but OTel resource attributes are frozen at process',
+    'start, so THIS session keeps emitting under the old instance and its usage will',
+    'not appear against this device. Restart `claude` to pick up the current enrolment.',
+  ].join(' ')
 }
 
 const OTLP_PORT = Number(process.env.TOKENSCOPE_OTLP_PROXY_PORT) || 14318
@@ -948,8 +987,11 @@ async function main() {
     /* fail-open */
   }
 
+  // Captured, not discarded: `instanceDrifted` is the only in-process evidence
+  // that THIS session's frozen resource attrs name a superseded instance.
+  let repoTagResult = null
   try {
-    selfHealRepoTag()
+    repoTagResult = selfHealRepoTag()
   } catch {
     /* fail-open */
   }
@@ -979,10 +1021,21 @@ async function main() {
     /* fail-open: never break session start over enrolment */
   }
 
-  // Collect session-start warnings into ONE systemMessage: (1) emission health and
-  // (2) a wrong-env project tag (the repo's .tokenscope isn't billable where the
-  // device emits → spend spills untagged). Both fail-open — our own errors never warn.
+  // Collect session-start warnings into ONE systemMessage: (1) a superseded
+  // instance pin, (2) emission health and (3) a wrong-env project tag (the repo's
+  // .tokenscope isn't billable where the device emits → spend spills untagged).
+  // All fail-open — our own errors never warn.
   const lines = []
+  // FIRST: a superseded instance pin outranks the rest. Emit auth can be perfectly
+  // healthy while every record lands against an instance this device no longer
+  // claims, so this must not sit below a green-looking emission check.
+  try {
+    const w = staleInstancePinWarning(repoTagResult)
+    if (w) lines.push(w)
+  } catch {
+    /* fail-open: never warn on our own error */
+  }
+
   try {
     const w = emissionHealthWarning() // also runs the emit helper → refreshes the token
     if (w) lines.push(w)

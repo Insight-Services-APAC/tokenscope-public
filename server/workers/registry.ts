@@ -19,6 +19,7 @@ import { consola } from 'consola'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type * as schema from '../../drizzle/schema'
 import { runAggregateRollup } from './aggregate-rollup'
+import { runUsageRollup } from './usage-rollup'
 import { runArchiveLedger } from './archive-ledger'
 import { runAnalyticsPollReconciledOrgs, sourceForOrg } from './analytics-poller'
 import { runPlacementSync } from './placement-sync'
@@ -55,6 +56,7 @@ import { runGovernanceKeyBackfill } from './governance-key-backfill'
 import { runGovernanceRecompute } from './governance-recompute'
 import { runGithubCoverageSweep } from './github-coverage-sweep'
 import { runProviderTransform } from './provider-transform'
+import { runOpsAlert } from './ops-alert'
 import { getTelemetryReader, emptyParseCounters } from '../azure/reader'
 import { UI_TRIGGERABLE_WORKER_NAMES } from '../../shared/workers/ui-triggerable'
 
@@ -403,6 +405,20 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
       'Materialise attribution_aggregate (teammate/project × day × tool × model × token_type) — the consumption-dashboard read path',
   },
   {
+    name: 'usage-rollup',
+    // Full-history backfill RESUMES across runs (bounded chunks per
+    // invocation — the dispatch budget); steady state recomputes a NARROW
+    // trailing window with one wide pass per UTC day
+    // (docs/design/usage-rollup-lane.md; performance-observability-baseline.md
+    // O5). Minutes ≡ 2 (mod 5) avoid simultaneous STARTS with the */5 and
+    // */15 pollers — starts only, NOT overlap: dispatches can run ~200 s
+    // (dr-M6; O4's duty-cycle numbers verify the offset helps).
+    run: (db) => runUsageRollup(db),
+    recommendedCron: '7,22,37,52 * * * *',
+    description:
+      'Materialise usage_rollup_daily from v_complete_usage (day-grain §A) — the region reporting read path',
+  },
+  {
     name: 'velocity-watch',
     run: (db) => runVelocityWatch(db),
     // Sunday 23:50 UTC — the last 10 minutes of the ISO week, NOT Monday morning.
@@ -546,6 +562,19 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
     recommendedCron: '0 * * * *',
     description:
       'Derive the normalised provider layer (provider_usage_fact -- NOT billed-only; §B is a read-time filter over it) at teammate/day/tool/model/cost_type grain from actual_spend.raw_payload; upsert-then-guarded-prune, homing stamped once and never refreshed (docs/design/target-state-data-architecture.md §6, T0)',
+  },
+  {
+    name: 'ops-alert',
+    run: (db) => runOpsAlert(db),
+    // ≡4 mod 5 — off the shared 5- and 15-minute tick grids so its probes
+    // measure the estate, not the estate mid-worker-burst (ops-alerting
+    // ar-L22: exact literal, lockstepped with the deployed cron). Its OWN
+    // liveness is the A4 Azure-native dead-man (successful-execution count on
+    // the job), which is also why it never evaluates itself in the fleet
+    // predicate.
+    recommendedCron: '9,24,39,54 * * * *',
+    description:
+      'Evaluate the ops conditions (telemetry-read table probe, attribution stall, worker fleet, private-link network sweep, admin inbox aging) and page the operator on the external ntfy channel — every severity two-run damped, 6h reminders, recovery notices; each observation records WHY it fired into this run\'s result; inbox + audit parity per condition (docs/design/ops-alerting.md A2/A3/A5, alert-diagnosability.md D1-D4)',
   },
 ]
 

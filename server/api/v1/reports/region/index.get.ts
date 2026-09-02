@@ -118,31 +118,53 @@ export default defineEventHandler(async (event) => {
     }
 
     if (req.width === 'all-regions') {
-      const kpis = await fetchAcrossKpis(tx, win, { copilotChargeback, momMonthRange, now })
-      const regionCards = await fetchAcrossRegionCards(tx, win, { copilotChargeback })
-      // §B chargeback-by-region ranking — the chargeback-lane swap for the usage region
-      // cards. Sourced off the bill lane so a region with charge but no in-window usage
-      // is not dropped, and it sums back to kpis.chargeableUsd.
-      const chargebackByRegion = await fetchAcrossChargebackByRegion(tx, win, { copilotChargeback })
-      const providerSplit = await fetchProviderSplit(tx, win)
-      // The daily-metrics + chargeback-trend reads are the exact series the
-      // trend/behaviour endpoints serve — memoized (D8) so the page's
-      // CONCURRENT XHRs compute each once, not once per endpoint.
-      const dailyMetrics = await memoizedScan(
-        ['across-daily-metrics', idKey, win.startIso, win.endIso, clock.settledThrough],
-        () => fetchAcrossDailyMetrics(tx, win, clock),
-      )
-      // §A budget coverage — the denominator the hero publishes beside `genuineUsd`,
-      // on the SAME lane and window, so the parts foot to that headline.
-      const budgetCoverage = await fetchAcrossUsageBudgetCoverage(tx, win)
-      const chargeDaily = await memoizedScan(
-        ['across-charge-trend', idKey, win.startIso, win.endIso, clock.settledThrough],
-        () => fetchAcrossChargebackTrend(tx, win, clock),
-      )
-      const chargebackLanes = await fetchAcrossChargebackLanes(tx, win, { copilotChargeback })
+      // Concurrent issuance on ONE tx connection: postgres-js pipelines and
+      // answers in order — safe; the win is issuance without
+      // per-query await gaps (one wave once statements are prepared on the
+      // connection; first use still describes), not true
+      // parallelism (docs/design/request-floor-performance.md F5). Only
+      // `perPerson` consumes a wave-1 output (kpis.asOfDate), so it alone
+      // waits for wave 2. The memoized reads may idle as memo waiters inside
+      // the wave — by design (report-cache.ts header).
+      const [
+        kpis,
+        regionCards,
+        // §B chargeback-by-region ranking — the chargeback-lane swap for the usage region
+        // cards. Sourced off the bill lane so a region with charge but no in-window usage
+        // is not dropped, and it sums back to kpis.chargeableUsd.
+        chargebackByRegion,
+        providerSplit,
+        // The daily-metrics + chargeback-trend reads are the exact series the
+        // trend/behaviour endpoints serve — memoized (D8) so the page's
+        // CONCURRENT XHRs compute each once, not once per endpoint.
+        dailyMetrics,
+        // §A budget coverage — the denominator the hero publishes beside `genuineUsd`,
+        // on the SAME lane and window, so the parts foot to that headline.
+        budgetCoverage,
+        chargeDaily,
+        chargebackLanes,
+        coverage,
+      ] = await Promise.all([
+        fetchAcrossKpis(tx, win, { copilotChargeback, momMonthRange, now }),
+        fetchAcrossRegionCards(tx, win, { copilotChargeback }),
+        fetchAcrossChargebackByRegion(tx, win, { copilotChargeback }),
+        fetchProviderSplit(tx, win),
+        memoizedScan(
+          ['across-daily-metrics', idKey, win.startIso, win.endIso, clock.settledThrough],
+          () => fetchAcrossDailyMetrics(tx, win, clock),
+        ),
+        fetchAcrossUsageBudgetCoverage(tx, win),
+        memoizedScan(
+          ['across-charge-trend', idKey, win.startIso, win.endIso, clock.settledThrough],
+          () => fetchAcrossChargebackTrend(tx, win, clock),
+        ),
+        fetchAcrossChargebackLanes(tx, win, { copilotChargeback }),
+        reportCoverageMeta(tx),
+      ])
       // §A per-person cohort — the median + its three percentiles + the emitting
       // split, over the SAME lane, scope and window as `kpis.activeUsers`, which is
       // the headcount the median's "half of N are below this" divides by.
+      // After wave 1: consumes kpis.asOfDate.
       const perPerson = await fetchAcrossPerPerson(tx, win, {
         momMonthRange,
         asOfDate: kpis.asOfDate,
@@ -168,7 +190,7 @@ export default defineEventHandler(async (event) => {
         // opening a second clock request (external review r2).
         settledThrough: clock.settledThrough,
         providerStates: providerStatesForWindow(win, now),
-        coverage: await reportCoverageMeta(tx),
+        coverage,
         scope: 'region',
         // Usage dims are point-in-time "as at emit" (§A completeness lane).
         pointInTimeDims: true,
@@ -227,7 +249,47 @@ export default defineEventHandler(async (event) => {
     }
 
     const { scope } = req
-    const kpis = await fetchRegionalKpis(tx, scope, win, { copilotChargeback, momMonthRange, now })
+    // Concurrent issuance on ONE tx connection: postgres-js pipelines and
+    // answers in order — safe; the win is issuance without
+    // per-query await gaps (one wave once statements are prepared on the
+    // connection; first use still describes), not true parallelism
+    // (docs/design/request-floor-performance.md F5). Wave 2 holds
+    // the two reads that consume wave-1 outputs: `perPerson` (kpis.asOfDate)
+    // and `exceptions` (the resolved threshold).
+    const [
+      kpis,
+      // Top-level shows the practice ranking; the `ou` drill shows the vendor donut.
+      practices,
+      chargebackByCostCentre,
+      vendorSplit,
+      providerSplit,
+      // Memoized for the same D8 reason as the all-regions branch — the regional
+      // trend/behaviour endpoints serve these exact series.
+      dailyMetrics,
+      budgetCoverage,
+      chargeDaily,
+      chargebackLanes,
+      threshold,
+      coverage,
+    ] = await Promise.all([
+      fetchRegionalKpis(tx, scope, win, { copilotChargeback, momMonthRange, now }),
+      scope.ou ? [] : fetchRegionalPractices(tx, scope, win),
+      scope.ou ? [] : fetchRegionalChargebackByCostCentre(tx, scope, win, { copilotChargeback }),
+      scope.ou ? fetchRegionalVendorSplit(tx, scope, win) : null,
+      fetchRegionalProviderSplit(tx, scope, win),
+      memoizedScan(
+        ['regional-daily-metrics', idKey, scope.scopeKey, win.startIso, win.endIso, clock.settledThrough],
+        () => fetchRegionalDailyMetrics(tx, scope, win, clock),
+      ),
+      fetchRegionalUsageBudgetCoverage(tx, scope, win),
+      memoizedScan(
+        ['regional-charge-trend', idKey, scope.scopeKey, win.startIso, win.endIso, clock.settledThrough],
+        () => fetchRegionalChargebackTrend(tx, scope, win, clock),
+      ),
+      fetchRegionalChargebackLanes(tx, scope, win, { copilotChargeback }),
+      resolveVelocitySpikeThreshold(tx, scope.effectiveRegionId),
+      reportCoverageMeta(tx),
+    ])
 
     const asOf = kpis.asOfDate ? new Date(`${kpis.asOfDate}T00:00:00.000Z`) : null
     const forecast =
@@ -235,37 +297,17 @@ export default defineEventHandler(async (event) => {
         ? forecastForMonth({ requestedMonth: win.monthStr, now, asOf, meteredMtdUsd: kpis.genuineUsd })
         : null
 
-    // Top-level shows the practice ranking; the `ou` drill shows the vendor donut.
-    const practices = scope.ou ? [] : await fetchRegionalPractices(tx, scope, win)
-    const chargebackByCostCentre = scope.ou
-      ? []
-      : await fetchRegionalChargebackByCostCentre(tx, scope, win, { copilotChargeback })
-    const vendorSplit = scope.ou ? await fetchRegionalVendorSplit(tx, scope, win) : null
-    const providerSplit = await fetchRegionalProviderSplit(tx, scope, win)
-    // Memoized for the same D8 reason as the all-regions branch — the regional
-    // trend/behaviour endpoints serve these exact series.
-    const dailyMetrics = await memoizedScan(
-      ['regional-daily-metrics', idKey, scope.scopeKey, win.startIso, win.endIso, clock.settledThrough],
-      () => fetchRegionalDailyMetrics(tx, scope, win, clock),
-    )
-    const budgetCoverage = await fetchRegionalUsageBudgetCoverage(tx, scope, win)
-    const chargeDaily = await memoizedScan(
-      ['regional-charge-trend', idKey, scope.scopeKey, win.startIso, win.endIso, clock.settledThrough],
-      () => fetchRegionalChargebackTrend(tx, scope, win, clock),
-    )
-    const chargebackLanes = await fetchRegionalChargebackLanes(tx, scope, win, { copilotChargeback })
-
-    // §A per-person cohort — the median + its three percentiles + the emitting
-    // split, over the SAME lane, scope and window as `kpis.activeUsers`, which is
-    // the headcount the median's "half of N are below this" divides by. The SAME
-    // engine read the whole-company branch above makes, region-clamped.
-    const perPerson = await fetchRegionalPerPerson(tx, scope, win, {
-      momMonthRange,
-      asOfDate: kpis.asOfDate,
-    })
-
-    const threshold = await resolveVelocitySpikeThreshold(tx, scope.effectiveRegionId)
-    const exceptions = await fetchRegionalExceptions(tx, scope, threshold)
+    const [perPerson, exceptions] = await Promise.all([
+      // §A per-person cohort — the median + its three percentiles + the emitting
+      // split, over the SAME lane, scope and window as `kpis.activeUsers`, which is
+      // the headcount the median's "half of N are below this" divides by. The SAME
+      // engine read the whole-company branch above makes, region-clamped.
+      fetchRegionalPerPerson(tx, scope, win, {
+        momMonthRange,
+        asOfDate: kpis.asOfDate,
+      }),
+      fetchRegionalExceptions(tx, scope, threshold, now),
+    ])
 
     const meta: ReportMeta = {
       month: metaMonth,
@@ -276,7 +318,7 @@ export default defineEventHandler(async (event) => {
       // opening a second clock request (external review r2).
       settledThrough: clock.settledThrough,
       providerStates: providerStatesForWindow(win, now),
-      coverage: await reportCoverageMeta(tx),
+      coverage,
       scope: 'region',
       pointInTimeDims: scope.pointInTimeDims,
       ...(win.isMonth ? {} : { range: { from: win.from, to: win.to } }),

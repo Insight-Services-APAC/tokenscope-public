@@ -45,6 +45,7 @@
     "coverage:walk": "node scripts/coverage-walk.mjs",
     "test:fidelity": "bash tests/fidelity/check.sh",
     "test:smoke": "bash tests/smoke/run-smoke.sh",
+    "test:nav": "node tests/smoke/admin-nav-timing.mjs",
     "test:reap": "docker ps -aq --filter label=tokenscope.test=true | xargs -r docker rm -f && echo 'reaped orphaned tokenscope test containers'"
   },
   "dependencies": {
@@ -82,7 +83,7 @@
     "prettier": "^3.9.6",
     "typescript": "^5.7.0",
     "vitest": "^4.1.1",
-    "vue-tsc": "^3.3.8"
+    "vue-tsc": "^3.3.10"
   },
   "engines": {
     "node": ">=24",

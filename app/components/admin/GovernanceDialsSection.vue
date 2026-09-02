@@ -24,6 +24,7 @@ import UiCard from '../ui/Card.vue'
 import UiEyebrow from '../ui/Eyebrow.vue'
 import UiBadge from '../ui/Badge.vue'
 import UiButton from '../ui/Button.vue'
+import UiAuxFetchError from '../ui/AuxFetchError.vue'
 import { apiErrorDetail } from '../../composables/useApiError'
 
 export interface GovernanceDialsData {
@@ -54,9 +55,16 @@ const props = defineProps<{
   regionId: string | null
   /** Display code for the caller's home region (region-admin caption). */
   regionCode: string | null
+  /*
+   * The caller's region read failed. The scope picker would otherwise offer
+   * "Platform default" alone, which reads as "there are no region overrides to
+   * make" — the false empty D2 forbids
+   * (docs/design/admin-nav-responsiveness.md).
+   */
+  regionsError?: unknown
 }>()
 
-const emit = defineEmits<{ saved: [] }>()
+const emit = defineEmits<{ saved: []; retryRegions: [] }>()
 
 // Human label + honest one-liner per known dial. Keys the server reports
 // that we don't know yet still render (label = key) so a new dial is never
@@ -216,7 +224,8 @@ const scopeLabel = computed(() => {
       <select
         id="governance-scope"
         v-model="selectedScope"
-        class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white"
+        :disabled="!!regionsError"
+        class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white disabled:bg-calm/40 disabled:cursor-not-allowed"
         data-testid="settings-governance-scope"
       >
         <option value="platform">Platform default</option>
@@ -224,6 +233,12 @@ const scopeLabel = computed(() => {
           {{ r.display_name }} — region override
         </option>
       </select>
+      <UiAuxFetchError
+        :error="regionsError"
+        label="regions"
+        testid="settings-governance-regions-error"
+        @retry="emit('retryRegions')"
+      />
     </div>
 
     <p v-if="!data" class="text-sm text-carbon-3 italic">Loading governance settings…</p>

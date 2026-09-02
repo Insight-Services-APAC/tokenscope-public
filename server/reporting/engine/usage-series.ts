@@ -3,8 +3,11 @@
  * reporting engine.
  *
  * SEPARATE FROM chargeback-series.ts ON PURPOSE. That module reads
- * v_finance_bill_chargeback (the §B BILL lane); this one reads v_complete_usage
- * (the §A USAGE lane). Consistency contract C2 is "one lane per axis,
+ * v_finance_bill_chargeback (the §B BILL lane); this one reads the §A USAGE
+ * lane — through `usage_rollup_daily`, the day-grain rollup whose content is
+ * DEFINED as an aggregate of v_complete_usage (docs/design/usage-rollup-lane.md
+ * R5; both reads here are day/week-grain, so the rollup serves them exactly).
+ * Consistency contract C2 is "one lane per axis,
  * firewall-enforced", and §A and §B answer different questions on different
  * grains — a figure from one must never be summed with a figure from the other
  * (docs/design/provider-billing-attribution-model.md). Keeping them in one file
@@ -21,8 +24,11 @@ import { scopeSql, type UsageScope } from './scope'
 type Tx = PostgresJsDatabase<Record<string, unknown>>
 
 /**
- * The canonical §A weekly lane series over the window: v_complete_usage grouped
- * by ISO week × tool, tools folded to registry lane ids by mergeWeeklyLaneRows.
+ * The canonical §A weekly lane series over the window: usage_rollup_daily
+ * grouped by ISO week × tool, tools folded to registry lane ids by
+ * mergeWeeklyLaneRows. ISO week derives from `day` (usage-rollup-lane.md R5) —
+ * every arm-2/3 row was day-grain already, and arm-1 intra-day times were never
+ * load-bearing for a week bucket.
  *
  * EVERY §A surface rides this natively, including copilot and copilot-agent —
  * there is no GitHub firewall here, because that firewall exists only to keep
@@ -40,11 +46,11 @@ export async function fetchUsageWeeklyLanes(
   window: UsageWindow,
 ): Promise<UsageSurfaceWeeklyCell[]> {
   const rows = await tx.execute<{ week_start: string; tool: string | null; usd: string }>(sql`
-    SELECT date_trunc('week', ts_event)::date::text AS week_start, tool,
+    SELECT date_trunc('week', day::timestamp)::date::text AS week_start, tool,
            COALESCE(SUM(cost_usd), 0)::text AS usd
-    FROM v_complete_usage
+    FROM usage_rollup_daily
     WHERE ${scopeSql(scope)}
-      AND ts_event >= ${window.startIso}::timestamptz AND ts_event < ${window.endIso}::timestamptz
+      AND day >= ${window.startIso.slice(0, 10)}::date AND day < ${window.endIso.slice(0, 10)}::date
     GROUP BY 1, tool
     ORDER BY 1`)
   return mergeWeeklyLaneRows(rows)
@@ -126,14 +132,14 @@ export async function fetchDailyMetrics(
     -- counted anyone carrying a row, so the line and the number it sat under
     -- measured different things.
     per_person AS (
-      SELECT date_trunc('day', u.ts_event)::date AS day,
+      SELECT u.day AS day,
              u.teammate_id,
              SUM(u.cost_usd) AS genuine,
              SUM(u.tokens) AS tokens
-      FROM v_complete_usage u
+      FROM usage_rollup_daily u
       WHERE ${scopeSql(scope)}
-        AND u.ts_event >= ${window.startIso}::timestamptz
-        AND u.ts_event <  ${window.endIso}::timestamptz
+        AND u.day >= ${startDate}::date
+        AND u.day <  ${endDate}::date
       GROUP BY 1, 2
     ),
     agg AS (

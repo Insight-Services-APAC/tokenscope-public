@@ -165,6 +165,11 @@ export default defineNuxtConfig({
         // either way. This ARMS the control for the deployment that first adds
         // a pattern.
         optionalClaims: ['oid', 'email', 'name', 'preferred_username', 'upn'],
+        // Per-provider override of the entra preset's expirationThreshold:1800
+        // (defu leftmost-priority in the module's _useSession) — without it every
+        // API request in the last 30 min of a token's life pays a synchronous
+        // Entra refresh. docs/design/request-floor-performance.md F7.
+        sessionConfiguration: { expirationThreshold: 300 },
       },
     },
   },
@@ -223,5 +228,14 @@ export default defineNuxtConfig({
     // '' bucket and a 429'd health probe restart-loops the replicas — exempt
     // it (it is also the one path require-front-door excludes).
     '/api/health': { security: { rateLimiter: false } },
+  },
+
+  nitro: {
+    // Build-time compression of the hashed /_nuxt assets; the node server
+    // serves the .br/.gz siblings with Content-Encoding on every environment
+    // — including Dev, which has no Front Door to compress for it
+    // (docs/design/performance-observability-baseline.md O6a, dr-H10; the
+    // 2026-08-20 cold-load capture moved 2.2 MB for 2.5 MB of resources).
+    compressPublicAssets: { gzip: true, brotli: true },
   },
 })

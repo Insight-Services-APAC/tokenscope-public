@@ -89,7 +89,8 @@ export async function fetchBreakdownCells(
 ): Promise<BreakdownCell[]> {
   if (conversationIds.length === 0) return []
   // Explicit IN list: drizzle's sql template can't bind a JS array as a PG
-  // array param here (22P02). Bounded by the callers (≤100 ids).
+  // array param here (22P02). Bounded by the callers (≤100 ids); it appears in
+  // BOTH key arms below, so the bind count is 2× the id count.
   const inList = sql.join(
     conversationIds.map((id) => sql`${id}`),
     sql`, `,
@@ -112,7 +113,17 @@ export async function fetchBreakdownCells(
       bool_and(ar.rate_card_id IS NOT NULL) AS lane_priced
     FROM attribution_record ar
     WHERE ar.teammate_id = ${teammateId}::uuid
-      AND ${conversationKeyExpr('ar')} IN (${inList})
+      -- The OR-of-two-equalities shape conversation-key.ts documents, NEVER
+      -- COALESCE(...) IN (...) — the COALESCE form drags EVERY row through an
+      -- expression; here the claude_session_id arm is index-servable and the
+      -- legacy instance_id::text arm (pre-0016 rows only) stays a filter
+      -- bounded by the teammate qual
+      -- (docs/design/request-floor-performance.md F6). A row matches when its
+      -- claude_session_id hits the list, or (legacy pre-0016 rows only) when
+      -- claude_session_id IS NULL and its instance id does — the same rows
+      -- the COALESCE key selects.
+      AND (ar.claude_session_id IN (${inList})
+           OR (ar.claude_session_id IS NULL AND ar.instance_id::text IN (${inList})))
     GROUP BY ${conversationKeyExpr('ar')}, ar.model, ar.token_type
   `)
   return [...rows].map((r) => ({
@@ -369,7 +380,12 @@ export async function fetchQuerySourceSplit(
            SUM(ar.cost_usd)::text AS cost_usd
     FROM attribution_record ar
     WHERE ar.teammate_id = ${teammateId}::uuid
-      AND ${conversationKeyExpr('ar')} = ${conversationId}
+      -- OR of two equalities (claude arm index-servable; legacy arm a
+      -- teammate-bounded filter), never COALESCE(...) = id — same constraint
+      -- and legacy-arm semantics as fetchBreakdownCells above
+      -- (conversation-key.ts; docs/design/request-floor-performance.md F6).
+      AND (ar.claude_session_id = ${conversationId}
+           OR (ar.claude_session_id IS NULL AND ar.instance_id::text = ${conversationId}))
     GROUP BY ar.query_source
     ORDER BY SUM(ar.cost_usd) DESC
   `)

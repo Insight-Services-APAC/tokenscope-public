@@ -10,5 +10,5 @@ await navigateTo('/admin/policies/report-access', { redirectCode: 302, replace: 
 </script>
 
 <template>
-  <div class="max-w-[1600px] mx-auto px-10 py-16 text-center text-sm text-carbon-2">Redirecting…</div>
+  <div class="max-w-[1600px] mx-auto px-10 py-16 text-center text-sm text-carbon-2" data-admin-page="/admin/policies/report-visibility">Redirecting…</div>
 </template>

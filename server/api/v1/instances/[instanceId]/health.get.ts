@@ -5,7 +5,8 @@
  * 'tokenscope.emit' + ownership), so a device can self-check "did my telemetry
  * actually LAND?" with the credential it already has — no MCP/read auth needed.
  * Read-only and narrow: returns only THIS instance's own last-landed timestamp +
- * bearer heartbeat, never another instance and never any cross-teammate corpus —
+ * bearer heartbeat + its own enrolment start (`ts_start`, so a client can age a
+ * never-landed enrolment), never another instance and never any cross-teammate corpus —
  * so the read↔emit wall holds (this is a device reading its own delivery beacon,
  * not the telemetry corpus).
  *
@@ -50,6 +51,7 @@ export default defineEventHandler(async (event) => {
       .select({
         instanceId: schema.instanceAttestation.instanceId,
         teammateId: schema.instanceAttestation.teammateId,
+        tsStart: schema.instanceAttestation.tsStart,
         tsActualEnd: schema.instanceAttestation.tsActualEnd,
         lastBearerAt: schema.instanceAttestation.lastBearerAt,
       })
@@ -83,6 +85,12 @@ export default defineEventHandler(async (event) => {
     instance_id: sid,
     last_emission: lastEmission,
     last_bearer_at: row.lastBearerAt ? row.lastBearerAt.toISOString() : null,
+    // ENROLMENT AGE. Additive (older plugins ignore it). Without this a client
+    // cannot tell a 90-second-old enrolment whose first record is still in flight
+    // from one enrolled hours ago that has NEVER landed — both are
+    // `last_emission: null`. The first is normal; the second is a fault. The
+    // statusline needs the difference to stop rendering the second as benign.
+    ts_start: row.tsStart.toISOString(),
     silent,
     revoked,
   }

@@ -10,6 +10,7 @@
  */
 import { ref, computed, watch, type Ref } from 'vue'
 import UiButton from '../ui/Button.vue'
+import UiAuxFetchError from '../ui/AuxFetchError.vue'
 import { useModalA11y } from '../../composables/useModalA11y'
 import { apiErrorDetail } from '../../composables/useApiError'
 import { BU_LABEL } from '#shared/reports/vocabulary'
@@ -28,8 +29,14 @@ export interface ProjectEditTarget {
 const props = defineProps<{
   project: ProjectEditTarget | null
   couOptions: { id: string; display_name: string }[]
+  /*
+   * The caller's org-units read failed. Without this the unit picker renders
+   * empty and reads as "this region has no units" — the false empty D2 forbids
+   * (docs/design/admin-nav-responsiveness.md).
+   */
+  couOptionsError?: unknown
 }>()
-const emit = defineEmits<{ close: []; saved: [] }>()
+const emit = defineEmits<{ close: []; saved: []; retryCouOptions: [] }>()
 
 const displayName = ref('')
 const clientFacingName = ref('')
@@ -253,15 +260,24 @@ async function save() {
         </select>
 
         <label for="pe-cou" class="text-[12px] font-semibold text-carbon">{{ BU_LABEL }}</label>
-        <select
-          id="pe-cou"
-          v-model="couId"
-          class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
-          data-testid="pe-cou"
-        >
-          <option value="" disabled>Select a unit…</option>
-          <option v-for="u in couOptions" :key="u.id" :value="u.id">{{ u.display_name }}</option>
-        </select>
+        <div class="mt-1 mb-3">
+          <select
+            id="pe-cou"
+            v-model="couId"
+            :disabled="!!couOptionsError"
+            class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none disabled:bg-calm/40 disabled:cursor-not-allowed"
+            data-testid="pe-cou"
+          >
+            <option value="" disabled>Select a unit…</option>
+            <option v-for="u in couOptions" :key="u.id" :value="u.id">{{ u.display_name }}</option>
+          </select>
+          <UiAuxFetchError
+            :error="couOptionsError"
+            :label="`${BU_LABEL}s`"
+            testid="pe-cou-error"
+            @retry="emit('retryCouOptions')"
+          />
+        </div>
 
         <!--
           MIGRATE. Only once the unit has actually changed — until then there is

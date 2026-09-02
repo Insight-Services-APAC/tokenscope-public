@@ -22,6 +22,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import { injectTestSession } from '../../helpers/auth'
 import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
@@ -167,6 +168,11 @@ beforeAll(async () => {
   }
   // No project claim and no burn home — the whole-company axis's untagged bucket.
   await ar(UNTAGGED_USD, 'conv-untagged', null, 'confirmed', null)
+
+  // The project axis reads usage_rollup_daily since R5b (source: 'rollup' in
+  // engine/budget-axis.ts + reporting/cost-centres.ts) — materialise the
+  // seeded lane or every axis figure below reads an EMPTY source.
+  await buildUsageRollup(t.db)
 }, 300_000)
 
 afterAll(async () => {

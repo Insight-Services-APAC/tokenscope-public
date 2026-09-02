@@ -108,6 +108,22 @@ export const ALLOWLIST = new Map([
     'Cross-identity merge: re-points the SHADOW teammate\'s attribution_record. Under the confirmer\'s context it would silently move FEWER rows; failing loudly is safer.',
   ],
 
+  // ── Global operational signal: the read is deliberately estate-wide ────────
+  // The attribution-stall leg (server/usage/attribution-stall.ts, ops-alerting
+  // A2.2/A6) is ONE verdict about the whole estate: instance_attestation is
+  // region-scoped under RLS, so a viewer-lane read would hand two regions two
+  // different stall verdicts about the same outage. Both handlers keep their
+  // payload queries on withRequestRls; only the stall leg reads the base
+  // handle, and the helper's own header carries the constraint.
+  [
+    'server/api/v1/me/home.get.ts',
+    'Main payload on withRequestRls; getDb() feeds only the attribution-stall leg, a global signal a region-clamped lane would misreport.',
+  ],
+  [
+    'server/api/v1/me/usage.get.ts',
+    'Main payload on withRequestRls; getDb() feeds only the attribution-stall leg, a global signal a region-clamped lane would misreport.',
+  ],
+
   // ── Worker-shaped probes: DB reads interleaved with provider HTTP ──────────
   // Holding a request transaction across third-party HTTP is the anti-pattern
   // design §2 names (copilot-bill-repull.post.ts: "the failure mode, not the

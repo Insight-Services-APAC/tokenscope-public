@@ -14,7 +14,7 @@ Source of truth for the emission recipe:
 > was **retired**. Device onboarding is now an MCP OAuth flow: connect the MCP
 > (one browser consent), then run the `tokenscope-setup` prompt, which provisions
 > emitting via a secret-isolating handoff (`provision_emit` → `/api/v1/setup/redeem`).
-> See [MCP-first client backbone](../design/mcp-client-backbone.md).
+> See MCP-first client backbone (`docs/design/mcp-client-backbone.md`).
 
 ## Connect + emission flow
 
@@ -23,7 +23,7 @@ OAuth consent → global config), then **tag each repo** with a committed
 `.tokenscope` file. Identity is anchored to the device attestation (by
 `tokenscope.instance_id` / DEVICE_SID, minted by `provision_emit`); the
 **project** is an emitted per-event claim, membership-gated at join (see
-[ADR-0004](../decisions/0004-attribution-trust-model.md)).
+ADR-0004).
 
 ```mermaid
 flowchart TD
@@ -84,7 +84,7 @@ flowchart TD
   attestation by DEVICE_SID** (unspoofable per-event) and takes the **project
   from the emitted `code_hash` claim**, billing it only if that teammate is a
   _current_ member of the project; otherwise the spend spills to untagged + an
-  `attribution-spill-unauthorized` audit ([ADR-0004](../decisions/0004-attribution-trust-model.md)).
+  `attribution-spill-unauthorized` audit (ADR-0004).
 - **Untagged-first.** A device with no repo `.tokenscope` (or an
   unrecognised/unauthorised code) emits without a `project.code_hash` claim, so it
   surfaces in the web **untagged-spend** card. Assign it to a project later via
@@ -192,8 +192,8 @@ vendored `copilot-plugin/` copies byte-identical to their sources.
 Claude Code merges a repository's `.claude/settings.local.json` over the device's
 global `~/.claude/settings.json`, **per key**, with the repo-local value winning
 any key present in both — measured against Claude Code 2.1.232 in
-[`env-precedence-capture.md`](../security-sprint/env-precedence-capture.md).
-([ADR-0006](../decisions/0006-project-pin-must-not-freeze-upgradeable-client-state.md)
+`env-precedence-capture.md`.
+(ADR-0006
 §2 previously described this as wholesale replacement; that claim is amended.)
 Any cloned repository therefore gets a vote on the environment the plugin's own
 scripts run under — which is fine for a project claim and not fine for anything
@@ -355,10 +355,16 @@ fleet emits **directly** with no forwarder in the path:
   plugin script paths and the global OTLP logs endpoint (CC #72671), spawns the
   version-aware Content-Length forwarder when needed, and surfaces one-line warnings —
   emission health, the OTLP-stash wedge, the auto-shim note, and a
-  project-not-billable-here warning. Every step is fail-open, so a failure never
-  breaks session start.
+  project-not-billable-here warning, and a superseded-instance-pin warning. Every
+  step is fail-open, so a failure never breaks session start.
 - `/tokenscope:status` showing not-emitting right after setup usually means the
   ~4–5 min ingest lag or a missing restart — not a wiring fault.
+- In a repo with a `.tokenscope` tag, re-enrolling takes **two** relaunches. The
+  repo keeps its own merged copy of the enrolment and the hook can only reconcile
+  it *after* the session has read its env, so the first relaunch repairs the file
+  while still emitting under the previous instance. That session prints the
+  superseded-instance-pin warning; the next one is correct. Untagged repos have no
+  repo-local override and pick the new instance up on the first relaunch.
 
 ## Key files
 

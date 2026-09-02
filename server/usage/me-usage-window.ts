@@ -26,6 +26,7 @@
  * exact vocabulary, reused).
  */
 import { sql } from 'drizzle-orm'
+import { splitBounds, type RollupGate } from './rollup-gate'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type { SpendLens } from '../../shared/usage/lens'
 import type { SpendWindow } from './complete-spend'
@@ -50,16 +51,54 @@ export async function teammateWindowDaily(
   tx: Tx,
   teammateId: string,
   window: SpendWindow,
+  gate: RollupGate | null = null,
 ): Promise<TeammateWindowDaily> {
+  /*
+   * SPLIT BY DAY when the gate allows it: settled days from usage_rollup_daily,
+   * today from the live view, summed per day. The two halves are disjoint by
+   * construction — the rollup arm stops at settledThrough, the view arm starts
+   * at todayUtc — so no row can be counted twice or dropped between them.
+   *
+   * TODAY IS NEVER TAKEN FROM THE ROLLUP. The window end is clamped to `now`
+   * (me/usage.get.ts), and a whole-day grain cannot express "up to now"; reading
+   * today from the view is what keeps the figure exact rather than approximately
+   * one cadence stale.
+   *
+   * gate === null means the coverage conditions failed, and then this reads the
+   * view for the WHOLE window exactly as before — the fallback is the original
+   * query, not a degraded variant of it.
+   */
+  const b = gate ? splitBounds(gate, window) : null
+  const source = gate && b
+    ? sql`
+        SELECT day, SUM(cost_usd) AS cost_usd, SUM(tokens) AS tokens FROM (
+          SELECT r.day::text AS day, r.cost_usd, r.tokens
+            FROM usage_rollup_daily r
+           WHERE r.teammate_id = ${teammateId}::uuid
+             AND r.day >= ${b.rollupFrom}::date
+             AND r.day <= ${b.rollupTo}::date
+          UNION ALL
+          SELECT (u.ts_event AT TIME ZONE 'UTC')::date::text AS day, u.cost_usd, u.tokens
+            FROM v_complete_usage u
+           WHERE u.teammate_id = ${teammateId}::uuid
+             AND u.ts_event >= ${b.liveFrom}::timestamptz
+             AND u.ts_event <  ${window.endIso}::timestamptz
+        ) parts GROUP BY day`
+    : sql`
+        SELECT (u.ts_event AT TIME ZONE 'UTC')::date::text AS day,
+               SUM(u.cost_usd) AS cost_usd, SUM(u.tokens) AS tokens
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.ts_event >= ${window.startIso}::timestamptz
+           AND u.ts_event <  ${window.endIso}::timestamptz
+         GROUP BY 1`
+
   const rows = await tx.execute<{ day: string; cost_usd: string; tokens: string }>(sql`
-    SELECT (u.ts_event AT TIME ZONE 'UTC')::date::text AS day,
-           COALESCE(SUM(u.cost_usd), 0)::text AS cost_usd,
-           COALESCE(SUM(u.tokens), 0)::text AS tokens
-      FROM v_complete_usage u
-     WHERE u.teammate_id = ${teammateId}::uuid
-       AND u.ts_event >= ${window.startIso}::timestamptz
-       AND u.ts_event <  ${window.endIso}::timestamptz
-     GROUP BY 1 ORDER BY 1
+    SELECT day,
+           COALESCE(cost_usd, 0)::text AS cost_usd,
+           COALESCE(tokens, 0)::text AS tokens
+      FROM (${source}) s
+     ORDER BY day
   `)
   const days = [...rows].map((r) => ({
     day: r.day,
@@ -92,7 +131,39 @@ export async function teammateWindowProjects(
   tx: Tx,
   teammateId: string,
   window: SpendWindow,
+  gate: RollupGate | null = null,
 ): Promise<TeammateWindowProject[]> {
+  // Same split as teammateWindowDaily: settled days from the rollup, today from
+  // the view, disjoint at the boundary. `project_id IS NOT NULL` is applied on
+  // both arms — the rollup carries NULL project rows for unattributed spend and
+  // this read is per-project by definition.
+  const b = gate ? splitBounds(gate, window) : null
+  const spend = gate && b
+    ? sql`
+        SELECT project_id, SUM(cost_usd) AS cost_usd FROM (
+          SELECT r.project_id, r.cost_usd
+            FROM usage_rollup_daily r
+           WHERE r.teammate_id = ${teammateId}::uuid
+             AND r.project_id IS NOT NULL
+             AND r.day >= ${b.rollupFrom}::date
+             AND r.day <= ${b.rollupTo}::date
+          UNION ALL
+          SELECT u.project_id, u.cost_usd
+            FROM v_complete_usage u
+           WHERE u.teammate_id = ${teammateId}::uuid
+             AND u.project_id IS NOT NULL
+             AND u.ts_event >= ${b.liveFrom}::timestamptz
+             AND u.ts_event <  ${window.endIso}::timestamptz
+        ) parts GROUP BY project_id`
+    : sql`
+        SELECT u.project_id, SUM(u.cost_usd) AS cost_usd
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.project_id IS NOT NULL
+           AND u.ts_event >= ${window.startIso}::timestamptz
+           AND u.ts_event <  ${window.endIso}::timestamptz
+         GROUP BY u.project_id`
+
   const rows = await tx.execute<{
     project_id: string
     code: string
@@ -100,23 +171,18 @@ export async function teammateWindowProjects(
     mine_usd: string
     is_member: boolean
   }>(sql`
-    SELECT u.project_id::text AS project_id,
+    SELECT s.project_id::text AS project_id,
            p.code, p.display_name,
-           COALESCE(SUM(u.cost_usd), 0)::text AS mine_usd,
+           COALESCE(s.cost_usd, 0)::text AS mine_usd,
            EXISTS (
              SELECT 1 FROM project_assignment pa
-              WHERE pa.project_id = u.project_id
+              WHERE pa.project_id = s.project_id
                 AND pa.teammate_id = ${teammateId}::uuid
                 AND pa.effective @> now()
            ) AS is_member
-      FROM v_complete_usage u
-      JOIN project p ON p.id = u.project_id
-     WHERE u.teammate_id = ${teammateId}::uuid
-       AND u.project_id IS NOT NULL
-       AND u.ts_event >= ${window.startIso}::timestamptz
-       AND u.ts_event <  ${window.endIso}::timestamptz
-     GROUP BY u.project_id, p.code, p.display_name
-     ORDER BY SUM(u.cost_usd) DESC, p.code
+      FROM (${spend}) s
+      JOIN project p ON p.id = s.project_id
+     ORDER BY s.cost_usd DESC, p.code
   `)
   return [...rows].map((r) => ({
     projectId: r.project_id,
@@ -136,20 +202,43 @@ export async function teammateWindowDailyForProjects(
   teammateId: string,
   window: SpendWindow,
   projectIds: readonly string[],
+  gate: RollupGate | null = null,
 ): Promise<Map<string, number>> {
   if (projectIds.length === 0) return new Map()
+  const ids = sql`ANY(ARRAY[${sql.join(
+    projectIds.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  )}])`
+  // Same split, same bounds as its siblings; the project-set predicate rides
+  // both arms so neither can widen the population the other narrows.
+  const b = gate ? splitBounds(gate, window) : null
+  const parts = gate && b
+    ? sql`
+        SELECT r.day::text AS day, r.cost_usd
+          FROM usage_rollup_daily r
+         WHERE r.teammate_id = ${teammateId}::uuid
+           AND r.project_id = ${ids}
+           AND r.day >= ${b.rollupFrom}::date
+           AND r.day <= ${b.rollupTo}::date
+        UNION ALL
+        SELECT (u.ts_event AT TIME ZONE 'UTC')::date::text AS day, u.cost_usd
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.project_id = ${ids}
+           AND u.ts_event >= ${b.liveFrom}::timestamptz
+           AND u.ts_event <  ${window.endIso}::timestamptz`
+    : sql`
+        SELECT (u.ts_event AT TIME ZONE 'UTC')::date::text AS day, u.cost_usd
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.project_id = ${ids}
+           AND u.ts_event >= ${window.startIso}::timestamptz
+           AND u.ts_event <  ${window.endIso}::timestamptz`
+
   const rows = await tx.execute<{ day: string; cost_usd: string }>(sql`
-    SELECT (u.ts_event AT TIME ZONE 'UTC')::date::text AS day,
-           COALESCE(SUM(u.cost_usd), 0)::text AS cost_usd
-      FROM v_complete_usage u
-     WHERE u.teammate_id = ${teammateId}::uuid
-       AND u.project_id = ANY(ARRAY[${sql.join(
-         projectIds.map((id) => sql`${id}::uuid`),
-         sql`, `,
-       )}])
-       AND u.ts_event >= ${window.startIso}::timestamptz
-       AND u.ts_event <  ${window.endIso}::timestamptz
-     GROUP BY 1
+    SELECT day, COALESCE(SUM(cost_usd), 0)::text AS cost_usd
+      FROM (${parts}) p
+     GROUP BY day
   `)
   return new Map([...rows].map((r) => [r.day, Number(r.cost_usd)]))
 }
@@ -204,19 +293,49 @@ export async function teammateClaudeWindow(
   teammateId: string,
   window: SpendWindow,
   dayBounds: { from: string; to: string },
+  gate: RollupGate | null = null,
 ): Promise<TeammateClaudeWindow> {
+  /*
+   * The split source, shared by BOTH reads below.
+   *
+   * It unions ROWS, not per-arm aggregates, and that is load-bearing: this
+   * function counts DISTINCT active days across tools, and summing two arms'
+   * day-counts would double-count any day that appears in both. Unioning rows
+   * first means COUNT(DISTINCT day) sees one combined set and the union is
+   * correct by construction rather than by a merge rule someone must remember.
+   */
+  const b = gate ? splitBounds(gate, window) : null
+  const claudeParts = gate && b
+    ? sql`
+        SELECT r.day::text AS day, r.tool, r.cost_usd
+          FROM usage_rollup_daily r
+         WHERE r.teammate_id = ${teammateId}::uuid
+           AND r.tool LIKE 'claude%'
+           AND r.day >= ${b.rollupFrom}::date
+           AND r.day <= ${b.rollupTo}::date
+        UNION ALL
+        SELECT (u.ts_event AT TIME ZONE 'UTC')::date::text AS day, u.tool, u.cost_usd
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.tool LIKE 'claude%'
+           AND u.ts_event >= ${b.liveFrom}::timestamptz
+           AND u.ts_event <  ${window.endIso}::timestamptz`
+    : sql`
+        SELECT (u.ts_event AT TIME ZONE 'UTC')::date::text AS day, u.tool, u.cost_usd
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.tool LIKE 'claude%'
+           AND u.ts_event >= ${window.startIso}::timestamptz
+           AND u.ts_event <  ${window.endIso}::timestamptz`
+
   const [surfaceRows, searchRows] = await Promise.all([
     tx.execute<{ tool: string; usd: string; days: string }>(sql`
-      SELECT u.tool,
-             COALESCE(SUM(u.cost_usd), 0)::text AS usd,
-             COUNT(DISTINCT (u.ts_event AT TIME ZONE 'UTC')::date)::text AS days
-        FROM v_complete_usage u
-       WHERE u.teammate_id = ${teammateId}::uuid
-         AND u.tool LIKE 'claude%'
-         AND u.ts_event >= ${window.startIso}::timestamptz
-         AND u.ts_event <  ${window.endIso}::timestamptz
-       GROUP BY u.tool
-       ORDER BY SUM(u.cost_usd) DESC
+      SELECT c.tool,
+             COALESCE(SUM(c.cost_usd), 0)::text AS usd,
+             COUNT(DISTINCT c.day)::text AS days
+        FROM (${claudeParts}) c
+       GROUP BY c.tool
+       ORDER BY SUM(c.cost_usd) DESC
     `),
     tx.execute<{ n: string }>(sql`
       SELECT COALESCE(SUM(web_search_requests), 0)::text AS n
@@ -231,12 +350,7 @@ export async function teammateClaudeWindow(
   // Distinct ACROSS tools, not Σ per-tool counts: re-query-free upper bound is
   // wrong when two tools share a day, so take the distinct-day count directly.
   const dayRows = await tx.execute<{ n: string }>(sql`
-    SELECT COUNT(DISTINCT (u.ts_event AT TIME ZONE 'UTC')::date)::text AS n
-      FROM v_complete_usage u
-     WHERE u.teammate_id = ${teammateId}::uuid
-       AND u.tool LIKE 'claude%'
-       AND u.ts_event >= ${window.startIso}::timestamptz
-       AND u.ts_event <  ${window.endIso}::timestamptz
+    SELECT COUNT(DISTINCT c.day)::text AS n FROM (${claudeParts}) c
   `)
   return {
     activeDays: Number([...dayRows][0]?.n ?? 0),

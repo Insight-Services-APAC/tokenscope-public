@@ -82,14 +82,21 @@ export default defineEventHandler(async (event): Promise<BehaviourReport> => {
     () =>
       withRequestRls(event, async (tx): Promise<BehaviourReport> => {
         if (req.width === 'all-regions') {
-          const exposure = await fetchAcrossTierExposure(tx, win)
-          // The composite's dailyMetrics — memoized (D8). NOTE the sharing is
-          // per-WINDOW: this card usually arrives with the rolling 60-day band,
-          // which shares only with callers on the same band.
-          const daily = await memoizedScan(
-            ['across-daily-metrics', idKey, win.startIso, win.endIso, clock.settledThrough],
-            () => fetchAcrossDailyMetrics(tx, win, clock),
-          )
+          // Concurrent issuance on ONE tx connection: postgres-js pipelines and
+          // answers in order — no per-query await gaps (fully one wave on
+          // prepared statements), no cross-dependencies
+          // (docs/design/request-floor-performance.md F5).
+          //
+          // `daily` is the composite's dailyMetrics — memoized (D8). NOTE the
+          // sharing is per-WINDOW: this card usually arrives with the rolling
+          // 60-day band, which shares only with callers on the same band.
+          const [exposure, daily] = await Promise.all([
+            fetchAcrossTierExposure(tx, win),
+            memoizedScan(
+              ['across-daily-metrics', idKey, win.startIso, win.endIso, clock.settledThrough],
+              () => fetchAcrossDailyMetrics(tx, win, clock),
+            ),
+          ])
           return {
             window,
             width: 'all-regions' as const,
@@ -100,11 +107,14 @@ export default defineEventHandler(async (event): Promise<BehaviourReport> => {
         }
 
         const { scope } = req
-        const exposure = await fetchRegionalTierExposure(tx, scope, win)
-        const daily = await memoizedScan(
-          ['regional-daily-metrics', idKey, scope.scopeKey, win.startIso, win.endIso, clock.settledThrough],
-          () => fetchRegionalDailyMetrics(tx, scope, win, clock),
-        )
+        // One round-trip wave, no cross-dependencies (request-floor-performance.md F5).
+        const [exposure, daily] = await Promise.all([
+          fetchRegionalTierExposure(tx, scope, win),
+          memoizedScan(
+            ['regional-daily-metrics', idKey, scope.scopeKey, win.startIso, win.endIso, clock.settledThrough],
+            () => fetchRegionalDailyMetrics(tx, scope, win, clock),
+          ),
+        ])
         return {
           window,
           width: 'region' as const,

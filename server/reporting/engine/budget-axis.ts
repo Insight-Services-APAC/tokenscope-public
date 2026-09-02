@@ -49,9 +49,12 @@
  * coverage ratio, and is the one place the prototype and
  * target-state-data-architecture.md §5 contradict each other. §5 wins.
  *
- * Lane firewall (build-design §7(7)): reads the normalised `v_complete_usage`
- * seam only, through `completeProjectAxisSpend` — never `attribution_record`,
- * never `unaccounted_usage` directly, never raw `actual_spend`.
+ * Lane firewall (build-design §7(7)): reads the §A lane through the
+ * `completeProjectAxisSpend` seam only — never `attribution_record`, never
+ * `unaccounted_usage` directly, never raw `actual_spend`. The seam scans the
+ * day-grain rollup for this axis (`source: 'rollup'`, usage-rollup-lane.md
+ * R5b), an ALLOWED §A source (R7): its content is defined as an aggregate of
+ * `v_complete_usage`, so the lane's definition is unchanged.
  */
 import { sql, type SQL } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
@@ -150,7 +153,10 @@ export async function fetchBudgetAxis(
   range: UsageWindow,
   lens: SpendLens,
 ): Promise<BudgetAxisResult> {
-  const raw = await completeProjectAxisSpend(tx, range, { scope: clamp })
+  // CONSTRAINT: rollup-sourced, so this axis may lag a source mutation by up
+  // to one worker cadence — never feed it a real-time decision
+  // (usage-rollup-lane.md R5b.3/R5b.4).
+  const raw = await completeProjectAxisSpend(tx, range, { scope: clamp, source: 'rollup' })
 
   // The unallocated bucket is named for the LANE's question — see
   // `shared/reports/vocabulary.ts`. The key moves with the label so the two can

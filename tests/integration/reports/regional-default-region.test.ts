@@ -39,6 +39,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup, rebuildUsageRollup } from '../helpers/usage-rollup'
 import { injectTestSession } from '../../helpers/auth'
 import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
@@ -234,6 +235,9 @@ beforeAll(async () => {
   await spend(ann, aardvarkId, aardvarkUnit, projA, AARDVARK_USD)
   await spend(zoe, zebraId, zebraUnit, projZ, 13)
   await spend(zack, zebraId, zebraUnit, projZ, 10)
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {
@@ -466,6 +470,9 @@ describe('two regions sharing a display name still resolve to ONE region', () =>
     const projTB = await mkProject('PROJ-TB', 'Project Twin B', twinB, unitB)
     await spend(tomA, twinA, unitA, projTA, TWIN_A_USD)
     await spend(tomB, twinB, unitB, projTB, TWIN_B_USD)
+    // New §A rows after the top-level rollup build — REBUILD so the endpoints'
+    // rollup reads see the twins' spend (usage-rollup-lane.md R8).
+    await rebuildUsageRollup(t.db)
   })
 
   /**

@@ -50,8 +50,12 @@ const DETAIL: SessionDetail = {
     { token_type: 'cache-read', tokens: 900_000, cost_usd: '0.90' },
   ],
   by_query_source: [
-    { query_source: 'main', tokens: 1_100_000, cost_usd: '3.80' },
-    { query_source: 'aux', tokens: 150_000, cost_usd: '0.40' },
+    // Claude Code's REAL conversation token — never the word 'main'
+    // (docs/development/claude-code-telemetry-contract.md §Query-source vocabulary).
+    // RED ON REVERT: restore the `=== 'main'` equality in DetailDrawer and the
+    // 'Your conversation' assertion below goes red.
+    { query_source: 'repl_main_thread', tokens: 1_100_000, cost_usd: '3.80' },
+    { query_source: 'compact', tokens: 150_000, cost_usd: '0.40' },
   ],
   cache: { read_tokens: 900_000, write_tokens: 100_000, input_tokens: 280_000, hit_ratio: 0.76, savings_usd: '2.10' },
   fidelity: { tier1_cost_usd: '4.00', tier2_cost_usd: '0.20' },

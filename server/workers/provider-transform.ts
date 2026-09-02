@@ -611,21 +611,37 @@ async function transformSource(
    * analytics-poller.ts:626-651. Reached only after EVERY row in the window
    * derived and wrote successfully: a throw above aborts the transaction, so a
    * partial run can never delete rows it did not get the chance to re-assert.
+   *
+   * The delete ALSO enqueues the affected teammates for a usage-rollup
+   * recompute (docs/design/usage-rollup-lane.md R4): a pruned row leaves no
+   * write instant behind, so a day revised away to EMPTY — nothing
+   * re-asserted on it — is invisible to the rollup's source-write signal.
+   * Days that keep rows are already covered (the survivors carry
+   * pulled_at = runStarted). Actor-ref rows (teammate NULL) never enter the
+   * §A view and enqueue nothing.
    */
-  const pruned = await db.execute<{ id: string }>(
-    sql`DELETE FROM provider_usage_fact
-         WHERE source = ${source}
-           AND date >= ${opts.startingAt}::date
-           AND date <= ${opts.endingAt}::date
-           AND pulled_at < ${runStarted}::timestamptz
-       RETURNING id::text AS id`,
+  const pruned = await db.execute<{ n: string }>(
+    sql`WITH deleted AS (
+           DELETE FROM provider_usage_fact
+           WHERE source = ${source}
+             AND date >= ${opts.startingAt}::date
+             AND date <= ${opts.endingAt}::date
+             AND pulled_at < ${runStarted}::timestamptz
+           RETURNING teammate_id
+         ), enqueued AS (
+           INSERT INTO usage_rollup_refresh (teammate_id, requested_at)
+           SELECT DISTINCT teammate_id, statement_timestamp() FROM deleted WHERE teammate_id IS NOT NULL
+           ON CONFLICT (teammate_id) DO UPDATE SET requested_at = GREATEST(usage_rollup_refresh.requested_at + interval '1 microsecond', statement_timestamp())
+           RETURNING 1
+         )
+         SELECT COUNT(*)::text AS n FROM deleted`,
   )
 
   return {
     sourceRowsRead: derived.sourceRowsRead,
     providerRowsConsidered: derived.providerRowsConsidered,
     factRowsUpserted,
-    factRowsPruned: pruned.length,
+    factRowsPruned: Number([...pruned][0]?.n ?? 0),
     unresolvedActorRows: derived.unresolvedActorRows,
     pruneSkipped: false,
   }

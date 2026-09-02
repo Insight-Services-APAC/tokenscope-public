@@ -10,7 +10,10 @@
  * the consumption is inside the budget lens, and how much is outside it.
  *
  * ── SAME LANE, SAME WINDOW, SAME CLAMP AS THE HEADLINE ───────────────────────
- * ONE scan of v_complete_usage, clamped by the caller's UsageScope over the same
+ * ONE scan of usage_rollup_daily (the day-grain §A rollup the headline itself
+ * reads — usage-rollup-lane.md R5; `project_id` and `usage_provenance` are both
+ * in the rollup grain, so every FILTER below tests a cell dim, never a per-row
+ * measure), clamped by the caller's UsageScope over the same
  * window the surface's own KPI used. That is what makes `totalUsd` the surface's
  * headline rather than a second opinion about it: the four parts are FILTER
  * aggregates over the same scan, so they foot to the total by construction and
@@ -153,11 +156,11 @@ export async function fetchUsageBudgetCoverage(
                WHERE u.project_id IS NULL AND u.usage_provenance <> 'provider-usage'), 0)::text AS untagged,
              COALESCE(SUM(u.cost_usd) FILTER (
                WHERE u.project_id IS NULL AND u.usage_provenance = 'provider-usage'), 0)::text AS untaggable
-        FROM v_complete_usage u
+        FROM usage_rollup_daily u
         LEFT JOIN budgeted_project bp ON bp.project_id = u.project_id
        WHERE ${scopeSql(scope)}
-         AND u.ts_event >= ${window.startIso}::timestamptz
-         AND u.ts_event <  ${window.endIso}::timestamptz`)),
+         AND u.day >= ${window.startIso.slice(0, 10)}::date
+         AND u.day <  ${window.endIso.slice(0, 10)}::date`)),
   ]
   return {
     scopeLabel,

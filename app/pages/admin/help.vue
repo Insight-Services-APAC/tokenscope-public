@@ -44,7 +44,7 @@ const emission = [
 </script>
 
 <template>
-  <div class="max-w-[1000px] mx-auto px-10 py-8 pb-20" data-testid="admin-help">
+  <div class="max-w-[1000px] mx-auto px-10 py-8 pb-20" data-testid="admin-help" data-admin-page="/admin/help">
     <UiPageHead
       eyebrow="Reference"
       title="Roles & terms"

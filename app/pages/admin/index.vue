@@ -13,66 +13,126 @@ definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 const { isAdmin, isOrgWide, regionId, displayName, roleDisplay } = useAdminAccess()
 
-// User count — the admin's home region (org-wide admins have no home region, so
-// the URL getter is '' and the fetch is skipped: an explicit key avoids the
-// empty-URL SSR key-derivation crash).
-const usersAsync = useFetch<{ total: number }>(
+// Every tile is lazy, client-only, null-default and never awaited:
+// docs/design/admin-nav-responsiveness.md D1/D2. The users URL getter is '' for
+// org-wide admins (no home region), which is the one case D1 gives an explicit
+// key + watch.
+//
+// `immediate` is evaluated ONCE, at setup: a read that was never issued can
+// never become busy, so the same captured gate drives both. Without it a tile
+// whose read never fired would sit on '…' for ever and announce itself busy.
+const adminAtSetup = isAdmin.value
+
+const { data: users, error: usersError, refresh: refreshUsers } = useLazyFetch<{ total: number } | null>(
   () => (regionId.value ? `/api/v1/admin/users?region=${regionId.value}&limit=1` : ''),
-  { key: 'admin-overview-users', default: () => ({ total: 0 }), immediate: !!regionId.value },
+  {
+    key: 'admin-overview-users',
+    server: false,
+    default: () => null,
+    immediate: !!regionId.value,
+    watch: [regionId],
+  },
 )
-const users = usersAsync.data
 
-const regionsAsync = useFetch<{ regions: unknown[] }>('/api/v1/admin/regions', {
+const { data: regions, error: regionsError, refresh: refreshRegions } = useLazyFetch<{ regions: unknown[] } | null>('/api/v1/admin/regions', {
   key: 'admin-overview-regions',
-  default: () => ({ regions: [] }),
-  immediate: isAdmin.value,
+  server: false,
+  default: () => null,
+  immediate: adminAtSetup,
 })
-const regions = regionsAsync.data
 
-await Promise.all([usersAsync, regionsAsync])
-
-const since24h = computed(() => new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-const { data: audit } = useLazyFetch<{ total: number } | null>(
-  () => `/api/v1/admin/audit?limit=1&since=${encodeURIComponent(since24h.value)}`,
-  { key: 'admin-overview-audit', default: () => null, immediate: isAdmin.value },
+// The SERVER owns `now` (CLAUDE.md §The clock): this read is client-only, so a
+// browser-computed cutoff would let a skewed clock ask for a window the server
+// is not serving. The URL is empty until the clock lands; the watch issues the
+// request then, and the tile reads busy in the meantime.
+const { clock } = useServerClock()
+const since24h = computed(() => {
+  const now = clock.value?.now
+  return now ? new Date(new Date(now).getTime() - 24 * 60 * 60 * 1000).toISOString() : ''
+})
+const { data: audit, error: auditError, refresh: refreshAudit } = useLazyFetch<{ total: number } | null>(
+  () => (since24h.value ? `/api/v1/admin/audit?limit=1&since=${encodeURIComponent(since24h.value)}` : ''),
+  {
+    key: 'admin-overview-audit',
+    server: false,
+    default: () => null,
+    immediate: false,
+    watch: [since24h],
+  },
 )
-const { data: diag } = useLazyFetch<{ postgres: { reachable: boolean } } | null>(
+const { data: diag, error: diagError, refresh: refreshDiag } = useLazyFetch<{ postgres: { reachable: boolean } } | null>(
   '/api/v1/admin/diagnostics',
-  { key: 'admin-overview-diag', default: () => null, immediate: isAdmin.value },
+  { key: 'admin-overview-diag', server: false, default: () => null, immediate: adminAtSetup },
 )
-const { data: recon } = useLazyFetch<{ summary: { total: number } } | null>(
+const { data: recon, error: reconError, refresh: refreshRecon } = useLazyFetch<{ summary: { total: number } } | null>(
   '/api/v1/admin/reconciliation/records?limit=1',
-  { key: 'admin-overview-recon', default: () => null, immediate: isAdmin.value },
+  { key: 'admin-overview-recon', server: false, default: () => null, immediate: adminAtSetup },
 )
 
-// At-a-glance status. Lazy tiles show '…' until they land; never block paint.
+// One of busy / error / value per tile — D2, keyed on the ABSENCE of data, not
+// on `pending`. 'na' is the read that was never issued (org-wide admin has no
+// home region), which is a real '—', not a pending state.
+type TileState = 'busy' | 'error' | 'ready' | 'na'
+function tile<T>(issued: boolean, data: T | null | undefined, error: unknown, render: (d: T) => string): { value: string; state: TileState } {
+  if (error) return { value: '—', state: 'error' }
+  if (data != null) return { value: render(data), state: 'ready' }
+  return issued ? { value: '…', state: 'busy' } : { value: '—', state: 'na' }
+}
+
 const stats = computed(() => [
-  { key: 'regions', label: 'Regions', value: String(regions.value?.regions.length ?? 0), to: '/admin/regions' },
+  {
+    key: 'regions',
+    label: 'Regions',
+    to: '/admin/regions',
+    ...tile(adminAtSetup, regions.value, regionsError.value, (d) => String(d.regions.length)),
+  },
   {
     key: 'teammates',
     label: 'Teammates in your region',
-    value: regionId.value ? String(users.value?.total ?? 0) : '—',
     to: '/admin/users',
+    ...tile(!!regionId.value, users.value, usersError.value, (d) => String(d.total)),
   },
   {
     key: 'recon',
     label: 'Proposed reconciliation deltas',
-    value: recon.value ? String(recon.value.summary.total) : '…',
     to: '/admin/reconciliation',
+    ...tile(adminAtSetup, recon.value, reconError.value, (d) => String(d.summary.total)),
   },
   {
     key: 'audit',
     label: 'Audit events · 24h',
-    value: audit.value ? String(audit.value.total) : '…',
     to: '/admin/audit',
+    ...tile(adminAtSetup, audit.value, auditError.value, (d) => String(d.total)),
   },
   {
     key: 'postgres',
     label: 'Postgres',
-    value: diag.value ? (diag.value.postgres.reachable ? 'ok' : 'down') : '…',
     to: '/admin/diagnostics',
+    ...tile(adminAtSetup, diag.value, diagError.value, (d) => (d.postgres.reachable ? 'ok' : 'down')),
   },
 ])
+
+// The strip is busy while ANY issued read is still absent, and stops being busy
+// the moment every read has landed or failed: the gate
+// (docs/design/admin-nav-responsiveness.md D6) fails a busy state that never
+// clears, and a permanent '…' is exactly that defect.
+const stripBusy = computed(() => stats.value.some((s) => s.state === 'busy'))
+
+// Failure is announced, never rendered as a confident number. One banner for
+// the strip; retry refreshes only the reads that actually failed.
+const failed = [
+  { label: 'Regions', error: regionsError, refresh: refreshRegions },
+  { label: 'Teammates in your region', error: usersError, refresh: refreshUsers },
+  { label: 'Proposed reconciliation deltas', error: reconError, refresh: refreshRecon },
+  { label: 'Audit events · 24h', error: auditError, refresh: refreshAudit },
+  { label: 'Postgres', error: diagError, refresh: refreshDiag },
+]
+const failedReads = computed(() => failed.filter((r) => r.error.value))
+const stripError = computed(() => failedReads.value[0]?.error.value ?? null)
+const stripErrorLabel = computed(() => failedReads.value.map((r) => r.label).join(', '))
+function retryFailed() {
+  for (const r of failedReads.value) void r.refresh()
+}
 
 // Common tasks — the deepest / most-frequent actions, role-aware. Kept short on
 // purpose; the sidebar is the complete surface.
@@ -92,20 +152,28 @@ const quickActions = computed(() => {
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-hub">
+  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-hub" data-admin-page="/admin">
     <UiPageHead
       eyebrow="Administration"
       title="Overview"
       :sub="`Welcome back, ${displayName || roleDisplay}. Here's your region at a glance.`"
     />
 
+    <UiFetchErrorBanner v-if="stripError" :error="stripError" :label="stripErrorLabel" @retry="retryFailed" />
+
     <!-- Status strip -->
-    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-10" data-testid="admin-overview-stats">
+    <div
+      class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-10"
+      data-testid="admin-overview-stats"
+      :aria-busy="stripBusy ? 'true' : undefined"
+    >
+      <span v-if="stripBusy" class="sr-only" role="status">Loading overview status…</span>
       <NuxtLink
         v-for="s in stats"
         :key="s.key"
         :to="s.to"
         :data-testid="`admin-stat-${s.key}`"
+        :data-state="s.state"
         class="block p-4 rounded-xl border border-calm-2 bg-paper no-underline hover:border-brand-harmony/40 transition-colors"
       >
         <div class="text-2xl font-bold text-carbon tabular-nums leading-none">{{ s.value }}</div>
@@ -136,7 +204,7 @@ const quickActions = computed(() => {
       </NuxtLink>
     </div>
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
     <p class="text-sm text-carbon-2 mt-2">Sign in as an admin to view this page.</p>
   </div>

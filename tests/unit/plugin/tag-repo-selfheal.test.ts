@@ -119,6 +119,10 @@ describe('writeRepoTag change-detection', () => {
     const r = writeRepoTag({ cwd, enrolment: enrolment({ helper: '/plugins/tokenscope/0.1.3/scripts/otel-headers-helper.sh' }), codeHash: CODE_HASH })
     expect(r.changed).toBe(true)
     expect(r.healed).toBe(true)
+    // A helper-path move does NOT change which instance records land against, so
+    // it must NOT set instanceDrifted — the SessionStart warning keys off that
+    // field alone, and firing it on every plugin upgrade would cry wolf.
+    expect(r.instanceDrifted).toBe(false)
     expect(readRepo(cwd).otelHeadersHelper).toContain('0.1.3')
   })
 
@@ -127,7 +131,26 @@ describe('writeRepoTag change-detection', () => {
     const r = writeRepoTag({ cwd, enrolment: enrolment({ instance: 'inst-NEW' }), codeHash: CODE_HASH })
     expect(r.changed).toBe(true)
     expect(r.healed).toBe(true)
+    // THE signal (2026-09-01): the repo pinned a different instance than the device's
+    // current enrolment, so the RUNNING session — whose resource attrs froze before
+    // this rewrite — is emitting under the superseded one. SessionStart warns on this.
+    expect(r.instanceDrifted).toBe(true)
     expect(readRepo(cwd).env.OTEL_RESOURCE_ATTRIBUTES).toContain('tokenscope.instance_id=inst-NEW')
+  })
+
+  it('a FIRST tag (no previous repo env to compare) is not instance drift', () => {
+    // Nothing was superseded — there was no prior pin. Warning here would fire on
+    // every first-ever tag of a repo, which is the normal path.
+    const r = writeRepoTag({ cwd, enrolment: enrolment({ instance: 'inst-A' }), codeHash: CODE_HASH })
+    expect(r.changed).toBe(true)
+    expect(r.instanceDrifted).toBe(false)
+  })
+
+  it('an idempotent no-op reports no instance drift', () => {
+    writeRepoTag({ cwd, enrolment: enrolment({ instance: 'inst-A' }), codeHash: CODE_HASH })
+    const r = writeRepoTag({ cwd, enrolment: enrolment({ instance: 'inst-A' }), codeHash: CODE_HASH })
+    expect(r.changed).toBe(false)
+    expect(r.instanceDrifted).toBe(false)
   })
 
   it('refreshes frozen credentials: a legacy session-token pin picks up the current OAuth env', () => {
@@ -288,7 +311,7 @@ describe('writeRepoTag change-detection', () => {
     expect(() => {
       r = writeRepoTag({ cwd, enrolment: enrolment(), codeHash: CODE_HASH })
     }).not.toThrow()
-    expect(r).toEqual({ settingsPath: null, changed: false, healed: false })
+    expect(r).toEqual({ settingsPath: null, changed: false, healed: false, instanceDrifted: false })
     expect(existsSync(join(cwd, '.claude'))).toBe(false)
   })
 

@@ -24,6 +24,8 @@ import postgres from 'postgres'
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import * as schema from '../../../drizzle/schema'
 import { WORKER_RLS_STARTUP_OPTIONS } from '../../../server/db/worker-db'
+import { createDbClient } from '../../../drizzle/connect'
+import { closeDispatchLockPool } from '../../../server/workers/dispatch-lock'
 
 const MIGRATIONS_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -111,7 +113,7 @@ export async function startTestDb(): Promise<TestDb> {
     }
     u.pathname = `/${dbName}`
     const url = u.toString()
-    const client = postgres(url, { max: 4, idle_timeout: 5, connection: PROD_CONNECTION })
+    const client = createDbClient(url, { max: 4, idle_timeout: 5, connection: PROD_CONNECTION })
     const db = drizzle(client, { schema })
     await runMigrations(client)
     return {
@@ -207,7 +209,7 @@ export async function startTestDb(): Promise<TestDb> {
   } else {
     url = container.getConnectionUri()
   }
-  const client = postgres(url, { max: 4, idle_timeout: 5, connection: PROD_CONNECTION })
+  const client = createDbClient(url, { max: 4, idle_timeout: 5, connection: PROD_CONNECTION })
   const db = drizzle(client, { schema })
 
   await runMigrations(client)
@@ -216,6 +218,9 @@ export async function startTestDb(): Promise<TestDb> {
 }
 
 export async function stopTestDb(t: TestDb): Promise<void> {
+  // The dispatch lock opens a sibling pool on first use (server/workers/
+  // dispatch-lock.ts); close it before the parent so vitest has no open handle.
+  await closeDispatchLockPool(t.db)
   await t.client.end({ timeout: 5 })
   if (t.container) await t.container.stop()
   if (t.teardown) await t.teardown()

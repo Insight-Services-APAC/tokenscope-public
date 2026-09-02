@@ -37,8 +37,7 @@ interface InstanceRow extends Record<string, unknown> {
   teammate_display_name: string | null
 }
 
-const { session, ensure } = useSession()
-await ensure()
+const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
@@ -50,9 +49,17 @@ const isOrgWide = computed(() => {
 })
 const regionId = computed(() => session.value?.regionId ?? '')
 
-const { data: regionsData } = await useFetch<{ regions: { id: string; code: string; display_name: string }[] }>(
+// Both reads are declared lazily and never awaited: navigation is never gated
+// on data (docs/design/admin-nav-responsiveness.md D1/D2).
+// The region picker's read keeps its `error`: a failed read collapsed into `[]`
+// renders as "no other regions" — the false empty D2 forbids.
+const {
+  data: regionsData,
+  error: regionsError,
+  refresh: refreshRegions,
+} = useLazyFetch<{ regions: { id: string; code: string; display_name: string }[] } | null>(
   '/api/v1/admin/regions',
-  { default: () => ({ regions: [] }) },
+  { server: false, default: () => null },
 )
 const viewRegionId = ref('')
 watch(regionId, (r) => { if (!viewRegionId.value && r) viewRegionId.value = r }, { immediate: true })
@@ -64,14 +71,18 @@ const instancesUrl = computed(() =>
   scopeRegion.value ? `/api/v1/admin/instances?region=${scopeRegion.value}` : '',
 )
 
-const { data, refresh, pending } = await useFetch<{ instances: InstanceRow[]; region: string }>(
+// Explicit key because the getter can be '' (D1); the watch carries the refetch.
+const { data, error, refresh } = useLazyFetch<{ instances: InstanceRow[]; region: string } | null>(
   () => instancesUrl.value,
   {
-    default: () => ({ instances: [], region: '' }),
+    key: 'admin-instances-list',
+    server: false,
+    default: () => null,
     immediate: !!regionId.value,
     watch: [instancesUrl],
   },
 )
+const skeleton = computed(() => !error.value && data.value == null)
 
 const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
 let toastTimer: ReturnType<typeof setTimeout> | null = null
@@ -118,7 +129,7 @@ function fmtTs(v: string | null): string {
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-instances">
+  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-instances" data-admin-page="/admin/instances">
     <UiPageHead
       eyebrow="Administration"
       title="Devices"
@@ -136,24 +147,34 @@ function fmtTs(v: string | null): string {
       {{ toast.message }}
     </div>
 
+    <UiFetchErrorBanner v-if="error" :error="error" label="devices" @retry="refresh" />
     <AdminDataTable
+      v-else
       :rows="data?.instances ?? []"
       :columns="columns"
-      :loading="pending"
+      :loading="skeleton"
       empty-headline="No devices"
       empty-sub="No enrolled devices in this region yet."
     >
       <template #toolbar>
         <div class="flex-1" />
-        <select
-          v-if="isOrgWide"
-          v-model="viewRegionId"
-          class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white"
-          data-testid="admin-instances-region-view"
-          title="Browse devices in another region"
-        >
-          <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
-        </select>
+        <div v-if="isOrgWide">
+          <select
+            v-model="viewRegionId"
+            :disabled="!regionsData"
+            class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white disabled:bg-calm/40 disabled:cursor-not-allowed"
+            data-testid="admin-instances-region-view"
+            :title="regionsError ? 'The region list could not be loaded.' : 'Browse devices in another region'"
+          >
+            <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
+          </select>
+          <UiAuxFetchError
+            :error="regionsError"
+            label="regions"
+            testid="admin-instances-regions-error"
+            @retry="refreshRegions"
+          />
+        </div>
       </template>
       <template #row="{ row }">
         <tr
@@ -195,7 +216,7 @@ function fmtTs(v: string | null): string {
       </template>
     </AdminDataTable>
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/instances">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

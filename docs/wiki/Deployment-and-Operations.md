@@ -187,6 +187,40 @@ at apply time by the workflow from `secrets.*` — never hardcoded.
   centralised private DNS. Pick per environment. (Insight dev consumes central
   zones — see your deployment's own configuration.)
 
+## Ops alerting
+
+Degradation pages the operator; it never waits to be looked at
+(`docs/design/ops-alerting.md` is the planning record — this is the shipped
+state).
+
+- **Evaluator**: the `ops-alert` worker (cron `9,24,39,54 * * * *`, see
+  [Background-Workers](Background-Workers)) checks four condition groups each
+  tick: a bounded read of the joiner's real telemetry table, attribution stall
+  (people emitting, no rows landing), a cadence-aware worker-fleet predicate,
+  and admin alert-inbox aging. Criticals notify on first detection; warnings
+  need two consecutive runs; reminders every 6h while unresolved; recovery
+  notices only for alerts that were actually delivered.
+- **Channel**: a public ntfy.sh topic — the 64-char random topic name is the
+  access control. The URL lives as GH env secret `OPS_ALERT_NTFY_URL` → Key
+  Vault `ops-alert-ntfy-url` → container `secretRef`
+  `NUXT_OPS_ALERT_NTFY_URL`; empty = alerting disabled (local default). The
+  payload is allowlisted to severity, condition key, env tag, UTC timestamp
+  and an aggregate count — nothing else, enforced by tests. Logs record
+  host + HTTP status + condition key, never the URL. Rotation = new topic,
+  update the GH secret, re-apply.
+- **Azure-native legs** (`infra/modules/ops-alerts.bicep`, the existing action
+  group + `alertNotificationEmail`): Container App `Replicas` < 1, Postgres
+  `is_db_alive` < 1, and a dead-man on the `caj-ts-ops-alert` job's successful
+  executions — these fire from inside Azure even when the app, AMPLS or the
+  worker itself is down.
+- **Parity**: every externally-notified condition also upserts one admin inbox
+  item (platform-admin + global-finops) and writes
+  `ops-alert-{delivered,failed,reminded,recovered}` audit events.
+- **User surface**: while the stall condition holds, Home and My usage show a
+  degradation banner ("recent spend may be missing"), and the freshness dot
+  never shows green for an age it cannot vouch for — worker and UI share one
+  decision function (`server/usage/attribution-stall.ts`).
+
 ## Operator pointers
 
 - **Secret rotation** always goes through the workflow path — update the GH

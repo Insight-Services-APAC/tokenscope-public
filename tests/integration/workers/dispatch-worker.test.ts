@@ -15,11 +15,11 @@
  * unique worker name, so there is exactly one worker_run row per name.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { workerRun } from '../../../drizzle/schema'
-import { acquireWorkerDispatchLock } from '../../../server/workers/dispatch-lock'
 import { dispatchWorker } from '../../../server/workers/dispatch'
+import { acquireWorkerDispatchLock, DISPATCH_LOCK_POOL_MAX } from '../../../server/workers/dispatch-lock'
 import type { WorkerEntry, WorkerRunContext } from '../../../server/workers/registry'
 
 let t: TestDb
@@ -102,4 +102,48 @@ describe('dispatchWorker', () => {
     // No run row was written for the blocked dispatch.
     expect(await latestRun(name)).toBeUndefined()
   })
+
+  /*
+   * Dev 2026-08-27: the `:00` cron batch dispatches 19 workers at once against a
+   * request pool of 10. When the lock reserved its connection off THAT pool,
+   * each dispatch pinned one connection and then waited for a second from the
+   * same pool for its run — all of them, forever. Test pool is max 4; dispatch
+   * three times that many concurrently, each doing a real query through the
+   * pool while its lock is held. With the lock on the parent pool this hangs
+   * (bounded here to a failure); with the dedicated lock pool they all finish.
+   */
+  it('a batch larger than the request pool completes — the lock never starves the pool it runs on', async () => {
+    const poolMax = 4 // tests/integration/helpers/db.ts client
+    const batch = poolMax * 3
+    expect(batch).toBeLessThanOrEqual(DISPATCH_LOCK_POOL_MAX)
+    const names = Array.from({ length: batch }, (_, i) => `test-dispatch-batch-${i}`)
+
+    let inFlight = 0
+    let peak = 0
+    const all = Promise.all(
+      names.map((name) =>
+        dispatchWorker(
+          t.db,
+          entry(name, async (db) => {
+            inFlight += 1
+            peak = Math.max(peak, inFlight)
+            try {
+              // Hold the run open long enough that the whole batch overlaps.
+              await db.execute(sql`SELECT pg_sleep(0.2)`)
+            } finally {
+              inFlight -= 1
+            }
+            return { rowsWritten: 1 }
+          }),
+        ),
+      ),
+    )
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('batch deadlocked: dispatches never completed')), 20_000),
+    )
+    const results = await Promise.race([all, timeout])
+    expect(results).toHaveLength(batch)
+    expect(peak).toBeGreaterThan(1) // the batch genuinely overlapped
+    for (const name of names) expect((await latestRun(name))?.status).toBe('success')
+  }, 30_000)
 })

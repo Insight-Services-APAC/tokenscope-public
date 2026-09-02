@@ -93,6 +93,12 @@ var workers = [
   // Consumption-dashboard read path (night sprint): materialises
   // attribution_aggregate; self-bootstraps a 90-day backfill on first run.
   { name: 'aggregate-rollup', cron: '*/15 * * * *' }
+  // Region-reporting read path: materialises usage_rollup_daily from
+  // v_complete_usage; full-history backfill resumes across runs
+  // (docs/design/usage-rollup-lane.md). Minutes ≡ 2 (mod 5) avoid simultaneous
+  // STARTS with the */5 and */15 pollers — starts only, NOT overlap: dispatches
+  // can run ~200 s (performance-observability-baseline.md O5, dr-M6).
+  { name: 'usage-rollup', cron: '7,22,37,52 * * * *' }
   // Read-path outage detector (ADR-0005 safety-net sibling of went-silent):
   // scans the worker_run ledger and inbox-alerts platform-admins when the
   // azure-monitor-read gatherer is silently failing (rows not landing while
@@ -175,6 +181,12 @@ var workers = [
   // 30-day revision window the poller re-polls. Money-adjacent bulk derive, so
   // cron/HMAC-only — never UI-triggerable.
   { name: 'provider-transform', cron: '0 * * * *' }
+  // Ops-alerting evaluator (docs/design/ops-alerting.md A2): probes the read
+  // path + private-link routes, detects attribution stalls / fleet failures /
+  // inbox aging, and pages the external ntfy channel. Cron is the exact design
+  // literal (ar-L22), ≡4 mod 5 — off the 5- and 15-minute tick grids. Its OWN
+  // liveness is the A4 dead-man metric alert on this job's execution count.
+  { name: 'ops-alert', cron: '9,24,39,54 * * * *' }
 ]
 
 resource jobs 'Microsoft.App/jobs@2024-03-01' = [

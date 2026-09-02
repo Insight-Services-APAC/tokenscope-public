@@ -83,7 +83,11 @@ function conversationsQuery(teammateId: string, opts: { dismissed: boolean }): S
         WHERE sa.teammate_id = ${teammateId}::uuid
           AND sa.claude_session_id = g.session_id
           AND sa.dismissed_at IS NOT NULL)
-     ORDER BY g.last_event_ts DESC
+     -- session_id is the UNIQUE tiebreaker. Ordering by a non-unique column
+     -- under a LIMIT orders tied last_event_ts values arbitrarily, so WHICH
+     -- sessions appear at all varies per request and one can stay permanently
+     -- invisible on a queue people act on.
+     ORDER BY g.last_event_ts DESC, g.session_id DESC
      LIMIT ${LIST_LIMIT}
   `
 }
@@ -95,7 +99,9 @@ function unaccountedQuery(teammateId: string, opts: { dismissed: boolean }): SQL
     FROM unaccounted_usage
     WHERE teammate_id = ${teammateId}::uuid AND project_id IS NULL AND cost_usd > 0
       AND dismissed_at IS ${opts.dismissed ? sql`NOT NULL` : sql`NULL`}
-    ORDER BY day DESC
+    -- id is the UNIQUE tiebreaker: day is not unique, and under a LIMIT that
+    -- makes the visible set non-deterministic (see the note above).
+    ORDER BY day DESC, id DESC
     LIMIT ${LIST_LIMIT}
   `
 }
@@ -125,14 +131,17 @@ export default defineEventHandler(async (event) => {
   const { rows, cellsByConv, unaccounted, dismissedRows, dismissedUnaccounted } = await withRequestRls(
     event,
     async (tx) => {
-      const convRows = await tx.execute<Row>(conversationsQuery(session.teammateId, { dismissed: false }))
-      const unaccountedRows = await tx.execute<UnaccountedRow>(
-        unaccountedQuery(session.teammateId, { dismissed: false }),
-      )
-      const dismissedConvRows = await tx.execute<Row>(conversationsQuery(session.teammateId, { dismissed: true }))
-      const dismissedUnaccountedRows = await tx.execute<UnaccountedRow>(
-        unaccountedQuery(session.teammateId, { dismissed: true }),
-      )
+      // Concurrent issuance on ONE tx connection: postgres-js pipelines and
+      // answers in order — no per-query await gaps for the four independent
+      // lists (docs/design/request-floor-performance.md F5). The breakdown fetch
+      // below stays after: it consumes the active conversations' ids.
+      const [convRows, unaccountedRows, dismissedConvRows, dismissedUnaccountedRows] =
+        await Promise.all([
+          tx.execute<Row>(conversationsQuery(session.teammateId, { dismissed: false })),
+          tx.execute<UnaccountedRow>(unaccountedQuery(session.teammateId, { dismissed: false })),
+          tx.execute<Row>(conversationsQuery(session.teammateId, { dismissed: true })),
+          tx.execute<UnaccountedRow>(unaccountedQuery(session.teammateId, { dismissed: true })),
+        ])
       // NOTE: the breakdown spans the conversation's FULL ledger (attributed +
       // unallocated rows), while tokens/cost above are the unallocated slice
       // only — the worklist sums what needs tagging; the chip describes the

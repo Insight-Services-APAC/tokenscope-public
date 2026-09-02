@@ -17,7 +17,7 @@
  *   - audit rows written for every mutation
  */
 import { createServer, type Server } from 'node:http'
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import * as schema from '../../../drizzle/schema'
 import { injectTestSession } from '../../helpers/auth'
@@ -32,6 +32,16 @@ import entPost from '../../../server/api/v1/admin/reconciliation/enterprises.pos
 import entPatch from '../../../server/api/v1/admin/reconciliation/enterprises/[id].patch'
 import entDelete from '../../../server/api/v1/admin/reconciliation/enterprises/[id].delete'
 import discoverPost from '../../../server/api/v1/admin/reconciliation/anthropic/discover.post'
+import { computeOrgHealth } from '../../../server/anthropic/org-health'
+
+// computeOrgHealth is the outbound HTTPS probe. It lives ONLY behind
+// anthropic/health now (docs/design/admin-nav-responsiveness.md D5) — the list
+// must never call it. Wrapped, not stubbed, so any other caller keeps the real
+// behaviour and the assertion is about CALLS, not about a fake.
+vi.mock('../../../server/anthropic/org-health', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../server/anthropic/org-health')>()
+  return { ...actual, computeOrgHealth: vi.fn(actual.computeOrgHealth) }
+})
 
 let t: TestDb
 let regionId: string
@@ -509,23 +519,27 @@ describe('provider_org CRUD (both providers) + api_kind CHECK + linkage', () => 
     expect(rows[0]!.provider_enterprise_id).toBe(anthEnt.id)
   })
 
-  it('list returns BOTH providers joined to the enterprise, with keyPresent + health(anthropic)/null(github)', async () => {
+  it('list returns BOTH providers joined to the enterprise, with keyPresent and NO health, and makes no outbound call', async () => {
+    vi.mocked(computeOrgHealth).mockClear()
     const got = (await orgsGet(ev({ method: 'GET', session: finops() }))) as {
       orgs: {
         id: string; provider: string; externalOrgId: string; apiKind: string | null
-        enterprise: { id: string } | null; keyPresent: boolean; health: { color: string } | null
+        enterprise: { id: string } | null; keyPresent: boolean
       }[]
       total: number
     }
     const anth = got.orgs.find((o) => o.id === anthOrgId)!
     const gh = got.orgs.find((o) => o.id === ghOrgId)!
     expect(anth.provider).toBe('anthropic')
-    expect(anth.health).not.toBeNull()
     expect(anth.keyPresent).toBe(false) // no NUXT_ANTHROPIC_KEY_* env wired
     expect(gh.provider).toBe('github')
     expect(gh.apiKind).toBeNull()
-    expect(gh.health).toBeNull()
     expect(gh.enterprise!.id).toBe(ghEntId)
+    // D5: the verdict is served by anthropic/health alone (per org, keyed by
+    // externalOrgId — lane-conversion-routes.test.ts covers it). The list
+    // carries no `health` key at all and pays no probe.
+    for (const o of got.orgs) expect(o).not.toHaveProperty('health')
+    expect(computeOrgHealth).not.toHaveBeenCalled()
   })
 
   it('deletes the github org (leaf), audited; second delete → 404', async () => {

@@ -22,9 +22,12 @@
  *   - top-level `total_allocation_usd` — sum of buckets' allocation
  */
 import { sql } from 'drizzle-orm'
+import { consola } from 'consola'
 import { defineEventHandler } from 'h3'
 import { requireAuth } from '../../../utils/auth'
+import { getDb } from '../../../db'
 import { withRequestRls } from '../../../db/request-rls'
+import { attributionStall } from '../../../usage/attribution-stall'
 import { getMyUsage, getMyProviderTruthMtd } from '../../../utils/me-queries'
 import { buildMeHeadline, buildMeLensDisclosure } from '../../../utils/me-lens'
 import { requestClock } from '../../../utils/request-clock'
@@ -137,6 +140,34 @@ export default defineEventHandler(async (event) => {
     `)
     const hasEverEmitted = [...emitted][0]?.ever === true
 
-    return { ...usage, has_ever_emitted: hasEverEmitted, headline, disclosure }
+    /*
+     * The §A6.2 degradation-banner leg (additive). On the BASE handle, not this
+     * RLS tx: the signal is GLOBAL — `instance_attestation` is region-scoped
+     * under RLS, so a viewer-scoped MAX(last_bearer_at) would hand two regions
+     * two different stall verdicts. See server/usage/attribution-stall.ts.
+     */
+    const attributionStallLeg = await attributionStall(getDb(), { now }).catch((err) => {
+      // The leg is additive: an unreadable ledger must degrade to no-banner,
+      // never 500 the page — which would hit exactly during the outage the
+      // banner exists for (attribution-stall.ts assigns never-throws to us).
+      consola.error('[me/home] attribution-stall leg failed', err instanceof Error ? err.name : '')
+      return null
+    })
+
+    return {
+      ...usage,
+      /*
+       * §A6.1: `getMyUsage` answers "minutes since your newest event" with 0
+       * when there IS no event (the MCP `my_usage` wire keeps that shape —
+       * changing it is a plugin-contract change, not this endpoint's). The WEB
+       * payload ships the honest absence instead: null renders the neutral
+       * "freshness unknown" dot, never a fabricated green "Updated 0 min ago".
+       */
+      freshness_minutes_ago: hasEverEmitted ? usage.freshness_minutes_ago : null,
+      has_ever_emitted: hasEverEmitted,
+      headline,
+      disclosure,
+      attribution_stall: attributionStallLeg,
+    }
   })
 })

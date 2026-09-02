@@ -46,6 +46,23 @@ export function isOrgWideRole(role: string | null | undefined): boolean {
 }
 
 /**
+ * Roles that reach /reporting on the ROLE axis alone. Excludes `finance` (a
+ * retired enum member, see SELECTABLE_ROLES) and `developer`.
+ *
+ * Reporting visibility is role OR Business-Unit ownership OR an active
+ * report-access grant — the other two are RELATIONSHIPS, not roles (J3, mig
+ * 0048/0129), so they cannot be answered from this list. `resolveReportingNav`
+ * (server/auth/nav-visibility.ts) is the one place all three are combined; the
+ * nav renders its verdict and never re-derives it.
+ */
+export const REPORTING_ROLES = ['manager', 'admin', 'global-finops', 'platform-admin'] as const
+
+/** True for a role that reaches /reporting without needing ownership or a grant. */
+export function isReportingRole(role: string | null | undefined): boolean {
+  return !!role && (REPORTING_ROLES as readonly string[]).includes(role)
+}
+
+/**
  * Roles offered in role-assignment dropdowns. Excludes `finance` — a retired
  * enum member never assigned to anyone (kept in ROLES only for exhaustiveness /
  * historical data). Never offer an unassignable role. See the "Roles & terms"

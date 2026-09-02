@@ -338,6 +338,55 @@ describe('is_active is consulted on the authentication path', () => {
   })
 })
 
+// ── The in-process verdict (request-floor-performance.md F2) ─────────────────
+//
+// The NORMAL (non-override) session path no longer re-reads the teammate row:
+// resolveOrCreateTeammate's fused query carries revoked_at/is_active and
+// revocationDenies() judges them in-process. The tryAuth cases above pin the
+// route-level behaviour (they run the real resolveSession normal path); this
+// block pins the verdict function's four branches directly, because the
+// row-missing branch is unreachable through tryAuth (the resolver always
+// returns a row or throws).
+
+describe('revocationDenies — semantics identical to isRevoked()', () => {
+  const nowIso = () => new Date().toISOString()
+
+  async function verdict() {
+    vi.resetModules()
+    const { revocationDenies } = await import('../../../server/utils/auth')
+    return revocationDenies
+  }
+
+  it('teammate row gone denies (fail closed)', async () => {
+    const revocationDenies = await verdict()
+    expect(revocationDenies(null, nowIso())).toBe(true)
+    expect(revocationDenies(undefined, nowIso())).toBe(true)
+  })
+
+  it('is_active !== true denies — false AND null (fail closed), regardless of revoked_at', async () => {
+    const revocationDenies = await verdict()
+    expect(revocationDenies({ revokedAt: null, isActive: false }, nowIso())).toBe(true)
+    expect(revocationDenies({ revokedAt: null, isActive: null }, nowIso())).toBe(true)
+  })
+
+  it('revoked_at > issuedAt denies; revoked_at < issuedAt admits (session ANCHOR, not a flag)', async () => {
+    const revocationDenies = await verdict()
+    const issued = new Date('2026-08-01T12:00:00.000Z').toISOString()
+    const after = new Date('2026-08-01T13:00:00.000Z')
+    const before = new Date('2026-08-01T11:00:00.000Z')
+    expect(revocationDenies({ revokedAt: after, isActive: true }, issued)).toBe(true)
+    expect(revocationDenies({ revokedAt: before, isActive: true }, issued)).toBe(false)
+    expect(revocationDenies({ revokedAt: null, isActive: true }, issued)).toBe(false)
+  })
+
+  it('an unparseable issuedAt sorts to EPOCH — any revoked_at ever stamped denies', async () => {
+    const revocationDenies = await verdict()
+    const anyRevoke = new Date('2020-01-01T00:00:00.000Z')
+    expect(revocationDenies({ revokedAt: anyRevoke, isActive: true }, 'not-a-date')).toBe(true)
+    expect(revocationDenies({ revokedAt: null, isActive: true }, 'not-a-date')).toBe(false)
+  })
+})
+
 // ── The mandatory regression check: retired provisional shadows ──────────────
 
 describe('a retired provisional shadow teammate keeps doing what it legitimately does', () => {

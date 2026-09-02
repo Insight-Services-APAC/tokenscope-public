@@ -47,7 +47,20 @@ export default defineEventHandler(async (event) => {
     // a role) still feeds the cost-centre grant. Byte-identical to the old
     // inline map for a caller with no report-access grants at all (the
     // baseline).
-    const g = await resolveReportGrants(event, tx, session)
+    //
+    // Concurrent issuance on ONE tx connection: postgres-js pipelines and
+    // answers in order (docs/design/request-floor-performance.md F5). The
+    // floors read shares nothing with the grant resolution; revoked/permissions
+    // below are NOT in the wave — resolveReportGrants resolves both internally
+    // and memoises them on the event, so a concurrent call would re-issue the
+    // same queries instead of hitting that memo.
+    const [g, floorRows] = await Promise.all([
+      resolveReportGrants(event, tx, session),
+      tx.execute<FloorRow>(sql`
+        SELECT (SELECT month_floor FROM v_usage_month_floor) AS usage,
+               (SELECT to_char(MIN(period_month), 'YYYY-MM') FROM v_finance_bill_totals_month) AS bill,
+               (SELECT to_char(MIN(period_date), 'YYYY-MM') FROM reconciliation_record) AS reconciliation`),
+    ])
     const revoked = await resolveReportAccessRevoked(event, tx, session.teammateId)
     // A REVOKE zeroes access (resolveReportGrants already returned the empty
     // grant set), so a leftover positive grant must NOT surface as an "elevated
@@ -74,19 +87,14 @@ export default defineEventHandler(async (event) => {
     const defaultScope = scopes[0] ?? null
 
     /*
-     * Month floors — the picker's lower bound.
+     * Month floors — the picker's lower bound. Fetched in the wave above.
      *
      * The usage floor reads `v_usage_month_floor` (mig 0133), not
      * `MIN(ts_event) FROM v_complete_usage`: MIN over that 4-arm UNION with
      * GROUP BY CTEs can use no index, so Postgres materialised the whole estate
      * on every load of the reporting shell — the ~2 minute /reporting load.
      */
-    const [floors] = [
-      ...(await tx.execute<FloorRow>(sql`
-        SELECT (SELECT month_floor FROM v_usage_month_floor) AS usage,
-               (SELECT to_char(MIN(period_month), 'YYYY-MM') FROM v_finance_bill_totals_month) AS bill,
-               (SELECT to_char(MIN(period_date), 'YYYY-MM') FROM reconciliation_record) AS reconciliation`)),
-    ]
+    const [floors] = [...floorRows]
     const monthFloors = {
       usage: floors?.usage ?? null,
       bill: floors?.bill ?? null,

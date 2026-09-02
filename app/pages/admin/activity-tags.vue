@@ -35,8 +35,7 @@ interface TagRow extends Record<string, unknown> {
   scope: 'global' | 'region'
 }
 
-const { session, ensure } = useSession()
-await ensure()
+const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
@@ -48,9 +47,17 @@ const isOrgWide = computed(() => {
 })
 const regionId = computed(() => session.value?.regionId ?? '')
 
-const { data: regionsData } = await useFetch<{ regions: { id: string; code: string; display_name: string }[] }>(
+// Both reads are declared lazily and never awaited: navigation is never gated
+// on data (docs/design/admin-nav-responsiveness.md D1/D2). The auxiliary read
+// keeps its `error`: a region picker that collapses failure into `[]` is the
+// false empty D2 forbids.
+const {
+  data: regionsData,
+  error: regionsError,
+  refresh: refreshRegions,
+} = useLazyFetch<{ regions: { id: string; code: string; display_name: string }[] } | null>(
   '/api/v1/admin/regions',
-  { default: () => ({ regions: [] }) },
+  { server: false, default: () => null },
 )
 const viewRegionId = ref('')
 watch(regionId, (r) => { if (!viewRegionId.value && r) viewRegionId.value = r }, { immediate: true })
@@ -62,14 +69,18 @@ const listUrl = computed(() =>
   scopeRegion.value ? `/api/v1/admin/activity-types?region_id=${scopeRegion.value}` : '',
 )
 
-const { data, refresh, pending } = await useFetch<{ region_id: string; activity_types: TagRow[] }>(
+// Explicit key because the getter can be '' (D1); the watch carries the refetch.
+const { data, error, refresh } = useLazyFetch<{ region_id: string; activity_types: TagRow[] } | null>(
   () => listUrl.value,
   {
-    default: () => ({ region_id: '', activity_types: [] }),
+    key: 'admin-activity-tags-list',
+    server: false,
+    default: () => null,
     immediate: !!regionId.value,
     watch: [listUrl],
   },
 )
+const skeleton = computed(() => !error.value && data.value == null)
 
 // A region admin may only edit region-scoped rows; org-wide roles may edit any
 // row (including the global set). Mirrors the server's requireActivityScope.
@@ -200,21 +211,30 @@ function asRow(row: Record<string, unknown>): TagRow {
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-activity-tags">
+  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-activity-tags" data-admin-page="/admin/activity-tags">
     <UiPageHead
       eyebrow="Administration"
       title="Activity tags"
       sub="The activity vocabulary the picker suggests. Add your region's own tags, rename, reorder, or deactivate to hide one."
     >
       <template v-if="isOrgWide" #actions>
-        <select
-          v-model="viewRegionId"
-          class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white"
-          data-testid="admin-activity-tags-region-view"
-          title="Browse activity tags in another region"
-        >
-          <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
-        </select>
+        <div>
+          <select
+            v-model="viewRegionId"
+            :disabled="!regionsData"
+            class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white disabled:bg-calm/40 disabled:cursor-not-allowed"
+            data-testid="admin-activity-tags-region-view"
+            :title="regionsError ? 'The region list could not be loaded.' : 'Browse activity tags in another region'"
+          >
+            <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
+          </select>
+          <UiAuxFetchError
+            :error="regionsError"
+            label="regions"
+            testid="admin-activity-tags-regions-error"
+            @retry="refreshRegions"
+          />
+        </div>
       </template>
     </UiPageHead>
 
@@ -269,10 +289,12 @@ function asRow(row: Record<string, unknown>): TagRow {
       </form>
     </UiCard>
 
+    <UiFetchErrorBanner v-if="error" :error="error" label="activity tags" @retry="refresh" />
     <AdminDataTable
+      v-else
       :rows="data?.activity_types ?? []"
       :columns="columns"
-      :loading="pending"
+      :loading="skeleton"
       empty-headline="No activity tags"
       empty-sub="No global or region activity tags on file."
     >
@@ -367,7 +389,7 @@ function asRow(row: Record<string, unknown>): TagRow {
       </template>
     </AdminDataTable>
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/activity-tags">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

@@ -19,6 +19,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import { injectTestSession } from '../../helpers/auth'
 import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
@@ -139,6 +140,9 @@ beforeAll(async () => {
       (instance_id, teammate_id, region_id, org_unit_id, cost_owning_unit_id, tool, model, token_type, tokens, cost_usd, fidelity_tier, cost_basis, ts_event, claude_session_id)
     VALUES (${instCarol}::uuid, ${carol}::uuid, ${regionA}::uuid, ${unitA}::uuid, NULL,
             'copilot-cli', 'gpt-copilot', 'input', 1000, 15, 'tier-1', 'estimated', now(), 'conv-dtb-carol-cp')`
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {

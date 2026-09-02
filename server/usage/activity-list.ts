@@ -129,6 +129,18 @@ interface UnionRow extends Record<string, unknown> {
  * subagent never becomes its own row and a legacy instance-keyed conversation
  * still appears. The sort day is the day of the conversation's LAST event —
  * the same instant the row displays, so the order can never look random.
+ *
+ * TWO PHASES, ONE STATEMENT (docs/design/request-floor-performance.md §F6).
+ * The from/to bounds and the keyset cursor compare against MAX(ts_event), so
+ * they can only live in HAVING — the per-conversation aggregate is unbounded
+ * by construction, over a table RANGE-partitioned on ts_event. Phase 1
+ * (`ranked`) therefore ranks conversation keys with the slimmest aggregate
+ * that can answer the HAVING + ORDER BY (project joined ONLY when the filter
+ * needs p.code; no array_agg sorts), and takes the page's n keys. Phase 2
+ * builds the full row shape for only those keys. Both phases apply the SAME
+ * WHERE quals and group on the SAME key, and phase 1 ranks on the UNFILTERED
+ * per-conversation MAX — identical HAVING semantics — so the output is
+ * row-identical to the single-phase aggregate it replaces.
  */
 function sessionsBranch(teammateId: string, f: ActivityFilters, c: ActivityCursor | null, n: number): SQL {
   const key = conversationKeyExpr('ar')
@@ -149,7 +161,32 @@ function sessionsBranch(teammateId: string, f: ActivityFilters, c: ActivityCurso
   if (f.tagged === 'untagged') having.push(sql`bool_or(ar.project_id IS NULL)`)
   if (c) having.push(keysetPredicate(dayExpr, RANK_SESSION, tsExpr, key, c))
 
+  // Phase-2 key filter: the OR-of-two-equalities shape conversation-key.ts
+  // documents, NEVER COALESCE(...) IN (...) — the COALESCE form drags every
+  // row through an expression, while here the claude_session_id arm is
+  // index-servable and the legacy instance_id::text arm (pre-0016 rows only)
+  // stays a filter bounded by the teammate qual. A row belongs to a ranked
+  // key when its claude_session_id hits the set, or (legacy pre-0016 rows
+  // only) when claude_session_id IS NULL and its instance id does — exactly
+  // the rows whose COALESCE key equals that key, so phase 2 regroups the same
+  // populations phase 1 ranked (§F6).
+  const rankedKeyFilter = sql`(ar.claude_session_id IN (SELECT r.id FROM ranked r)
+             OR (ar.claude_session_id IS NULL
+                 AND ar.instance_id::text IN (SELECT r.id FROM ranked r)))`
+
   return sql`
+    WITH ranked AS (
+      SELECT ${key} AS id
+      FROM attribution_record ar
+      ${f.project ? sql`LEFT JOIN project p ON p.id = ar.project_id` : sql``}
+      WHERE ${sql.join(where, sql` AND `)}
+      GROUP BY ${key}
+      ${having.length ? sql`HAVING ${sql.join(having, sql` AND `)}` : sql``}
+      -- The final sort minus its rank leg: rank is constant on this branch,
+      -- so these three legs ARE the full order (§F6).
+      ORDER BY ${dayExpr} DESC, ${tsExpr} DESC, ${key} DESC
+      LIMIT ${n}
+    )
     SELECT * FROM (
       SELECT
         'session'::text                       AS kind,
@@ -197,9 +234,13 @@ function sessionsBranch(teammateId: string, f: ActivityFilters, c: ActivityCurso
         NULL::boolean                         AS dismissed
       FROM attribution_record ar
       LEFT JOIN project p ON p.id = ar.project_id
+      -- Same WHERE quals as phase 1 (teammate qual stays: RLS + the
+      -- teammate index), so each ranked key regroups the exact row population
+      -- phase 1 aggregated — every HAVING fact phase 1 established therefore
+      -- still holds and is not re-checked here (§F6).
       WHERE ${sql.join(where, sql` AND `)}
+        AND ${rankedKeyFilter}
       GROUP BY ${key}
-      ${having.length ? sql`HAVING ${sql.join(having, sql` AND `)}` : sql``}
     ) s
     ORDER BY s.sort_day DESC, s.sort_rank DESC, s.sort_ts DESC, s.id DESC
     LIMIT ${n}

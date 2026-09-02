@@ -362,12 +362,12 @@ export function transcodeChatSpans(spans, opts = {}) {
     const nanoAiu = safeNonNegNumber(resolveAttr(attrs, 'github.copilot.nano_aiu'))
 
     // query_source — main-vs-aux lane, the SAME wire attr Claude emits
-    // (`Attributes['query_source']`; reader.ts:~293 `_qsrc`). The aux-overhead
-    // detector (insights.ts:353) treats 'main' as the conversation lane and any
-    // other non-NULL value as auxiliary harness overhead, EXCLUDING NULL from
-    // both sides. Until now the Copilot transcoder never emitted this attr, so
-    // the joiner stored NULL for every Copilot record and the detector silently
-    // never fired for Copilot users (the latent bug).
+    // (`Attributes['query_source']`, projected as `_qsrc` by server/azure/reader.ts).
+    // Server-side classification is `shared/usage/query-source.ts`, which accepts
+    // the literal 'main' emitted here; NULL is excluded from both sides of the
+    // aux-overhead detector. Claude's OWN values are different tokens entirely
+    // (docs/development/claude-code-telemetry-contract.md §Query-source
+    // vocabulary) — do not copy Claude's spellings here.
     //
     // Copilot's signal is `github.copilot.initiator` on the `chat` span (the
     // ONLY main-vs-aux discriminator in the forwarded data; verified present as
@@ -375,12 +375,8 @@ export function transcodeChatSpans(spans, opts = {}) {
     //   'user' → interactive turn         → 'main'
     //   anything else (e.g. 'auto')       → system/background lane → 'auto' (aux)
     //   absent                            → default 'main' (tolerant)
-    // 'auto' is the Copilot analogue of Claude's aux lanes (e.g.
-    // 'generate_session_title'); the detector keys only on '== main' vs not, so
-    // the exact aux label is informational. Defaulting to 'main' keeps the
-    // schema aligned with Claude even when the signal is absent — the detector
-    // is then correctly inert for that record rather than silently missing the
-    // field.
+    // Defaulting to 'main' when the signal is absent keeps the record in the
+    // conversation lane rather than silently missing the field.
     const initiator = resolveAttr(attrs, 'github.copilot.initiator')
     const querySource = initiator == null || String(initiator) === 'user' ? 'main' : 'auto'
 

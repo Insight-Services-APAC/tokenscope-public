@@ -455,18 +455,28 @@ interface DiagResp {
   }
   costDrift: {
     spansCompared: number
+    meanAbsDriftPct: number | null
     providerPricedSpans: number
     rateCardPricedSpans: number
     worstSpan: { model: string; pricedBy: string; driftUsd: string } | null
   }
+  // Per-read availability. The zero shapes above are indistinguishable from a
+  // failed query without it, so this is the only field that lets the page tell
+  // "nothing happened" from "we could not find out".
+  reads: {
+    costDrift: { available: boolean; error?: string; errorCorrelationId?: string }
+    costingRungs: { available: boolean; error?: string; errorCorrelationId?: string }
+  }
 }
 
-describe('GET /api/v1/admin/diagnostics — costing rungs', () => {
+// The costing aggregates moved off the main snapshot to their own endpoint
+// (docs/design/admin-nav-responsiveness.md D4); this block moved with them.
+describe('GET /api/v1/admin/diagnostics/costing — costing rungs', () => {
   let resp: DiagResp
 
   async function loadHandler() {
     vi.resetModules()
-    return (await import('../../../server/api/v1/admin/diagnostics/index.get'))
+    return (await import('../../../server/api/v1/admin/diagnostics/costing.get'))
       .default as (event: unknown) => Promise<DiagResp>
   }
 
@@ -542,6 +552,25 @@ describe('GET /api/v1/admin/diagnostics — costing rungs', () => {
     await expect(handler(makeEvent(devSession()))).rejects.toMatchObject({ statusCode: 403 })
   })
 
+  it('returns EXACTLY the two keys the main snapshot used to carry, in their old shapes', () => {
+    // The page re-points its drift and rungs cards at this read; a key that
+    // silently stays on (or comes back to) the main snapshot would render as
+    // "no data" there while looking green here.
+    expect(Object.keys(resp).sort()).toEqual(['costDrift', 'costingRungs', 'reads'])
+    // `reads` carries one entry per independently-fallible read and NOTHING is
+    // merged into the two data shapes, so a consumer pinned to their fields is
+    // untouched by the availability signal.
+    expect(Object.keys(resp.reads).sort()).toEqual(['costDrift', 'costingRungs'])
+    expect(resp.reads.costDrift).toEqual({ available: true })
+    expect(resp.reads.costingRungs).toEqual({ available: true })
+    expect(Object.keys(resp.costingRungs).sort()).toEqual(
+      ['fallbackModels', 'ladderSpans', 'other', 'provider', 'rateCard', 'rateCardPct', 'spans', 'windowDays'],
+    )
+    expect(Object.keys(resp.costDrift).sort()).toEqual(
+      ['meanAbsDriftPct', 'providerPricedSpans', 'rateCardPricedSpans', 'spansCompared', 'worstSpan'],
+    )
+  })
+
   it('counts SPANS, not rows — a four-token-type provider span is one provider span', () => {
     expect(resp.costingRungs.provider).toBe(1)
   })
@@ -583,6 +612,52 @@ describe('GET /api/v1/admin/diagnostics — costing rungs', () => {
     // estimate was persisted rather than re-read from cost_usd.
     expect(d.worstSpan?.pricedBy).toBe('provider')
     expect(Number(d.worstSpan?.driftUsd)).toBeCloseTo(0.25, 6)
+  })
+
+  it('A FAILING DRIFT READ CANNOT BLANK THE RUNGS CARD, AND DECLARES ITSELF UNAVAILABLE', async () => {
+    /*
+     * costDrift reads v_cost_drift, which a pre-0045 database does not have. A
+     * failed statement aborts the Postgres transaction it runs in, so if the two
+     * reads shared one, the missing view would also throw away the rungs result
+     * and the card the alert lives on would read all-zero: a success-shaped
+     * nothing, indistinguishable from a healthy fleet with no traffic. Hide the
+     * view for one request and assert the rungs still carry the seeded spans.
+     *
+     * Isolation alone is only half of it: the drift read's OWN zero shape is
+     * still success-shaped, and the page draws "No comparable spans yet" from
+     * it. So the failure must also be DECLARED — `reads.costDrift.available`
+     * false with a classified reason — while the healthy sibling stays
+     * available. Without that field the two states are the same bytes.
+     */
+    await t.client.unsafe('ALTER VIEW v_cost_drift RENAME TO v_cost_drift_hidden_by_test')
+    try {
+      const handler = await loadHandler()
+      const r = await handler(makeEvent(adminSession()))
+      expect(r.costDrift).toEqual({
+        spansCompared: 0,
+        meanAbsDriftPct: null,
+        providerPricedSpans: 0,
+        rateCardPricedSpans: 0,
+        worstSpan: null,
+      })
+      // The failed read says so, with a reason and a correlation id that ties
+      // back to the full-fidelity server log line (never the raw message).
+      expect(r.reads.costDrift.available).toBe(false)
+      expect(r.reads.costDrift.error).toBe('relation-missing')
+      expect(r.reads.costDrift.errorCorrelationId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      )
+      // No fragment of the driver's message (which carries the relation name and
+      // can carry host/db/user) rides along.
+      expect(JSON.stringify(r.reads.costDrift)).not.toContain('v_cost_drift')
+      // The healthy sibling is unaffected: same numbers AND still declared
+      // available, so its card is not tarred by its neighbour's failure.
+      expect(r.reads.costingRungs).toEqual({ available: true })
+      expect(r.costingRungs).toEqual(resp.costingRungs)
+      expect(r.costingRungs.spans).toBe(5)
+    } finally {
+      await t.client.unsafe('ALTER VIEW v_cost_drift_hidden_by_test RENAME TO v_cost_drift')
+    }
   })
 
   // LAST in the file: it seeds more rows, so it must not run before the

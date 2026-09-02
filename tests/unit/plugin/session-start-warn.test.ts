@@ -12,7 +12,13 @@
  * additionalContext.
  */
 import { describe, it, expect } from 'vitest'
-import { warnFor, sentinelHttp, projectBillabilityWarning, buildHookOutput } from '../../../plugin/hooks/session-start.mjs'
+import {
+  warnFor,
+  sentinelHttp,
+  projectBillabilityWarning,
+  buildHookOutput,
+  staleInstancePinWarning,
+} from '../../../plugin/hooks/session-start.mjs'
 import { repoTagEnv } from '../../../plugin/scripts/plugin-runtime.mjs'
 
 describe('repoTagEnv — the hostile-repo fixture (S1 fix 1)', () => {
@@ -152,5 +158,34 @@ describe('sentinelHttp', () => {
     expect(sentinelHttp(null)).toBeNull()
     expect(sentinelHttp({})).toBeNull()
     expect(sentinelHttp({ http_status: 'nope' })).toBeNull()
+  })
+})
+
+describe('staleInstancePinWarning — the superseded instance pin (2026-09-01 incident)', () => {
+  it('warns when the repo tag we just reconciled had pinned a DIFFERENT instance', () => {
+    // The whole point: writeRepoTag repairs the file for the NEXT launch, but THIS
+    // process froze its OTel resource attrs at startup, so it keeps emitting under
+    // the superseded instance. That went unsaid for 69 minutes; now it is said.
+    const w = staleInstancePinWarning({ changed: true, healed: true, instanceDrifted: true })
+    expect(w).toBeTruthy()
+    expect(w).toMatch(/superseded/i)
+    expect(w).toMatch(/restart/i)
+  })
+
+  it('stays SILENT when only the helper path moved (healed but no instance drift)', () => {
+    // healed is true on a plugin upgrade too. Warning on that would fire on every
+    // version bump and train the developer to ignore the one warning that matters.
+    expect(staleInstancePinWarning({ changed: true, healed: true, instanceDrifted: false })).toBeNull()
+  })
+
+  it('stays SILENT on a clean no-op, and on an absent result (not enrolled / no .tokenscope)', () => {
+    expect(staleInstancePinWarning({ changed: false, healed: false, instanceDrifted: false })).toBeNull()
+    expect(staleInstancePinWarning(null)).toBeNull()
+    expect(staleInstancePinWarning(undefined)).toBeNull()
+  })
+
+  it('never warns on a truthy-but-not-true instanceDrifted (fail SILENT, never cry wolf)', () => {
+    expect(staleInstancePinWarning({ instanceDrifted: 'yes' } as never)).toBeNull()
+    expect(staleInstancePinWarning({ instanceDrifted: 1 } as never)).toBeNull()
   })
 })

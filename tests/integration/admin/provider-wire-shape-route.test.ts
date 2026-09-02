@@ -41,8 +41,37 @@ let adminId: string
 let devId: string
 let stub: Server
 let stubUrl: string
+/*
+ * ONE clock reading, two days derived from it. Fixture dates must come from the
+ * run clock, never a literal — a pinned date ages out of the window the tests
+ * ask for and takes its assertions with it (see docs/design/... and the sibling
+ * GitHub fixture below, which already carried this warning).
+ *
+ * NOW_MS is read ONCE. Two separate Date.now() calls can straddle UTC midnight,
+ * and then `now - 1d` and `now - 2d` resolve to the SAME date — which collides
+ * on actual_spend's (teammate, date, tool, source) unique index and fails the
+ * suite for a reason that has nothing to do with what it tests.
+ */
+const NOW_MS = Date.now()
+const DAY_MS = 86_400_000
 /** Yesterday (UTC) — inside every window these tests ask for, and it stays that way. */
-const RECENT_DAY = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
+const RECENT_DAY = new Date(NOW_MS - DAY_MS).toISOString().slice(0, 10)
+/** The day before, for fixtures needing two distinct in-window rows. */
+const OLDER_DAY = new Date(NOW_MS - 2 * DAY_MS).toISOString().slice(0, 10)
+/*
+ * The Copilot STORED fixture's day, derived like the two above rather than
+ * pinned — which is what the header three lines up warns against, in so many
+ * words, immediately before the fixture that did it anyway.
+ *
+ * It was the literal 2026-07-30. The stored scan filters
+ * `period_date >= CURRENT_DATE - 30` (provider-wire-probe.ts, default window),
+ * so that date sat exactly ON the cutoff while the UTC date was 2026-08-29 and
+ * fell outside it at 2026-08-30: four assertions went from green to
+ * "expected 1, got 0" with no commit in between. A third distinct day, because
+ * reconciliation_record's open-unique key would otherwise collide with the rows
+ * seeded on RECENT_DAY.
+ */
+const COPILOT_STORED_DAY = new Date(NOW_MS - 3 * DAY_MS).toISOString().slice(0, 10)
 /** Which paths the stub was asked for — proves the probe issued the calls it claims. */
 let stubRequests: string[] = []
 
@@ -268,7 +297,7 @@ describe('GitHub Copilot stored payloads', () => {
     await t.db.insert(schema.reconciliationRecord).values({
       provider: 'github',
       enterpriseRef: 'ws-ent',
-      periodDate: '2026-07-30',
+      periodDate: COPILOT_STORED_DAY,
       category: 'copilot_interactive',
       actualUsd: '1.000000',
       otelAttributedUsd: '0.000000',
@@ -278,7 +307,7 @@ describe('GitHub Copilot stored payloads', () => {
       raw: {
         login: 'octocat',
         licenseOrg: 'ws-org',
-        periodDate: '2026-07-30',
+        periodDate: COPILOT_STORED_DAY,
         category: 'copilot_interactive',
         items: [
           { product: 'copilot', sku: 'ai_credits', model: 'gpt-5-mini', unitType: 'ai-credits', grossQuantity: 4, netAmount: 0.04 },
@@ -303,14 +332,14 @@ describe('GitHub Copilot stored payloads', () => {
     await t.db.insert(schema.reconciliationRecord).values({
       provider: 'github',
       enterpriseRef: 'zz-other-ent',
-      periodDate: '2026-07-30',
+      periodDate: COPILOT_STORED_DAY,
       category: 'copilot_interactive',
       actualUsd: '2.000000',
       otelAttributedUsd: '0.000000',
       deltaUsd: '2.000000',
       spendClass: 'billed',
       disposition: 'matched',
-      raw: { login: 'someone-else', periodDate: '2026-07-30', items: [{ other_tenant_marker: 'x' }] },
+      raw: { login: 'someone-else', periodDate: COPILOT_STORED_DAY, items: [{ other_tenant_marker: 'x' }] },
     })
     /*
      * 2. A different LANE on the SAME enterprise that also stores an `items` array.
@@ -321,14 +350,14 @@ describe('GitHub Copilot stored payloads', () => {
     await t.db.insert(schema.reconciliationRecord).values({
       provider: 'github',
       enterpriseRef: 'ws-ent',
-      periodDate: '2026-07-30',
+      periodDate: COPILOT_STORED_DAY,
       category: 'model_tokens',
       actualUsd: '3.000000',
       otelAttributedUsd: '0.000000',
       deltaUsd: '3.000000',
       spendClass: 'billed',
       disposition: 'matched',
-      raw: { periodDate: '2026-07-30', items: [{ other_lane_marker: 'x' }] },
+      raw: { periodDate: COPILOT_STORED_DAY, items: [{ other_lane_marker: 'x' }] },
     })
 
     /*
@@ -531,14 +560,14 @@ describe('with an Enterprise Analytics org configured', () => {
     // the cost rows carrying a `model` our CostRow schema never declared.
     await t.db.insert(schema.actualSpend).values({
       teammateId: devId,
-      date: '2026-07-30',
+      date: RECENT_DAY,
       tool: 'claude-code',
       inputTokens: 10n,
       outputTokens: 5n,
       costUsd: '0.010000',
       source: 'anthropic-analytics-api:org-stub',
       rawPayload: {
-        day: '2026-07-30',
+        day: RECENT_DAY,
         usage: [
           { actor: { type: 'user_actor', email: 'someone@example.test' }, product: 'claude_code', model: 'claude-opus-4', total_tokens: 15 },
         ],
@@ -564,14 +593,14 @@ describe('with an Enterprise Analytics org configured', () => {
     // still see exactly one row.
     await t.db.insert(schema.actualSpend).values({
       teammateId: devId,
-      date: '2026-07-29',
+      date: OLDER_DAY,
       tool: 'claude-code',
       inputTokens: 4n,
       outputTokens: 2n,
       costUsd: '0.004000',
       source: 'anthropic-analytics-api:org-stub',
       rawPayload: {
-        day: '2026-07-29',
+        day: OLDER_DAY,
         usage: [{ actor: { type: 'user_actor' }, product: 'claude_code', model: 'claude-sonnet-4', total_tokens: 6 }],
         cost: [],
       },

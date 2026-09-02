@@ -105,10 +105,10 @@ export default defineEventHandler(async (event) => {
     () => withRequestRls(event, async (tx) => {
     if (req.width === 'all-regions') {
       const axis = parseAxis<AcrossDriverAxis>(query.axis, ACROSS_DRIVER_AXES)
-      const drivers = await fetchAcrossDrivers(tx, win, axis, lane, billing)
-      // The top-1/5/10% cohort shares + power/heavy/typical/light segments, computed
-      // once per call from the same lane (build-design §5). Whole-company only: a
-      // single region's concentration is a different denominator and is not offered.
+      // `concentration` is the top-1/5/10% cohort shares + power/heavy/typical/light
+      // segments, computed once per call from the same lane (build-design §5).
+      // Whole-company only: a single region's concentration is a different
+      // denominator and is not offered.
       //
       // ALWAYS §A, in BOTH lenses. It is a distribution over PEOPLE's consumption,
       // and `provider_usage_fact` carries no equivalent cohort. `measureLanes`
@@ -117,10 +117,17 @@ export default defineEventHandler(async (event) => {
       // Memoized (D8): the screen fires one drivers XHR PER AXIS concurrently —
       // different response-cache keys, same cohort statistic. Single-flight
       // makes those concurrent calls share ONE concentration scan.
-      const concentration = await memoizedScan(
-        ['concentration', idKey, win.startIso, win.endIso],
-        () => fetchConcentration(tx, win),
-      )
+      //
+      // Concurrent issuance on ONE tx connection: postgres-js pipelines and
+      // answers in order — no per-query await gaps (fully one wave on
+      // prepared statements), no cross-dependencies
+      // (docs/design/request-floor-performance.md F5).
+      const [drivers, concentration] = await Promise.all([
+        fetchAcrossDrivers(tx, win, axis, lane, billing),
+        memoizedScan(['concentration', idKey, win.startIso, win.endIso], () =>
+          fetchConcentration(tx, win),
+        ),
+      ])
       return {
         month,
         width: 'all-regions' as const,

@@ -33,8 +33,7 @@ interface AuditResp {
   offset: number
 }
 
-const { session, ensure } = useSession()
-await ensure()
+const { session } = useSession()
 
 const eventTypeFilter = ref('')
 const sinceFilter = ref('')
@@ -58,10 +57,14 @@ const auditUrl = computed(() => {
   return `/api/v1/admin/audit?${parts.join('&')}`
 })
 
-const { data, pending } = await useFetch<AuditResp>(() => auditUrl.value, {
-  default: () => ({ events: [], total: 0, limit: LIMIT, offset: 0 }),
+// Declared lazily, never awaited: navigation is never gated on data, and the
+// skeleton keys on ABSENT data, not `pending` (docs/design/admin-nav-responsiveness.md D1/D2).
+const { data, error, refresh } = useLazyFetch<AuditResp | null>(() => auditUrl.value, {
+  server: false,
+  default: () => null,
   watch: [auditUrl],
 })
+const skeleton = computed(() => !error.value && data.value == null)
 
 // Distinct event types in the current page — fast UX win, not a full
 // distinct-server query. Acceptable: filter dropdown is a quick-pick,
@@ -122,18 +125,20 @@ const isAdmin = computed(() => {
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-audit">
+  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-audit" data-admin-page="/admin/audit">
     <UiPageHead
       eyebrow="Administration"
       title="Audit"
       sub="Append-only mutation trail. Click a row to inspect the payload."
     />
 
+    <UiFetchErrorBanner v-if="error" :error="error" label="the audit log" @retry="refresh" />
     <AdminDataTable
+      v-else
       :rows="data?.events ?? []"
       :columns="columns"
       :total="data?.total"
-      :loading="pending"
+      :loading="skeleton"
       empty-headline="No events"
       empty-sub="No audit events match the current filters."
     >
@@ -200,7 +205,7 @@ const isAdmin = computed(() => {
       <UiButton kind="ghost" size="sm" :disabled="offset + LIMIT >= (data?.total ?? 0)" @click="nextPage">Next →</UiButton>
     </div>
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/audit">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

@@ -12,7 +12,10 @@
  * dispatch, transitioned running → success | failure.
  *
  * Index (worker_name, started_at DESC) backs the latest-per-worker read
- * in the diagnostics endpoint (DISTINCT ON / window function).
+ * in the diagnostics endpoint (DISTINCT ON / window function). Index
+ * (started_at) backs the all-workers trailing-24 h duty-cycle summary
+ * (mig 0137; docs/design/performance-observability-baseline.md O4) —
+ * the name-leading index cannot serve that range scan.
  */
 import { sql } from 'drizzle-orm'
 import { pgTable, uuid, text, integer, timestamp, index, jsonb } from 'drizzle-orm/pg-core'
@@ -37,5 +40,8 @@ export const workerRun = pgTable(
     // run/errored, disposition counts, skipped lines, etc. Nullable (legacy rows).
     result: jsonb('result'),
   },
-  (t) => [index('worker_run_name_started_idx').on(t.workerName, t.startedAt.desc())],
+  (t) => [
+    index('worker_run_name_started_idx').on(t.workerName, t.startedAt.desc()),
+    index('worker_run_started_at_idx').on(t.startedAt),
+  ],
 )

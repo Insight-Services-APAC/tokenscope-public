@@ -25,6 +25,7 @@
 import { ref, computed, watch, type Ref } from 'vue'
 import { consola } from 'consola'
 import UiButton from '../ui/Button.vue'
+import UiAuxFetchError from '../ui/AuxFetchError.vue'
 import { useModalA11y } from '../../composables/useModalA11y'
 import { apiErrorDetail } from '../../composables/useApiError'
 
@@ -67,6 +68,19 @@ const props = defineProps<{
   enterprises: EnterpriseOption[]
   /* All regions, for the GitHub org→region home picker (ADR-0010 D4). */
   regions: RegionOption[]
+  /*
+   * The caller's region read failed. Without it the picker holds only
+   * "— unmapped —" and reads as "there is nowhere to map this org" — the false
+   * empty D2 forbids (docs/design/admin-nav-responsiveness.md).
+   */
+  regionsError?: unknown
+  /*
+   * The caller's region read has not landed yet. Region is OPTIONAL and
+   * `canSubmit` does not check it, so an enabled picker holding only
+   * "— unmapped —" lets an operator persist regionId: null before the real
+   * options arrive. Absent data disables the control, exactly as a failure does.
+   */
+  regionsLoading?: boolean
   /* Workstream B (ADR-0011 D11): once true, provider_org.billing is meaningless
    * for a github org (the enterprise is authoritative) — the field is hidden
    * for github and never sent on save (the server rejects the write anyway;
@@ -74,7 +88,7 @@ const props = defineProps<{
    * for anthropic, where the org remains its own billing unit. */
   governanceActivated?: boolean
 }>()
-const emit = defineEmits<{ close: []; saved: [] }>()
+const emit = defineEmits<{ close: []; saved: []; retryRegions: [] }>()
 
 const CRED_RE = /^[a-z0-9-]{3,64}$/
 
@@ -456,12 +470,26 @@ async function save() {
             <select
               id="po-region"
               v-model="regionId"
-              class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+              :disabled="!!regionsError || !!regionsLoading"
+              class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none disabled:bg-calm/40 disabled:cursor-not-allowed"
               data-testid="po-region"
             >
               <option value="">— unmapped —</option>
               <option v-for="r in regions" :key="r.id" :value="r.id">{{ r.displayName }}</option>
             </select>
+            <p
+              v-if="regionsLoading && !regionsError"
+              class="mt-1 text-[11px] text-carbon-3"
+              role="status"
+              aria-busy="true"
+              data-testid="po-region-loading"
+            >Loading regions…</p>
+            <UiAuxFetchError
+              :error="regionsError"
+              label="regions"
+              testid="po-region-error"
+              @retry="emit('retryRegions')"
+            />
             <p class="text-[11px] text-carbon-3 mt-1">
               The region this org's Copilot cost belongs to. Used as the fallback home when a
               seat-holder can't be placed into a practice automatically. Leave unmapped if unsure.

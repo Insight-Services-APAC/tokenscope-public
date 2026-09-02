@@ -326,9 +326,15 @@ export async function applyRehome(
       WITH moved AS (
         UPDATE attribution_record ar
            SET cost_owning_unit_id = ${opts.toCostOwningUnitId}::uuid,
-               -- SO THE ROLLUP NOTICES. The incremental window keys on
-               -- ts_recorded; without this the aggregates keep the old BU and
-               -- disagree with the ledger they summarise.
+               -- SO THE ROLLUPS NOTICE. aggregate-rollup's incremental window and
+               -- usage-rollup's re-tag signal both key on ts_recorded; without this
+               -- the aggregates keep the old BU and disagree with the ledger they
+               -- summarise. This bump is also WHY this path needs no
+               -- usage_rollup_refresh enqueue: only arm 1 of v_complete_usage
+               -- carries the project dims this restates, every mutated row is
+               -- bumped here, so its event-days enter the usage-rollup day-set and
+               -- each day is recomputed globally from the view
+               -- (docs/design/usage-rollup-lane.md R4).
                ts_recorded = now()
          WHERE ${scopePredicate(opts.projectId, opts.range, opts.toCostOwningUnitId)}
            AND date_trunc('month', ar.ts_event AT TIME ZONE 'UTC')::date IN (${plannedMonths})

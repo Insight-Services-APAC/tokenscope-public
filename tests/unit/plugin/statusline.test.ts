@@ -18,6 +18,7 @@ import {
   landedRefreshDue,
   DEAD_EXPORT_MS,
   LANDED_LAG_MS,
+  NEVER_LANDED_GRACE_MS,
   POLL_INTERVAL_MS,
 } from '../../../plugin/scripts/statusline.mjs'
 import {
@@ -163,17 +164,86 @@ describe('classifyLanding — landing keyed off emit ACTIVITY, not wall-clock (p
     expect(classifyLanding(c, INSTANCE, NOW)).toBe('dead')
   })
 
-  it('ACTIVE + NEVER landed (fresh enrolment, emission null) → unknown, NOT a false red on the setup-verify check', () => {
+  it('ACTIVE + NEVER landed with NO ts_start (older server) → unknown, NOT a false red', () => {
     // The HIGH finding: a brand-new device (bearer minted, first record not yet
     // landed ~10-60 min post-setup) must read the honest neutral 'unknown', never
     // red — otherwise the statusline lies about health exactly when the user is
-    // verifying setup worked. 'dead' now REQUIRES a prior landing that went stale.
+    // verifying setup worked. Without `ts_start` we cannot age the enrolment, so
+    // this stays neutral — which is also the back-compat path against a server
+    // that predates the field.
     expect(classifyLanding(cache({ lastBearer: RECENT_BEARER, lastEmission: null }), INSTANCE, NOW)).toBe('unknown')
+  })
+
+  it('ACTIVE + NEVER landed but enrolment still INSIDE the grace → unknown (first record in flight)', () => {
+    // A record takes ~5 min of Azure Monitor ingest plus up to one ~15-min reader
+    // cadence, so a minutes-old enrolment reporting null is NORMAL. This is the
+    // case the neutral fallback exists to protect and it must stay neutral.
+    const c = cache({
+      lastBearer: RECENT_BEARER,
+      lastEmission: null,
+      tsStart: iso(NEVER_LANDED_GRACE_MS - 10 * 60 * 1000),
+    })
+    expect(classifyLanding(c, INSTANCE, NOW)).toBe('unknown')
+  })
+
+  it('ACTIVE + NEVER landed and enrolment PAST the grace → dead — nothing has EVER been attributed', () => {
+    // The 2026-09-01 incident: a superseded instance pin meant a whole session
+    // emitted against an instance the device no longer claimed. Emit auth was
+    // healthy, bearers minted on cadence, and this read benign cyan for 69 minutes
+    // because "never landed" was treated as permanently unknowable. Past the grace
+    // it is a fault, and the beacon must say so.
+    const c = cache({
+      lastBearer: RECENT_BEARER,
+      lastEmission: null,
+      tsStart: iso(NEVER_LANDED_GRACE_MS + 60 * 60 * 1000),
+    })
+    expect(classifyLanding(c, INSTANCE, NOW)).toBe('dead')
+  })
+
+  it('IDLE + NEVER landed stays unknown however OLD the enrolment — age alone never reddens an idle device', () => {
+    // Age is only meaningful alongside emit ACTIVITY: with no recent bearer there
+    // is nothing to land, so an ancient never-landed idle enrolment must NOT read
+    // red. This is the guard that keeps the new rule from re-introducing the
+    // false-alarm class DEAD_EXPORT_MS was added to kill.
+    const c = cache({
+      lastBearer: OLD_BEARER,
+      lastEmission: null,
+      tsStart: iso(30 * 24 * 60 * 60 * 1000),
+    })
+    expect(classifyLanding(c, INSTANCE, NOW)).toBe('unknown')
+  })
+
+  it('never-landed age is measured bearer−ts_start, so a client clock running AHEAD cannot false-red', () => {
+    // Both stamps come from the server; only `now` is local. Passing a `now` far
+    // in the future (a skewed client) must change nothing, because the verdict is
+    // a server-stamp difference. The `now - enrolled` form this replaced would
+    // have crossed the grace here and painted red — the exact outcome the skew
+    // note on the active branch promises this function never produces.
+    const c = cache({
+      lastBearer: RECENT_BEARER,
+      lastEmission: null,
+      tsStart: iso(NEVER_LANDED_GRACE_MS - 30 * 60 * 1000), // in-grace by server time
+    })
+    expect(classifyLanding(c, INSTANCE, NOW)).toBe('unknown')
+    // The skew must keep the client ACTIVE to discriminate: push `now` far enough
+    // and it lands in the IDLE branch, which returns 'unknown' for its own reason
+    // and would pass against the buggy form too. +60 min keeps now−bearer at
+    // 70 min (inside DEAD_EXPORT_MS = 90 min) while now−ts_start reaches 150 min
+    // (past the 120 min grace) — so the old form returns 'dead' here and the
+    // server-stamp form returns 'unknown'.
+    const skewed = NOW + 60 * 60 * 1000
+    expect(skewed - Date.parse(RECENT_BEARER)).toBeLessThanOrEqual(DEAD_EXPORT_MS) // still active
+    expect(classifyLanding(c, INSTANCE, skewed)).toBe('unknown')
+  })
+
+  it('ACTIVE + NEVER landed with an unparseable ts_start → unknown (never guesses, never false-reds)', () => {
+    const c = cache({ lastBearer: RECENT_BEARER, lastEmission: null, tsStart: 'not-a-date' })
+    expect(classifyLanding(c, INSTANCE, NOW)).toBe('unknown')
   })
 
   it('ACTIVE + PRIOR landing then frozen (gap > LANDED_LAG_MS) → dead — landing was working and STOPPED', () => {
     // 'dead' means "was landing, then stopped" — the real incident. Contrast with
-    // the never-landed case above which stays neutral.
+    // the in-grace never-landed case above, which stays neutral.
     const c = cache({ lastBearer: RECENT_BEARER, lastEmission: iso(LANDED_LAG_MS + 2 * 60 * 60 * 1000) })
     expect(classifyLanding(c, INSTANCE, NOW)).toBe('dead')
   })

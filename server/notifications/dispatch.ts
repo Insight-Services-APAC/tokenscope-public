@@ -37,6 +37,7 @@ export type InboxCategory =
   | 'project-ended-retag' // D2a: a dev's spend spilled to unallocated because the project ended — re-tag the spilled portion
   | 'github-coverage-gap' // a GitHub org transitioned into a non-connected coverage state, or an enterprise lost its census capability (github-coverage-sweep worker); admin-routed — Workstream D, design §6
   | 'personal-subscription-prompt' // settled Claude usage has no provider corroboration; prompt the teammate to declare only when personally funded (ADR-0011 D4)
+  | 'ops-alert' // A5 inbox parity for an externally-notified ops condition (ops-alert worker); ONE item per condition key (related_entity_kind carries the key), reminders update it in place (docs/design/ops-alerting.md A5, ar-M17); admin-routed
 
 export interface DispatchInput {
   category: InboxCategory
@@ -150,6 +151,7 @@ function defaultSeverity(category: InboxCategory): 'info' | 'attention' | 'urgen
     case 'connector-health':
     case 'read-path-stale':
     case 'attribution-gap':
+    case 'ops-alert': // mirrors a condition that ALSO paged the operator's phone (ops-alerting A5); the worker passes an explicit per-condition severity (critical→urgent, warning→attention) — this default only backstops it
       return 'urgent'
     case 'copilot-bill-unsettled':
     case 'copilot-bill-unclassified':
@@ -212,6 +214,13 @@ async function resolveRecipients(
         routingScope: 'platform',
       }
     }
+    case 'ops-alert':
+      // The operations-recipient policy (ops-alerting A5, ar-M18): platform-admin
+      // AND global-finops — an estate without an active platform-admin must not
+      // receive nothing. Deployment-level conditions (a dead read path, a failing
+      // fleet, a broken private-link route) have no region to derive, so this is
+      // always the cross-region set, matching read-path-stale.
+      return { recipientIds: await resolveAdmins(db, null), routingScope: 'platform' }
     case 'attribution-gap':
       // Scoped to ONE instance, but the cause is always platform-side (the join
       // path), never something that instance's regional admin can fix — and

@@ -1030,10 +1030,14 @@ export async function fetchCostCentreBurnDrivers(
      * on the same page instead, on the dimension it has, as
      * `memberUntaggedUsd` (/me/cost-centres → `CcProjectTable`).
      */
+    // CONSTRAINT: both clamp arms must address columns the rollup grain
+    // carries — a new arm on a view-only column silently matches nothing under
+    // source: 'rollup' (usage-rollup-lane.md R5b.3).
     const projectRows = await completeProjectAxisPopulation(tx, window, {
       scope: sql`( p.cost_owning_unit_id = ${ccId}::uuid
                    OR (u.project_id IS NULL AND u.cost_owning_unit_id = ${ccId}::uuid) )`,
       excludeProvisional: true,
+      source: 'rollup',
     })
     const [budgets, ccShare] = await Promise.all([
       fetchCostCentreProjectBudgets(tx, ccId),

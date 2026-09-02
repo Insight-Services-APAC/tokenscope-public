@@ -8,6 +8,7 @@ import {
   integer,
   boolean,
   timestamp,
+  date,
   jsonb,
   uniqueIndex,
   index,
@@ -72,10 +73,13 @@ export const attributionRecord = pgTable('attribution_record', {
   // Orthogonal activity axis (mig 0020): denormalised from session_assignment by
   // the joiner / assign endpoint, for within-project activity rollups. Nullable.
   activity: text('activity'),
-  // Claude's per-event query_source attr (mig 0045): 'main' or an auxiliary
-  // lane like 'generate_session_title'. NULL = captured pre-0045 / attr absent
-  // — render as unknown, never assume 'main'. Not in the dedup index:
-  // request_id (source_run_id) already disambiguates same-ms aux/main events.
+  // Claude's per-event query_source attr (mig 0045), stored RAW — Claude's own
+  // token ('repl_main_thread', 'agent:custom', 'compact', …), NEVER the word
+  // 'main'. Classify with shared/usage/query-source.ts; vocabulary + evidence in
+  // docs/development/claude-code-telemetry-contract.md. NULL = captured
+  // pre-0045 / attr absent — unknown lane, never assumed to be a conversation.
+  // Not in the dedup index: request_id (source_run_id) already disambiguates
+  // same-ms aux/main events.
   querySource: text('query_source'),
   // Identity provenance (mig 0057; emit-on-install). The emitting instance's
   // instance_attestation.identity_state, stamped by the read joiner at insert
@@ -145,9 +149,10 @@ export const attributionAggregate = pgTable(
     // mig 0045: token-type dimension (input | output | cache-read | cache-write).
     // NULL = all-types rollup, mirroring the nullable tool/model convention.
     tokenType: text('token_type'),
-    // mig 0046: query-source lane dimension ('main' | aux | NULL = unknown).
-    // The live unique index keys on COALESCE(query_source, '') — an
-    // expression this drizzle def can't render; 0046 is the source of truth.
+    // mig 0046: query-source lane dimension, carried RAW from
+    // attribution_record (classify with shared/usage/query-source.ts;
+    // NULL = unknown). The live unique index keys on COALESCE(query_source, '')
+    // — an expression this drizzle def can't render; 0046 is the source of truth.
     querySource: text('query_source'),
     totalTokens: bigint('total_tokens', { mode: 'bigint' }).notNull(),
     totalCostUsd: numeric('total_cost_usd', { precision: 14, scale: 6 }).notNull(),
@@ -218,6 +223,55 @@ export const spendRollupDaily = pgTable(
     index('spend_rollup_daily_cou_period').on(t.costOwningUnitId, t.periodStart),
   ],
 )
+
+// Day-grain §A rollup for the region reporting endpoints (mig 0136) —
+// content DEFINED as an aggregate of v_complete_usage, written by the
+// usage-rollup worker. teammate stays in the grain for the non-additive
+// reads. Live grain-unique keys on COALESCE sentinels — 0136 is the source
+// of truth for that expression index (docs/design/usage-rollup-lane.md).
+export const usageRollupDaily = pgTable(
+  'usage_rollup_daily',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    day: date('day').notNull(),
+    teammateId: uuid('teammate_id')
+      .notNull()
+      .references(() => teammate.id),
+    regionId: uuid('region_id').references(() => region.id),
+    orgUnitId: uuid('org_unit_id').references(() => orgUnit.id),
+    costOwningUnitId: uuid('cost_owning_unit_id').references(() => orgUnit.id),
+    projectId: uuid('project_id').references(() => project.id),
+    tool: text('tool').notNull(),
+    model: text('model'),
+    usageProvenance: text('usage_provenance').notNull(),
+    modelGapReason: text('model_gap_reason'),
+    activity: text('activity'),
+    // Grain dim (mig 0138): the lane row's identity_state as the view projects
+    // it — NULL is a real arm-1 value; arms 2/3 are 'confirmed' by
+    // construction (usage-rollup-lane.md R5b).
+    identityState: text('identity_state'),
+    costUsd: numeric('cost_usd', { precision: 14, scale: 6 }).notNull(),
+    tokens: bigint('tokens', { mode: 'bigint' }).notNull(),
+    recordCount: integer('record_count').notNull(),
+    refreshAt: timestamp('refresh_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('usage_rollup_daily_day_idx').on(t.day),
+    index('usage_rollup_daily_region_day_idx').on(t.regionId, t.day),
+    index('usage_rollup_daily_org_unit_day_idx').on(t.orgUnitId, t.day),
+    index('usage_rollup_daily_teammate_day_idx').on(t.teammateId, t.day),
+  ],
+)
+
+// Retro-mutation refresh queue for usage_rollup_daily (mig 0136): quarantine
+// flips and placement re-homes queue the teammate; the usage-rollup worker
+// drains per teammate (delete-after-recompute).
+export const usageRollupRefresh = pgTable('usage_rollup_refresh', {
+  teammateId: uuid('teammate_id')
+    .primaryKey()
+    .references(() => teammate.id),
+  requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
+})
 
 // Singleton archive watermark (mig 0056; ledger-retention epic). One row,
 // id='singleton'. archived_through = the exclusive lower bound of the HOT

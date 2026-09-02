@@ -185,6 +185,38 @@ describe('RLS — region + org_unit scope on attribution_record', () => {
   })
 })
 
+describe('applyRlsContext — single-statement GUC installation (request-floor-performance.md F1)', () => {
+  it('all four GUCs read back via current_setting inside the tx, and are gone after it', async () => {
+    const ctx = {
+      userRegionId: '11111111-1111-1111-1111-111111111111',
+      userOrgPath: 'apac.services',
+      userRole: 'developer' as const,
+      userTeammateId: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
+    }
+    const inside = await withRlsContext(scopedDb, ctx, async (tx) =>
+      tx.execute(sql`SELECT
+        current_setting('app.user_region_id', true)   AS user_region_id,
+        current_setting('app.user_org_path', true)    AS user_org_path,
+        current_setting('app.user_role', true)        AS user_role,
+        current_setting('app.user_teammate_id', true) AS user_teammate_id`),
+    )
+    expect(inside[0]).toEqual({
+      user_region_id: ctx.userRegionId,
+      user_org_path: ctx.userOrgPath,
+      user_role: ctx.userRole,
+      user_teammate_id: ctx.userTeammateId,
+    })
+
+    // `true` (transaction-local) scoping: outside the tx none of the values
+    // survive — a later checkout must never inherit an identity.
+    const after = await scopedDb.execute(sql`SELECT
+      current_setting('app.user_region_id', true)   AS user_region_id,
+      current_setting('app.user_teammate_id', true) AS user_teammate_id`)
+    expect([null, '']).toContain(after[0]!.user_region_id)
+    expect([null, '']).toContain(after[0]!.user_teammate_id)
+  })
+})
+
 describe('RLS — org_unit (S11 c): mirrors orgSubtreeScopePredicate(), recursion-safe', () => {
   it('admin (region-scoped) sees only org_unit rows in their own region', async () => {
     const rows = await withRlsContext(

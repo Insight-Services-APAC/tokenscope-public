@@ -190,6 +190,8 @@ interface ConsumptionResp {
     provider_feed_minutes_ago: number | null
     worst_minutes_ago: number | null
   }
+  /** §A6.2 — the degradation banner's signal; null = healthy, banner hidden. */
+  attribution_stall?: { since: string } | null
   /** W0c D11 — the chip row's real operands (D14). */
   providerStates?: ProviderState[]
   coverage?: ReportCoverageMeta | null
@@ -647,6 +649,10 @@ async function onWorklistChanged() {
     </UiPageHead>
 
     <div v-if="data" class="space-y-5">
+      <!-- §A6.2 degradation banner — first thing on the page when attribution
+           has stalled; every figure below is suspect while it shows. -->
+      <UiAttributionStallBanner :stall="data.attribution_stall" />
+
       <!-- Lane toggle (fix 6 — /usage keeps its lens) + window presets (fix 1/D16). -->
       <div class="flex items-start justify-between gap-3 flex-wrap">
         <div class="flex items-start gap-3 flex-wrap">

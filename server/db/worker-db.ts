@@ -19,10 +19,10 @@
  * Do NOT "improve" this into a `withWorkerRls(db, fn)` that opens a transaction
  * and SET LOCALs the GUCs. §2 of the design doc lists four independent
  * mechanisms that break, all evidenced in the tree:
- *   1. `dispatchWorker` needs `db.$client.reserve()` (dispatch-lock.ts) to hold
- *      the single-flight advisory lock on a DIFFERENT pooled connection. A
- *      transaction handle has no `$client` — the lock breaks before the worker
- *      runs.
+ *   1. `dispatchWorker` keys its single-flight lock pool on `db.$client`
+ *      (dispatch-lock.ts) and holds the advisory lock on a connection OUTSIDE
+ *      the pool the run queries through. A transaction handle has no `$client`
+ *      — the lock breaks before the worker runs.
  *   2. Fault isolation inverts. Five workers wrap raw `db.execute` in try/catch
  *      for per-item isolation; inside one transaction the first caught SQL error
  *      leaves the backend in 25P02 and every later statement fails.
@@ -110,7 +110,11 @@ export function workerConnectionOptions(overrides: PgOptions = {}): PgOptions {
   const { connection, ...rest } = overrides
   return {
     max: 10,
-    idle_timeout: 30,
+    // Cron-burst lane: workers spike every 5-15 min, so 60s idle drains the
+    // pool between runs — the fleet connection arithmetic lives at
+    // server/db/index.ts (docs/design/request-floor-performance.md F3).
+    idle_timeout: 60,
+    connect_timeout: 10,
     ...rest,
     connection: { ...WORKER_CONNECTION_PARAMETERS, ...connection },
   }

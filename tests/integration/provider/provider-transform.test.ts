@@ -460,6 +460,14 @@ describe('idempotency', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0]!.model).toBe('claude-opus-5')
     expect(res.factRowsPruned).toBe(1)
+
+    // The prune enqueues the affected teammate for a usage-rollup recompute
+    // (usage-rollup-lane.md R4): a pruned row leaves no write instant behind,
+    // so without this a day revised away to empty would keep its deleted
+    // usage in usage_rollup_daily forever.
+    const queued = await t.client<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM usage_rollup_refresh`
+    expect(queued[0]!.n).toBeGreaterThanOrEqual(1)
   })
 })
 

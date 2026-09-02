@@ -151,6 +151,25 @@ describe('frontier-overreliance', () => {
     expect(byId(mk(40, 9)).get('frontier-overreliance')).toBeUndefined() // $49 total
     expect(byId(mk(45, 4, 51)).get('frontier-overreliance')).toBeUndefined() // 49% classified
   })
+
+  /*
+   * DEGENERATE DENOMINATOR. `frontier_share` divides by classified spend, so an
+   * unclassifiable window (empty/unseeded model_catalog) would divide by zero and
+   * the finding would describe the CATALOG, not the teammate.
+   *
+   * RED ON REVERT: this is defence in depth, so it goes red only when BOTH the
+   * positive `classified <= 0` refusal AND FRONTIER_MIN_CLASSIFIED_RATIO's guard
+   * are removed (verified: the detector then fires on a NaN share). The positive
+   * refusal exists so the invariant does not rest on a threshold constant that a
+   * later tuning pass could set to 0.
+   */
+  it('publishes NOTHING when the catalog classifies no model', () => {
+    expect(
+      new Map(
+        detectFindings(mk(81, 19), [], WILDCARD_LINES).map((f) => [f.id, f]),
+      ).get('frontier-overreliance'),
+    ).toBeUndefined()
+  })
 })
 
 describe('model-concentration', () => {
@@ -183,7 +202,7 @@ describe('model-concentration', () => {
 describe('aux-overhead', () => {
   const mk = (main: number, aux: number, unknown = 0) => [
     cell({ query_source: 'main', tokens: main, cost_usd: 1 }),
-    cell({ query_source: 'generate_session_title', tokens: aux, cost_usd: 2 }),
+    cell({ query_source: 'compact', tokens: aux, cost_usd: 2 }),
     ...(unknown > 0 ? [cell({ query_source: null, tokens: unknown, cost_usd: 5 })] : []),
   ]
 
@@ -202,6 +221,63 @@ describe('aux-overhead', () => {
 
   it('silent at the share boundary', () => {
     expect(byId(mk(850_000, 150_000)).get('aux-overhead')).toBeUndefined() // exactly 15%
+  })
+
+  /*
+   * THE LIVE DEFECT. Claude Code emits `repl_main_thread`, never the word
+   * `main`, so the conversation lane counted as harness overhead: 16.9B tokens,
+   * `main_tokens: 0`, `aux_share: 1`, and a $12,200/month recommendation.
+   *
+   * RED ON REVERT: restore `c.query_source === 'main'` in detectAuxOverhead and
+   * this goes red — the finding reappears at 100%.
+   */
+  it("counts Claude Code's real conversation tokens as MAIN, not overhead", () => {
+    const claude = [
+      cell({ query_source: 'repl_main_thread', tokens: 800_000, cost_usd: 1 }),
+      cell({ query_source: 'repl_main_thread:outputStyle:Concise', tokens: 500_000, cost_usd: 1 }),
+      cell({ query_source: 'agent:custom', tokens: 500_000, cost_usd: 1 }),
+      cell({ query_source: 'sdk', tokens: 200_000, cost_usd: 1 }),
+      cell({ query_source: 'compact', tokens: 1_000_000, cost_usd: 8 }),
+    ]
+    const f = byId(claude).get('aux-overhead')!
+    expect(f).toBeDefined()
+    expect(f.evidence.main_tokens).toBe(2_000_000)
+    expect(f.evidence.aux_tokens).toBe(1_000_000)
+    expect(f.evidence.aux_share).toBeCloseTo(1 / 3, 4)
+  })
+
+  /*
+   * DEGENERATE DENOMINATOR. `aux_share` = aux/(main+aux) is exactly 1 whenever
+   * the main lane is empty, whatever the aux volume. "We have no conversation
+   * -lane signal" is not the finding "100% of your volume is overhead", and an
+   * insight that cannot tell them apart must not publish a savings estimate.
+   *
+   * RED ON REVERT: drop the AUX_MIN_MAIN_TOKENS guard from detectAuxOverhead
+   * and both cases below go red.
+   */
+  it('publishes NOTHING when the main lane is empty (main = 0, aux > 0)', () => {
+    const degenerate = [cell({ query_source: 'compact', tokens: 16_888_592_916, cost_usd: 13_396.81 })]
+    expect(byId(degenerate).get('aux-overhead')).toBeUndefined()
+  })
+
+  it('publishes NOTHING when the main lane is below the denominator floor', () => {
+    const nearlyDegenerate = [
+      cell({ query_source: 'repl_main_thread', tokens: THRESHOLDS.AUX_MIN_MAIN_TOKENS - 1, cost_usd: 1 }),
+      cell({ query_source: 'compact', tokens: 5_000_000, cost_usd: 40 }),
+    ]
+    expect(byId(nearlyDegenerate).get('aux-overhead')).toBeUndefined()
+  })
+
+  it('still fires on a GENUINE high-aux window once the main lane is real', () => {
+    const genuine = [
+      cell({ query_source: 'repl_main_thread', tokens: 2_000_000, cost_usd: 10 }),
+      cell({ query_source: 'compact', tokens: 6_000_000, cost_usd: 40 }),
+    ]
+    const f = byId(genuine).get('aux-overhead')!
+    expect(f).toBeDefined()
+    expect(f.evidence.main_tokens).toBe(2_000_000)
+    expect(f.evidence.aux_share).toBeCloseTo(0.75, 4)
+    expect(Number(f.estimated_monthly_savings_usd)).toBeGreaterThan(0)
   })
 })
 

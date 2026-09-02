@@ -25,6 +25,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { sql, type SQL } from 'drizzle-orm'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import {
   fetchFinanceBillCheck,
@@ -103,6 +104,10 @@ beforeAll(async () => {
       (month, provider_enterprise_id, provider_org_id, cost_owning_unit_id, seats,
        license_net_usd, overage_net_usd, unclassified_net_usd, included_allowance_usd, usage_gross_usd)
     VALUES (${MONTH}::date, ${ent!.id}::uuid, ${po!.id}::uuid, ${ccA}::uuid, 5, 200, 100, 55, 400, 350)`
+  // The §A side of the region-card fetchers reads usage_rollup_daily (design
+  // R5) — materialise the seeded lane before any fetcher runs. Group (3)'s
+  // nested seeds are §B-only, so one build here covers the file.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {

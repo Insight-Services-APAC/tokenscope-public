@@ -2,11 +2,23 @@
 /*
  * Lane firewall (build-design §7(7)) — a STATIC test: no reporting READ path may
  * touch `attribution_record`, `attribution_aggregate` or raw `actual_spend`. The
- * usage lane reads `v_complete_usage`; the finance/bill lane reads the
+ * usage lane reads `v_complete_usage` OR `usage_rollup_daily`; the finance/bill
+ * lane reads the
  * `v_finance_*` views (incl. the Σ=bill term via `v_finance_bill_totals_month`) —
  * so the firewall holds with NO exceptions. Scans BOTH the endpoint dir
  * (`server/api/v1/reports/**`) and the shared query layer
  * (`server/reporting/**`, where the query fns actually live).
+ *
+ * `usage_rollup_daily` is an ALLOWED §A source (docs/design/usage-rollup-lane.md
+ * R7). The two reasons `attribution_aggregate` is banned below do NOT apply to
+ * it: the aggregate is OTEL-ONLY (it misses the API−OTel gap arms entirely) and
+ * carries no quarantine predicate, so a drill on it shows a smaller, staler
+ * number than the lane. The usage rollup's content is DEFINED as an aggregate of
+ * `v_complete_usage` itself (the worker scans the view, R3), so it is
+ * arm-complete and quarantine-aware by construction; the only residual is a
+ * bounded, self-healing lag of <= one worker cadence on the still-filling day,
+ * inside the settling contract. This does not weaken the existing bans — the
+ * three banned tables stay banned, unconditionally.
  *
  * `attribution_aggregate` is banned as of the one-lane slice (consistency
  * contract §6.2). Banning `attribution_record` never covered it: the two are
@@ -51,6 +63,18 @@ describe('reporting lane firewall', () => {
     expect(files.length).toBeGreaterThanOrEqual(6)
     expect(files.some((f) => f.endsWith('regional.ts'))).toBe(true)
     expect(files.some((f) => f.endsWith('meta.get.ts'))).toBe(true)
+  })
+
+  it('the allowed §A rollup source is actually read (usage-rollup-lane.md R5/R7)', () => {
+    // Not a ban — the positive half of the header's claim. If the region
+    // reports' §A reads ever silently fall back to per-request re-aggregation,
+    // this points at the design decision being reverted.
+    const readsRollup = files.some((f) =>
+      /\busage_rollup_daily\b/.test(stripComments(readFileSync(f, 'utf8'))),
+    )
+    expect(readsRollup, 'server/reporting/** should read usage_rollup_daily (design R5)').toBe(
+      true,
+    )
   })
 
   it('no reporting read path references `attribution_record` (usage lane = v_complete_usage)', () => {

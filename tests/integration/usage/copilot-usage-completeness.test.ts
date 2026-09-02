@@ -272,6 +272,17 @@ describe('Copilot §A usage completeness', () => {
     expect(tagged!.project).toBe(proj!.id) // ...but the tag is preserved
     const [live] = await t.client<{ cost: string }[]>`SELECT cost_usd::text AS cost FROM unaccounted_usage WHERE teammate_id = ${teammateId}::uuid AND day = ${DAY}::date AND tool = 'copilot-cli'`
     expect(Number(live!.cost)).toBeCloseTo(15, 2) // live row preserved
+    /*
+     * And the DELETE is announced. It is the one §A mutation that leaves no
+     * trace: the zeroed row above carries a fresh computed_at, which both the
+     * rollup worker's stale signal and the read-side coverage gate read, but a
+     * removed row has no instant to carry. Without this entry the rollup keeps
+     * the deleted money until the next daily wide sweep while the gate reports
+     * the figure as current.
+     */
+    const queued = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM usage_rollup_refresh WHERE teammate_id = ${teammateId}::uuid`
+    expect(Number(queued[0]!.n), 'the orphan DELETE did not enqueue a rollup refresh').toBe(1)
   })
 
   it('reconciles Claude and Copilot independently in the same window', async () => {

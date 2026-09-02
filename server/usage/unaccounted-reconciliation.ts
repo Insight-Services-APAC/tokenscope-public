@@ -364,7 +364,26 @@ export async function reconcileUnaccountedUsage(
     // Undecided orphan: DELETE outright — no decision to keep, and a $0 row would be a
     // permanent ghost in "My projects" / needs-tagging. (If the view later re-produces the
     // key, the upsert re-inserts.)
-    await tx.execute(sql`DELETE FROM unaccounted_usage u WHERE u.cost_usd > 0 AND NOT ${decided} AND ${orphanScope}`)
+    /*
+     * The teammates go on the rollup refresh queue IN THIS STATEMENT.
+     *
+     * A DELETE is the one §A mutation that leaves no trace for anything
+     * downstream to notice: the zeroing branch below stamps computed_at, which
+     * the rollup worker's stale signal and the read-side coverage gate both
+     * read, but a removed row has no instant to carry. Without this the rollup
+     * keeps the deleted money until the next daily wide sweep, and the gate --
+     * finding nothing newer than the day's refresh_at -- reports the figure as
+     * current. The queue is the durable channel for exactly this class.
+     */
+    await tx.execute(sql`
+      WITH deleted AS (
+        DELETE FROM unaccounted_usage u
+         WHERE u.cost_usd > 0 AND NOT ${decided} AND ${orphanScope}
+        RETURNING u.teammate_id
+      )
+      INSERT INTO usage_rollup_refresh (teammate_id, requested_at)
+      SELECT DISTINCT teammate_id, statement_timestamp() FROM deleted
+      ON CONFLICT (teammate_id) DO UPDATE SET requested_at = GREATEST(usage_rollup_refresh.requested_at + interval '1 microsecond', statement_timestamp())`)
     // Decided orphan: zero the amount but KEEP the row — the developer's decision is
     // preserved history (and survives the key coming back); only its contribution drops to 0.
     // The zeroed parents' children go IN THE SAME STATEMENT (design r1-M1): a

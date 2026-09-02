@@ -640,18 +640,30 @@ export async function runEnterpriseAnalyticsPoll(
       CLAUDE_FAMILY_TOOLS.map((t) => sql`${t}`),
       sql.raw(', '),
     )
-    const pruned = await db.execute<{ id: string }>(
+    // The delete ALSO enqueues the affected teammates for a usage-rollup
+    // recompute (docs/design/usage-rollup-lane.md R4): a day revised away to
+    // EMPTY leaves no write instant for the rollup's source-write signal —
+    // only the survivors carry pulled_at = runStarted.
+    const pruned = await db.execute<{ n: string }>(
       sql`
-        DELETE FROM actual_spend
-        WHERE source = ${source}
-          AND date >= ${opts.startingAt}::date
-          AND date <= ${opts.endingAt}::date
-          AND tool IN (${lanedList})
-          AND pulled_at < ${runStarted}::timestamptz
-        RETURNING id::text AS id
+        WITH deleted AS (
+          DELETE FROM actual_spend
+          WHERE source = ${source}
+            AND date >= ${opts.startingAt}::date
+            AND date <= ${opts.endingAt}::date
+            AND tool IN (${lanedList})
+            AND pulled_at < ${runStarted}::timestamptz
+          RETURNING teammate_id
+        ), enqueued AS (
+          INSERT INTO usage_rollup_refresh (teammate_id, requested_at)
+          SELECT DISTINCT teammate_id, statement_timestamp() FROM deleted
+          ON CONFLICT (teammate_id) DO UPDATE SET requested_at = GREATEST(usage_rollup_refresh.requested_at + interval '1 microsecond', statement_timestamp())
+          RETURNING 1
+        )
+        SELECT COUNT(*)::text AS n FROM deleted
       `,
     )
-    staleRowsDeleted = pruned.length
+    staleRowsDeleted = Number([...pruned][0]?.n ?? 0)
   } else {
     consola.warn(
       `[enterprise-analytics-poll] skipping stale-row prune: ${skipped}/${identityEligible} identity-eligible API rows failed to bind a teammate (ratio ${skipRatio.toFixed(2)} > ${PRUNE_MAX_SKIP_RATIO}) — identity resolution looks broken`,

@@ -38,8 +38,10 @@ interface SettingsResp {
 
 const { isAdmin } = useAdminAccess()
 
-const { data, pending } = await useFetch<SettingsResp>('/api/v1/admin/settings', {
-  default: () => null as unknown as SettingsResp,
+// Lazy, client-only, null default: docs/design/admin-nav-responsiveness.md D1/D2.
+const { data, error, refresh } = useLazyFetch<SettingsResp | null>('/api/v1/admin/settings', {
+  server: false,
+  default: () => null,
   immediate: isAdmin.value,
 })
 
@@ -48,7 +50,7 @@ const flagBadge = (v: boolean) =>
 </script>
 
 <template>
-  <div class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-system">
+  <div class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-system" data-admin-page="/admin/system">
     <UiPageHead
       eyebrow="Operations"
       title="System info"
@@ -68,8 +70,9 @@ const flagBadge = (v: boolean) =>
       </div>
     </div>
 
-    <div v-if="pending" class="text-center text-sm text-carbon-3 py-8">Loading…</div>
-    <div v-else-if="data" class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+    <UiFetchErrorBanner v-if="error" :error="error" label="system info" @retry="refresh" />
+    <AdminPageSkeleton v-else-if="data == null" :rows="8" :toolbar="false" />
+    <div v-else class="grid grid-cols-1 lg:grid-cols-2 gap-5">
       <!-- Auth -->
       <UiCard accent="harmony" data-testid="admin-settings-auth">
         <UiEyebrow>Auth</UiEyebrow>

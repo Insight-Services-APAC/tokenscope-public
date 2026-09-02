@@ -212,26 +212,21 @@ export interface ReadPathHealthResult {
 const RUN_LOAD_LIMIT = 20
 
 /*
- * CONCURRENCY CONTRACT: this worker MUST run under the per-worker dispatch lock
- * (server/workers/dispatch-lock.ts), which the run-worker HTTP endpoint acquires
- * before every dispatch. The idempotency check below (SELECT an open alert →
- * dispatchInbox) is a NON-ATOMIC check-then-insert; it is safe ONLY because the
- * name-scoped lock serializes read-path-health runs, so two concurrent ticks
- * can't both pass the "no open alert" check and double-insert. This is the same
- * contract went-silent + budget-alert rely on. Do NOT run this worker unlocked —
- * in particular the scripts/run-worker.ts CLI path is UNLOCKED and is for
- * single-shot manual/dev use only, never concurrent.
+ * Recent azure-monitor-read runs, most-recent first — SHARED with the ops-alert
+ * worker's attribution-stall condition (docs/design/ops-alerting.md A2.2 reuses
+ * this worker's signals by helper, not by copy). Extracted verbatim from
+ * runReadPathHealth; the query semantics (scoped-run and running-row exclusion)
+ * are part of this worker's contract and must not fork per consumer.
+ *
+ * Model on shouldDeepRescan's worker_run query + the diagnostics workers-RAG
+ * SQL: read rows_affected and the result jsonb's errors/sessionsProcessed.
+ * errors/sessionsProcessed are cast from the jsonb text — NULL-safe (a missing
+ * key yields NULL, not 0).
  */
-export async function runReadPathHealth(
+export async function loadReaderRuns(
   db: PostgresJsDatabase<typeof schema>,
-  opts?: { now?: Date },
-): Promise<ReadPathHealthResult> {
-  const now = opts?.now ?? new Date()
-
-  // Recent azure-monitor-read runs, most-recent first. Model on shouldDeepRescan's
-  // worker_run query + the diagnostics workers-RAG SQL: read rows_affected and the
-  // result jsonb's errors/sessionsProcessed. errors/sessionsProcessed are cast from
-  // the jsonb text (::int) — NULL-safe (a missing key yields NULL, not 0).
+  limit: number = RUN_LOAD_LIMIT,
+): Promise<ReaderRun[]> {
   const runRows = await db.execute<{
     status: string
     started_at_ms: string
@@ -264,19 +259,27 @@ export async function runReadPathHealth(
        -- runs.length guard is satisfied by completed failures.
        AND status <> 'running'
      ORDER BY started_at DESC, id DESC
-     LIMIT ${RUN_LOAD_LIMIT}
+     LIMIT ${limit}
   `)
 
-  const runs: ReaderRun[] = [...runRows].map((r) => ({
+  return [...runRows].map((r) => ({
     status: r.status,
     startedAtMs: Number(r.started_at_ms),
     rowsAffected: r.rows_affected === null ? null : Number(r.rows_affected),
     sessionsProcessed: r.sessions_processed === null ? null : Number(r.sessions_processed),
     errors: r.errors === null ? null : Number(r.errors),
   }))
+}
 
-  // "Is the fleet still emitting?" — measured with the INDEPENDENT write/emit-auth
-  // signal (see FLEET_EMITTING_FRESH_MS), NOT the read path's own output. Each
+/*
+ * "Is the fleet still emitting?" — SHARED with the ops-alert worker's
+ * attribution-stall condition, same extraction rationale as loadReaderRuns.
+ */
+export async function loadLastFleetEmitMs(
+  db: PostgresJsDatabase<typeof schema>,
+): Promise<number | null> {
+  // Measured with the INDEPENDENT write/emit-auth signal (see
+  // FLEET_EMITTING_FRESH_MS), NOT the read path's own output. Each
   // /bearer emit-token mint stamps instance_attestation.last_bearer_at, so this
   // MAX keeps advancing throughout a read-path outage while clients keep emitting,
   // and only ages out when the fleet genuinely goes quiet. This is what stops the
@@ -287,7 +290,28 @@ export async function runReadPathHealth(
       FROM instance_attestation
   `)
   const lastRaw = [...emitRows][0]?.last_ms ?? null
-  const lastFleetEmitMs = lastRaw === null ? null : Number(lastRaw)
+  return lastRaw === null ? null : Number(lastRaw)
+}
+
+/*
+ * CONCURRENCY CONTRACT: this worker MUST run under the per-worker dispatch lock
+ * (server/workers/dispatch-lock.ts), which the run-worker HTTP endpoint acquires
+ * before every dispatch. The idempotency check below (SELECT an open alert →
+ * dispatchInbox) is a NON-ATOMIC check-then-insert; it is safe ONLY because the
+ * name-scoped lock serializes read-path-health runs, so two concurrent ticks
+ * can't both pass the "no open alert" check and double-insert. This is the same
+ * contract went-silent + budget-alert rely on. Do NOT run this worker unlocked —
+ * in particular the scripts/run-worker.ts CLI path is UNLOCKED and is for
+ * single-shot manual/dev use only, never concurrent.
+ */
+export async function runReadPathHealth(
+  db: PostgresJsDatabase<typeof schema>,
+  opts?: { now?: Date },
+): Promise<ReadPathHealthResult> {
+  const now = opts?.now ?? new Date()
+
+  const runs = await loadReaderRuns(db)
+  const lastFleetEmitMs = await loadLastFleetEmitMs(db)
 
   const decision = decideReadPathAlert({ runs, lastFleetEmitMs, nowMs: now.getTime() })
 

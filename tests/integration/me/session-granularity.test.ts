@@ -46,6 +46,14 @@ const COPILOT_INSTANCE = randomUUID()
 const COPILOT_CONV = 'conv-gran-copilot-1'
 /** The same Copilot span as it sits on the ledger from BEFORE mig 0038 (r6-A2). */
 const LEGACY_COPILOT_CONV = 'conv-gran-copilot-legacy'
+/**
+ * A pre-0016 conversation: claude_session_id NULL on EVERY row, so its
+ * conversation key IS this instance id (conversation-key.ts). The key filters
+ * in breakdowns.ts are the OR-of-two-equalities shape
+ * (request-floor-performance.md F6); this fixture pins the legacy arm, and its
+ * sibling test pins the IS NULL guard on that arm.
+ */
+const INSTANCE_KEYED_INSTANCE = randomUUID()
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -101,7 +109,7 @@ beforeAll(async () => {
 
   // One conversation, two spans:
   //   span A (req_a, main, Fable): all four token types, tier-1/estimated
-  //   span B (req_b, generate_session_title, Haiku): input+output,
+  //   span B (req_b, side_question, Haiku): input+output,
   //     tier-2/telemetry-only, NULL query_source on one row (legacy shape)
   const baseRow = {
     instanceId: INSTANCE,
@@ -122,7 +130,7 @@ beforeAll(async () => {
     { model: 'claude-fable-5', tokenType: 'output', tokens: 20_000n, costUsd: '0.300000', q: 'main', ts: spanA, run: 'req_a', tier: 'tier-1', basis: 'estimated' },
     { model: 'claude-fable-5', tokenType: 'cache-read', tokens: 1_200_000n, costUsd: '0.360000', q: 'main', ts: spanA, run: 'req_a', tier: 'tier-1', basis: 'estimated' },
     { model: 'claude-fable-5', tokenType: 'cache-write', tokens: 100_000n, costUsd: '0.376000', q: 'main', ts: spanA, run: 'req_a', tier: 'tier-1', basis: 'estimated' },
-    { model: 'claude-haiku-4-5', tokenType: 'input', tokens: 5_000n, costUsd: '0.005000', q: 'generate_session_title', ts: spanB, run: 'req_b', tier: 'tier-2', basis: 'telemetry-only' },
+    { model: 'claude-haiku-4-5', tokenType: 'input', tokens: 5_000n, costUsd: '0.005000', q: 'side_question', ts: spanB, run: 'req_b', tier: 'tier-2', basis: 'telemetry-only' },
     { model: 'claude-haiku-4-5', tokenType: 'output', tokens: 1_000n, costUsd: '0.004000', q: null, ts: spanB, run: 'req_b', tier: 'tier-2', basis: 'telemetry-only' },
   ]
   for (const r of rows) {
@@ -215,6 +223,48 @@ beforeAll(async () => {
       costBasis: 'telemetry-only',
       tsEvent: new Date('2026-06-01T11:00:00Z'),
       sourceRunId: 'req_copilot_legacy',
+    })
+  }
+
+  // ── The pre-0016 INSTANCE-KEYED conversation (claude_session_id NULL) ────
+  await t.db.insert(schema.instanceAttestation).values({
+    instanceId: INSTANCE_KEYED_INSTANCE,
+    principalOid: 'oid-other-g',
+    teammateId: otherId,
+    projectCodeHash: 'h-grn-api',
+    rawProjectCode: 'GRN-API',
+    tool: 'claude-code',
+    sessionTokenHash: 'tok-gran-' + INSTANCE_KEYED_INSTANCE,
+    tsStart: new Date('2026-06-01T09:00:00Z'),
+    regionId,
+    orgUnitId,
+    costOwningUnitId: orgUnitId,
+  })
+  const legacyKeyedRows = [
+    { tokenType: 'input', tokens: 1_000n, costUsd: '0.010000', q: 'main' },
+    { tokenType: 'output', tokens: 200n, costUsd: '0.020000', q: null },
+  ]
+  for (const r of legacyKeyedRows) {
+    await t.db.insert(schema.attributionRecord).values({
+      instanceId: INSTANCE_KEYED_INSTANCE,
+      claudeSessionId: null,
+      teammateId: otherId,
+      projectId,
+      regionId,
+      orgUnitId,
+      costOwningUnitId: orgUnitId,
+      tool: 'claude-code',
+      model: 'claude-sonnet-4-6',
+      tokenType: r.tokenType,
+      tokens: r.tokens,
+      costUsd: r.costUsd,
+      querySource: r.q,
+      rateCardId: rc!.id,
+      rateCardVersion: rc!.version,
+      fidelityTier: 'tier-1',
+      costBasis: 'estimated',
+      tsEvent: new Date('2026-06-01T12:00:00Z'),
+      sourceRunId: 'req_instance_keyed',
     })
   }
 }, 60_000)
@@ -317,8 +367,35 @@ describe('usage read-model (DB layer)', () => {
     const split = await fetchQuerySourceSplit(t.db, devId, CONV)
     const lanes = new Map(split.map((s) => [s.query_source, s]))
     expect(lanes.get('main')!.tokens).toBe(1_400_000)
-    expect(lanes.get('generate_session_title')!.tokens).toBe(5_000)
+    expect(lanes.get('side_question')!.tokens).toBe(5_000)
     expect(lanes.get(null)!.tokens).toBe(1_000)
+  })
+
+  /*
+   * F6 (request-floor-performance.md) — the key filters are the
+   * OR-of-two-equalities shape from conversation-key.ts. Both directions of
+   * that shape's contract, pinned:
+   *   1. the legacy arm: claude_session_id NULL rows answer on the INSTANCE id;
+   *   2. the guard on it: a claude-keyed row is NOT reachable via its instance
+   *      id — only rows whose COALESCE key equals the candidate may match.
+   */
+  it('F6: an instance-keyed conversation (claude_session_id NULL) answers on its instance id', async () => {
+    const cells = await fetchBreakdownCells(t.db, otherId, [INSTANCE_KEYED_INSTANCE])
+    expect(cells).toHaveLength(2)
+    expect(cells.every((c) => c.conversation_id === INSTANCE_KEYED_INSTANCE)).toBe(true)
+    expect(cells.reduce((a, c) => a + c.tokens, 0)).toBe(1_200)
+
+    const split = await fetchQuerySourceSplit(t.db, otherId, INSTANCE_KEYED_INSTANCE)
+    const lanes = new Map(split.map((s) => [s.query_source, s]))
+    expect(lanes.get('main')!.tokens).toBe(1_000)
+    expect(lanes.get(null)!.tokens).toBe(200)
+  })
+
+  it('F6: a claude-keyed conversation is NOT reachable by its instance id — the legacy arm is guarded', async () => {
+    // COPILOT_INSTANCE's rows all carry a claude_session_id, so on the
+    // COALESCE key model the instance uuid names no conversation of theirs.
+    expect(await fetchBreakdownCells(t.db, otherId, [COPILOT_INSTANCE])).toEqual([])
+    expect(await fetchQuerySourceSplit(t.db, otherId, COPILOT_INSTANCE)).toEqual([])
   })
 })
 

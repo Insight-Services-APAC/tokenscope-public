@@ -32,18 +32,23 @@
  *   TokenScope ✗ enrolment revoked     — /health says this enrolment was revoked (red)
  *   TokenScope ✗ not landing           — DEAD EXPORT: the client is actively emitting
  *                                        (recent bearer) but the landed watermark isn't
- *                                        keeping up → nothing is being attributed (red)
+ *                                        keeping up → nothing is being attributed (red).
+ *                                        Also covers an enrolment PAST the grace window
+ *                                        that has never landed anything at all.
  *   TokenScope ⚠ landed · emit-only    — delivery CONFIRMED, but MCP not connected (yellow)
  *   TokenScope ✓ landed                — delivery CONFIRMED + MCP authed (green)
  *   TokenScope ⚠ emit-only             — landing UNCONFIRMED + MCP not connected (yellow)
  *   TokenScope ◎ emit-auth             — auth fine, MCP authed, delivery UNCONFIRMED
- *                                        (/health unreachable, or idle+never-landed —
- *                                        a neutral fallback, cyan)
+ *                                        (/health unreachable, idle+never-landed, or a
+ *                                        still-in-grace fresh enrolment — neutral, cyan)
  *
- * The `◎ emit-auth` cyan is now STRICTLY the "we couldn't confirm landing" fallback
- * (health unreachable / idle client that has never landed) — it no longer covers
- * "landing looks dead". When the client is actively emitting, the landing state is
- * the primary colour driver; an IDLE client never trips the red dead-export state.
+ * The `◎ emit-auth` cyan is STRICTLY the "we couldn't confirm landing" fallback
+ * (health unreachable / idle client that has never landed / a fresh enrolment still
+ * inside NEVER_LANDED_GRACE_MS) — it does NOT cover "landing looks dead", and since
+ * 2026-09-01 it no longer covers an ACTIVE enrolment that has never landed anything
+ * long past setup: that was the hole a superseded instance pin hid in for 69 minutes.
+ * When the client is actively emitting, the landing state is the primary colour
+ * driver; an IDLE client never trips the red dead-export state.
  *
  * The trailing (Env) tag is DERIVED from the configured emit endpoint, never
  * hardcoded — see emitEnvLabel().
@@ -97,10 +102,34 @@ export const DEAD_EXPORT_MS = 90 * 60 * 1000
 export const LANDED_LAG_MS = 24 * 60 * 60 * 1000
 
 /**
+ * How long after ENROLMENT a still-never-landed active client stays neutral.
+ *
+ * `last_emission: null` has two meanings and only `ts_start` separates them: a
+ * fresh enrolment whose first record is still in flight (normal), or an enrolment
+ * that has never landed anything (a fault). Before this window we say nothing;
+ * after it, an ACTIVE client that has still never landed reads as not-landing.
+ *
+ * 2h is ~5x the observed worst case: a record takes ~5 min through Azure Monitor
+ * ingest (measured 2026-09-01: enrolment 11:33:24 → first landed row 11:39:04)
+ * plus up to one ~15-min azure-monitor-read cadence, so ~20-25 min end to end.
+ * The margin absorbs a reader backlog without crying wolf during setup — the case
+ * the neutral fallback exists to protect.
+ *
+ * IDLE clients are exempt entirely (see classifyLanding): with no emission there
+ * is nothing to land, so age alone must never turn an idle device red.
+ *
+ * Measured `last_bearer_at − ts_start`, i.e. SERVER stamp minus SERVER stamp, so
+ * a skewed client clock cannot manufacture a false red. Never `now − ts_start`.
+ */
+export const NEVER_LANDED_GRACE_MS = 2 * 60 * 60 * 1000
+
+/**
  * Pure: classify the DELIVERY-CONFIRMATION (landing) state from a /health cache.
  * Tested directly, independent of the network. Inputs:
  *   - cache:  the parsed last-landed.json object, or null (no cache yet). Shape:
- *             { ok, instanceId, lastEmission, lastBearer, silent, revoked, checkedAt }.
+ *             { ok, instanceId, lastEmission, lastBearer, tsStart, silent, revoked,
+ *             checkedAt }. `tsStart` (the enrolment's start) may be absent against
+ *             an older server — then a never-landed client stays neutral as before.
  *             `ok:true` = /health was actually REACHED on the last refresh.
  *   - instanceId: the currently-configured instance id (to reject a stale cache
  *             left by a different enrolment sharing the home dir).
@@ -115,16 +144,22 @@ export const LANDED_LAG_MS = 24 * 60 * 60 * 1000
  *
  * Returns one of:
  *   'revoked' — the enrolment was revoked server-side (clear error).
- *   'dead'    — CLIENT ACTIVE (bearer within DEAD_EXPORT_MS) AND a PRIOR landing
- *               has since gone stale (bearer − emission > LANDED_LAG_MS) → landing
- *               was working and STOPPED, emissions accepted but no longer landing.
- *               Requires a prior landing; a never-landed client is NOT dead.
+ *   'revoked' handled above. Then, for a CLIENT ACTIVE (bearer within
+ *   DEAD_EXPORT_MS):
+ *   'dead'    — EITHER a PRIOR landing has since gone stale (bearer − emission >
+ *               LANDED_LAG_MS) → landing was working and STOPPED; OR the client has
+ *               NEVER landed and kept minting bearers well past enrolment
+ *               (bearer − ts_start > NEVER_LANDED_GRACE_MS) → it has never worked
+ *               at all. Both mean "emissions accepted, nothing attributed", which is
+ *               the one thing this beacon exists to show. Both are SERVER-stamp
+ *               differences, so neither can be manufactured by a skewed local clock.
  *   'landed'  — delivery confirmed: an active client whose watermark is keeping
  *               up, OR an idle client whose last emission DID land at some point.
  *   'unknown' — /health NOT reached (cache missing/never-ok/other-instance); an
- *               ACTIVE client that has NEVER landed (fresh enrolment, first record
- *               still pending); or an idle client that has never landed anything.
- *               We can neither confirm nor deny → render stays NEUTRAL, never red.
+ *               ACTIVE client that has never landed but is still INSIDE the
+ *               enrolment grace (first record legitimately in flight) or whose
+ *               `ts_start` is absent/unparseable; or ANY idle client that has never
+ *               landed. We can neither confirm nor deny → NEUTRAL, never red.
  */
 export function classifyLanding(cache, instanceId, now = Date.now()) {
   // No cache, or the last refresh never reached /health → nothing confirmed.
@@ -140,17 +175,38 @@ export function classifyLanding(cache, instanceId, now = Date.now()) {
   // and we CAN judge landing. 'dead' requires a PRIOR landing that has since gone
   // stale (>LANDED_LAG_MS while the credential keeps refreshing = a real read-path
   // outage — the actual incident); an hours-long within-session idle stays 'landed'.
-  // A client that has NEVER landed (emission null) is NOT dead — it's a fresh
-  // enrolment whose first record hasn't landed yet (~10-60 min post-setup): report
-  // the honest neutral 'unknown', never a false red exactly when the user is
-  // verifying setup. (Systemic never-lands are the SERVER read-path-health alert's
-  // job, not this per-device beacon.)
+  // A client that has NEVER landed is judged by ENROLMENT AGE, not treated as
+  // permanently unknowable: inside NEVER_LANDED_GRACE_MS it is a fresh enrolment
+  // whose first record hasn't landed yet, so report the honest neutral 'unknown'
+  // and never a false red while the user is verifying setup; beyond it, nothing has
+  // EVER landed for this device and that is a fault worth showing. (Systemic
+  // fleet-wide never-lands remain the SERVER read-path-health alert's job; this is
+  // the per-device beacon for the device in front of you.)
   // SKEW blind spot (documented, fails SAFE): a client clock running >DEAD_EXPORT_MS
   // AHEAD of the server-stamped last_bearer_at makes `now - bearer` exceed the
   // window → misjudged IDLE → a real dead export can read green. This never yields
   // a false RED, so we accept it as a known limitation rather than trust the clock.
   if (bearer !== null && now - bearer <= DEAD_EXPORT_MS) {
-    if (emission === null) return 'unknown'
+    if (emission === null) {
+      // NEVER landed. Age the ENROLMENT to tell "first record still in flight"
+      // (normal, stay neutral) from "enrolled long ago, nothing has ever landed"
+      // (a fault — the shape of the 2026-09-01 superseded-instance-pin incident,
+      // where a whole session emitted against an instance the device no longer
+      // claimed and this read benign cyan for 69 minutes). No `ts_start` (an
+      // older server, or an unparseable stamp) → unchanged neutral behaviour.
+      //
+      // Measured BEARER-to-ENROLMENT, never `now`-to-enrolment: both stamps come
+      // from the SERVER, so a skewed client clock cancels out. Using the local
+      // `now` here would let a clock running AHEAD inflate the age, cross the
+      // grace early and paint a false RED — the one outcome the skew note above
+      // promises this function never produces. (It also reads as the truer
+      // statement: the client was still minting bearers this long after
+      // enrolling, and nothing had landed by then.) Same server-to-server shape
+      // as the `bearer - emission` comparison below.
+      const enrolled = parseTs(cache.tsStart)
+      if (enrolled !== null && bearer - enrolled > NEVER_LANDED_GRACE_MS) return 'dead'
+      return 'unknown'
+    }
     if (bearer - emission > LANDED_LAG_MS) return 'dead'
     return 'landed'
   }

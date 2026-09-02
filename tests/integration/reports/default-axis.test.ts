@@ -23,6 +23,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import { injectTestSession } from '../../helpers/auth'
 import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
@@ -110,6 +111,9 @@ beforeAll(async () => {
   await t.client`INSERT INTO attribution_record
       (instance_id, teammate_id, region_id, org_unit_id, cost_owning_unit_id, project_id, tool, model, token_type, tokens, cost_usd, fidelity_tier, cost_basis, ts_event, claude_session_id)
     VALUES (${inst}::uuid, ${dana}::uuid, ${regionId}::uuid, ${ccId}::uuid, ${ccId}::uuid, ${projD}::uuid, 'claude-code', 'claude-sonnet-4-6', 'input', 100, 12, 'tier-1', 'estimated', '2026-07-02T00:00:00Z'::timestamptz, 'conv-d')`
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {

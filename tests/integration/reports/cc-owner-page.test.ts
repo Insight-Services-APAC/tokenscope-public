@@ -26,6 +26,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { sql } from 'drizzle-orm'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import {
   fetchCostCentreBurnDrill,
   fetchCostCentreHeroes,
@@ -185,6 +186,11 @@ beforeAll(async () => {
     VALUES (${ourTeammateId}::uuid, '2026-07-02'::date, 'claude-ai', 500, 500, ${INGEST_ONLY},
             'anthropic-analytics-api', ${regionId}::uuid, ${ccId}::uuid, ${ccId}::uuid,
             'ingest-snapshot')`
+
+  // The Business-Unit page's engine wrappers (cost-centres.ts) take their §A
+  // reads from usage_rollup_daily (usage-rollup-lane.md R5/R8): materialise
+  // it from the seeds above.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {

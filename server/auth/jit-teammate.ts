@@ -68,6 +68,15 @@ export interface ResolvedTeammate {
   role: Role
   regionId: string
   orgPath: string
+  /**
+   * Revocation columns, read in the SAME query as the identity so the normal
+   * session path can judge revocation without a re-read
+   * (docs/design/request-floor-performance.md F2). Semantics are the caller's
+   * (server/utils/auth.ts isRevoked doc): `revokedAt` is a session ANCHOR,
+   * `isActive` is durable deactivation.
+   */
+  revokedAt: Date | null
+  isActive: boolean
   created: boolean
 }
 
@@ -281,6 +290,10 @@ async function loadTeammateByOid(
   db: PostgresJsDatabase<typeof schema>,
   oid: string,
 ): Promise<Omit<ResolvedTeammate, 'created'> | null> {
+  // ONE query: teammate + org_unit.path + revocation columns
+  // (docs/design/request-floor-performance.md F2). LEFT JOIN, not INNER: a
+  // missing org_unit is data corruption and must throw loudly below — an INNER
+  // JOIN would silently drop the row and turn corruption into a 401.
   const [row] = await db
     .select({
       id: schema.teammate.id,
@@ -289,18 +302,17 @@ async function loadTeammateByOid(
       role: schema.teammate.role,
       regionId: schema.teammate.regionId,
       orgUnitId: schema.teammate.orgUnitId,
+      revokedAt: schema.teammate.revokedAt,
+      isActive: schema.teammate.isActive,
+      orgPath: schema.orgUnit.path,
     })
     .from(schema.teammate)
+    .leftJoin(schema.orgUnit, eq(schema.orgUnit.id, schema.teammate.orgUnitId))
     .where(eq(schema.teammate.entraOid, oid))
     .limit(1)
   if (!row) return null
 
-  const [unit] = await db
-    .select({ path: schema.orgUnit.path })
-    .from(schema.orgUnit)
-    .where(eq(schema.orgUnit.id, sql`${row.orgUnitId}`))
-    .limit(1)
-  if (!unit) {
+  if (row.orgPath == null) {
     throw new Error(
       `Teammate ${row.id} references missing org_unit ${row.orgUnitId} — investigate before continuing.`,
     )
@@ -317,6 +329,8 @@ async function loadTeammateByOid(
     displayName: row.displayName ?? row.email,
     role,
     regionId: row.regionId,
-    orgPath: unit.path,
+    orgPath: row.orgPath,
+    revokedAt: row.revokedAt,
+    isActive: row.isActive,
   }
 }

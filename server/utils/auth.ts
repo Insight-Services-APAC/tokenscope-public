@@ -162,8 +162,10 @@ async function resolveSession(event: H3Event): Promise<Session | null> {
 
   const db = getDb()
   let session: Session
+  let revocationRow: RevocationFields
   try {
     const resolved = await resolveOrCreateTeammate(db, claims)
+    revocationRow = { revokedAt: resolved.revokedAt, isActive: resolved.isActive }
     session = {
       teammateId: resolved.teammateId,
       email: resolved.email,
@@ -201,12 +203,22 @@ async function resolveSession(event: H3Event): Promise<Session | null> {
   // and `allowOverride` is false.
   if (allowOverride) {
     const overridden = await applyPersonaOverride(event, session, db)
-    if (overridden) session = overridden
+    if (overridden) {
+      // The override rewrote the session mid-flight: the fused row above
+      // describes the IMPERSONATOR, not the target, so this lane keeps the
+      // dedicated re-read — isRevoked judges the override target AND the
+      // impersonator behind it.
+      if (await isRevoked(db, overridden)) return null
+      return overridden
+    }
   }
 
-  // Revocation traversal — covers both the primary identity and
-  // (when impersonating) the real admin behind the override.
-  if (await isRevoked(db, session)) return null
+  // Normal path: revocation judged in-process from the same row the identity
+  // came from — same columns, verdict logic identical to isRevoked(). Same
+  // enforcement point as before: session resolution, once per request — a
+  // revocation committing mid-request lands on the NEXT request under both
+  // shapes (docs/design/request-floor-performance.md F2).
+  if (revocationDenies(revocationRow, session.issuedAt)) return null
 
   return session
 }
@@ -430,10 +442,44 @@ function parseRevokedAtMs(value: string | Date | null | undefined): number | nul
   return Number.isFinite(ms) ? ms : null
 }
 
+interface RevocationFields {
+  revokedAt: string | Date | null
+  isActive: boolean | null
+}
+
+/**
+ * In-process revocation verdict for the NORMAL (non-override) session path —
+ * byte-for-byte the semantics of isRevoked()'s primary-identity leg (the
+ * two-axes contract is documented there), evaluated from the columns
+ * resolveOrCreateTeammate's fused query already read instead of a re-read
+ * (docs/design/request-floor-performance.md F2). Fail closed: a missing row
+ * denies, `isActive !== true` denies (NULL/absent deny rather than admit), an
+ * unparseable issuedAt sorts to epoch.
+ *
+ * Exported because the row-missing branch is unreachable through tryAuth (the
+ * resolver always returns a row or throws) and must still be pinned by tests.
+ */
+export function revocationDenies(
+  row: RevocationFields | null | undefined,
+  issuedAt: string,
+): boolean {
+  if (!row) return true // teammate gone — treat as revoked
+  if (row.isActive !== true) return true // deactivated — no session, ever
+  const revokedMs = parseRevokedAtMs(row.revokedAt)
+  const issuedAtMs = Date.parse(issuedAt) || 0
+  return revokedMs !== null && revokedMs > issuedAtMs
+}
+
 /**
  * True if the session must not resolve. Checks the primary identity AND the
  * impersonator (when present). One DB round-trip in the non-impersonating
  * case; two when impersonating.
+ *
+ * CALL SITES: the persona-override lanes only — resolveFromOverrideOnly
+ * (dev-mode) and the override-applied branch of resolveSession, where the
+ * session was rewritten mid-flight and the target must be judged by re-read.
+ * The normal path applies the SAME verdict in-process via revocationDenies()
+ * from the fused teammate read (docs/design/request-floor-performance.md F2).
  *
  * TWO INDEPENDENT AXES, and they are NOT the same shape:
  *
@@ -448,11 +494,13 @@ function parseRevokedAtMs(value: string | Date | null | undefined): number | nul
  *    regardless of issuedAt. There is no timestamp comparison because there is
  *    no "after" to be on the right side of: the account is retired.
  *
- * Why the second one has to live here: the privileged-identity-cleanup worker's
- * ONLY identity mutation is `UPDATE teammate SET is_active = FALSE`
+ * Why is_active has to be judged at session resolution: the
+ * privileged-identity-cleanup worker's ONLY identity mutation is
+ * `UPDATE teammate SET is_active = FALSE`
  * (server/workers/privileged-identity-cleanup.ts) — it never touches
  * revoked_at — and resolveOrCreateTeammate's fast path returns an existing row
- * without consulting is_active. Without this check a "cleaned" privileged /
+ * without gating on is_active. Without this verdict (here for the override
+ * lanes; revocationDenies() for the normal lane) a "cleaned" privileged /
  * service account keeps its live cookie session and can keep signing in, so the
  * retirement worker would be cosmetic for access. The assignment side already
  * gates on the same column (server/auth/ensure-real-identity.ts,

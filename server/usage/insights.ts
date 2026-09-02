@@ -16,6 +16,7 @@
  */
 import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
+import { classifyQuerySource } from '../../shared/usage/query-source'
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
 
@@ -112,6 +113,14 @@ export const THRESHOLDS = {
   /** aux-overhead: harness lanes vs everything classified. */
   AUX_MIN_TOKEN_SHARE: 0.15,
   AUX_MIN_TOKENS: 1_000_000,
+  /**
+   * aux-overhead: the FLOOR ON THE OTHER HALF OF THE RATIO. `aux_share` is
+   * aux/(main+aux), so an empty (or near-empty) main lane pins it at ~1 whatever
+   * the aux volume is — "no conversation-lane signal" wearing the costume of
+   * "all of your volume is overhead". 10k tokens is a couple of real turns: below
+   * it the main lane is noise, not a denominator, and the detector stays silent.
+   */
+  AUX_MIN_MAIN_TOKENS: 10_000,
   /** Estimate conservatism: applied to behavioural-change estimates. */
   CONSERVATISM: 0.5,
   /** Workhorse/frontier blended-rate ratio when the rate card is
@@ -312,8 +321,20 @@ function detectFrontierOverreliance(
     }
   }
   if (total < THRESHOLDS.FRONTIER_MIN_SPEND_USD) return null
+  /*
+   * DEGENERATE DENOMINATOR — refuse before dividing, not with a ternary.
+   *
+   * `share` is frontier/classified, and `classified` is only non-zero because
+   * `model_catalog` matched at least one model. An unseeded/failed catalog
+   * classifies nothing, and the finding would then be a statement about the
+   * catalog, not about the teammate. Today FRONTIER_MIN_CLASSIFIED_RATIO (0.5)
+   * makes that unreachable — which is exactly why it is stated POSITIVELY here:
+   * the invariant must not rest on the value of a threshold declared elsewhere,
+   * because setting that threshold to 0 would silently reopen it.
+   */
+  if (classified <= 0) return null
   if (classified / total < THRESHOLDS.FRONTIER_MIN_CLASSIFIED_RATIO) return null
-  const share = classified > 0 ? frontier / classified : 0
+  const share = frontier / classified
   if (share <= THRESHOLDS.FRONTIER_MIN_SHARE) return null
 
   // Workhorse/frontier blended-rate ratio from OUR rate card; documented
@@ -382,14 +403,17 @@ function detectModelConcentration(cells: InsightCell[]): Finding | null {
 }
 
 function detectAuxOverhead(cells: InsightCell[]): Finding | null {
-  // NULL query_source = pre-0045/unknown — EXCLUDED from both sides so legacy
-  // data can never fabricate a finding.
+  // Unknown query_source = pre-0045 capture / attr absent — EXCLUDED from both
+  // sides so legacy data can never fabricate a finding. The main-vs-aux test is
+  // the shared classifier, NOT `=== 'main'`: no emitter sends that literal for
+  // Claude Code (shared/usage/query-source.ts).
   let main = 0
   let aux = 0
   let auxCost = 0
   for (const c of cells) {
-    if (c.query_source === null) continue
-    if (c.query_source === 'main') main += c.tokens
+    const lane = classifyQuerySource(c.query_source)
+    if (lane === 'unknown') continue
+    if (lane === 'main') main += c.tokens
     else {
       aux += c.tokens
       auxCost += c.cost_usd
@@ -397,6 +421,18 @@ function detectAuxOverhead(cells: InsightCell[]): Finding | null {
   }
   const known = main + aux
   if (known < THRESHOLDS.AUX_MIN_TOKENS) return null
+  /*
+   * DEGENERATE DENOMINATOR — refuse, do not publish.
+   *
+   * `share` is aux/(main+aux). An empty main lane drives it to exactly 1 and
+   * turns "we have no conversation-lane signal" into the finding "100% of your
+   * volume is harness overhead", with a $/month estimate attached. Those two
+   * are not the same claim, and this detector cannot tell them apart from the
+   * ratio alone — so it declines to speak when the denominator has only one
+   * half. A missing main lane is an INGESTION question (a renamed emitter
+   * vocabulary, a dropped attribute), never a savings recommendation.
+   */
+  if (main < THRESHOLDS.AUX_MIN_MAIN_TOKENS) return null
   const share = aux / known
   if (share <= THRESHOLDS.AUX_MIN_TOKEN_SHARE) return null
   const excessShare = share - THRESHOLDS.AUX_MIN_TOKEN_SHARE

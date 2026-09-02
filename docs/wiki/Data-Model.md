@@ -468,7 +468,7 @@ The core ledger — one row per attributed cost event. Rows are frozen on write
 | `source_run_id` | TEXT | provider-side run id (span/request id; retro claims + Copilot parallel-subagent dedup) |
 | `is_frozen` | BOOL NOT NULL = true | re-cost only via authorised admin event |
 | `activity` | TEXT | orthogonal activity axis (mig 0020), denormalised from `session_assignment` for within-project activity rollups; nullable |
-| `query_source` | TEXT | Claude's per-event `query_source` (mig 0045): `main` or an auxiliary lane like `generate_session_title`; NULL = attr absent / pre-0045 (render as unknown, never assume `main`) |
+| `query_source` | TEXT | Claude's per-event `query_source` (mig 0045), stored RAW — Claude's own token (`repl_main_thread`, `agent:custom`, `compact`, …) and **never** the word `main`; classify with `shared/usage/query-source.ts` (vocabulary + evidence in `docs/development/claude-code-telemetry-contract.md`); NULL = attr absent / pre-0045 (unknown lane, never assumed to be a conversation) |
 | `identity_state` | TEXT | identity provenance (mig 0057) stamped from the emitting instance's `instance_attestation.identity_state` so surfaces can exclude/label provisional usage; display-only, never gates money; NULL = pre-0057 (treat as `confirmed`) |
 | `emitting_email` | TEXT | canonicalised (trim + lower) Claude per-event `user.email` (mig 0119) — which **account** was signed in, as distinct from which device emitted (`instance_id`); the evidence for `billing_lane`; NULL = the emitter did not report one; redacted in place on erasure (`billing_lane` survives, stamped at write) |
 | `emitting_org_id` | TEXT | Claude per-event `organization.id` (mig 0119); hint and diagnostics only — never decides `billing_lane` |
@@ -564,7 +564,7 @@ by the worker, not generated columns.
 | `period_kind` | TEXT NOT NULL | `day` / `week` / `month` / `quarter` |
 | `tool` / `model` | TEXT | nullable dimensions |
 | `token_type` | TEXT | token-type dimension (mig 0045): `input` / `output` / `cache-read` / `cache-write`; NULL = all-types rollup |
-| `query_source` | TEXT | query-source lane dimension (mig 0046): `main` / aux / NULL = unknown |
+| `query_source` | TEXT | query-source lane dimension (mig 0046). Carried RAW from `attribution_record` by the rollup — Claude's own token (`repl_main_thread`, `agent:custom`, `compact`, …), **never** the word `main` for a Claude row; NULL = unknown lane. Classify with `shared/usage/query-source.ts`, never by equality |
 | `total_tokens` | BIGINT NOT NULL | |
 | `total_cost_usd` | NUMERIC(14,6) NOT NULL | |
 | `advisory_cost_usd` | NUMERIC(14,6) NOT NULL = 0 | the tier-2 (telemetry-only / advisory) subset of `total_cost_usd` for this cell (mig 0046) — the estimated-vs-advisory split without touching the raw ledger |
@@ -607,6 +607,67 @@ nullable id dims, `''` for `activity` / `query_source`) that the Drizzle def can
 render — mig 0053 is the source of truth. A companion `spend_session_daily` captures
 distinct-session counts per (teammate, project, day), since session count can't be
 recomputed once raw is retired.
+
+### usage_rollup_daily
+
+The day-grain §A rollup the region reporting endpoints read — and, for its
+settled days, `/api/v1/me/usage` — (mig 0136), written
+by the `usage-rollup` registry worker (see
+[Background Workers](Background-Workers.md)) every 15 minutes. Each row is an
+aggregate of `v_complete_usage` — the worker aggregates the view itself, so
+quarantine exclusion, fill arms and remainder rows always match the lane's own
+definition. The two rollups are different lanes: `spend_rollup_daily` is the
+raw-ledger lane (archival / finance-cold fallback — reads `attribution_record`
+raw, no quarantine predicate); `usage_rollup_daily` is the §A lane for the
+region reports — quarantine-aware and arm-complete (arms 1+2+3). `teammate_id`
+stays in the grain because the region page's non-additive reads (active users,
+per-person percentiles, concentration, distinct counts) need the per-teammate
+vector.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | |
+| `day` | DATE NOT NULL | UTC provider day |
+| `teammate_id` | UUID NOT NULL → teammate | stays in the grain |
+| `region_id` / `org_unit_id` | UUID → region / org_unit | nullable — an Unassigned person has no placement |
+| `cost_owning_unit_id` | UUID → org_unit | nullable — arm 2 carries no cost-owning unit |
+| `project_id` | UUID → project | nullable — arms 2b/3 carry NULL project |
+| `tool` | TEXT NOT NULL | |
+| `model` | TEXT | NULL on the view's remainder rows |
+| `usage_provenance` | TEXT NOT NULL | |
+| `model_gap_reason` / `activity` | TEXT | nullable dims |
+| `identity_state` | TEXT | in the grain (mig 0138) — `'provisional'`/`'confirmed'` from arm 1 (NULL when unstamped); arms 2/3 always `'confirmed'`. Lets rollup readers apply the seam's provisional-exclusion filter; a mixed day splits into separate cells |
+| `cost_usd` | NUMERIC(14,6) NOT NULL | |
+| `tokens` | BIGINT NOT NULL | |
+| `record_count` | INTEGER NOT NULL | |
+| `refresh_at` | TIMESTAMPTZ NOT NULL = now() | |
+
+The grain-unique index keys on `COALESCE` expressions (sentinel uuid for the
+nullable id dims, `''` for the nullable text dims) — same idiom as
+`spend_rollup_daily`; mig 0136 is the source of truth. Read indexes: `(day)`,
+`(region_id, day)`, `(org_unit_id, day)`, `(teammate_id, day)`. RLS is enabled
+with the 0098-converged admin policy (`global-finops` / `platform-admin` —
+never bare `admin`) mirroring `attribution_aggregate`, plus
+`REVOKE ALL FROM PUBLIC` — the reporting endpoints authorize via their
+in-query scope predicates, as on every report read.
+
+### usage_rollup_refresh
+
+The retro-mutation refresh queue for `usage_rollup_daily` (mig 0136).
+`v_complete_usage` changes retroactively with no timestamp a trailing window
+can see on two paths — a quarantine flip (over-emission resolve) and a
+placement re-home — so those writers upsert the affected teammate here in the
+same transaction. The `usage-rollup` worker drains the queue by recomputing
+that teammate's full history, deleting the request only afterwards (a crashed
+run re-drains).
+
+| Column | Type | Notes |
+|---|---|---|
+| `teammate_id` | UUID PK → teammate | one pending request per teammate; re-enqueue bumps `requested_at` |
+| `requested_at` | TIMESTAMPTZ NOT NULL = now() | |
+
+RLS is enabled: a developer's own over-emission resolve writes their own row;
+the admin lanes (re-home) write anyone's.
 
 ### ledger_archive_state
 
@@ -834,7 +895,8 @@ Constraints and indexes:
   supersession writes a NEW row rather than overwriting one, so any read must
   select the effective row per logical key or a revised day double-counts.
 - `reconciliation_record_lag_state_ck` — `lag_state` only on `walk_back`.
-- Indexes `(teammate_id, period_date)` and `(status)`.
+- Indexes `(teammate_id, period_date)`, `(status)`, and `(period_date)`
+  (mig 0134 — serves the bare `MIN(period_date)` month-floor read).
 - **No finance-close trigger** — the close guard is attached to `actual_spend`
   alone, and there is no pruning path anywhere: rows here are durable.
 
@@ -961,7 +1023,11 @@ Constraints and indexes:
   plus the partial `provider_usage_fact_teammate_date_tool_idx`
   `(teammate_id, date, tool) WHERE teammate_id IS NOT NULL` (mig 0121) — the
   by-key read the provider-day drawer and the residual-subtraction writer use,
-  aggregating **across sources** for one key.
+  aggregating **across sources** for one key — and the two date-window indexes
+  (mig 0134): `(date)` for the bare-date windows the reporting engine filters
+  on, and the expression `((date::timestamp AT TIME ZONE 'UTC'))` serving
+  `v_complete_usage` arm 3 / `v_usage_month_floor`'s `MIN` (the same
+  expression-index shape mig 0126 gave the other fill-arm tables).
 - `REVOKE ALL FROM PUBLIC` (mig 0118). Retention is unresolved pending #41
   (de-facto permanent); the table is derived and rebuildable only while its
   source payloads survive.
@@ -1196,7 +1262,10 @@ EXCLUDE USING gist (
 
 COALESCE-ing the NULL pool rows to a fixed sentinel keeps two overlapping pool
 baselines conflicting (the invariant the original key protected) while distinct
-per-dev rows coexist. Index: `allocation_teammate_idx (teammate_id) WHERE teammate_id IS NOT NULL`.
+per-dev rows coexist. Indexes: `allocation_teammate_idx (teammate_id) WHERE
+teammate_id IS NOT NULL`, and `allocation_scope_kind_idx (scope_type, scope_id,
+allocation_kind)` (mig 0134) — the probe shape every budget read keys on; the
+GiST EXCLUDE above is a constraint, not a probe, and excludes `top-up` rows.
 
 ### limit_policy
 

@@ -23,7 +23,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="max-w-[1600px] mx-auto px-10 py-16 text-center text-sm text-carbon-2" data-testid="admin-settings-redirect">
+  <div class="max-w-[1600px] mx-auto px-10 py-16 text-center text-sm text-carbon-2" data-testid="admin-settings-redirect" data-admin-page="/admin/settings">
     Redirecting…
   </div>
 </template>

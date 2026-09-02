@@ -3,8 +3,11 @@
  * (docs/design/reporting-consolidation/00-build-design.md §2/§3/§4/§5).
  *
  * ONE lane per axis (build-design §4):
- *   - usage KPIs / ranking / drivers / trend / exceptions → `v_complete_usage`
- *     (the §A completeness lane: attribution ∪ the API−OTel gap). Homed by
+ *   - usage KPIs / ranking / drivers / trend / exceptions → the §A completeness
+ *     lane (attribution ∪ the API−OTel gap), read through `usage_rollup_daily` —
+ *     the day-grain rollup DEFINED as an aggregate of `v_complete_usage`
+ *     (docs/design/usage-rollup-lane.md R5; seasonality alone stays on the view
+ *     — it is off the page's request path). Homed by
  *     `org_unit_id` (the point-in-time emit home) — the Regional usage axis is
  *     already point-in-time "as at emit" (owner-decisions D-Homing).
  *   - the monetised genuine-vs-chargeable pair → `v_finance_chargeback_month`
@@ -245,50 +248,78 @@ export async function resolveRegionalScope(
   // CSV export run this independently, so an unbroken tie is exactly the "wrong
   // region under a wrong name" state the owner's rule forbids. `code` is UNIQUE
   // NOT NULL, so appending it makes the order total and the default reproducible.
-  let regionOptions: RegionRef[] = []
-  if (isCrossRegion) regionOptions = await fetchRegionOptions(tx)
-
-  // `ou` drill — resolve WITHIN scope OR active ownership (practice-page pattern). A
-  // policy-elevated cross-region caller resolves ANY existing unit (consistent with
-  // their honoured cross-region selector); a genuine cross-region role already
-  // matched everything via orgSubtreeScopePredicate's global-finops branch.
-  let ou: OuRef | null = null
-  if (params.ou) {
-    /*
-     * A2 — SEALS THE ?ou= DRILL BYPASS. `orgSubtreeScopePredicate`'s GUC arm
-     * is UNCONDITIONALLY TRUE for role 'global-finops' (org-subtree-scope.ts:
-     * 49; platform-admin maps to it at the RLS layer, request-rls.ts:33). For
-     * the new `isOrgWide && !isCrossRegion` class (admitted above, never
-     * forbidden) that predicate would therefore validate ANY unit in ANY
-     * region — an ungranted org-wide caller is supposed to be bound to their
-     * OWN region, exactly like `admin`. So THIS class gets an explicit
-     * JS-computed clamp instead of the predicate: `org_unit.region_id =
-     * caller.regionId`, the same own-region semantics `admin` gets. Does NOT
-     * touch org-subtree-scope.ts or the GUC layer.
-     */
-    const scopeClause = isCrossRegion
-      ? sql`TRUE`
-      : isOrgWide
-        ? sql`org_unit.region_id = ${caller.regionId}::uuid`
-        : orgSubtreeScopePredicate('org_unit')
-    const ownerClause = sql`EXISTS (
+  /*
+   * A2 — SEALS THE ?ou= DRILL BYPASS. `orgSubtreeScopePredicate`'s GUC arm
+   * is UNCONDITIONALLY TRUE for role 'global-finops' (org-subtree-scope.ts:
+   * 49; platform-admin maps to it at the RLS layer, request-rls.ts:33). For
+   * the new `isOrgWide && !isCrossRegion` class (admitted above, never
+   * forbidden) that predicate would therefore validate ANY unit in ANY
+   * region — an ungranted org-wide caller is supposed to be bound to their
+   * OWN region, exactly like `admin`. So THIS class gets an explicit
+   * JS-computed clamp instead of the predicate: `org_unit.region_id =
+   * caller.regionId`, the same own-region semantics `admin` gets. Does NOT
+   * touch org-subtree-scope.ts or the GUC layer.
+   */
+  const scopeClause = isCrossRegion
+    ? sql`TRUE`
+    : isOrgWide
+      ? sql`org_unit.region_id = ${caller.regionId}::uuid`
+      : orgSubtreeScopePredicate('org_unit')
+  const ownerClause = sql`EXISTS (
       SELECT 1 FROM cou_owner co
       WHERE co.org_unit_id = org_unit.id
         AND co.teammate_id = NULLIF(current_setting('app.user_teammate_id', true), '')::uuid
         AND co.revoked_at IS NULL)`
-    const rows = await tx.execute<{
-      id: string
-      path: string
-      region_id: string
-      code: string
-      display_name: string
-    }>(sql`
+  const usesSubtreeClamp = !isCrossRegion && isSubtree
+
+  /*
+   * Concurrent issuance on ONE tx connection: postgres-js pipelines and answers
+   * in order (docs/design/request-floor-performance.md F5). CONSERVATIVE by
+   * design — this is authz code: the wave carries ONLY the reads whose inputs
+   * are caller flags, request params and the session GUCs, all fixed before any
+   * query runs. The region-row read below is NOT in the wave: its key
+   * (`effectiveRegionId`) is computed FROM the wave's results (the resolved
+   * drill unit / the region list) — a real dependency chain, kept sequential.
+   */
+  const [regionOptionRows, ouRows, gucRows, homeRows] = await Promise.all([
+    isCrossRegion ? fetchRegionOptions(tx) : null,
+    // `ou` drill — resolve WITHIN scope OR active ownership (practice-page
+    // pattern). A policy-elevated cross-region caller resolves ANY existing
+    // unit (consistent with their honoured cross-region selector); a genuine
+    // cross-region role already matched everything via
+    // orgSubtreeScopePredicate's global-finops branch.
+    params.ou
+      ? tx.execute<{
+          id: string
+          path: string
+          region_id: string
+          code: string
+          display_name: string
+        }>(sql`
       SELECT id::text AS id, path::text AS path, region_id::text AS region_id, code, display_name
       FROM org_unit
       WHERE id = ${params.ou}::uuid AND retired_at IS NULL
         AND ( ${scopeClause} OR ${ownerClause} )
       LIMIT 1`)
-    const r = [...rows][0]
+      : null,
+    // The GUC read-back for `scopeKey` (see the comment at its use below).
+    tx.execute<{ org_path: string | null; region: string | null; role: string | null }>(
+      sql`SELECT current_setting('app.user_org_path', true) AS org_path,
+               current_setting('app.user_region_id', true) AS region,
+               current_setting('app.user_role', true) AS role`,
+    ),
+    // The subtree caller's home-unit label (see the scopeLabel arms below). A
+    // drilled request (`params.ou`) labels from the unit instead, so it skips
+    // this read exactly as the sequential code did.
+    usesSubtreeClamp && !params.ou
+      ? tx.execute<{ display_name: string }>(callerHomeUnitQuery())
+      : null,
+  ])
+  const regionOptions: RegionRef[] = regionOptionRows ?? []
+
+  let ou: OuRef | null = null
+  if (params.ou) {
+    const r = ouRows ? [...ouRows][0] : undefined
     // Anti-IDOR: an out-of-scope / foreign-region unit simply does not resolve → 403.
     if (!r) forbid('org unit not in your scope')
     ou = {
@@ -347,6 +378,7 @@ export async function resolveRegionalScope(
     effectiveRegionId = caller.regionId
   }
 
+  // NOT waved (F5): keyed by `effectiveRegionId`, which the wave's results decide.
   const rg = await tx.execute<{ id: string; code: string; display_name: string }>(sql`
     SELECT id::text AS id, code, display_name FROM region WHERE id = ${effectiveRegionId}::uuid LIMIT 1`)
   const rgRow = [...rg][0]
@@ -388,13 +420,10 @@ export async function resolveRegionalScope(
    * Reading the GUCs back rather than re-listing the inputs is the point: the
    * key is derived from the SAME source the predicate reads, so the two cannot
    * drift no matter how the predicate is later changed. Three cheap
-   * current_setting() calls, no table access.
+   * current_setting() calls, no table access — issued in the F5 wave above
+   * (`gucRows`): the GUCs are fixed for the whole transaction, so reading them
+   * earlier reads the same values.
    */
-  const gucRows = await tx.execute<{ org_path: string | null; region: string | null; role: string | null }>(
-    sql`SELECT current_setting('app.user_org_path', true) AS org_path,
-               current_setting('app.user_region_id', true) AS region,
-               current_setting('app.user_role', true) AS role`,
-  )
   const g = [...gucRows][0]
   const gucKey = `${g?.org_path ?? '-'}|${g?.region ?? '-'}|${g?.role ?? '-'}`
 
@@ -415,13 +444,13 @@ export async function resolveRegionalScope(
    *     only when the region row itself is unreadable — still the caller's own scope,
    *     just unnamed, never a wider one.
    */
-  const usesSubtreeClamp = !isCrossRegion && isSubtree
   let scopeLabel: string | null
   if (ou) {
     scopeLabel = ou.displayName
   } else if (usesSubtreeClamp) {
-    const homeRows = await tx.execute<{ display_name: string }>(callerHomeUnitQuery())
-    scopeLabel = [...homeRows][0]?.display_name ?? null
+    // Read in the F5 wave above; this arm is only reachable without a drill,
+    // which is exactly when the wave issued the query.
+    scopeLabel = [...(homeRows ?? [])][0]?.display_name ?? null
   } else {
     scopeLabel = region?.displayName ?? 'this region'
   }
@@ -517,10 +546,10 @@ export async function fetchRegionalVendorSplit(
   const [r] = [
     ...(await tx.execute<{ claude: string; copilot: string; other: string }>(sql`
       SELECT ${vendorSplitAggregates}
-      FROM v_complete_usage u
+      FROM usage_rollup_daily u
       WHERE ${scope.usageScope('u.region_id', 'u.org_unit_id')}
-        AND u.ts_event >= ${range.startIso}::timestamptz
-        AND u.ts_event <  ${range.endIso}::timestamptz`)),
+        AND u.day >= ${range.startIso.slice(0, 10)}::date
+        AND u.day <  ${range.endIso.slice(0, 10)}::date`)),
   ]
   return {
     claudeUsd: Number(r?.claude ?? 0),
@@ -566,13 +595,14 @@ export async function fetchRegionalPractices(
     SELECT cou.cost_owning_unit_id::text AS key, cou.cost_owning_unit_name AS label,
            (cou.cost_owning_unit_code = 'default') AS is_default,
            COALESCE(SUM(u.cost_usd), 0)::text AS value
-    FROM v_complete_usage u
+    FROM usage_rollup_daily u
     -- ONE cost-owner resolution (v_org_unit_cost_owner, mig 0114), not a
     -- correlated LATERAL per usage row. LEFT, so unhomed spend keeps its row.
+    -- The join key org_unit_id is in the rollup grain (usage-rollup-lane.md R5).
     LEFT JOIN v_org_unit_cost_owner cou ON cou.org_unit_id = u.org_unit_id
     WHERE ${scope.usageScope('u.region_id', 'u.org_unit_id')}
-      AND u.ts_event >= ${range.startIso}::timestamptz
-      AND u.ts_event <  ${range.endIso}::timestamptz
+      AND u.day >= ${range.startIso.slice(0, 10)}::date
+      AND u.day <  ${range.endIso.slice(0, 10)}::date
     GROUP BY cou.cost_owning_unit_id, cou.cost_owning_unit_name, cou.cost_owning_unit_code
     ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)
   return [...rows].map((r) => ({
@@ -654,7 +684,8 @@ export async function fetchRegionalChargebackByCostCentre(
 
 // ── Daily metrics (§A usage sparkline series, region-scoped) ──────────────────
 /**
- * The region-scoped §A per-day usage series over the window (`v_complete_usage`) —
+ * The region-scoped §A per-day usage series over the window (`usage_rollup_daily`,
+ * usage-rollup-lane.md R5) —
  * one row per UTC day in the window THAT HAS HAPPENED — zero-filled, so a day
  * with no in-scope usage is present with 0s rather than absent: `SUM(cost_usd)`,
  * `SUM(tokens)`, `COUNT(DISTINCT teammate_id)`, ordered by day. That matters
@@ -930,8 +961,8 @@ export async function fetchRegionalTrend(
 
 // ── Provider split (region-scoped, spend + active users) ─────────────────────
 /**
- * The region-scoped per-provider split over the window (`v_complete_usage`, §A
- * usage lane): one bucket per named §A lane — `claude-code` → `claudeCode`,
+ * The region-scoped per-provider split over the window (`usage_rollup_daily`,
+ * the §A rollup — usage-rollup-lane.md R5): one bucket per named §A lane — `claude-code` → `claudeCode`,
  * `copilot-cli` → `copilotCli`, `copilot-agent` → `copilotAgent` (the three-lane
  * §A ceiling, registry-driven via SECTION_A_USAGE_TOOLS) — plus the live `other`
  * catch-all (incl. NULL tool). Mirrors the Across `fetchProviderSplit` one tier
@@ -966,10 +997,10 @@ export async function fetchRegionalProviderSplit(
         COUNT(DISTINCT u.teammate_id) FILTER (WHERE u.tool = ${COPILOT_AGENT_TOOL})::int AS ca_users,
         COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool NOT IN (${laneListSql(SECTION_A_USAGE_TOOLS)}) OR u.tool IS NULL), 0)::text AS ot_spend,
         COUNT(DISTINCT u.teammate_id) FILTER (WHERE u.tool NOT IN (${laneListSql(SECTION_A_USAGE_TOOLS)}) OR u.tool IS NULL)::int AS ot_users
-      FROM v_complete_usage u
+      FROM usage_rollup_daily u
       WHERE ${scope.usageScope('u.region_id', 'u.org_unit_id')}
-        AND u.ts_event >= ${range.startIso}::timestamptz
-        AND u.ts_event <  ${range.endIso}::timestamptz`)),
+        AND u.day >= ${range.startIso.slice(0, 10)}::date
+        AND u.day <  ${range.endIso.slice(0, 10)}::date`)),
   ]
   return {
     claudeCode: { spendUsd: Number(row?.cc_spend ?? 0), activeUsers: Number(row?.cc_users ?? 0) },
@@ -1005,7 +1036,8 @@ export async function fetchRegionalSeasonality(
 
 // ── Active-user trend (region-scoped, distinct teammates per tool per day) ────
 /**
- * The region-scoped active-users-over-time series (`v_complete_usage`): per UTC
+ * The region-scoped active-users-over-time series (`usage_rollup_daily`,
+ * usage-rollup-lane.md R5): per UTC
  * day, `COUNT(DISTINCT teammate_id)` for claude-code and copilot-cli. One point per
  * day with any in-scope usage; the two counts are NOT additive.
  */
@@ -1063,8 +1095,14 @@ export async function fetchRegionalExceptions(
   tx: Tx,
   scope: RegionalScope,
   threshold: number,
+  now: Date,
   limit = 25,
 ): Promise<RegionalException[]> {
+  // ONE clock: the request's resolved instant, never the database's NOW() —
+  // around a UTC week boundary the two can disagree, and the exceptions strip
+  // would describe a different week than the KPI/trend data in the same
+  // response (clock-and-day-boundary.md; the SQL clock is a SECOND clock).
+  const nowIso = now.toISOString()
   const rows = await tx.execute<{
     teammate_id: string
     name: string
@@ -1074,18 +1112,23 @@ export async function fetchRegionalExceptions(
     drill_is_provisional: boolean | null
   }>(sql`
     WITH weekly AS (
+      -- usage_rollup_daily, not the live view (usage-rollup-lane.md R5): the
+      -- week buckets derive from the day column, and the lower bound is exact
+      -- because date_trunc('week', <request instant>) is a UTC-midnight
+      -- instant under the pinned session TimeZone (server/db/index.ts), so
+      -- its ::date loses nothing.
       SELECT u.teammate_id,
-             date_trunc('week', u.ts_event)::date AS week_start,
+             date_trunc('week', u.day::timestamp)::date AS week_start,
              SUM(u.cost_usd) AS week_usd
-      FROM v_complete_usage u
+      FROM usage_rollup_daily u
       WHERE ${scope.usageScope('u.region_id', 'u.org_unit_id')}
-        AND u.ts_event >= date_trunc('week', NOW()) - INTERVAL '4 weeks'
-      GROUP BY u.teammate_id, date_trunc('week', u.ts_event)
+        AND u.day >= (date_trunc('week', ${nowIso}::timestamptz) - INTERVAL '4 weeks')::date
+      GROUP BY u.teammate_id, date_trunc('week', u.day::timestamp)
     ),
     velocity AS (
       SELECT teammate_id,
-             COALESCE(SUM(week_usd) FILTER (WHERE week_start = date_trunc('week', NOW())::date), 0) AS current_week_usd,
-             AVG(week_usd) FILTER (WHERE week_start < date_trunc('week', NOW())::date) AS rolling_mean_usd
+             COALESCE(SUM(week_usd) FILTER (WHERE week_start = date_trunc('week', ${nowIso}::timestamptz)::date), 0) AS current_week_usd,
+             AVG(week_usd) FILTER (WHERE week_start < date_trunc('week', ${nowIso}::timestamptz)::date) AS rolling_mean_usd
       FROM weekly GROUP BY teammate_id
     )
     SELECT v.teammate_id::text AS teammate_id, COALESCE(t.display_name, t.email) AS name,

@@ -45,6 +45,25 @@ export function fmtTokens(n: number | string | null | undefined): string {
   return String(v)
 }
 
+/**
+ * A DURATION in milliseconds, at the precision the number deserves: sub-second
+ * work keeps its milliseconds (`947ms`), seconds-scale work reads in seconds
+ * (`5.3s`), anything past a minute is `m:ss`. Null / non-finite is an em-dash —
+ * a run with no recorded duration is not a run that took 0 ms.
+ *
+ * Used by the worker-run drill-down (docs/design/alert-diagnosability.md D5),
+ * where the difference between 288 ms and 5 293 ms is the whole diagnosis.
+ */
+export function fmtDurationMs(ms: number | string | null | undefined): string {
+  if (ms == null || ms === '') return EM_DASH
+  const v = Number(ms)
+  if (!Number.isFinite(v)) return EM_DASH
+  if (Math.abs(v) < 1000) return `${Math.round(v)}ms`
+  if (Math.abs(v) < 60_000) return `${(v / 1000).toFixed(1)}s`
+  const total = Math.round(v / 1000)
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
+
 export function fmtTimeAgo(iso: string | null | undefined): string {
   if (!iso) return EM_DASH
   const t = new Date(iso).getTime()

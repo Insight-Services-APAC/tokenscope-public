@@ -134,6 +134,16 @@ param githubPatApacNfr string = ''
 @secure()
 param githubAppKeyPartnerDemo string = ''
 
+// ── Ops alerting channel (docs/design/ops-alerting.md §A1) ──────────
+// The ntfy topic URL IS the credential — the 64-char CSPRNG topic name is the
+// only access control on the public ntfy.sh channel — so it lives in Key Vault
+// and reaches the container ONLY as a secretRef (ar-M20). Empty = NO-OP per
+// the SAFETY CONTRACT above: an apply without the value never clobbers a
+// stored topic. Rotation (the ar-H8 leak response) = pass the new URL.
+@description('ntfy topic URL for operator push alerts (read at runtime as NUXT_OPS_ALERT_NTFY_URL). Supplied by infra.yml from the GitHub environment secret OPS_ALERT_NTFY_URL. Empty = NO-OP (alerting disabled on envs without the secret; existing KV value untouched).')
+@secure()
+param opsAlertNtfyUrl string = ''
+
 @description('Entra OIDC client secret for nuxt-oidc-auth confidential flow.')
 @secure()
 param entraClientSecret string = ''
@@ -316,6 +326,16 @@ resource secretGithubAppKeyPartnerDemo 'Microsoft.KeyVault/vaults/secrets@2024-1
   name: 'github-app-key-partner-demo'
   properties: {
     value: githubAppKeyPartnerDemo
+  }
+}
+
+// Ops alerting channel (§A1): the topic URL is the credential — secretRef-only
+// downstream (ar-M20). Empty = NO-OP (never clobbers a stored topic).
+resource secretOpsAlertNtfyUrl 'Microsoft.KeyVault/vaults/secrets@2024-11-01' = if (!empty(opsAlertNtfyUrl)) {
+  parent: keyVault
+  name: 'ops-alert-ntfy-url'
+  properties: {
+    value: opsAlertNtfyUrl
   }
 }
 

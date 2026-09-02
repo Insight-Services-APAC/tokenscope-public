@@ -21,8 +21,11 @@
  * toggle and Top drivers has to move with it. Selecting *Chargeback · billed*
  * used to re-lens the KPI hero and leave attributed rows underneath it.
  *
- *   usage      §A — `v_complete_usage` (the completeness lane) or the
- *                   project-spend seam over the same lane. A driver row is "who
+ *   usage      §A — `usage_rollup_daily` (the day-grain rollup of the
+ *                   completeness lane, usage-rollup-lane.md R5) or the
+ *                   project-spend seam over the live lane (that seam is shared
+ *                   with non-report consumers and stays on `v_complete_usage`).
+ *                   A driver row is "who
  *                   consumed this", never "who is billed for it" (contract C2).
  *   chargeback §B — the cost of record, PER PROVIDER, from TWO sources because
  *                   the two providers bill at different grains:
@@ -269,7 +272,19 @@ export async function fetchDrivers(
   } = {},
 ): Promise<DriversResult> {
   const clamp = scopeSql(scope)
-  const window = sql`u.ts_event >= ${range.startIso}::timestamptz AND u.ts_event < ${range.endIso}::timestamptz`
+  /*
+   * The §A axes below read `usage_rollup_daily` (usage-rollup-lane.md R5) —
+   * every dim they group or join on (teammate, tool, provenance, model,
+   * model_gap_reason, region, org_unit) is in the rollup grain, so each query
+   * translates 1:1. This `window` fragment is applied ONLY to those rollup
+   * reads: the billed axes below build their own `period`-windowed predicates
+   * over provider_usage_fact (§B — untouched), and the budget axis passes
+   * `range` to the shared project-spend seam, which builds its own rollup day
+   * translation (`source: 'rollup'`, usage-rollup-lane.md R5b). Exact because
+   * startIso/endIso are UTC-midnight instants by construction
+   * (resolveReportWindow) — the seam THROWS on a non-midnight bound.
+   */
+  const window = sql`u.day >= ${range.startIso.slice(0, 10)}::date AND u.day < ${range.endIso.slice(0, 10)}::date`
 
   /*
    * BUDGET — the shipped attribution, in BOTH lenses, and the ONE axis whose
@@ -354,6 +369,9 @@ export async function fetchDrivers(
       )
     }
 
+    // NOT waved (request-floor-performance.md F5): the pooled arm above is an
+    // ARGUMENT to this call — fetchBilledAxis folds, ranks and headlines
+    // `extraArms` internally, so the two are a real dependency chain.
     const billed = await fetchBilledAxis(tx, clamp, range, axis, extraArms)
 
     /*
@@ -409,7 +427,7 @@ export async function fetchDrivers(
              u.tool AS tool, u.usage_provenance AS provenance,
              COALESCE(SUM(u.cost_usd), 0)::text AS value,
              ${TEAMMATE_DRILL_FACTS_AGG}
-      FROM v_complete_usage u JOIN teammate t ON t.id = u.teammate_id
+      FROM usage_rollup_daily u JOIN teammate t ON t.id = u.teammate_id
       WHERE ${clamp} AND ${window}
       GROUP BY u.teammate_id, t.display_name, t.email, u.tool, u.usage_provenance`)
     /*
@@ -480,7 +498,7 @@ export async function fetchDrivers(
     }>(sql`
       SELECT NULL::text AS key, NULL::text AS label, u.tool AS tool, u.usage_provenance AS provenance,
              COALESCE(SUM(u.cost_usd), 0)::text AS value
-      FROM v_complete_usage u
+      FROM usage_rollup_daily u
       WHERE ${clamp} AND ${window}
       GROUP BY u.tool, u.usage_provenance`)
     // Fold straight into ONE aggregate (key is irrelevant here — every row
@@ -533,7 +551,7 @@ export async function fetchDrivers(
       ...(await tx.execute<Raw>(sql`
         SELECT u.region_id::text AS key, r.display_name AS label,
                COALESCE(SUM(u.cost_usd), 0)::text AS value, FALSE AS pooled
-        FROM v_complete_usage u LEFT JOIN region r ON r.id = u.region_id
+        FROM usage_rollup_daily u LEFT JOIN region r ON r.id = u.region_id
         WHERE ${clamp} AND ${window}
         GROUP BY u.region_id, r.display_name
         ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)),
@@ -544,7 +562,7 @@ export async function fetchDrivers(
         SELECT u.model AS key, u.model AS label, u.usage_provenance AS provenance,
                u.model_gap_reason AS gap_reason,
                COALESCE(SUM(u.cost_usd), 0)::text AS value, FALSE AS pooled
-        FROM v_complete_usage u
+        FROM usage_rollup_daily u
         WHERE ${clamp} AND ${window}
         -- GROUP BY includes usage_provenance (R1-M3, mig 0101) AND
         -- model_gap_reason (mig 0124, r1-H5): after the fan-out, a NULL model
@@ -587,7 +605,7 @@ export async function fetchDrivers(
     raws = [
       ...(await tx.execute<Raw>(sql`
         SELECT cou.cost_owning_unit_id::text AS key, cou.cost_owning_unit_name AS label, COALESCE(SUM(u.cost_usd), 0)::text AS value, FALSE AS pooled
-        FROM v_complete_usage u
+        FROM usage_rollup_daily u
         -- ONE cost-owner resolution (v_org_unit_cost_owner, mig 0114), not a
         -- correlated LATERAL per usage row. LEFT, so unhomed spend keeps its row.
         LEFT JOIN v_org_unit_cost_owner cou ON cou.org_unit_id = u.org_unit_id

@@ -22,6 +22,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import { injectTestSession } from '../../helpers/auth'
 import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
@@ -149,6 +150,9 @@ beforeAll(async () => {
       ${regionA}::uuid, ${unitA}::uuid, ${unitA}::uuid,
       '10', 'ai-credits', '44.00', '0', '44.00', 'indicative', 'ingest_only', 'proposed')`
   // Region B's claude row (7.77) is the ONLY region-B row — must never leak into region A.
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {

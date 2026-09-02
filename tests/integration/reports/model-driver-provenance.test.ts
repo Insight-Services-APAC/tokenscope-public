@@ -34,6 +34,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import { fetchAcrossDrivers } from '../../../server/reporting/across-regions'
 import { resolveRegionalScope, fetchRegionalDrivers } from '../../../server/reporting/regional'
 import { fetchCostCentreBurnDrivers } from '../../../server/reporting/cost-centres'
@@ -105,6 +106,9 @@ beforeAll(async () => {
     VALUES ('anthropic-analytics-api', 'anthropic', ${teammateId}::uuid, 'mdl@x.test',
             '2026-09-07'::date, 'claude-ai', 'claude-haiku-4-6', 'tokens', 10,
             ${regionId}::uuid, ${unitId}::uuid, ${unitId}::uuid)`
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 120_000)
 
 afterAll(async () => {

@@ -11,6 +11,7 @@
 import { computed, ref } from 'vue'
 import { consola } from 'consola'
 import EntityTable from '../../../components/admin/EntityTable.vue'
+import AdminPageSkeleton from '../../../components/admin/AdminPageSkeleton.vue'
 import ProjectMembersModal from '../../../components/admin/ProjectMembersModal.vue'
 import ProjectEditDialog, { type ProjectEditTarget } from '../../../components/admin/ProjectEditDialog.vue'
 import SetBudgetDialog, { type SetBudgetTarget } from '../../../components/admin/SetBudgetDialog.vue'
@@ -44,8 +45,7 @@ interface OrgUnit {
   is_cost_owning_unit: boolean
 }
 
-const { session, ensure } = useSession()
-await ensure()
+const { session } = useSession()
 
 const regionId = computed(() => session.value?.regionId ?? '')
 
@@ -58,9 +58,18 @@ const isOrgWide = computed(() => {
   return r === 'global-finops' || r === 'platform-admin'
 })
 
-const { data: regionsData } = await useFetch<{ regions: { id: string; code: string; display_name: string }[] }>(
+// All three reads are declared lazily and never awaited: navigation is never
+// gated on data, and the skeleton keys on ABSENT data, not `pending`
+// (docs/design/admin-nav-responsiveness.md D1/D2). The two auxiliary reads keep
+// their `error` as well — a picker that collapses failure into `[]` is the false
+// empty D2 forbids.
+const {
+  data: regionsData,
+  error: regionsError,
+  refresh: refreshRegions,
+} = useLazyFetch<{ regions: { id: string; code: string; display_name: string }[] } | null>(
   '/api/v1/admin/regions',
-  { default: () => ({ regions: [] }) },
+  { server: false, default: () => null },
 )
 const viewRegionId = ref('')
 watch(regionId, (r) => { if (!viewRegionId.value && r) viewRegionId.value = r }, { immediate: true })
@@ -73,19 +82,29 @@ const projectsUrl = computed(() =>
   effectiveRegion.value ? `/api/v1/admin/projects?region=${effectiveRegion.value}&limit=50` : '',
 )
 
-const { data, refresh, pending } = await useFetch<{ projects: ProjectRow[]; total: number }>(
+// Explicit keys below because these getters can be '' (D1); the watch carries the refetch.
+const { data, error, refresh } = useLazyFetch<{ projects: ProjectRow[]; total: number } | null>(
   () => projectsUrl.value,
   {
-    default: () => ({ projects: [], total: 0 }),
+    key: 'admin-projects-list',
+    server: false,
+    default: () => null,
     immediate: !!regionId.value,
     watch: [projectsUrl],
   },
 )
+const skeleton = computed(() => !error.value && data.value == null)
 
-const { data: orgUnitsData } = await useFetch<{ nodes: OrgUnit[] }>(
+const {
+  data: orgUnitsData,
+  error: orgUnitsError,
+  refresh: refreshOrgUnits,
+} = useLazyFetch<{ nodes: OrgUnit[] } | null>(
   () => (effectiveRegion.value ? `/api/v1/admin/org-units?region=${effectiveRegion.value}` : ''),
   {
-    default: () => ({ nodes: [] }),
+    key: 'admin-projects-org-units',
+    server: false,
+    default: () => null,
     immediate: !!regionId.value,
     watch: [effectiveRegion],
   },
@@ -230,21 +249,30 @@ async function remove(row: ProjectRow) {
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-projects">
+  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-projects" data-admin-page="/admin/projects">
     <UiPageHead
       eyebrow="Administration"
       title="Projects"
       sub="Projects in this region. Create projects, edit budgets and owners, manage members."
     >
       <template v-if="isOrgWide" #actions>
-        <select
-          v-model="viewRegionId"
-          class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white"
-          data-testid="admin-projects-region-view"
-          title="Browse projects in another region"
-        >
-          <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
-        </select>
+        <div>
+          <select
+            v-model="viewRegionId"
+            :disabled="!regionsData"
+            class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white disabled:bg-calm/40 disabled:cursor-not-allowed"
+            data-testid="admin-projects-region-view"
+            :title="regionsError ? 'The region list could not be loaded.' : 'Browse projects in another region'"
+          >
+            <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
+          </select>
+          <UiAuxFetchError
+            :error="regionsError"
+            label="regions"
+            testid="admin-projects-regions-error"
+            @retry="refreshRegions"
+          />
+        </div>
       </template>
     </UiPageHead>
 
@@ -259,7 +287,10 @@ async function remove(row: ProjectRow) {
       {{ toast.message }}
     </div>
 
+    <UiFetchErrorBanner v-if="error" :error="error" label="projects" @retry="refresh" />
+    <AdminPageSkeleton v-else-if="skeleton" :rows="6" />
     <EntityTable
+      v-else
       entity-label="Projects"
       :rows="data?.projects ?? []"
       :columns="columns"
@@ -355,13 +386,13 @@ async function remove(row: ProjectRow) {
       </template>
     </EntityTable>
 
-    <div v-if="pending" class="mt-4 text-xs text-carbon-3">Loading…</div>
-
     <ProjectEditDialog
       :project="editTarget"
       :cou-options="couOptions"
+      :cou-options-error="orgUnitsError"
       @close="editTarget = null"
       @saved="onEdited"
+      @retry-cou-options="refreshOrgUnits"
     />
 
     <ProjectMembersModal
@@ -376,7 +407,7 @@ async function remove(row: ProjectRow) {
       @saved="onBudgetSet"
     />
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/projects">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

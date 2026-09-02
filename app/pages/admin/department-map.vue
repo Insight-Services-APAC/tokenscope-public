@@ -37,15 +37,25 @@ interface Rule {
 // 403s. The sidebar item is 'org-wide' too, so they see it locked with a hint.
 const { isOrgWide } = useAdminAccess()
 
-const { data: regionsData } = await useFetch<{ regions: { id: string; code: string; display_name: string }[] }>(
+// Lazy, client-only, null default: docs/design/admin-nav-responsiveness.md D1/D2.
+// The Add-rule form's Region select. Its `error` is kept: collapsed into `[]` a
+// failed read leaves the picker holding only the disabled "Select…" placeholder,
+// which reads as "there are no regions" — the false empty D2 forbids
+// (docs/design/admin-nav-responsiveness.md).
+const {
+  data: regionsData,
+  error: regionsError,
+  refresh: refreshRegions,
+} = useLazyFetch<{ regions: { id: string; code: string; display_name: string }[] } | null>(
   '/api/v1/admin/regions',
-  { key: 'region-rules-regions', default: () => ({ regions: [] }), immediate: isOrgWide.value },
+  { key: 'region-rules-regions', server: false, default: () => null, immediate: isOrgWide.value },
 )
 const regions = computed(() => regionsData.value?.regions ?? [])
 
-const { data, refresh, pending } = await useFetch<{ rules: Rule[] }>('/api/v1/admin/directory-region-rules', {
+const { data, error, refresh } = useLazyFetch<{ rules: Rule[] } | null>('/api/v1/admin/directory-region-rules', {
   key: 'region-rules-list',
-  default: () => ({ rules: [] }),
+  server: false,
+  default: () => null,
   immediate: isOrgWide.value,
 })
 const rules = computed(() => data.value?.rules ?? [])
@@ -158,7 +168,7 @@ async function discover() {
 </script>
 
 <template>
-  <div v-if="isOrgWide" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-region-rules">
+  <div v-if="isOrgWide" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-region-rules" data-admin-page="/admin/department-map">
     <UiPageHead
       eyebrow="Organisation"
       title="Region rules"
@@ -250,13 +260,26 @@ async function discover() {
           Value
           <input v-model="formValue" data-testid="rule-value" :placeholder="regionAttribute(formAttribute)?.example" class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none">
         </label>
-        <label class="text-[12px] font-semibold text-carbon">
-          Region
-          <select v-model="formRegion" data-testid="rule-region" class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white">
-            <option value="" disabled>Select…</option>
-            <option v-for="r in regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
-          </select>
-        </label>
+        <div>
+          <label class="text-[12px] font-semibold text-carbon">
+            Region
+            <select
+              v-model="formRegion"
+              :disabled="!regionsData"
+              data-testid="rule-region"
+              class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white disabled:bg-calm/40 disabled:cursor-not-allowed"
+            >
+              <option value="" disabled>Select…</option>
+              <option v-for="r in regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
+            </select>
+          </label>
+          <UiAuxFetchError
+            :error="regionsError"
+            label="regions"
+            testid="rule-region-error"
+            @retry="refreshRegions"
+          />
+        </div>
         <UiButton kind="primary" size="sm" :disabled="saving" data-testid="rule-add" @click="addRule">
           {{ saving ? 'Saving…' : 'Add rule' }}
         </UiButton>
@@ -265,7 +288,8 @@ async function discover() {
     </UiCard>
 
     <!-- Rules -->
-    <div v-if="pending" class="text-center text-sm text-carbon-3 py-8">Loading…</div>
+    <UiFetchErrorBanner v-if="error" :error="error" label="region rules" @retry="refresh" />
+    <AdminPageSkeleton v-else-if="data == null" :toolbar="false" />
     <div v-else-if="!rules.length" class="p-6 rounded-lg border border-calm-2 text-center" data-testid="region-rules-empty">
       <p class="text-sm text-carbon-2">No region rules yet. Run <strong>Discover</strong> to see which attribute maps to region, then add rules — or unplaced people fall back to Region leaders and Unassigned.</p>
     </div>
@@ -286,7 +310,7 @@ async function discover() {
       </div>
     </div>
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/department-map">
     <div class="text-lg font-bold text-carbon">Global finance access required.</div>
   </div>
 </template>

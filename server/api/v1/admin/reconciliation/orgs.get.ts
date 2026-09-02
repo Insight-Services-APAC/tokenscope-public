@@ -1,8 +1,8 @@
 /*
  * GET /api/v1/admin/reconciliation/orgs — list EVERY provider_org (anthropic AND
- * github), joined to its provider_enterprise, with credential presence and (for
- * anthropic) the live health verdict. This generalises the anthropic-only
- * anthropic/orgs.get.ts into the cross-provider onboarding surface.
+ * github), joined to its provider_enterprise, with credential presence. This
+ * generalises the anthropic-only anthropic/orgs.get.ts into the cross-provider
+ * onboarding surface.
  *
  * Per row we surface:
  *   - provider, externalOrgId, displayName, reconciliationMode, billing, notes
@@ -11,17 +11,17 @@
  *   - keyPresent: anthropic ⇒ resolveOrgApiKey(credential_secret_name) != null;
  *     github ⇒ the LINKED enterprise's credential is present (readSecret). The
  *     KEY ITSELF IS NEVER returned — only the boolean presence flag.
- *   - health: the anthropic computeOrgHealth verdict (key-format + live probe);
- *     null for github (no per-org Anthropic health model — github reconciles via
- *     the enterprise PAT, surfaced by enterprises.get / records).
+ *
+ * NO live health here. The per-org Anthropic verdict (key format + live probe)
+ * is served ONLY by anthropic/health.get.ts, keyed by externalOrgId; the client
+ * joins it onto these rows (docs/design/admin-nav-responsiveness.md D5). A list
+ * endpoint must not pay an outbound HTTPS probe per row.
  *
  * RBAC: requireRole(admin, global-finops). `provider_org` is a config table with
  * no RLS policy, but the read runs in the request lane anyway
  * (docs/design/rls-enforcement.md §2) — and it JOINS `org_unit`, which IS
  * RLS-enabled and is in the design's phase-2 FORCE set, so a context-less read
- * here would have silently lost the cost_owning_unit_code column. The live
- * PROBES (computeOrgHealth) stay OUTSIDE the transaction: third-party HTTP
- * inside a request transaction is the anti-pattern §2 names.
+ * here would have silently lost the cost_owning_unit_code column.
  *
  * Region-scope: a region `admin` sees mapped orgs in their OWN region PLUS
  * every unmapped (region_id IS NULL) org — narrowing unmapped rows would hide
@@ -29,8 +29,6 @@
  * `platform-admin` see every row. Matches diagnostics/index.get.ts's
  * `session.role === 'admin'` shape; RLS is inert at runtime (owner
  * connection, no FORCE) so this in-query clamp is the live gate.
- *
- * SAFETY: the probe (computeOrgHealth) never throws and never leaks the key.
  */
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -38,7 +36,7 @@ import { requireRole } from '../../../../auth/rbac'
 import { withRequestRls } from '../../../../db/request-rls'
 import { resolveOrgApiKey } from '../../../../workers/analytics-poller'
 import { readSecret } from '../../../../reconciliation/credentials'
-import { computeOrgHealth, apiKindLabel, type AnthropicOrgRow } from '../../../../anthropic/org-health'
+import { apiKindLabel } from '../../../../anthropic/org-health'
 import { isGovernanceActivated } from '../../../../governance/verdict'
 import type { AnthropicApiKind } from '../../../../reconciliation/adapters/registry'
 
@@ -114,10 +112,6 @@ export default defineEventHandler(async (event) => {
     return { governanceActivated, rows }
   })
 
-  // Read the endpoint once; computeOrgHealth folds an unset endpoint into an
-  // amber 'endpoint-unset' verdict (not a throw, not a red error).
-  const endpoint = process.env.NUXT_ANTHROPIC_API_ENDPOINT || undefined
-
   const orgs = []
   for (const r of [...rows]) {
     const enterprise = r.provider_enterprise_id
@@ -132,14 +126,6 @@ export default defineEventHandler(async (event) => {
       const apiKind = narrowApiKind(r.api_kind)
       // Presence ONLY — the key value never crosses this boundary.
       const keyPresent = resolveOrgApiKey(r.credential_secret_name) != null
-      const orgRow: AnthropicOrgRow = {
-        externalOrgId: r.external_org_id,
-        displayName: r.display_name,
-        apiKind,
-        credentialSecretName: r.credential_secret_name,
-        reconciliationMode: r.reconciliation_mode,
-      }
-      const health = await computeOrgHealth(orgRow, { endpoint })
       orgs.push({
         id: r.id,
         provider: r.provider,
@@ -158,7 +144,6 @@ export default defineEventHandler(async (event) => {
         costOwningUnitId: r.cost_owning_unit_id,
         costOwningUnitCode: r.cost_owning_unit_code,
         keyPresent,
-        health,
       })
     } else {
       // github: credential lives on the linked enterprise (one manage_billing PAT).
@@ -186,9 +171,6 @@ export default defineEventHandler(async (event) => {
         costOwningUnitId: r.cost_owning_unit_id,
         costOwningUnitCode: r.cost_owning_unit_code,
         keyPresent,
-        // No per-org Anthropic-style health model for github (reconciled via the
-        // enterprise PAT). Surfaced by enterprises.get / the records reader.
-        health: null,
       })
     }
   }

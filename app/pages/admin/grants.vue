@@ -19,6 +19,7 @@
 
 import { computed, ref, watch } from 'vue'
 import { consola } from 'consola'
+import AdminPageSkeleton from '../../components/admin/AdminPageSkeleton.vue'
 // Render-boundary sanitizer for a self-registered client_name — see S6: names
 // registered before the bounds fix shipped may still carry control/bidi
 // characters, so this strips them defensively wherever the name is displayed.
@@ -43,8 +44,7 @@ interface GrantRow extends Record<string, unknown> {
   is_emit: boolean
 }
 
-const { session, ensure } = useSession()
-await ensure()
+const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
@@ -56,9 +56,18 @@ const isOrgWide = computed(() => {
 })
 const regionId = computed(() => session.value?.regionId ?? '')
 
-const { data: regionsData } = await useFetch<{ regions: { id: string; code: string; display_name: string }[] }>(
+// All three reads are declared lazily and never awaited: navigation is never
+// gated on data, and each skeleton keys on ABSENT data, not `pending`
+// (docs/design/admin-nav-responsiveness.md D1/D2).
+// The region picker's read keeps its `error` too: collapsing failure into `[]`
+// would render as "no other regions" — the false empty D2 forbids.
+const {
+  data: regionsData,
+  error: regionsError,
+  refresh: refreshRegions,
+} = useLazyFetch<{ regions: { id: string; code: string; display_name: string }[] } | null>(
   '/api/v1/admin/regions',
-  { default: () => ({ regions: [] }) },
+  { server: false, default: () => null },
 )
 const viewRegionId = ref('')
 watch(regionId, (r) => { if (!viewRegionId.value && r) viewRegionId.value = r }, { immediate: true })
@@ -73,10 +82,18 @@ const teammatesUrl = computed(() => {
   const q = search.value.trim()
   return `/api/v1/admin/teammates?region=${scopeRegion.value}&limit=20${q ? `&q=${encodeURIComponent(q)}` : ''}`
 })
-const { data: tmData } = await useFetch<{ teammates: Teammate[] }>(
+// Explicit keys below because these getters can be '' (D1); the watch carries the refetch.
+const { data: tmData, error: tmError, refresh: refreshTeammates } = useLazyFetch<{ teammates: Teammate[] } | null>(
   () => teammatesUrl.value,
-  { default: () => ({ teammates: [] }), immediate: !!regionId.value, watch: [teammatesUrl] },
+  {
+    key: 'admin-grants-teammates',
+    server: false,
+    default: () => null,
+    immediate: !!regionId.value,
+    watch: [teammatesUrl],
+  },
 )
+const teammatesSkeleton = computed(() => !tmError.value && tmData.value == null)
 
 const selected = ref<Teammate | null>(null)
 // Clear the selection when the region view changes (the teammate may not belong).
@@ -85,10 +102,22 @@ watch(scopeRegion, () => { selected.value = null })
 const grantsUrl = computed(() =>
   selected.value ? `/api/v1/admin/grants?teammate_id=${selected.value.id}` : '',
 )
-const { data: grantsData, refresh, pending } = await useFetch<{ teammate_id: string; grants: GrantRow[] }>(
+const { data: grantsData, error: grantsError, refresh } = useLazyFetch<{ teammate_id: string; grants: GrantRow[] } | null>(
   () => grantsUrl.value,
-  { default: () => ({ teammate_id: '', grants: [] }), immediate: false, watch: [grantsUrl] },
+  {
+    key: 'admin-grants-list',
+    server: false,
+    default: () => null,
+    immediate: false,
+    watch: [grantsUrl],
+  },
 )
+// Only the CURRENT teammate's grants count as present: the response names its
+// teammate, so the previous pick's list reads as absent while the new one loads.
+const grants = computed(() =>
+  grantsData.value && grantsData.value.teammate_id === selected.value?.id ? grantsData.value.grants : null,
+)
+const grantsSkeleton = computed(() => !grantsError.value && grants.value == null)
 
 function selectTeammate(t: Teammate) {
   selected.value = t
@@ -143,7 +172,7 @@ function fmtTs(v: string | null): string {
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-grants">
+  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-grants" data-admin-page="/admin/grants">
     <UiPageHead
       eyebrow="Administration"
       title="Connections"
@@ -165,15 +194,23 @@ function fmtTs(v: string | null): string {
       <!-- Teammate picker -->
       <UiCard>
         <UiEyebrow>Teammate</UiEyebrow>
-        <select
-          v-if="isOrgWide"
-          v-model="viewRegionId"
-          class="mt-2 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white"
-          data-testid="admin-grants-region-view"
-          title="Browse teammates in another region"
-        >
-          <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
-        </select>
+        <div v-if="isOrgWide">
+          <select
+            v-model="viewRegionId"
+            :disabled="!regionsData"
+            class="mt-2 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white disabled:bg-calm/40 disabled:cursor-not-allowed"
+            data-testid="admin-grants-region-view"
+            :title="regionsError ? 'The region list could not be loaded.' : 'Browse teammates in another region'"
+          >
+            <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
+          </select>
+          <UiAuxFetchError
+            :error="regionsError"
+            label="regions"
+            testid="admin-grants-regions-error"
+            @retry="refreshRegions"
+          />
+        </div>
         <input
           v-model="search"
           type="text"
@@ -181,7 +218,9 @@ function fmtTs(v: string | null): string {
           class="mt-2 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
           data-testid="admin-grants-search"
         >
-        <ul class="mt-3 divide-y divide-calm-2 max-h-[420px] overflow-auto" data-testid="admin-grants-teammates">
+        <UiFetchErrorBanner v-if="tmError" :error="tmError" label="teammates" class="mt-3" @retry="refreshTeammates" />
+        <AdminPageSkeleton v-else-if="teammatesSkeleton" :rows="6" :toolbar="false" class="mt-3" />
+        <ul v-else class="mt-3 divide-y divide-calm-2 max-h-[420px] overflow-auto" data-testid="admin-grants-teammates">
           <li
             v-for="t in tmData?.teammates ?? []"
             :key="t.id"
@@ -214,14 +253,15 @@ function fmtTs(v: string | null): string {
           <div class="text-sm text-carbon font-medium mt-1">{{ selected.display_name ?? selected.email }}</div>
           <div class="text-[11px] text-carbon-3">{{ selected.email }}</div>
 
-          <p v-if="pending" class="text-xs text-carbon-3 mt-3">Loading…</p>
+          <UiFetchErrorBanner v-if="grantsError" :error="grantsError" label="their connections" class="mt-3" @retry="refresh" />
+          <AdminPageSkeleton v-else-if="grantsSkeleton" :rows="3" :toolbar="false" class="mt-3" />
           <ul
-            v-else-if="grantsData?.grants?.length"
+            v-else-if="grants?.length"
             class="mt-3 divide-y divide-calm-2"
             data-testid="admin-grants-list"
           >
             <li
-              v-for="g in grantsData.grants"
+              v-for="g in grants"
               :key="g.id"
               class="flex flex-wrap items-center gap-3 py-3"
               :data-testid="`admin-grants-row-${g.id}`"
@@ -268,7 +308,7 @@ function fmtTs(v: string | null): string {
       </UiCard>
     </div>
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/grants">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

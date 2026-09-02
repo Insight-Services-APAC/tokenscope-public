@@ -68,6 +68,8 @@ const CONVERGED_POLICIES: Array<[string, string]> = [
   ['unaccounted_usage', 'unaccounted_usage_org_scope'],
   ['over_emission', 'over_emission_owner'],
   ['over_emission', 'over_emission_org_scope'],
+  // 0136 — born converged (never carried the bare-'admin' bypass).
+  ['usage_rollup_daily', 'usage_rollup_daily_admin_only'],
 ]
 
 // session_quarantine_self_scope: 'admin' legitimately remains in the middle

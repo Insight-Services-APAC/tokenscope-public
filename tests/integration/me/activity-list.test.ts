@@ -48,6 +48,16 @@ let dev2Id = ''
 const ZED_ID = '00000000-0000-4000-8000-0000000000aa'
 const ALPHA_ID = 'ffffffff-0000-4000-8000-0000000000bb'
 
+/*
+ * ── THE THIRD TEAMMATE ──────────────────────────────────────────────────────
+ * The two-phase sessions branch (request-floor-performance.md F6) and the
+ * legacy key arm, isolated on their own teammate so the pinned counts above
+ * keep meaning what they say. Their instance id doubles as the conversation
+ * key of the legacy (claude_session_id NULL) conversation.
+ */
+let dev3Id = ''
+let inst3 = ''
+
 /** Day 0 is a fixed past UTC day, so no assertion here depends on the run clock. */
 const DAY0 = Date.UTC(2026, 4, 4) // 2026-05-04
 const dayIso = (n: number) => new Date(DAY0 + n * 86_400_000).toISOString().slice(0, 10)
@@ -274,6 +284,58 @@ beforeAll(async () => {
       tokens,
     })
   }
+
+  // ── The third teammate: two-phase rank semantics + the legacy key arm ─────
+  const [dev3] = await t.db
+    .insert(schema.teammate)
+    .values({ entraOid: 'oid-act-dev3', email: 'act-dev3@x.test', role: 'developer', regionId, orgUnitId: ouId })
+    .returning()
+  dev3Id = dev3!.id
+  inst3 = crypto.randomUUID()
+  await t.client.unsafe(`
+    INSERT INTO instance_attestation (instance_id, principal_oid, principal_email, teammate_id, tool, session_token_hash, ts_start, region_id, org_unit_id, attestation_state)
+    VALUES ('${inst3}','oid-act-dev3','act-dev3@x.test','${dev3Id}','claude-code','tok-${inst3}', now(), '${regionId}','${ouId}','unassigned')`)
+  const ar3 = (conv: string | null, dayN: number, hour: number, tokens: bigint, cost: string) =>
+    t.db.insert(schema.attributionRecord).values({
+      instanceId: inst3,
+      claudeSessionId: conv,
+      teammateId: dev3Id,
+      projectId: null,
+      regionId,
+      orgUnitId: ouId,
+      costOwningUnitId: null,
+      tool: 'claude-code',
+      model: 'claude-sonnet-4-6',
+      tokenType: 'input',
+      tokens,
+      costUsd: cost,
+      rateCardId: rc!.id,
+      rateCardVersion: rc!.version,
+      fidelityTier: 'tier-1',
+      costBasis: 'estimated',
+      tsEvent: new Date(DAY0 + dayN * 86_400_000 + hour * 3_600_000),
+    })
+  /*
+   * The window is [day 40 .. day 42]. The bounds compare against the
+   * conversation's UNFILTERED last event (they live in HAVING, on MAX), so:
+   *   conv-win-in   days 38 + 42 — last event INSIDE the window; its day-38
+   *                 row is outside it and must STILL be summed. A phase that
+   *                 truncated history to the window would show 200/2.00.
+   *   conv-win-out  days 41 + 44 — a row inside the window, last event after
+   *                 it: excluded. A truncating phase would rank it day 41 and
+   *                 let it back IN.
+   *   conv-win-only day 42, one hour after conv-win-in's last event — ranks
+   *                 first on the ts leg of the same day.
+   */
+  await ar3('conv-win-in', 38, 10, 100n, '1.000000')
+  await ar3('conv-win-in', 42, 9, 200n, '2.000000')
+  await ar3('conv-win-out', 41, 10, 300n, '3.000000')
+  await ar3('conv-win-out', 44, 8, 400n, '4.000000')
+  await ar3('conv-win-only', 42, 10, 500n, '5.000000')
+  // The legacy pre-0016 conversation: claude_session_id NULL on every row, so
+  // its conversation key is the INSTANCE id (conversation-key.ts).
+  await ar3(null, 50, 10, 600n, '6.000000')
+  await ar3(null, 50, 11, 50n, '0.500000')
 }, 180_000)
 
 afterAll(async () => {
@@ -331,6 +393,19 @@ const list2 = (query = '') =>
   listHandler(ev(query, dev2Session())) as Promise<ActivityListResponse>
 const csv2 = (query = '') =>
   exportHandler(ev(query, dev2Session()) as Parameters<typeof exportHandler>[0]) as Promise<string>
+
+/** The third teammate — the two-phase / legacy-key fixtures. */
+const dev3Session = (): Session =>
+  ({
+    teammateId: dev3Id,
+    email: 'act-dev3@x.test',
+    displayName: 'Dev3',
+    role: 'developer',
+    regionId,
+    orgPath: 'act.svc',
+  }) as unknown as Session
+const list3 = (query = '') =>
+  listHandler(ev(query, dev3Session())) as Promise<ActivityListResponse>
 
 /** Walk every page at `limit`, returning the rows in the order they arrived. */
 async function walkAll(limit: number, query = ''): Promise<ActivityRow[]> {
@@ -509,7 +584,7 @@ describe('T20 — filters, and a CSV that respects them', () => {
   })
 
   it('the CSV holds exactly the rows the filtered list holds, in the same order', async () => {
-    for (const q of ['', 'kind=provider-day', 'tagged=tagged', 'tool=claude-code', `from=${dayIso(3)}&to=${dayIso(9)}`]) {
+    for (const q of ['', 'kind=provider-day', 'tagged=tagged', 'tool=claude-code', 'project=ACT-P', `from=${dayIso(3)}&to=${dayIso(9)}`]) {
       const rows = await walkAll(100, q)
       const body = await csv(q)
       const lines = body.trim().split('\n')
@@ -601,6 +676,36 @@ describe('token PROVENANCE — "not reported" is not zero', () => {
   })
 })
 
+describe('the project filter — a "touched it" match, paged like every other', () => {
+  it('project=ACT-P returns exactly the sessions and provider days ON that project', async () => {
+    const rows = await walkAll(100, 'project=ACT-P')
+    // Even-indexed sessions (6) carry the project; of the provider days only
+    // the tagged one does.
+    expect(rows.filter((r) => r.kind === 'session')).toHaveLength(SESSIONS / 2)
+    expect(rows.filter((r) => r.kind === 'provider-day')).toHaveLength(1)
+    expect(rows.every((r) => r.project_code === 'ACT-P')).toBe(true)
+  })
+
+  it('filter + cursor: paging under project/tagged filters yields the unpaged sequence', async () => {
+    for (const q of ['project=ACT-P', 'tagged=untagged', 'tagged=tagged']) {
+      const whole = await walkAll(100, q)
+      expect(whole.length).toBeGreaterThan(0)
+      const paged = await walkAll(2, q)
+      expect(paged.map((r) => `${r.kind}|${r.id}`)).toEqual(whole.map((r) => `${r.kind}|${r.id}`))
+    }
+  })
+
+  it('a two-project conversation matches EITHER code and always displays the same ONE project', async () => {
+    for (const code of ['ACT-ALPHA', 'ACT-ZED']) {
+      const rows = await walkAll2(100, `project=${code}&kind=session`)
+      expect(rows.map((r) => r.id)).toEqual(['conv-two-projects'])
+      // The filter means "touched it"; the displayed tuple is the ONE project
+      // picked once (greatest code) — so a row matching ACT-ALPHA shows ZED.
+      expect(rows[0]!.project_code).toBe('ACT-ZED')
+    }
+  })
+})
+
 describe('ONE project per row — the tuple cannot name two', () => {
   it('project_id, code and display_name all come from the SAME touched project', async () => {
     const rows = await walkAll2(100, 'kind=session')
@@ -619,5 +724,72 @@ describe('ONE project per row — the tuple cannot name two', () => {
     const line = (await csv2('kind=session')).trim().split('\n')[1]!.split(',')
     expect(line[5]).toBe('ACT-ZED')
     expect(line[6]).toBe('Zed')
+  })
+})
+
+/** `walkAll`, for the third teammate. */
+async function walkAll3(limit: number, query = ''): Promise<ActivityRow[]> {
+  const out: ActivityRow[] = []
+  let cursor: string | null = null
+  for (let guard = 0; guard < 50; guard++) {
+    const q = [query, `limit=${limit}`, cursor ? `cursor=${encodeURIComponent(cursor)}` : '']
+      .filter(Boolean)
+      .join('&')
+    const page: ActivityListResponse = await list3(q)
+    out.push(...page.rows)
+    if (!page.has_more) return out
+    cursor = page.next_cursor
+  }
+  throw new Error('pagination did not terminate')
+}
+
+/*
+ * F6 (request-floor-performance.md) — the sessions branch ranks conversation
+ * keys in a slim first phase, then rebuilds full rows for only those keys.
+ * These pin the two facts a two-phase split can silently break: the window
+ * bounds judge the UNFILTERED per-conversation MAX (HAVING semantics), and the
+ * row a selected conversation ships sums its FULL history, not the window.
+ */
+describe('F6 — window bounds rank on the unfiltered conversation MAX', () => {
+  const WIN = `from=${dayIso(40)}&to=${dayIso(42)}`
+
+  it('a conversation ending inside the window appears WITH its outside-window history summed', async () => {
+    const rows = await walkAll3(100, WIN)
+    expect(rows.map((r) => r.id)).toEqual(['conv-win-only', 'conv-win-in'])
+    const winIn = rows[1]!
+    expect(winIn.day).toBe(dayIso(42))
+    // 100 tokens / $1 sit on day 38, OUTSIDE the window — still counted.
+    expect(winIn.tokens).toBe(300)
+    expect(winIn.cost_usd).toBe('3.00')
+  })
+
+  it('a conversation ending AFTER the window stays out, even though it has a row inside it', async () => {
+    const rows = await walkAll3(100, WIN)
+    expect(rows.some((r) => r.id === 'conv-win-out')).toBe(false)
+    // …and without the window it exists, on its true (unfiltered) last day.
+    const all = await walkAll3(100, 'kind=session')
+    expect(all.find((r) => r.id === 'conv-win-out')!.day).toBe(dayIso(44))
+  })
+
+  it('window + cursor: every page size yields the same sequence', async () => {
+    const whole = await walkAll3(100, WIN)
+    for (const size of [1, 2]) {
+      expect((await walkAll3(size, WIN)).map((r) => r.id)).toEqual(whole.map((r) => r.id))
+    }
+  })
+})
+
+describe('F6 — the legacy instance-keyed conversation survives the key filter', () => {
+  it('claude_session_id NULL rows group as ONE session keyed by the instance id', async () => {
+    const rows = await walkAll3(100, 'kind=session')
+    const legacy = rows.find((r) => r.id === inst3)
+    expect(legacy, 'the legacy conversation must be on the list').toBeTruthy()
+    expect(legacy!.kind).toBe('session')
+    expect(legacy!.day).toBe(dayIso(50))
+    expect(legacy!.tokens).toBe(650)
+    expect(legacy!.cost_usd).toBe('6.50')
+    // withBreakdowns rides the SAME key shape through fetchBreakdownCells, so
+    // the legacy conversation's model mix must be populated, not empty.
+    expect((legacy as unknown as { models: string[] }).models).toEqual(['claude-sonnet-4-6'])
   })
 })

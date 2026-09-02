@@ -74,13 +74,16 @@ interface CohortRow extends Record<string, unknown> {
  * `RegionalScope.usageScope('region_id', 'org_unit_id')` builds.
  */
 async function fetchCohort(tx: Tx, scope: UsageScope, window: UsageWindow) {
+  // usage_rollup_daily, not the live view (usage-rollup-lane.md R5): teammate_id
+  // and usage_provenance are both in the grain, so the per-teammate Σ and the
+  // bool_or over cells answer exactly what they answered over rows.
   const rows = await tx.execute<CohortRow>(sql`
     SELECT COALESCE(SUM(cost_usd), 0)::text AS cost,
            bool_or(usage_provenance = 'otel-emitted') AS emitting
-    FROM v_complete_usage
+    FROM usage_rollup_daily
     WHERE ${scopeSql(scope)}
-      AND ts_event >= ${window.startIso}::timestamptz
-      AND ts_event <  ${window.endIso}::timestamptz
+      AND day >= ${window.startIso.slice(0, 10)}::date
+      AND day <  ${window.endIso.slice(0, 10)}::date
     GROUP BY teammate_id
     HAVING COALESCE(SUM(cost_usd), 0) > 0
     ORDER BY SUM(cost_usd) DESC`)

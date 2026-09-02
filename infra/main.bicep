@@ -186,6 +186,9 @@ param anthropicApiKey string = ''
 @description('Whether the anthropic-admin-api-key KV secret exists (read by the app as NUXT_ANTHROPIC_KEY_MAIN). Set true once the secret is in Key Vault — independent of anthropicApiKey, so a manually-placed secret can be referenced.')
 param hasAnthropicKey bool = false
 
+@description('log_min_duration_statement (ms) forwarded to the PG module — the per-environment slow-statement threshold (docs/design/performance-observability-baseline.md O2/dr-M9).')
+param slowStatementLogMs string = '1000'
+
 // ── GitHub Copilot reconciliation PATs (F2 — GATED OFF; TEMPLATE) ──
 // Empty (the default) = NO-OP: no KV secret written, no container-app KV ref/env
 // var emitted, F2 stays gated off (no reconciled provider_enterprise → no lookup).
@@ -210,6 +213,17 @@ param githubPatApacNfr string = ''
 @description('GitHub App private key (BASE64-encoded PEM) for the partner-demo enterprise App-credential path (credential_secret_name "partner-demo", read as NUXT_GITHUB_APP_KEY_PARTNER_DEMO). Pair with provider_enterprise.github_app_id via onboarding. Empty = NO-OP.')
 @secure()
 param githubAppKeyPartnerDemo string = ''
+
+// ── Ops alerting channel (docs/design/ops-alerting.md §A1) ───────────
+// GitHub env secret OPS_ALERT_NTFY_URL → this param → KV secret
+// ops-alert-ntfy-url → container secretRef → NUXT_OPS_ALERT_NTFY_URL.
+// The topic URL IS the credential (public ntfy.sh; the 64-char CSPRNG topic
+// name is the access control — ar-H8 accepted residual), so it is secretRef-
+// only downstream (ar-M20). Empty = NO-OP write (safety contract) AND no
+// container ref/env = alerting disabled (the sandbox/local default).
+@description('ntfy topic URL for operator push alerts (NUXT_OPS_ALERT_NTFY_URL). Supplied by infra.yml from the GitHub env secret OPS_ALERT_NTFY_URL. Empty = NO-OP: no KV write, no container ref, alerting disabled.')
+@secure()
+param opsAlertNtfyUrl string = ''
 
 @description('Nuxt session signing secret (NUXT_SESSION_SECRET). REQUIRED for the app to boot.')
 @secure()
@@ -246,8 +260,14 @@ param oidcTokenKey string = ''
 @description('Enable VNet + private endpoints (Wave-III). Sandbox = false; dev / staging / production = true.')
 param enablePrivateNetworking bool = false
 
-@description('Make the Log Analytics QUERY path private (AMPLS + PE; ingestion stays public). Security hardening — only the in-VNet app reader can query the telemetry corpus. Requires enablePrivateNetworking. Default false; a one-line back-out lever. See docs/design/telemetry-query-network-posture.md. NOTE: flipping this on an env whose AMPLS privatelink DNS is not yet wired locks query out (incl. the app) until the records exist — acceptable on a not-yet-live env, bundle the DNS ask with IT. The AMPLS PE carries NO in-template DNS zone group (unlike the KV/PG/Redis/ACR PEs): on a self-owned-zone env (registerDnsZoneGroups=true) it does NOT self-register, so enabling this there ALSO requires the AMPLS privatelink zones (monitor/oms/ods/agentsvc/blob) to be created out-of-band first.')
+@description('Make the Log Analytics QUERY path private: publicNetworkAccessForQuery=Disabled, queryable only over an Azure Monitor Private Link Scope. Ingestion stays public. Requires enablePrivateNetworking. Default false — the back-out lever. Flipping this on before the AMPLS privatelink DNS resolves locks query out, the app included, so bundle the DNS ask with IT. Who owns the scope is useCentralAmpls. See docs/design/telemetry-query-network-posture.md.')
 param monitorQueryPrivateOnly bool = false
+
+@description('Consume IT\'s central Azure Monitor Private Link Scope instead of deploying our own. DEFAULTS from centralDnsZonesSubscriptionId, because the two are the same constraint: one shared privatelink zone holds ONE set of Monitor A records, so a scope of our own overwrites IT\'s and blackholes whoever it displaced. An env on central zones therefore consumes the central scope unless someone opts out ON PURPOSE. IT joins our workspace to their scope as a scoped resource.')
+param useCentralAmpls bool = !empty(centralDnsZonesSubscriptionId)
+
+@description('Resource ID of the central AMPLS to point our own private endpoint at. Read only when useCentralAmpls, and needed only if the central PE is unreachable from our VNet. Empty (default) = we deploy no AMPLS PE at all. Requires amplsSubnetPrefix, and no same-named PE already pointing at another scope (privateLinkServiceId is immutable).')
+param centralAmplsResourceId string = ''
 
 @description('VNet resource name override. Empty = `vnet-{nameSuffix}` convention. Dev must use the IT-issued name (vnet-tokenscope-example) — IT scripts hub peerings + central-DNS VNet links against it.')
 param vnetName string = ''
@@ -397,13 +417,14 @@ module monitoring 'modules/monitoring.bicep' = {
     // DCR, Log Analytics Reader on the LAW) — same deployRbac gate as KV.
     identityPrincipalId: appIdentity.properties.principalId
     deployRbac: deployRbac
-    // Private-query hardening (AMPLS + PE; ingestion stays public). The AMPLS
-    // `azuremonitor` PE needs its OWN subnet (it allocates several IPs, more
-    // than fit alongside the data-plane PEs — SubnetIsFull otherwise), so it
-    // uses the dedicated amplsSubnetId, not the shared PE subnet. Empty when no
-    // AMPLS subnet is configured (then the scope deploys but no PE).
+    // Private-query hardening (ingestion stays public). The `azuremonitor` PE
+    // needs its OWN subnet (multi-IP; SubnetIsFull beside the data-plane PEs),
+    // so it uses amplsSubnetId, not the shared PE subnet. On useCentralAmpls we
+    // deploy no scope, and no PE either unless centralAmplsResourceId is set.
     enableQueryPrivateLink: enablePrivateNetworking && monitorQueryPrivateOnly
     privateEndpointSubnetId: enablePrivateNetworking ? networking!.outputs.amplsSubnetId : ''
+    useCentralAmpls: useCentralAmpls
+    centralAmplsResourceId: centralAmplsResourceId
     tags: tags
   }
 }
@@ -492,6 +513,7 @@ module postgresql 'modules/postgresql.bicep' = {
     privateEndpointSubnetId: enablePrivateNetworking ? networking!.outputs.privateEndpointSubnetId : ''
     privateDnsZoneId: (enablePrivateNetworking && registerDnsZoneGroups) ? networking!.outputs.dnsZonePostgresqlId : ''
     logAnalyticsId: monitoring.outputs.logAnalyticsId
+    slowStatementLogMs: slowStatementLogMs
     tags: tags
   }
 }
@@ -575,6 +597,8 @@ module kvSecrets 'modules/keyvault-secrets.bicep' = {
     githubPatApacNfr: githubPatApacNfr
     // GitHub App private key (App-credential path; base64 PEM; empty = NO-OP).
     githubAppKeyPartnerDemo: githubAppKeyPartnerDemo
+    // Ops alerting channel (§A1; empty = NO-OP — never clobbers a stored topic).
+    opsAlertNtfyUrl: opsAlertNtfyUrl
     entraClientSecret: entraIdClientSecret
     oidcSessionSecret: oidcSessionSecret
     oidcAuthSessionSecret: oidcAuthSessionSecret
@@ -627,6 +651,10 @@ module containerApp 'modules/container-app.bicep' = {
     hasGithubPatApacNfr: !empty(githubPatApacNfr)
     // GitHub App private key (App-credential path; flag false until the base64 PEM is provided).
     hasGithubAppKeyPartnerDemo: !empty(githubAppKeyPartnerDemo)
+    // Ops alerting channel (§A1) — derived-flag pattern (same as the PATs):
+    // the ref/env is emitted only on an apply that also wrote the KV secret,
+    // so a KV ref to a missing secret (an ACA deploy failure) is unreachable.
+    hasOpsAlertNtfyUrl: !empty(opsAlertNtfyUrl)
     // RLS enforcement (§9). Every consumer is AND-ed with hasAppRoleSecrets so
     // a flag set out of order narrows to a no-op instead of emitting a KV
     // reference to a secret that was never written (which ACA rejects at deploy
@@ -725,6 +753,34 @@ module workerJobs 'modules/worker-jobs.bicep' = if (!empty(workerBaseUrl)) {
   }
 }
 
+// ── Ops alerting — A4 platform metric alerts (docs/design/ops-alerting.md) ──
+// A LATE module by graph necessity: monitoring is a PRODUCER for postgresql
+// and container-app, so alert rules scoping those resources cannot live in
+// monitoring.bicep without a cycle. This module is the graph's last consumer —
+// it reuses monitoring's action group (ar-M19: ONE group, never a second) and
+// scopes the targets by their producers' id outputs. See the module header.
+module opsAlerts 'modules/ops-alerts.bicep' = {
+  name: 'ops-alerts'
+  params: {
+    name: nameSuffix
+    actionGroupId: monitoring.outputs.actionGroupId
+    containerAppId: containerApp.outputs.appId
+    postgresServerId: postgresql.outputs.serverId
+    // The dead-man (ar-H4) scopes the caj-ts-ops-alert JOB, which exists only
+    // when worker-jobs deploys ('caj-ts-' + registry key, the worker-jobs.bicep
+    // naming rule; the ops-alert workers-array entry + ar-L22 cron lockstep are
+    // owned there). Same workerBaseUrl gate as the workerJobs module, so
+    // phase-1 applies elide the rule instead of scoping a missing resource.
+    // resourceId() is a pure string build — NO implicit dependency — hence the
+    // explicit dependsOn below.
+    opsAlertJobId: !empty(workerBaseUrl) ? resourceId('Microsoft.App/jobs', 'caj-ts-ops-alert') : ''
+    tags: tags
+  }
+  dependsOn: [
+    workerJobs // the dead-man's scope must EXIST before a metric alert can target it
+  ]
+}
+
 // ── Outputs ─────────────────────────────────────────────────────────
 
 @description('Container App ingress FQDN.')
@@ -793,6 +849,16 @@ output frontDoorInstanceId string = enableFrontDoor ? frontDoor!.outputs.frontDo
 //                         (explicit dependsOn).
 // frontDoor (Wave-II)   ← containerApp (implicit via outputs.fqdn).
 //                        Gated on `enableFrontDoor`.
+// workerJobs            ← containerApp (environmentId), containerRegistry,
+//                         keyVault, appIdentity (implicit via outputs).
+//                        Gated on `workerBaseUrl` (phase-1 elides it).
+// opsAlerts             ← monitoring (actionGroupId), containerApp (appId),
+//                         postgresql (serverId) — implicit via outputs — and
+//                         workerJobs (explicit dependsOn: the dead-man rule
+//                         scopes the caj-ts-ops-alert job). The LAST consumer:
+//                         its alert rules scope resources monitoring produces
+//                         FOR, which is why they cannot live in monitoring.bicep
+//                         (docs/design/ops-alerting.md §A4).
 //
 // No cycles. Every consumer comes after its producer.
 // When private networking is off (sandbox), the networking module is

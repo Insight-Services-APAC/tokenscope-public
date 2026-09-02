@@ -6,6 +6,7 @@
  * withRequestRls (the 0046 aggregate RLS bridge applies under the
  * non-owner role).
  */
+import { consola } from 'consola'
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
 import { z } from 'zod'
@@ -13,7 +14,9 @@ import { WindowQuery } from '../../../../shared/schemas/usage'
 import { parseSpendLens } from '../../../../shared/usage/lens'
 import { requireAuth } from '../../../auth/rbac'
 import { getValidated } from '../../../utils/validated-body'
+import { getDb } from '../../../db'
 import { withRequestRls } from '../../../db/request-rls'
+import { attributionStall } from '../../../usage/attribution-stall'
 import {
   getMyProviderFeedFreshness,
   getMyProviderTruthMtd,
@@ -32,7 +35,7 @@ import { runRate } from '../../../usage/projections'
 import { detectFindings, fetchCatalog, fetchRateLines, fetchSignalCells } from '../../../usage/insights'
 import { providerStatesForWindow } from '../../../reports/settling'
 import { reportCoverageMeta } from '../../../reports/coverage-meta'
-import { daysInMonthUtc, monthKeyUtc, MONTH_REGEX } from '../../../utils/period'
+import { daysInMonthUtc, monthKeyUtc, monthStartIso, MONTH_REGEX } from '../../../utils/period'
 import { DATE_REGEX, momPaceWindow, resolveReportWindow } from '../../../reporting/params'
 import { contextWindowResidency } from '../../../usage/context-residency'
 import { sessionEconomics } from '../../../usage/session-economics'
@@ -51,6 +54,7 @@ import {
   type TeammateWindowDaily,
 } from '../../../usage/me-usage-window'
 import { requestClock } from '../../../utils/request-clock'
+import { resolveRollupCoverage, resolveRollupGates } from '../../../usage/rollup-gate'
 
 
 /** Insight cards shown at once (PO cap — never a wall of advice). */
@@ -107,8 +111,6 @@ export default defineEventHandler(async (event) => {
      */
     const now = new Date(requestClock(event).now)
     // Existing quota math (buckets, allowance, activity-tagged spend).
-    const usage = await getMyUsage(tx, session.teammateId, now)
-
     /*
      * ── W2: the page window (D16/D17, r1-H9) ──────────────────────────────
      * ONE resolved window for the hero tiles, residency, session economics,
@@ -117,6 +119,10 @@ export default defineEventHandler(async (event) => {
      * current month resolves to a full calendar window, and a clock-skewed
      * future-dated row must not count toward a to-date figure (the
      * monthToDateWindow rule, applied to the resolved window).
+     *
+     * Resolved BEFORE the gates below, and only so they can be asked together —
+     * it is a pure function of the parsed query and the request clock, so
+     * nothing about the window changes by computing it a few lines earlier.
      */
     const resolved = resolveReportWindow(
       { month: parsed.month, from: parsed.from, to: parsed.to },
@@ -126,6 +132,35 @@ export default defineEventHandler(async (event) => {
     const clampedEnd =
       resolved.endIso <= nowIso ? resolved.endIso : resolved.startIso >= nowIso ? resolved.startIso : nowIso
     const spendWindow = { startIso: resolved.startIso, endIso: clampedEnd }
+
+    /*
+     * THE GATES, in TWO round trips instead of six.
+     *
+     * Coverage — backfill, sweep recency, worker liveness, pending refresh — is
+     * a property of the ROLLUP, not of any window, so it is resolved once and
+     * handed to both. Currency and the horizon are per-window, and the two
+     * windows known at this point are asked in one statement.
+     *
+     * Still separate GATES, which is the part that matters: coverage is shared,
+     * the verdicts are not. getMyUsage windows on month-to-date and the page
+     * reads on the resolved window, and late in a month one can sit inside the
+     * rollup's 40-day horizon while the other reaches past it. A false OPEN
+     * produces wrong money where a false close only costs speed.
+     *
+     * The previous-period gate cannot join this batch: its window depends on
+     * the frontier day the page read has not returned yet.
+     */
+    const rollupCoverage = await resolveRollupCoverage(tx, nowIso, session.teammateId)
+    const mtdStartIso = monthStartIso(now)
+    const [mtdGate, rollupGate] = await resolveRollupGates(
+      tx,
+      rollupCoverage,
+      [{ startIso: mtdStartIso, endIso: nowIso }, spendWindow],
+      nowIso,
+      session.teammateId,
+    )
+    const usage = await getMyUsage(tx, session.teammateId, now, mtdGate ?? null)
+
     const today = nowIso.slice(0, 10)
     /** Inclusive day upper bound for the fact/day-grain reads and the sparks. */
     const dayTo = resolved.to <= today ? resolved.to : today
@@ -142,8 +177,9 @@ export default defineEventHandler(async (event) => {
         : 'not-current-month'
 
     // Concurrent issuance on ONE tx connection: postgres-js pipelines and
-    // answers in order — safe; the win is one round-trip wave, not true
-    // parallelism.
+    // answers in order — safe; the win is issuance without
+    // per-query await gaps (one wave once statements are prepared on the
+    // connection; first use still describes), not true parallelism.
     const [
       series,
       seriesByModel,
@@ -199,18 +235,38 @@ export default defineEventHandler(async (event) => {
      * All on the ONE resolved window above. §A reads the lane; the §B lead
      * tile (chargeback lens only) reads the finance view — never blended.
      */
+    /*
+     * THE PAGE'S GATE was resolved with month-to-date's above, in one round
+     * trip. Every CALLER-SCOPED §A read on this window takes it, so those
+     * figures cannot sit on different bases from each other.
+     *
+     * Caller-scoped is the whole qualification, and it is load-bearing: the
+     * proof covers the requesting teammate's rows only. `completeProjectSpend`
+     * below spans ALL teammates and therefore takes NO gate — passing this one
+     * into it would serve a colleague's stale rows behind a proof that never
+     * covered them.
+     *
+     * Null when coverage is not provable — a stalled worker, an incomplete
+     * backfill, a window past the horizon, or a settled day the rollup has not
+     * caught up with — and null means the reads behave exactly as they did
+     * before this change, because the null branch IS the original query.
+     */
+
     const [currentDaily, windowProjects, residency, econ, modelMix, copilot, claudeWin] =
       await Promise.all([
-        teammateWindowDaily(tx, session.teammateId, spendWindow),
-        teammateWindowProjects(tx, session.teammateId, spendWindow),
+        teammateWindowDaily(tx, session.teammateId, spendWindow, rollupGate),
+        teammateWindowProjects(tx, session.teammateId, spendWindow, rollupGate),
         contextWindowResidency(tx, session.teammateId, { from: resolved.from, to: dayTo }),
         sessionEconomics(tx, session.teammateId, spendWindow),
-        completeTeammateModelMix(tx, session.teammateId, spendWindow),
+        completeTeammateModelMix(tx, session.teammateId, spendWindow, rollupGate),
         copilotEngagement(tx, session.teammateId, spendWindow),
-        teammateClaudeWindow(tx, session.teammateId, spendWindow, {
-          from: resolved.from,
-          to: dayTo,
-        }),
+        teammateClaudeWindow(
+          tx,
+          session.teammateId,
+          spendWindow,
+          { from: resolved.from, to: dayTo },
+          rollupGate,
+        ),
       ])
 
     const projectIds = windowProjects.map((p) => p.projectId)
@@ -253,10 +309,25 @@ export default defineEventHandler(async (event) => {
       clampedEnd,
     )
     const [projectTotals, budgetedByDay] = await Promise.all([
-      // The PROJECT's own window total — the same figure the PM and the reports
-      // project axis see (manager-facing ⇒ excludeProvisional, PM-page rule).
+      /*
+       * The PROJECT's own window total — the same figure the PM and the reports
+       * project axis see (manager-facing ⇒ excludeProvisional, PM-page rule).
+       *
+       * NO GATE, deliberately, and it is the only §A read on this page without
+       * one. This total spans ALL teammates, and the gate's currency proof is
+       * scoped to the CALLER: a colleague's late write or pending re-home
+       * cannot close it, so a gated read here would serve their stale rows
+       * behind a proof that never covered them. It would also disagree with
+       * every other caller of this function — /me/projects, the budget alert,
+       * the Business Unit reads — which pass no gate at all.
+       *
+       * Widening the proof to every contributing teammate is the alternative,
+       * and it is the wrong trade: it would close the gate for this reader
+       * whenever anyone on any of their projects had a recent write, which on a
+       * busy estate is most of the time.
+       */
       completeProjectSpend(tx, spendWindow, { projectIds, excludeProvisional: true }),
-      teammateWindowDailyForProjects(tx, session.teammateId, spendWindow, budgetedIds),
+      teammateWindowDailyForProjects(tx, session.teammateId, spendWindow, budgetedIds, rollupGate),
     ])
 
     // ── MoM (same-elapsed prior window, paced on the data frontier — D17) ──
@@ -266,6 +337,8 @@ export default defineEventHandler(async (event) => {
       (daysElapsed ?? 0) >= DELTA_MIN_ELAPSED_DAYS &&
       currentDaily.frontierDay != null
     let previousDaily: TeammateWindowDaily | null = null
+    /** null = the previous period was not read at all, so it has no source. */
+    let prevSettledSource: 'rollup' | 'view' | null = null
     let prevBudgetedUsd: number | null = null
     let prevWindow: { startIso: string; endIso: string } | null = null
     if (canMoM) {
@@ -273,11 +346,28 @@ export default defineEventHandler(async (event) => {
         resolved.monthRange!,
         new Date(`${currentDaily.frontierDay}T00:00:00.000Z`),
       )
+      /*
+       * ITS OWN GATE. The gate above was validated against spendWindow's start,
+       * and coverage is a property of the WINDOW, not of the request: late in a
+       * current month the page window sits inside the 40-day horizon while the
+       * previous-period comparison starts outside it. Reusing the gate there
+       * would open the rollup for a range its own contract cannot guarantee —
+       * and a false OPEN produces wrong money, where a false close only costs
+       * speed.
+       */
+      const [prevGate] = await resolveRollupGates(
+        tx,
+        rollupCoverage,
+        [prevWindow],
+        nowIso,
+        session.teammateId,
+      )
       const [prevDaily, prevProjects] = await Promise.all([
-        teammateWindowDaily(tx, session.teammateId, prevWindow),
-        teammateWindowProjects(tx, session.teammateId, prevWindow),
+        teammateWindowDaily(tx, session.teammateId, prevWindow, prevGate),
+        teammateWindowProjects(tx, session.teammateId, prevWindow, prevGate),
       ])
       previousDaily = prevDaily
+      prevSettledSource = prevGate ? 'rollup' : 'view'
       const prevAllocations = await fetchProjectAllocations(
         tx,
         prevProjects.map((p) => p.projectId),
@@ -414,8 +504,25 @@ export default defineEventHandler(async (event) => {
         attributedUsageUsd: totalAttributedUsd,
         providerReportedUsd: providerTruthMtd,
         now,
+        // The MTD gate, so the disclosure sits on the same basis as the
+        // headline it explains.
+        gate: mtdGate,
       }),
     ])
+
+    /*
+     * The §A6.2 degradation-banner leg (additive key only). On the BASE handle,
+     * not this RLS tx — the signal is GLOBAL (`instance_attestation` is
+     * region-scoped under RLS; a viewer-scoped MAX(last_bearer_at) would give
+     * two regions two different verdicts). See server/usage/attribution-stall.ts.
+     */
+    const attributionStallLeg = await attributionStall(getDb(), { now }).catch((err) => {
+      // Additive leg: degrade to no-banner on error rather than failing the
+      // page during the very outage the banner reports (the helper assigns
+      // never-throws to the caller).
+      consola.error('[me/usage] attribution-stall leg failed', err instanceof Error ? err.name : '')
+      return null
+    })
 
     return {
       // The ONE headline figure + its own derived statistics (ADR 0012).
@@ -558,7 +665,35 @@ export default defineEventHandler(async (event) => {
         aggregate_minutes_ago: aggregateMinutes,
         provider_feed_minutes_ago: providerFeedMinutes,
         worst_minutes_ago: worstMinutes,
+        /*
+         * WHICH LANE THE SETTLED DAYS CAME FROM. The other legs here answer
+         * "how old is the data"; this one answers "where did it come from",
+         * and that is a different question an operator needs when a figure
+         * looks wrong.
+         *
+         * 'rollup' means settled days were served from usage_rollup_daily and
+         * today from the live view. 'view' means the coverage gate declined —
+         * a stalled worker, an incomplete backfill, or a window past the
+         * sweep's horizon — and everything came from the view. Both are
+         * correct; they differ in cost, not in the answer.
+         *
+         * PER BASIS, because the gate is resolved per basis and the three can
+         * legitimately disagree: the page window, month-to-date and the
+         * previous period each carry their own start, and only the start
+         * decides the horizon check. A page inside the 40-day sweep can be
+         * served from the rollup while the comparison period behind it is not.
+         * One value for three answers would be right by luck.
+         *
+         * `previous_period` is null when no previous period was read.
+         */
+        settled_source: {
+          page: rollupGate ? ('rollup' as const) : ('view' as const),
+          month_to_date: mtdGate ? ('rollup' as const) : ('view' as const),
+          previous_period: prevSettledSource,
+        },
       },
+      // §A6.2 — the degradation banner's signal; null = healthy, banner hidden.
+      attribution_stall: attributionStallLeg,
       /*
        * ── developer-pages W0c (D11): the reporting freshness operands ────────
        * Real operands for the W1 settlement/coverage chip row (CcHeaderNotes),
@@ -581,5 +716,32 @@ export default defineEventHandler(async (event) => {
       ),
       coverage,
     }
-  })
+  },
+  /*
+   * ONE SNAPSHOT for every figure this transaction reads, for the same reason
+   * there is one clock above it.
+   *
+   * This handler proves the rollup is current and then reads the two bases in
+   * separate statements. Under READ COMMITTED each statement takes its own
+   * snapshot, so a write committing after the proof lands in the view-backed
+   * figures and not the split-backed ones — the proof would be true when taken
+   * and false when used, which is worse than not proving it. One
+   * repeatable-read snapshot makes the proof and every read it authorises
+   * describe the same instant.
+   *
+   * NOT the whole response: the attribution-stall leg deliberately runs on the
+   * base handle outside this transaction (it is a global signal RLS would scope
+   * per region), so it reads its own snapshot. That is fine and stays fine — it
+   * is a banner operand, not a money figure, and nothing foots against it.
+   *
+   * The trade, stated honestly rather than as "free": no row locks and no
+   * change to how long a pooled connection is held, but the request's MVCC
+   * snapshot is pinned for its whole duration, which on the slow fallback path
+   * is seconds rather than milliseconds, and a pinned snapshot defers dead-tuple
+   * reclamation while it is held. Acceptable at this route's volume; worth
+   * revisiting if it is ever held much longer. READ-ONLY handlers only — a
+   * writer under repeatable read can abort with a serialisation failure, which
+   * a read has no way to reach.
+   */
+  { isolationLevel: 'repeatable read' })
 })

@@ -141,6 +141,11 @@ jobs:
         # allowlist -- the allowlist form silently missed plugin/, copilot-plugin/,
         # infra/, every root-level file and every .sh/.css/.bicep/.py file.
         run: node scripts/check-source-files-are-text.mjs
+      - name: A backtick in a SQL comment closes the query
+        # Not a type error and not a lint rule: it makes the file fail to PARSE,
+        # with the error pointing at an unrelated later line. Nothing else here
+        # catches it, and it has cost real debugging time more than once.
+        run: node scripts/check-sql-comment-backticks.mjs
       - name: Check for new direct getDb() calls in server/api/** handlers (S12 / UF-1(a))
         # FORCE ROW LEVEL SECURITY is not enabled yet (S11/UF-1): 47 handlers
         # call getDb() directly instead of the RLS-context wrapper

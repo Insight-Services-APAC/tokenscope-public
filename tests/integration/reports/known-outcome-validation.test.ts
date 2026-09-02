@@ -20,6 +20,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import {
   seedKnownOutcomeCompany,
   seedCostCentreProjectSumBack,
@@ -107,6 +108,9 @@ beforeAll(async () => {
     regionId: r.region_id,
     regionCode: r.region_code,
   }))
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {

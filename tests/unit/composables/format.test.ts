@@ -8,6 +8,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   fmtUsd,
   fmtTokens,
+  fmtDurationMs,
   fmtTimeAgo,
   fmtPct,
   fmtSharePct,
@@ -60,6 +61,34 @@ describe('fmtTokens', () => {
     expect(fmtTokens('')).toBe('—')
     expect(fmtTokens('garbage')).toBe('—')
     expect(fmtTokens(Number.NaN)).toBe('—')
+  })
+})
+
+describe('fmtDurationMs', () => {
+  it('keeps milliseconds below a second — the fast run must stay legible', () => {
+    // 288 ms is ops-alert's fastest observed run; rounding it to "0.3s" would
+    // erase the distance to the 5 293 ms one that raised the alert.
+    expect(fmtDurationMs(288)).toBe('288ms')
+    expect(fmtDurationMs(999)).toBe('999ms')
+    expect(fmtDurationMs(0)).toBe('0ms')
+  })
+
+  it('reads in seconds from one second, to one decimal', () => {
+    expect(fmtDurationMs(1000)).toBe('1.0s')
+    expect(fmtDurationMs(5293)).toBe('5.3s')
+    expect(fmtDurationMs(59_999)).toBe('60.0s')
+  })
+
+  it('is m:ss from a minute', () => {
+    expect(fmtDurationMs(60_000)).toBe('1:00')
+    expect(fmtDurationMs(725_000)).toBe('12:05')
+  })
+
+  it('null / unparseable is an em-dash — never a zero duration', () => {
+    expect(fmtDurationMs(null)).toBe('—')
+    expect(fmtDurationMs(undefined)).toBe('—')
+    expect(fmtDurationMs('')).toBe('—')
+    expect(fmtDurationMs('nonsense')).toBe('—')
   })
 })
 

@@ -11,7 +11,9 @@
  *
  * WHY THIS MODULE READS BOTH LANES, when every other engine module reads one.
  * The KPI row is the one place a §A figure and a §B figure are rendered side by
- * side: `genuineUsd` is USAGE (v_complete_usage — what the company consumed) and
+ * side: `genuineUsd` is USAGE (usage_rollup_daily — the day-grain rollup whose
+ * content is defined as an aggregate of v_complete_usage, so it IS what the
+ * company consumed; docs/design/usage-rollup-lane.md R5) and
  * `chargeableUsd` / `prevChargeableUsd` / `billedTokens` / `billedTeammates` are
  * BILL (the v_finance_* views — what is charged back). They are never summed
  * with each other here, and no returned field mixes them: the two lanes answer
@@ -61,7 +63,7 @@ interface ChargeRow extends Record<string, unknown> {
  * does have data in — cannot be introduced by editing one and not the other.
  */
 export interface ReportKpiScope {
-  /** §A clamp, over (`region_id`, `org_unit_id`) on `v_complete_usage`. */
+  /** §A clamp, over (`region_id`, `org_unit_id`) on `usage_rollup_daily` (same column names as the lane). */
   usage: UsageScope
   /** §B clamp, over (`region_id`, `cost_owning_unit_id`) on the `v_finance_*` views. */
   finance: FinanceScope
@@ -152,7 +154,7 @@ export interface ReportKpiCore {
    * are never mixed.
    */
   momDeltaPct: number | null
-  /** §A MAX(ts_event) in the window (`YYYY-MM-DD`), or null when the window has no data. */
+  /** §A MAX(day) in the window (`YYYY-MM-DD`), or null when the window has no data. */
   asOfDate: string | null
   /** §A earliest month with data in scope (`YYYY-MM`), or null. Cached (month-floor.ts). */
   monthFloor: string | null
@@ -181,87 +183,8 @@ export async function fetchKpiCore(
   window: UsageWindow,
   opts: { copilotChargeback: boolean; momMonthRange?: MonthRangeUtc | null; now?: Date },
 ): Promise<ReportKpiCore> {
-  /*
-   * Grouped per teammate FIRST, then rolled up, because `activeUsers` is a
-   * statement about PEOPLE WHO SPENT and that cannot be expressed on the flat
-   * rows: `COUNT(DISTINCT teammate_id)` counted anyone carrying a row at all,
-   * including a teammate whose whole window nets to $0. That is a different
-   * population from the one the per-person cohort divides by
-   * (`fetchAcrossPerPerson`, `HAVING SUM(cost_usd) > 0`), so the KPI row
-   * published a headcount its own median contradicted.
-   *
-   * ONE definition, written once: a person is ACTIVE when their Σ `cost_usd`
-   * over this scope and window is POSITIVE. `genuine`, `tokens` and `as_of` are
-   * unchanged — summing the per-teammate sums is the same total, and
-   * `teammate_id` is NOT NULL in every arm of `v_complete_usage` (0113), so the
-   * grouping introduces no phantom bucket.
-   */
-  const [totals] = [
-    ...(await tx.execute<KpiRow>(sql`
-      WITH per_person AS (
-        SELECT teammate_id,
-               SUM(cost_usd)  AS cost,
-               SUM(tokens)    AS tokens,
-               MAX(ts_event)  AS as_of
-        FROM v_complete_usage
-        WHERE ${scopeSql(scope.usage)}
-          AND ts_event >= ${window.startIso}::timestamptz
-          AND ts_event <  ${window.endIso}::timestamptz
-        GROUP BY teammate_id
-      )
-      SELECT COALESCE(SUM(cost), 0)::text AS genuine,
-             COALESCE(SUM(tokens), 0)::text AS tokens,
-             COUNT(*) FILTER (WHERE cost > 0)::int AS active_users,
-             to_char(MAX(as_of), 'YYYY-MM-DD') AS as_of
-      FROM per_person`)),
-  ]
-
-  /*
-   * Cached per scope (month-floor.ts). This query cannot be windowed — it IS a
-   * MIN over all history — so it was the one unbounded scan on the page.
-   *
-   * The predicate is taken from `scope.usage` rather than re-derived, and
-   * whole-company passes `null` rather than a `TRUE` clause: month-floor.ts
-   * branches on it to emit a query with no WHERE at all, which is the SQL both
-   * copies of this function issued before the extraction.
-   */
-  const floorMonth = await reportMonthFloor(tx, {
-    key: scope.monthFloorKey,
-    where: scope.usage.kind === 'clamped' ? scope.usage.predicate : null,
-  })
-
   const startDate = window.startIso.slice(0, 10)
   const endDate = window.endIso.slice(0, 10)
-  // §B ANTHROPIC chargeable + the per-teammate bill grain — BOTH from the DAILY bill lane
-  // (`v_finance_bill_chargeback`, `period_date`-windowed, clamped by the SAME finance
-  // predicate). The month view's Anthropic portion is EXACTLY this view rolled to month, so
-  // reading it daily is correct for ANY window — a non-month-aligned custom range no longer
-  // drops the charge to $0 — and keeps the Anthropic chargeable, billed teammates + billed
-  // tokens on ONE window+grain (so `avgChargePerBilledUser` divides same-day-set operands).
-  // Copilot is ABSENT from this view (pooled, per-org, no per-teammate row) by construction.
-  const [billed] = [
-    ...(await tx.execute<{ anthropic: string; billed_teammates: number; billed_tokens: string }>(sql`
-      SELECT COALESCE(SUM(bill_usd), 0)::text AS anthropic,
-             COUNT(DISTINCT teammate_id)::int AS billed_teammates,
-             COALESCE(SUM(bill_tokens), 0)::text AS billed_tokens
-      FROM v_finance_bill_chargeback
-      WHERE ${scopeSql(scope.finance)}
-        AND period_date >= ${startDate}::date AND period_date < ${endDate}::date`)),
-  ]
-
-  // §B COPILOT pooled net is POOLED-MONTHLY (month grain — no daily grain to window).
-  // Keep it month-grained (summed over every `period_month` inside the window) and fold
-  // it on top only in chargeback mode. Clamped by the SAME finance predicate. CHARGEABLE
-  // lanes only (registry-driven, mig 0085): copilot-license + copilot-usage;
-  // copilot-unclassified NEVER enters a chargeable figure (design D2).
-  const [charge] = [
-    ...(await tx.execute<{ copilot: string }>(sql`
-      SELECT COALESCE(SUM(charge_usd), 0)::text AS copilot
-      FROM v_finance_chargeback_month
-      WHERE ${scopeSql(scope.finance)}
-        AND tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})
-        AND period_month >= ${startDate}::date AND period_month < ${endDate}::date`)),
-  ]
 
   // §B chargeback MoM is computed ONLY for a fully-CLOSED calendar month. The bill lane
   // accrues intra-month, so an in-progress month is a PARTIAL MTD accrual; comparing it
@@ -273,28 +196,119 @@ export async function fetchKpiCore(
   // Closed = strictly BEFORE the current month (YYYY-MM string compare); `!==` would
   // treat a FUTURE month as closed vs the still-open current month (round-2 #5).
   const chargeMomClosed = opts.momMonthRange != null && opts.momMonthRange.month < monthKeyUtc(now)
-  let prevChargeableAnthropic = 0
-  let prevChargeableCopilot = 0
-  if (chargeMomClosed) {
-    const prevMonth = monthRangeUtc(
-      monthKeyUtc(new Date(opts.momMonthRange!.monthStartUtc.getTime() - 1)),
-    )
-    const prevStart = prevMonth.startIso.slice(0, 10)
-    const prevEnd = prevMonth.endIso.slice(0, 10)
-    // Anthropic = everything OUTSIDE the unified GitHub firewall set (every lane id
-    // + §A tool literal — never the narrower chargeback-lane list, r1 finding 1);
-    // copilot = the CHARGEABLE lanes only (unclassified never charges).
-    const [prevCharge] = [
-      ...(await tx.execute<ChargeRow>(sql`
+  // The gate reads only `opts`, so the prev-month §B read rides wave 1 below.
+  const prevMonth = chargeMomClosed
+    ? monthRangeUtc(monthKeyUtc(new Date(opts.momMonthRange!.monthStartUtc.getTime() - 1)))
+    : null
+
+  /*
+   * Concurrent issuance on ONE tx connection: postgres-js pipelines and answers
+   * in order — safe; the win is no per-query await gaps (fully one wave on
+   * prepared statements), not true parallelism
+   * (docs/design/request-floor-performance.md F5). The five reads below share
+   * no outputs; only the §A usage-MoM operand after the wave consumes a wave
+   * result (`totals.as_of` paces its window), so it alone stays sequential.
+   *
+   * Per-read notes:
+   *
+   * TOTALS — grouped per teammate FIRST, then rolled up, because `activeUsers`
+   * is a statement about PEOPLE WHO SPENT and that cannot be expressed on the
+   * flat rows: `COUNT(DISTINCT teammate_id)` counted anyone carrying a row at
+   * all, including a teammate whose whole window nets to $0. That is a
+   * different population from the one the per-person cohort divides by
+   * (`fetchAcrossPerPerson`, `HAVING SUM(cost_usd) > 0`), so the KPI row
+   * published a headcount its own median contradicted. ONE definition, written
+   * once: a person is ACTIVE when their Σ `cost_usd` over this scope and window
+   * is POSITIVE. `genuine`, `tokens` and `as_of` are unchanged — summing the
+   * per-teammate sums is the same total, and `teammate_id` is NOT NULL in the
+   * rollup grain (mig 0136), so the grouping introduces no phantom bucket.
+   * The read is `usage_rollup_daily`, not the live view (usage-rollup-lane.md
+   * R5): the rollup pre-sums the lane per (day, teammate, dims) cell, so
+   * per-teammate Σ over cells ≡ Σ over rows, and `MAX(day)` is the same
+   * frontier `MAX(ts_event)` dated to UTC was. The window is exact because
+   * `startIso`/`endIso` are UTC-midnight instants by construction
+   * (resolveReportWindow).
+   *
+   * FLOOR — cached per scope (month-floor.ts). This query cannot be windowed —
+   * it IS a MIN over all history — so it was the one unbounded scan on the
+   * page. The predicate is taken from `scope.usage` rather than re-derived, and
+   * whole-company passes `null` rather than a `TRUE` clause: month-floor.ts
+   * branches on it to emit a query with no WHERE at all, which is the SQL both
+   * copies of this function issued before the extraction.
+   *
+   * BILLED — §B ANTHROPIC chargeable + the per-teammate bill grain — BOTH from
+   * the DAILY bill lane (`v_finance_bill_chargeback`, `period_date`-windowed,
+   * clamped by the SAME finance predicate). The month view's Anthropic portion
+   * is EXACTLY this view rolled to month, so reading it daily is correct for
+   * ANY window — a non-month-aligned custom range no longer drops the charge to
+   * $0 — and keeps the Anthropic chargeable, billed teammates + billed tokens
+   * on ONE window+grain (so `avgChargePerBilledUser` divides same-day-set
+   * operands). Copilot is ABSENT from this view (pooled, per-org, no
+   * per-teammate row) by construction.
+   *
+   * CHARGE — §B COPILOT pooled net is POOLED-MONTHLY (month grain — no daily
+   * grain to window). Keep it month-grained (summed over every `period_month`
+   * inside the window) and fold it on top only in chargeback mode. Clamped by
+   * the SAME finance predicate. CHARGEABLE lanes only (registry-driven, mig
+   * 0085): copilot-license + copilot-usage; copilot-unclassified NEVER enters a
+   * chargeable figure (design D2).
+   *
+   * PREV CHARGE — Anthropic = everything OUTSIDE the unified GitHub firewall
+   * set (every lane id + §A tool literal — never the narrower chargeback-lane
+   * list, r1 finding 1); copilot = the CHARGEABLE lanes only (unclassified
+   * never charges).
+   */
+  const [totalsRows, floorMonth, billedRows, chargeRows, prevChargeRows] = await Promise.all([
+    tx.execute<KpiRow>(sql`
+      WITH per_person AS (
+        SELECT teammate_id,
+               SUM(cost_usd)  AS cost,
+               SUM(tokens)    AS tokens,
+               MAX(day)       AS as_of
+        FROM usage_rollup_daily
+        WHERE ${scopeSql(scope.usage)}
+          AND day >= ${startDate}::date
+          AND day <  ${endDate}::date
+        GROUP BY teammate_id
+      )
+      SELECT COALESCE(SUM(cost), 0)::text AS genuine,
+             COALESCE(SUM(tokens), 0)::text AS tokens,
+             COUNT(*) FILTER (WHERE cost > 0)::int AS active_users,
+             to_char(MAX(as_of), 'YYYY-MM-DD') AS as_of
+      FROM per_person`),
+    reportMonthFloor(tx, {
+      key: scope.monthFloorKey,
+      where: scope.usage.kind === 'clamped' ? scope.usage.predicate : null,
+    }),
+    tx.execute<{ anthropic: string; billed_teammates: number; billed_tokens: string }>(sql`
+      SELECT COALESCE(SUM(bill_usd), 0)::text AS anthropic,
+             COUNT(DISTINCT teammate_id)::int AS billed_teammates,
+             COALESCE(SUM(bill_tokens), 0)::text AS billed_tokens
+      FROM v_finance_bill_chargeback
+      WHERE ${scopeSql(scope.finance)}
+        AND period_date >= ${startDate}::date AND period_date < ${endDate}::date`),
+    tx.execute<{ copilot: string }>(sql`
+      SELECT COALESCE(SUM(charge_usd), 0)::text AS copilot
+      FROM v_finance_chargeback_month
+      WHERE ${scopeSql(scope.finance)}
+        AND tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})
+        AND period_month >= ${startDate}::date AND period_month < ${endDate}::date`),
+    prevMonth
+      ? tx.execute<ChargeRow>(sql`
         SELECT COALESCE(SUM(charge_usd) FILTER (WHERE tool NOT IN (${laneListSql(GITHUB_FIREWALL_EXCLUSIONS)})), 0)::text AS anthropic,
                COALESCE(SUM(charge_usd) FILTER (WHERE tool IN (${laneListSql(GITHUB_CHARGEABLE_LANES)})), 0)::text  AS copilot
         FROM v_finance_chargeback_month
         WHERE ${scopeSql(scope.finance)}
-          AND period_month >= ${prevStart}::date AND period_month < ${prevEnd}::date`)),
-    ]
-    prevChargeableAnthropic = Number(prevCharge?.anthropic ?? 0)
-    prevChargeableCopilot = Number(prevCharge?.copilot ?? 0)
-  }
+          AND period_month >= ${prevMonth.startIso.slice(0, 10)}::date AND period_month < ${prevMonth.endIso.slice(0, 10)}::date`)
+      : null,
+  ])
+  const [totals] = [...totalsRows]
+  const [billed] = [...billedRows]
+  const [charge] = [...chargeRows]
+  const [prevCharge] = prevChargeRows ? [...prevChargeRows] : []
+  // No closed prior month ⇒ no rows ⇒ both operands 0, exactly as before.
+  const prevChargeableAnthropic = Number(prevCharge?.anthropic ?? 0)
+  const prevChargeableCopilot = Number(prevCharge?.copilot ?? 0)
 
   // Anthropic from the DAILY bill lane (windowed); Copilot from the MONTH pool view.
   const anthropicChargeableUsd = Number(billed?.anthropic ?? 0)
@@ -325,12 +339,16 @@ export async function fetchKpiCore(
       new Date(`${asOfDate}T00:00:00.000Z`),
     )
     const [prev] = [
+      // Same rollup read as the headline (usage-rollup-lane.md R5) — both MoM
+      // operands come from one table, so the delta cannot straddle the rollup
+      // cadence. momPaceWindow's bounds are UTC-midnight instants (month starts
+      // plus whole days), so the ::date translation is exact.
       ...(await tx.execute<{ genuine: string }>(sql`
         SELECT COALESCE(SUM(cost_usd), 0)::text AS genuine
-        FROM v_complete_usage
+        FROM usage_rollup_daily
         WHERE ${scopeSql(scope.usage)}
-          AND ts_event >= ${momPrevWindow.startIso}::timestamptz
-          AND ts_event <  ${momPrevWindow.endIso}::timestamptz`)),
+          AND day >= ${momPrevWindow.startIso.slice(0, 10)}::date
+          AND day <  ${momPrevWindow.endIso.slice(0, 10)}::date`)),
     ]
     prevGenuineUsd = Number(prev?.genuine ?? 0)
   }

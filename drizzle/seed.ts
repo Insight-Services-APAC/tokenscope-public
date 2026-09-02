@@ -361,19 +361,32 @@ async function main() {
       ON CONFLICT DO NOTHING;
     `)
 
-    // Governance dials: migration 0049 owns the canonical platform rows, but
-    // SEED_RESET's TRUNCATE … CASCADE wipes them via the teammate→
+    // Governance dials: migrations 0049 and 0112 own the canonical platform
+    // rows, but SEED_RESET's TRUNCATE … CASCADE wipes them via the teammate→
     // governance_setting(updated_by) FK chain — same trap as rate_card above.
-    // Re-insert the platform defaults verbatim (values MUST mirror 0049);
-    // the partial-unique platform index makes ON CONFLICT DO NOTHING safe
-    // for append-mode runs.
+    // The resolver (server/utils/governance-settings.ts) has NO fallback: a
+    // missing platform key 500s every reader (org-units, velocity-watch, the
+    // reconciliation engine). Re-insert the platform defaults verbatim (values
+    // MUST mirror 0049 + 0112); the partial-unique platform index makes
+    // ON CONFLICT DO NOTHING safe for append-mode runs.
     await client.unsafe(`
       INSERT INTO governance_setting (key, scope_type, scope_id, value_numeric)
       VALUES
         ('velocity.spike_threshold',        'platform', NULL, 0.25),
         ('reconciliation.gap_threshold',    'platform', NULL, 0.1),
         ('reconciliation.epsilon_usd',      'platform', NULL, 0.01),
-        ('reconciliation.lag_buffer_hours', 'platform', NULL, 48)
+        ('reconciliation.lag_buffer_hours', 'platform', NULL, 48),
+        ('placement.default_unit_warn_threshold', 'platform', NULL, 20)
+      ON CONFLICT DO NOTHING
+    `)
+
+    // Governance cutover singleton (id = 1): migration 0104 seeds it, but the
+    // same TRUNCATE … CASCADE wipes it via its *_by → teammate FKs, and
+    // server/governance/cutover.ts throws on an absent row (every
+    // governance-cutover endpoint and the provider_org billing-edit lock 500).
+    // Mirrors 0104's INSERT; the PK makes ON CONFLICT DO NOTHING safe.
+    await client.unsafe(`
+      INSERT INTO governance_cutover_state (id, status) VALUES (1, 'not_started')
       ON CONFLICT DO NOTHING
     `)
 

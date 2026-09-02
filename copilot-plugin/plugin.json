@@ -1,6 +1,6 @@
 {
   "name": "tokenscope",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "TokenScope — attribute GitHub Copilot CLI token spend to projects via the Insight TokenScope platform. Trust the developer. Track every token.",
   "author": {
     "name": "Insight Services APAC"

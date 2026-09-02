@@ -64,6 +64,49 @@ describe('classifyProbeError — redaction', () => {
     expect(classifyProbeError(syntheticPostgresError('42P01', 'relation "foo" does not exist'), 'x').reason).toBe('relation-missing')
   })
 
+  /*
+   * A bounded probe must be able to name its OWN bound. Before 57014 was
+   * classified, a `statement_timeout` a probe set on its own transaction came
+   * back as 'unknown' — the uninformative-by-construction shape this module
+   * exists to avoid — and it must not read as 'driver-unreachable' either: the
+   * connection was fine and the server answered; the WORK was too slow, which
+   * is a different fix.
+   */
+  it("maps a cancelled statement (57014) to statement-timeout, not 'unknown' and not 'driver-unreachable'", () => {
+    vi.spyOn(consola, 'error').mockImplementation(() => {})
+    const reason = classifyProbeError(
+      syntheticPostgresError('57014', 'canceling statement due to statement timeout'),
+      'x',
+    ).reason
+    expect(reason).toBe('statement-timeout')
+    expect(reason).not.toBe('unknown')
+    expect(reason).not.toBe('driver-unreachable')
+  })
+
+  it('finds the code UNDER a wrapper — drizzle rethrows every driver error as DrizzleQueryError with the real one on .cause', () => {
+    vi.spyOn(consola, 'error').mockImplementation(() => {})
+    // drizzle-orm/pg-core/session.js: `throw new DrizzleQueryError(query, params, e)`.
+    // The wrapper has no `code` of its own, so reading only `err.code` would
+    // classify every database probe failure as 'unknown' — an "unavailable"
+    // signal that never says why.
+    const wrapped = Object.assign(new Error('Failed query: select * from v_cost_drift'), {
+      cause: syntheticPostgresError('42P01', 'relation "v_cost_drift" does not exist'),
+    })
+    const result = classifyProbeError(wrapped, 'x')
+    expect(result.reason).toBe('relation-missing')
+    // Still nothing from the wrapper's own message (which carries the SQL).
+    expect(JSON.stringify(result)).not.toContain('v_cost_drift')
+  })
+
+  it('a cyclic cause chain terminates instead of spinning', () => {
+    vi.spyOn(consola, 'error').mockImplementation(() => {})
+    const a: Error & { cause?: unknown } = new Error('a')
+    const b: Error & { cause?: unknown } = new Error('b')
+    a.cause = b
+    b.cause = a
+    expect(classifyProbeError(a, 'x').reason).toBe('unknown')
+  })
+
   it('an error with no recognisable code classifies as unknown, not a guess', () => {
     vi.spyOn(consola, 'error').mockImplementation(() => {})
     expect(classifyProbeError(new Error('something odd happened'), 'x').reason).toBe('unknown')

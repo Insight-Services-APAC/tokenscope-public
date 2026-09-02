@@ -1,40 +1,78 @@
 /*
- * Per-worker dispatch lock (ING-3) — at most ONE concurrent run per worker name.
+ * Worker dispatch lock (ING-3): at most one concurrent run per worker name.
  *
- * Nothing previously stopped the same worker running twice concurrently
- * (scheduler overlap/retry, manual + cron, or an HMAC replay inside the ±300 s
- * window). Verified consequences: duplicate inbox items (the hasOpenItem →
- * dispatchInbox check-then-insert in reconciliation/budget-alert/went-silent is
- * non-atomic, with no unique constraint on inbox_item) and Copilot per-span
- * double-pricing.
+ * A session-level advisory lock held on a connection that stays open for the
+ * whole run. Session-level on purpose: if the container dies mid-run, Postgres
+ * drops the connection and the lock with it, so a redeploy never leaves a
+ * worker undispatchable until the 180-minute reaper.
  *
- * Mechanism: a SESSION-level `pg_try_advisory_lock(hashtext('worker:'||name))`
- * held on a RESERVED connection for the duration of the run. Session grain (not
- * xact) because the worker must run OUTSIDE a transaction; the reserved
- * connection pins the lock to one backend so the unlock can't land on a
- * different pooled connection. If the process dies mid-run the backend closes
- * and PG releases the lock automatically — no stuck-lock janitor needed.
- * A hashtext collision between worker names only ever over-serializes.
+ * INVARIANT: the lock connection comes from a DEDICATED pool, never from the
+ * pool the run queries through. A dispatch that pins a request-pool connection
+ * for its lock and then needs a second one from the same pool deadlocks the
+ * whole batch once the pool is full (dev incident 2026-08-27 — see the
+ * regression test in tests/integration/workers/dispatch-worker.test.ts and
+ * CHANGELOG). A lock-pool holder never needs a second lock-pool connection, so
+ * this pool cannot starve itself.
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type { Sql } from 'postgres'
 import type * as schema from '../../drizzle/schema'
+import { clientUrl, createDbClient } from '../../drizzle/connect'
 
-// `drizzle(client, …)` exposes the underlying postgres-js pool as `$client`
-// (drizzle-orm/postgres-js driver.d.ts) — both getDb() and the test helper
-// construct the db that way. The bare PostgresJsDatabase type doesn't carry it,
-// so widen explicitly.
 type Db = PostgresJsDatabase<typeof schema> & { $client: Sql }
 
+/*
+ * One lock connection per in-flight worker. 32 workers exist and the largest
+ * cron coincidence (`:00`) dispatches 19, so 24 covers a full batch with room;
+ * a 25th dispatch queues on the lock pool (and never deadlocks: a holder needs
+ * nothing further from this pool). Short idle_timeout so the connections are
+ * gone between batches — they count against Dev PG's max_connections 50
+ * alongside the request (10) and worker (10) lanes per replica
+ * (server/db/index.ts).
+ */
+export const DISPATCH_LOCK_POOL_MAX = 24
+
+const lockClients = new WeakMap<object, Sql>()
+
+/**
+ * The lock pool for the database `db` points at — one per parent client,
+ * opened on first use. Throws if the parent was not made by createDbClient
+ * (its URL is unknown): falling back to reserving off the parent pool would
+ * silently restore the deadlock this module exists to prevent.
+ */
+function lockClientFor(db: Db): Sql {
+  const parent = db.$client
+  const existing = lockClients.get(parent)
+  if (existing) return existing
+  const url = clientUrl(parent)
+  if (!url) {
+    throw new Error(
+      'dispatch-lock: db client has no registered URL — open it via createDbClient (drizzle/connect.ts)',
+    )
+  }
+  const client = createDbClient(url, {
+    max: DISPATCH_LOCK_POOL_MAX,
+    idle_timeout: 30,
+    connect_timeout: 10,
+    connection: { TimeZone: 'UTC' },
+  })
+  lockClients.set(parent, client)
+  return client
+}
+
 export interface WorkerDispatchLock {
-  /** False when another dispatch of this worker currently holds the lock. */
   acquired: boolean
-  /** Release the lock + return the reserved connection to the pool. Idempotent. */
   release: () => Promise<void>
 }
 
+/**
+ * Try to take the per-worker advisory lock. Non-blocking: a second dispatch of
+ * the same name gets `acquired: false` immediately (the caller turns that into
+ * a 409). `release` unlocks and returns the connection to the lock pool; it is
+ * idempotent and safe to call on a loser.
+ */
 export async function acquireWorkerDispatchLock(db: Db, workerName: string): Promise<WorkerDispatchLock> {
-  const reserved = await db.$client.reserve()
+  const reserved = await lockClientFor(db).reserve()
   let released = false
   const release = async (): Promise<void> => {
     if (released) return
@@ -42,7 +80,7 @@ export async function acquireWorkerDispatchLock(db: Db, workerName: string): Pro
     try {
       await reserved`SELECT pg_advisory_unlock(hashtext('worker:' || ${workerName}))`
     } catch {
-      // The reserved backend is gone → PG already dropped the session lock.
+      // The connection may already be gone; Postgres released the lock with it.
     } finally {
       reserved.release()
     }
@@ -62,4 +100,12 @@ export async function acquireWorkerDispatchLock(db: Db, workerName: string): Pro
     reserved.release()
     throw err
   }
+}
+
+/** Close the lock pool opened for `db` (tests / shutdown). No-op if none was opened. */
+export async function closeDispatchLockPool(db: Db): Promise<void> {
+  const client = lockClients.get(db.$client)
+  if (!client) return
+  lockClients.delete(db.$client)
+  await client.end({ timeout: 5 })
 }

@@ -86,3 +86,11 @@ echo "[e2e] running playwright..."
 # so invoke @playwright/test's cli directly.
 # Optional spec filter(s) forwarded as "$@"; no args = whole suite.
 node node_modules/@playwright/test/cli.js test "$@" --project chromium
+
+# Admin navigation responsiveness gate (docs/design/admin-nav-responsiveness.md
+# D6). Lives here, not in the CI smoke job, because it needs the seeded persona
+# login this runner provides. Skipped when a spec filter narrows the run.
+if [ $# -eq 0 ]; then
+  echo "[e2e] admin navigation gate..."
+  BASE_URL="$URL" node tests/smoke/admin-nav-timing.mjs
+fi

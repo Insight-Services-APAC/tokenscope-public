@@ -29,6 +29,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import {
   fetchCostCentreKpis,
   fetchCostCentrePerPerson,
@@ -69,6 +70,9 @@ beforeAll(async () => {
     VALUES (${regionId}::uuid, 'ccw'::ltree, 'ccw-unit', 'CC Wrappers Unit', 'practice', true)`
   ;[{ id: ccId }] =
     await t.client<{ id: string }[]>`SELECT id::text AS id FROM org_unit WHERE code='ccw-unit'`
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 })
 
 afterAll(async () => {

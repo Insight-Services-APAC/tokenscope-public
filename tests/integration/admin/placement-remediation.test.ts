@@ -586,6 +586,27 @@ describe('C8b/C8c — owner diagnostics come from the walk\'s own rule', () => {
   const treeA = () =>
     call<TreeResponse>(orgUnitsGet, ev({ method: 'GET', session: adminA(), query: { region: regionAId } }))
 
+  it('the response shape survives the single-transaction read (admin-nav D5): same keys, same types', async () => {
+    // The three reads (tree, owner counts, threshold) now issue concurrently in
+    // ONE request transaction. A key snapshot is the cheapest proof that the
+    // consumer-facing shape did not move with them.
+    const tree = (await treeA()) as unknown as Record<string, unknown>
+    expect(Object.keys(tree).sort()).toEqual(['default_unit_warn_threshold', 'nodes'])
+    expect(typeof tree.default_unit_warn_threshold).toBe('number')
+    const nodes = tree.nodes as Array<Record<string, unknown>>
+    const node = nodes.find((n) => n.code === 'pra-core')!
+    expect(Object.keys(node).sort()).toEqual([
+      'code', 'default_occupancy', 'depth', 'display_name', 'id', 'is_cost_owning_unit', 'is_default',
+      'owners', 'parent_id', 'path', 'project_count', 'teammate_count', 'unit_type',
+    ])
+    expect(typeof node.depth).toBe('number')
+    expect(typeof node.teammate_count).toBe('number')
+    const owner = (node.owners as Array<Record<string, unknown>>)[0]!
+    expect(Object.keys(owner).sort()).toEqual([
+      'display_name', 'email', 'owns_unit_count', 'placement_status', 'places_count', 'teammate_id',
+    ])
+  })
+
   it('one active cost-owning unit → resolves, with the count THIS owner actually places', async () => {
     /*
      * A SECOND owner on the same unit, with a different number of chain

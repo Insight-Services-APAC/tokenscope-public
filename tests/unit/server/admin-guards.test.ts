@@ -19,7 +19,7 @@ vi.mock('../../../server/azure/network-check', () => ({
   runNetworkCheck: vi.fn().mockResolvedValue({
     generatedNote: 'x',
     vnetHint: 'x',
-    summary: { total: 0, ok: 0, zoneNotLinked: 0, unreachable: 0, dnsFail: 0 },
+    summary: { total: 0, ok: 0, dnsOnly: 0, zoneNotLinked: 0, unreachable: 0, dnsFail: 0 },
     records: [],
     itReport: 'x',
   }),

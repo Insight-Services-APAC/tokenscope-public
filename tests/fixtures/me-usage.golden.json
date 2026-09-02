@@ -1,0 +1,1843 @@
+{
+  "current-month:default": {
+    "headline": {
+      "lane": "usage",
+      "month": "2026-05",
+      "mtd_usd": "373.00",
+      "run_rate": {
+        "projected_month_end_usd": "770.87",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      },
+      "quota": {
+        "total_usd": "1600.00",
+        "base_allowance_usd": "100.00",
+        "allocation_usd": "1500.00",
+        "projection": {
+          "state": "not-at-this-pace"
+        }
+      }
+    },
+    "disclosure": {
+      "attributed_usage_usd": "373.00",
+      "provider_reported_usd": "350.00",
+      "chargeable_usd": "350.00",
+      "declared_personal": [],
+      "declared_personal_usage_usd": "0.00",
+      "tool_gaps": [
+        {
+          "tool": "claude-code",
+          "label": "Claude Code",
+          "attributed_usage_usd": "368.00",
+          "provider_reported_usd": "350.00",
+          "state": "nothing_to_disclose",
+          "has_open_review": false
+        },
+        {
+          "tool": "copilot-cli",
+          "label": "Copilot",
+          "attributed_usage_usd": "5.00",
+          "provider_reported_usd": "0.00",
+          "state": "nothing_to_disclose",
+          "has_open_review": false
+        }
+      ],
+      "cost_centre": "APAC · CTO APAC",
+      "billing_states": [
+        {
+          "tool": "claude-code",
+          "label": "Claude Code",
+          "state": "charged",
+          "usd": "350.00",
+          "subscription_type": null
+        }
+      ]
+    },
+    "month": {
+      "spend_usd": "368.00",
+      "tokens": 702000,
+      "quota_usd": "1600.00",
+      "base_allowance_usd": "100.00",
+      "allocation_usd": "1500.00",
+      "run_rate": {
+        "projected_month_end_usd": "760.53",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      }
+    },
+    "window_days": 30,
+    "series": [],
+    "series_by_model": [],
+    "mix": {
+      "by_model": [],
+      "by_token_type": [],
+      "buckets": [
+        {
+          "project_code": "PROJ-ASSIGNED-DRY",
+          "display_name": "Assigned No Spend",
+          "cost_usd": "0.00",
+          "tokens": 0,
+          "allocation_total_usd": "0.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "assigned",
+          "ended": false,
+          "tools": []
+        },
+        {
+          "project_code": "PROJ-DELIVERYX",
+          "display_name": "Delivery X",
+          "cost_usd": "250.00",
+          "tokens": 500000,
+          "allocation_total_usd": "1000.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "contributed",
+          "ended": false,
+          "tools": [
+            "claude-code"
+          ]
+        },
+        {
+          "project_code": "PROJ-SCHOLARSHIP",
+          "display_name": "Scholarship",
+          "cost_usd": "118.00",
+          "tokens": 202000,
+          "allocation_total_usd": "500.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "contributed",
+          "ended": false,
+          "tools": [
+            "claude-code"
+          ]
+        }
+      ],
+      "tagged_spend": [],
+      "unallocated": {
+        "total_cost_usd": "5.00",
+        "total_tokens": 10000,
+        "tagged_cost_usd": "0.00",
+        "untagged_cost_usd": "5.00",
+        "needs_tagging_count": 1,
+        "needs_tagging_sessions": 0,
+        "needs_tagging_days": 1,
+        "dismissed_cost_usd": "0.00",
+        "dismissed_count": 0,
+        "untaggable_cost_usd": "0.00",
+        "untaggable_count": 0,
+        "soft_cap_usd": "100.00",
+        "over_soft_cap": false
+      }
+    },
+    "fidelity": {
+      "window_cost_usd": "0.00",
+      "advisory_cost_usd": "0.00"
+    },
+    "insights": [],
+    "freshness_minutes_ago": "<stable>",
+    "aggregate_refreshed_minutes_ago": null,
+    "hero_tiles": {
+      "window": {
+        "from": "2026-05-01",
+        "to": "2026-05-31",
+        "is_month": true,
+        "month": "2026-05",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "spark_partial": true
+      },
+      "tiles": [
+        {
+          "key": "attributed",
+          "value_usd": "373.00",
+          "delta_pct": null,
+          "delta_empty_reason": "too early to compare",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            350,
+            0,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            11,
+            7
+          ]
+        },
+        {
+          "key": "budgeted",
+          "value_usd": "368.00",
+          "budgeted_share_pct": 0.9866,
+          "no_budget_usd": "0.00",
+          "untagged_usd": "5.00",
+          "delta_pct": null,
+          "delta_empty_reason": "too early to compare",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            350,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            11,
+            7
+          ]
+        },
+        {
+          "key": "quota",
+          "quota_basis": "window-month"
+        },
+        {
+          "key": "active_days",
+          "count": 4,
+          "days_so_far": 15,
+          "delta_abs": null,
+          "delta_empty_reason": "too early to compare",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            700000,
+            0,
+            0,
+            0,
+            0,
+            10000,
+            0,
+            0,
+            0,
+            1000,
+            1000
+          ]
+        }
+      ]
+    },
+    "context_residency": {
+      "window": {
+        "from": "2026-05-01",
+        "to": "2026-05-15"
+      },
+      "segments": [],
+      "remainder": null,
+      "totalUsd": 0
+    },
+    "session_economics": {
+      "sessions": 4,
+      "medianUsd": 55.5,
+      "p90Usd": 205,
+      "topShare": {
+        "n": 3,
+        "pct": 98.1
+      },
+      "arm": "otel"
+    },
+    "model_mix": {
+      "rows": [
+        {
+          "key": "claude-sonnet-4-6",
+          "label": "claude-sonnet-4-6",
+          "cost_usd": "368.00",
+          "tokens": 702000,
+          "gap_reason": null
+        },
+        {
+          "key": "__null_model:unmodelled-provider-cost",
+          "label": "Not split by model",
+          "cost_usd": "5.00",
+          "tokens": 10000,
+          "gap_reason": "unmodelled-provider-cost"
+        }
+      ],
+      "total_usd": "373.00"
+    },
+    "where_it_went": {
+      "total_usd": "373.00",
+      "untagged_usd": "5.00",
+      "no_project": {
+        "worklist_usd": "5.00",
+        "activity_tagged_usd": "0.00",
+        "dismissed_usd": "0.00",
+        "untaggable_usd": "0.00"
+      },
+      "rows": [
+        {
+          "project_id": "<stable>",
+          "code": "PROJ-DELIVERYX",
+          "display_name": "Delivery X",
+          "mine_usd": "250.00",
+          "project_total_usd": "550.00",
+          "is_member": false,
+          "allocation_usd": "1000.00"
+        },
+        {
+          "project_id": "<stable>",
+          "code": "PROJ-SCHOLARSHIP",
+          "display_name": "Scholarship",
+          "mine_usd": "118.00",
+          "project_total_usd": "118.00",
+          "is_member": false,
+          "allocation_usd": "500.00"
+        }
+      ]
+    },
+    "engagement": {
+      "claude": {
+        "sessions": 4,
+        "active_days": 3,
+        "web_searches": 0,
+        "surfaces": [
+          {
+            "tool": "claude-code",
+            "usd": "368.00"
+          }
+        ]
+      },
+      "copilot": null
+    },
+    "provider_truth": {
+      "month": "2026-05",
+      "mtd_usd": "350.00",
+      "run_rate": {
+        "projected_month_end_usd": "723.33",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      }
+    },
+    "page_freshness": {
+      "telemetry_minutes_ago": "<stable>",
+      "aggregate_minutes_ago": null,
+      "provider_feed_minutes_ago": "<stable>",
+      "worst_minutes_ago": "<stable>",
+      "settled_source": "<stable>"
+    },
+    "attribution_stall": null,
+    "providerStates": [
+      {
+        "vendor": "anthropic",
+        "state": "estimated",
+        "closeRun": false
+      },
+      {
+        "vendor": "github",
+        "state": "estimated",
+        "closeRun": false
+      },
+      {
+        "vendor": "usage",
+        "state": "estimated",
+        "closeRun": false
+      }
+    ],
+    "coverage": {
+      "applicable": true,
+      "denominator": null,
+      "connected": 0,
+      "nonConnected": 0,
+      "stale": false
+    }
+  },
+  "current-month:lens-chargeback": {
+    "headline": {
+      "lane": "chargeback",
+      "month": "2026-05",
+      "mtd_usd": "350.00",
+      "run_rate": {
+        "projected_month_end_usd": "723.33",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      },
+      "quota": null
+    },
+    "disclosure": {
+      "attributed_usage_usd": "373.00",
+      "provider_reported_usd": "350.00",
+      "chargeable_usd": "350.00",
+      "declared_personal": [],
+      "declared_personal_usage_usd": "0.00",
+      "tool_gaps": [
+        {
+          "tool": "claude-code",
+          "label": "Claude Code",
+          "attributed_usage_usd": "368.00",
+          "provider_reported_usd": "350.00",
+          "state": "nothing_to_disclose",
+          "has_open_review": false
+        },
+        {
+          "tool": "copilot-cli",
+          "label": "Copilot",
+          "attributed_usage_usd": "5.00",
+          "provider_reported_usd": "0.00",
+          "state": "nothing_to_disclose",
+          "has_open_review": false
+        }
+      ],
+      "cost_centre": "APAC · CTO APAC",
+      "billing_states": [
+        {
+          "tool": "claude-code",
+          "label": "Claude Code",
+          "state": "charged",
+          "usd": "350.00",
+          "subscription_type": null
+        }
+      ]
+    },
+    "month": {
+      "spend_usd": "368.00",
+      "tokens": 702000,
+      "quota_usd": "1600.00",
+      "base_allowance_usd": "100.00",
+      "allocation_usd": "1500.00",
+      "run_rate": {
+        "projected_month_end_usd": "760.53",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      }
+    },
+    "window_days": 30,
+    "series": [],
+    "series_by_model": [],
+    "mix": {
+      "by_model": [],
+      "by_token_type": [],
+      "buckets": [
+        {
+          "project_code": "PROJ-ASSIGNED-DRY",
+          "display_name": "Assigned No Spend",
+          "cost_usd": "0.00",
+          "tokens": 0,
+          "allocation_total_usd": "0.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "assigned",
+          "ended": false,
+          "tools": []
+        },
+        {
+          "project_code": "PROJ-DELIVERYX",
+          "display_name": "Delivery X",
+          "cost_usd": "250.00",
+          "tokens": 500000,
+          "allocation_total_usd": "1000.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "contributed",
+          "ended": false,
+          "tools": [
+            "claude-code"
+          ]
+        },
+        {
+          "project_code": "PROJ-SCHOLARSHIP",
+          "display_name": "Scholarship",
+          "cost_usd": "118.00",
+          "tokens": 202000,
+          "allocation_total_usd": "500.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "contributed",
+          "ended": false,
+          "tools": [
+            "claude-code"
+          ]
+        }
+      ],
+      "tagged_spend": [],
+      "unallocated": {
+        "total_cost_usd": "5.00",
+        "total_tokens": 10000,
+        "tagged_cost_usd": "0.00",
+        "untagged_cost_usd": "5.00",
+        "needs_tagging_count": 1,
+        "needs_tagging_sessions": 0,
+        "needs_tagging_days": 1,
+        "dismissed_cost_usd": "0.00",
+        "dismissed_count": 0,
+        "untaggable_cost_usd": "0.00",
+        "untaggable_count": 0,
+        "soft_cap_usd": "100.00",
+        "over_soft_cap": false
+      }
+    },
+    "fidelity": {
+      "window_cost_usd": "0.00",
+      "advisory_cost_usd": "0.00"
+    },
+    "insights": [],
+    "freshness_minutes_ago": "<stable>",
+    "aggregate_refreshed_minutes_ago": null,
+    "hero_tiles": {
+      "window": {
+        "from": "2026-05-01",
+        "to": "2026-05-31",
+        "is_month": true,
+        "month": "2026-05",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "spark_partial": true
+      },
+      "tiles": [
+        {
+          "key": "chargeable",
+          "value_usd": "350.00",
+          "delta_pct": null,
+          "delta_empty_reason": "too early to compare",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            350,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "key": "attributed",
+          "value_usd": "373.00",
+          "delta_pct": null,
+          "delta_empty_reason": "too early to compare",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            350,
+            0,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            11,
+            7
+          ]
+        },
+        {
+          "key": "quota",
+          "quota_basis": "window-month"
+        },
+        {
+          "key": "active_days",
+          "count": 4,
+          "days_so_far": 15,
+          "delta_abs": null,
+          "delta_empty_reason": "too early to compare",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            700000,
+            0,
+            0,
+            0,
+            0,
+            10000,
+            0,
+            0,
+            0,
+            1000,
+            1000
+          ]
+        }
+      ]
+    },
+    "context_residency": {
+      "window": {
+        "from": "2026-05-01",
+        "to": "2026-05-15"
+      },
+      "segments": [],
+      "remainder": null,
+      "totalUsd": 0
+    },
+    "session_economics": {
+      "sessions": 4,
+      "medianUsd": 55.5,
+      "p90Usd": 205,
+      "topShare": {
+        "n": 3,
+        "pct": 98.1
+      },
+      "arm": "otel"
+    },
+    "model_mix": {
+      "rows": [
+        {
+          "key": "claude-sonnet-4-6",
+          "label": "claude-sonnet-4-6",
+          "cost_usd": "368.00",
+          "tokens": 702000,
+          "gap_reason": null
+        },
+        {
+          "key": "__null_model:unmodelled-provider-cost",
+          "label": "Not split by model",
+          "cost_usd": "5.00",
+          "tokens": 10000,
+          "gap_reason": "unmodelled-provider-cost"
+        }
+      ],
+      "total_usd": "373.00"
+    },
+    "where_it_went": {
+      "total_usd": "373.00",
+      "untagged_usd": "5.00",
+      "no_project": {
+        "worklist_usd": "5.00",
+        "activity_tagged_usd": "0.00",
+        "dismissed_usd": "0.00",
+        "untaggable_usd": "0.00"
+      },
+      "rows": [
+        {
+          "project_id": "<stable>",
+          "code": "PROJ-DELIVERYX",
+          "display_name": "Delivery X",
+          "mine_usd": "250.00",
+          "project_total_usd": "550.00",
+          "is_member": false,
+          "allocation_usd": "1000.00"
+        },
+        {
+          "project_id": "<stable>",
+          "code": "PROJ-SCHOLARSHIP",
+          "display_name": "Scholarship",
+          "mine_usd": "118.00",
+          "project_total_usd": "118.00",
+          "is_member": false,
+          "allocation_usd": "500.00"
+        }
+      ]
+    },
+    "engagement": {
+      "claude": {
+        "sessions": 4,
+        "active_days": 3,
+        "web_searches": 0,
+        "surfaces": [
+          {
+            "tool": "claude-code",
+            "usd": "368.00"
+          }
+        ]
+      },
+      "copilot": null
+    },
+    "provider_truth": {
+      "month": "2026-05",
+      "mtd_usd": "350.00",
+      "run_rate": {
+        "projected_month_end_usd": "723.33",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      }
+    },
+    "page_freshness": {
+      "telemetry_minutes_ago": "<stable>",
+      "aggregate_minutes_ago": null,
+      "provider_feed_minutes_ago": "<stable>",
+      "worst_minutes_ago": "<stable>",
+      "settled_source": "<stable>"
+    },
+    "attribution_stall": null,
+    "providerStates": [
+      {
+        "vendor": "anthropic",
+        "state": "estimated",
+        "closeRun": false
+      },
+      {
+        "vendor": "github",
+        "state": "estimated",
+        "closeRun": false
+      },
+      {
+        "vendor": "usage",
+        "state": "estimated",
+        "closeRun": false
+      }
+    ],
+    "coverage": {
+      "applicable": true,
+      "denominator": null,
+      "connected": 0,
+      "nonConnected": 0,
+      "stale": false
+    }
+  },
+  "completed-month:2026-04": {
+    "headline": {
+      "lane": "usage",
+      "month": "2026-05",
+      "mtd_usd": "373.00",
+      "run_rate": {
+        "projected_month_end_usd": "770.87",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      },
+      "quota": {
+        "total_usd": "1600.00",
+        "base_allowance_usd": "100.00",
+        "allocation_usd": "1500.00",
+        "projection": {
+          "state": "not-at-this-pace"
+        }
+      }
+    },
+    "disclosure": {
+      "attributed_usage_usd": "373.00",
+      "provider_reported_usd": "350.00",
+      "chargeable_usd": "350.00",
+      "declared_personal": [],
+      "declared_personal_usage_usd": "0.00",
+      "tool_gaps": [
+        {
+          "tool": "claude-code",
+          "label": "Claude Code",
+          "attributed_usage_usd": "368.00",
+          "provider_reported_usd": "350.00",
+          "state": "nothing_to_disclose",
+          "has_open_review": false
+        },
+        {
+          "tool": "copilot-cli",
+          "label": "Copilot",
+          "attributed_usage_usd": "5.00",
+          "provider_reported_usd": "0.00",
+          "state": "nothing_to_disclose",
+          "has_open_review": false
+        }
+      ],
+      "cost_centre": "APAC · CTO APAC",
+      "billing_states": [
+        {
+          "tool": "claude-code",
+          "label": "Claude Code",
+          "state": "charged",
+          "usd": "350.00",
+          "subscription_type": null
+        }
+      ]
+    },
+    "month": {
+      "spend_usd": "368.00",
+      "tokens": 702000,
+      "quota_usd": "1600.00",
+      "base_allowance_usd": "100.00",
+      "allocation_usd": "1500.00",
+      "run_rate": {
+        "projected_month_end_usd": "760.53",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      }
+    },
+    "window_days": 30,
+    "series": [],
+    "series_by_model": [],
+    "mix": {
+      "by_model": [],
+      "by_token_type": [],
+      "buckets": [
+        {
+          "project_code": "PROJ-ASSIGNED-DRY",
+          "display_name": "Assigned No Spend",
+          "cost_usd": "0.00",
+          "tokens": 0,
+          "allocation_total_usd": "0.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "assigned",
+          "ended": false,
+          "tools": []
+        },
+        {
+          "project_code": "PROJ-DELIVERYX",
+          "display_name": "Delivery X",
+          "cost_usd": "250.00",
+          "tokens": 500000,
+          "allocation_total_usd": "1000.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "contributed",
+          "ended": false,
+          "tools": [
+            "claude-code"
+          ]
+        },
+        {
+          "project_code": "PROJ-SCHOLARSHIP",
+          "display_name": "Scholarship",
+          "cost_usd": "118.00",
+          "tokens": 202000,
+          "allocation_total_usd": "500.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "contributed",
+          "ended": false,
+          "tools": [
+            "claude-code"
+          ]
+        }
+      ],
+      "tagged_spend": [],
+      "unallocated": {
+        "total_cost_usd": "5.00",
+        "total_tokens": 10000,
+        "tagged_cost_usd": "0.00",
+        "untagged_cost_usd": "5.00",
+        "needs_tagging_count": 1,
+        "needs_tagging_sessions": 0,
+        "needs_tagging_days": 1,
+        "dismissed_cost_usd": "0.00",
+        "dismissed_count": 0,
+        "untaggable_cost_usd": "0.00",
+        "untaggable_count": 0,
+        "soft_cap_usd": "100.00",
+        "over_soft_cap": false
+      }
+    },
+    "fidelity": {
+      "window_cost_usd": "0.00",
+      "advisory_cost_usd": "0.00"
+    },
+    "insights": [],
+    "freshness_minutes_ago": "<stable>",
+    "aggregate_refreshed_minutes_ago": null,
+    "hero_tiles": {
+      "window": {
+        "from": "2026-04-01",
+        "to": "2026-04-30",
+        "is_month": true,
+        "month": "2026-04",
+        "days_elapsed": 30,
+        "days_in_month": 30,
+        "spark_partial": false
+      },
+      "tiles": [
+        {
+          "key": "attributed",
+          "value_usd": "13.00",
+          "delta_pct": null,
+          "delta_empty_reason": "too early to compare",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            13,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "key": "budgeted",
+          "value_usd": "13.00",
+          "budgeted_share_pct": 1,
+          "no_budget_usd": "0.00",
+          "untagged_usd": "0.00",
+          "delta_pct": null,
+          "delta_empty_reason": "too early to compare",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            13,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "key": "quota",
+          "quota_basis": "not-current-month"
+        },
+        {
+          "key": "active_days",
+          "count": 1,
+          "days_so_far": 30,
+          "delta_abs": null,
+          "delta_empty_reason": "too early to compare",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1000,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    "context_residency": {
+      "window": {
+        "from": "2026-04-01",
+        "to": "2026-04-30"
+      },
+      "segments": [],
+      "remainder": null,
+      "totalUsd": 0
+    },
+    "session_economics": {
+      "sessions": 1,
+      "medianUsd": 13,
+      "p90Usd": 13,
+      "topShare": {
+        "n": 3,
+        "pct": 100
+      },
+      "arm": "otel"
+    },
+    "model_mix": {
+      "rows": [
+        {
+          "key": "claude-sonnet-4-6",
+          "label": "claude-sonnet-4-6",
+          "cost_usd": "13.00",
+          "tokens": 1000,
+          "gap_reason": null
+        }
+      ],
+      "total_usd": "13.00"
+    },
+    "where_it_went": {
+      "total_usd": "13.00",
+      "untagged_usd": "0.00",
+      "no_project": {
+        "worklist_usd": "0.00",
+        "activity_tagged_usd": "0.00",
+        "dismissed_usd": "0.00",
+        "untaggable_usd": "0.00"
+      },
+      "rows": [
+        {
+          "project_id": "<stable>",
+          "code": "PROJ-SCHOLARSHIP",
+          "display_name": "Scholarship",
+          "mine_usd": "13.00",
+          "project_total_usd": "13.00",
+          "is_member": false,
+          "allocation_usd": "500.00"
+        }
+      ]
+    },
+    "engagement": {
+      "claude": {
+        "sessions": 1,
+        "active_days": 1,
+        "web_searches": 0,
+        "surfaces": [
+          {
+            "tool": "claude-code",
+            "usd": "13.00"
+          }
+        ]
+      },
+      "copilot": null
+    },
+    "provider_truth": {
+      "month": "2026-05",
+      "mtd_usd": "350.00",
+      "run_rate": {
+        "projected_month_end_usd": "723.33",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      }
+    },
+    "page_freshness": {
+      "telemetry_minutes_ago": "<stable>",
+      "aggregate_minutes_ago": null,
+      "provider_feed_minutes_ago": "<stable>",
+      "worst_minutes_ago": "<stable>",
+      "settled_source": "<stable>"
+    },
+    "attribution_stall": null,
+    "providerStates": [
+      {
+        "vendor": "anthropic",
+        "state": "settling",
+        "settlesAt": "2026-05-31T00:00:00.000Z",
+        "closeRun": false
+      },
+      {
+        "vendor": "github",
+        "state": "settled",
+        "settlesAt": "2026-05-08T00:00:00.000Z",
+        "closeRun": false
+      },
+      {
+        "vendor": "usage",
+        "state": "settling",
+        "settlesAt": "2026-06-05T00:00:00.000Z",
+        "closeRun": false
+      }
+    ],
+    "coverage": {
+      "applicable": true,
+      "denominator": null,
+      "connected": 0,
+      "nonConnected": 0,
+      "stale": false
+    }
+  },
+  "range-to-today": {
+    "headline": {
+      "lane": "usage",
+      "month": "2026-05",
+      "mtd_usd": "373.00",
+      "run_rate": {
+        "projected_month_end_usd": "770.87",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      },
+      "quota": {
+        "total_usd": "1600.00",
+        "base_allowance_usd": "100.00",
+        "allocation_usd": "1500.00",
+        "projection": {
+          "state": "not-at-this-pace"
+        }
+      }
+    },
+    "disclosure": {
+      "attributed_usage_usd": "373.00",
+      "provider_reported_usd": "350.00",
+      "chargeable_usd": "350.00",
+      "declared_personal": [],
+      "declared_personal_usage_usd": "0.00",
+      "tool_gaps": [
+        {
+          "tool": "claude-code",
+          "label": "Claude Code",
+          "attributed_usage_usd": "368.00",
+          "provider_reported_usd": "350.00",
+          "state": "nothing_to_disclose",
+          "has_open_review": false
+        },
+        {
+          "tool": "copilot-cli",
+          "label": "Copilot",
+          "attributed_usage_usd": "5.00",
+          "provider_reported_usd": "0.00",
+          "state": "nothing_to_disclose",
+          "has_open_review": false
+        }
+      ],
+      "cost_centre": "APAC · CTO APAC",
+      "billing_states": [
+        {
+          "tool": "claude-code",
+          "label": "Claude Code",
+          "state": "charged",
+          "usd": "350.00",
+          "subscription_type": null
+        }
+      ]
+    },
+    "month": {
+      "spend_usd": "368.00",
+      "tokens": 702000,
+      "quota_usd": "1600.00",
+      "base_allowance_usd": "100.00",
+      "allocation_usd": "1500.00",
+      "run_rate": {
+        "projected_month_end_usd": "760.53",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      }
+    },
+    "window_days": 30,
+    "series": [],
+    "series_by_model": [],
+    "mix": {
+      "by_model": [],
+      "by_token_type": [],
+      "buckets": [
+        {
+          "project_code": "PROJ-ASSIGNED-DRY",
+          "display_name": "Assigned No Spend",
+          "cost_usd": "0.00",
+          "tokens": 0,
+          "allocation_total_usd": "0.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "assigned",
+          "ended": false,
+          "tools": []
+        },
+        {
+          "project_code": "PROJ-DELIVERYX",
+          "display_name": "Delivery X",
+          "cost_usd": "250.00",
+          "tokens": 500000,
+          "allocation_total_usd": "1000.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "contributed",
+          "ended": false,
+          "tools": [
+            "claude-code"
+          ]
+        },
+        {
+          "project_code": "PROJ-SCHOLARSHIP",
+          "display_name": "Scholarship",
+          "cost_usd": "118.00",
+          "tokens": 202000,
+          "allocation_total_usd": "500.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "contributed",
+          "ended": false,
+          "tools": [
+            "claude-code"
+          ]
+        }
+      ],
+      "tagged_spend": [],
+      "unallocated": {
+        "total_cost_usd": "5.00",
+        "total_tokens": 10000,
+        "tagged_cost_usd": "0.00",
+        "untagged_cost_usd": "5.00",
+        "needs_tagging_count": 1,
+        "needs_tagging_sessions": 0,
+        "needs_tagging_days": 1,
+        "dismissed_cost_usd": "0.00",
+        "dismissed_count": 0,
+        "untaggable_cost_usd": "0.00",
+        "untaggable_count": 0,
+        "soft_cap_usd": "100.00",
+        "over_soft_cap": false
+      }
+    },
+    "fidelity": {
+      "window_cost_usd": "0.00",
+      "advisory_cost_usd": "0.00"
+    },
+    "insights": [],
+    "freshness_minutes_ago": "<stable>",
+    "aggregate_refreshed_minutes_ago": null,
+    "hero_tiles": {
+      "window": {
+        "from": "2026-05-01",
+        "to": "2026-05-15",
+        "is_month": false,
+        "month": null,
+        "days_elapsed": null,
+        "days_in_month": null,
+        "spark_partial": true
+      },
+      "tiles": [
+        {
+          "key": "attributed",
+          "value_usd": "373.00",
+          "delta_pct": null,
+          "delta_empty_reason": "no month-on-month for a custom range",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            350,
+            0,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            11,
+            7
+          ]
+        },
+        {
+          "key": "budgeted",
+          "value_usd": "368.00",
+          "budgeted_share_pct": 0.9866,
+          "no_budget_usd": "0.00",
+          "untagged_usd": "5.00",
+          "delta_pct": null,
+          "delta_empty_reason": "no month-on-month for a custom range",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            350,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            11,
+            7
+          ]
+        },
+        {
+          "key": "quota",
+          "quota_basis": "custom-range"
+        },
+        {
+          "key": "active_days",
+          "count": 4,
+          "days_so_far": 15,
+          "delta_abs": null,
+          "delta_empty_reason": "no month-on-month for a custom range",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            700000,
+            0,
+            0,
+            0,
+            0,
+            10000,
+            0,
+            0,
+            0,
+            1000,
+            1000
+          ]
+        }
+      ]
+    },
+    "context_residency": {
+      "window": {
+        "from": "2026-05-01",
+        "to": "2026-05-15"
+      },
+      "segments": [],
+      "remainder": null,
+      "totalUsd": 0
+    },
+    "session_economics": {
+      "sessions": 4,
+      "medianUsd": 55.5,
+      "p90Usd": 205,
+      "topShare": {
+        "n": 3,
+        "pct": 98.1
+      },
+      "arm": "otel"
+    },
+    "model_mix": {
+      "rows": [
+        {
+          "key": "claude-sonnet-4-6",
+          "label": "claude-sonnet-4-6",
+          "cost_usd": "368.00",
+          "tokens": 702000,
+          "gap_reason": null
+        },
+        {
+          "key": "__null_model:unmodelled-provider-cost",
+          "label": "Not split by model",
+          "cost_usd": "5.00",
+          "tokens": 10000,
+          "gap_reason": "unmodelled-provider-cost"
+        }
+      ],
+      "total_usd": "373.00"
+    },
+    "where_it_went": {
+      "total_usd": "373.00",
+      "untagged_usd": "5.00",
+      "no_project": {
+        "worklist_usd": "5.00",
+        "activity_tagged_usd": "0.00",
+        "dismissed_usd": "0.00",
+        "untaggable_usd": "0.00"
+      },
+      "rows": [
+        {
+          "project_id": "<stable>",
+          "code": "PROJ-DELIVERYX",
+          "display_name": "Delivery X",
+          "mine_usd": "250.00",
+          "project_total_usd": "550.00",
+          "is_member": false
+        },
+        {
+          "project_id": "<stable>",
+          "code": "PROJ-SCHOLARSHIP",
+          "display_name": "Scholarship",
+          "mine_usd": "118.00",
+          "project_total_usd": "118.00",
+          "is_member": false
+        }
+      ]
+    },
+    "engagement": {
+      "claude": {
+        "sessions": 4,
+        "active_days": 3,
+        "web_searches": 0,
+        "surfaces": [
+          {
+            "tool": "claude-code",
+            "usd": "368.00"
+          }
+        ]
+      },
+      "copilot": null
+    },
+    "provider_truth": {
+      "month": "2026-05",
+      "mtd_usd": "350.00",
+      "run_rate": {
+        "projected_month_end_usd": "723.33",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      }
+    },
+    "page_freshness": {
+      "telemetry_minutes_ago": "<stable>",
+      "aggregate_minutes_ago": null,
+      "provider_feed_minutes_ago": "<stable>",
+      "worst_minutes_ago": "<stable>",
+      "settled_source": "<stable>"
+    },
+    "attribution_stall": null,
+    "providerStates": [
+      {
+        "vendor": "anthropic",
+        "state": "estimated",
+        "closeRun": false
+      },
+      {
+        "vendor": "github",
+        "state": "estimated",
+        "closeRun": false
+      },
+      {
+        "vendor": "usage",
+        "state": "estimated",
+        "closeRun": false
+      }
+    ],
+    "coverage": {
+      "applicable": true,
+      "denominator": null,
+      "connected": 0,
+      "nonConnected": 0,
+      "stale": false
+    }
+  },
+  "range-settled": {
+    "headline": {
+      "lane": "usage",
+      "month": "2026-05",
+      "mtd_usd": "373.00",
+      "run_rate": {
+        "projected_month_end_usd": "770.87",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      },
+      "quota": {
+        "total_usd": "1600.00",
+        "base_allowance_usd": "100.00",
+        "allocation_usd": "1500.00",
+        "projection": {
+          "state": "not-at-this-pace"
+        }
+      }
+    },
+    "disclosure": {
+      "attributed_usage_usd": "373.00",
+      "provider_reported_usd": "350.00",
+      "chargeable_usd": "350.00",
+      "declared_personal": [],
+      "declared_personal_usage_usd": "0.00",
+      "tool_gaps": [
+        {
+          "tool": "claude-code",
+          "label": "Claude Code",
+          "attributed_usage_usd": "368.00",
+          "provider_reported_usd": "350.00",
+          "state": "nothing_to_disclose",
+          "has_open_review": false
+        },
+        {
+          "tool": "copilot-cli",
+          "label": "Copilot",
+          "attributed_usage_usd": "5.00",
+          "provider_reported_usd": "0.00",
+          "state": "nothing_to_disclose",
+          "has_open_review": false
+        }
+      ],
+      "cost_centre": "APAC · CTO APAC",
+      "billing_states": [
+        {
+          "tool": "claude-code",
+          "label": "Claude Code",
+          "state": "charged",
+          "usd": "350.00",
+          "subscription_type": null
+        }
+      ]
+    },
+    "month": {
+      "spend_usd": "368.00",
+      "tokens": 702000,
+      "quota_usd": "1600.00",
+      "base_allowance_usd": "100.00",
+      "allocation_usd": "1500.00",
+      "run_rate": {
+        "projected_month_end_usd": "760.53",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      }
+    },
+    "window_days": 30,
+    "series": [],
+    "series_by_model": [],
+    "mix": {
+      "by_model": [],
+      "by_token_type": [],
+      "buckets": [
+        {
+          "project_code": "PROJ-ASSIGNED-DRY",
+          "display_name": "Assigned No Spend",
+          "cost_usd": "0.00",
+          "tokens": 0,
+          "allocation_total_usd": "0.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "assigned",
+          "ended": false,
+          "tools": []
+        },
+        {
+          "project_code": "PROJ-DELIVERYX",
+          "display_name": "Delivery X",
+          "cost_usd": "250.00",
+          "tokens": 500000,
+          "allocation_total_usd": "1000.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "contributed",
+          "ended": false,
+          "tools": [
+            "claude-code"
+          ]
+        },
+        {
+          "project_code": "PROJ-SCHOLARSHIP",
+          "display_name": "Scholarship",
+          "cost_usd": "118.00",
+          "tokens": 202000,
+          "allocation_total_usd": "500.00",
+          "allocation_mode": "shared_pool",
+          "is_active_now": false,
+          "source": "contributed",
+          "ended": false,
+          "tools": [
+            "claude-code"
+          ]
+        }
+      ],
+      "tagged_spend": [],
+      "unallocated": {
+        "total_cost_usd": "5.00",
+        "total_tokens": 10000,
+        "tagged_cost_usd": "0.00",
+        "untagged_cost_usd": "5.00",
+        "needs_tagging_count": 1,
+        "needs_tagging_sessions": 0,
+        "needs_tagging_days": 1,
+        "dismissed_cost_usd": "0.00",
+        "dismissed_count": 0,
+        "untaggable_cost_usd": "0.00",
+        "untaggable_count": 0,
+        "soft_cap_usd": "100.00",
+        "over_soft_cap": false
+      }
+    },
+    "fidelity": {
+      "window_cost_usd": "0.00",
+      "advisory_cost_usd": "0.00"
+    },
+    "insights": [],
+    "freshness_minutes_ago": "<stable>",
+    "aggregate_refreshed_minutes_ago": null,
+    "hero_tiles": {
+      "window": {
+        "from": "2026-04-01",
+        "to": "2026-04-30",
+        "is_month": false,
+        "month": null,
+        "days_elapsed": null,
+        "days_in_month": null,
+        "spark_partial": false
+      },
+      "tiles": [
+        {
+          "key": "attributed",
+          "value_usd": "13.00",
+          "delta_pct": null,
+          "delta_empty_reason": "no month-on-month for a custom range",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            13,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "key": "budgeted",
+          "value_usd": "13.00",
+          "budgeted_share_pct": 1,
+          "no_budget_usd": "0.00",
+          "untagged_usd": "0.00",
+          "delta_pct": null,
+          "delta_empty_reason": "no month-on-month for a custom range",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            13,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "key": "quota",
+          "quota_basis": "custom-range"
+        },
+        {
+          "key": "active_days",
+          "count": 1,
+          "days_so_far": 30,
+          "delta_abs": null,
+          "delta_empty_reason": "no month-on-month for a custom range",
+          "spark": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1000,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    "context_residency": {
+      "window": {
+        "from": "2026-04-01",
+        "to": "2026-04-30"
+      },
+      "segments": [],
+      "remainder": null,
+      "totalUsd": 0
+    },
+    "session_economics": {
+      "sessions": 1,
+      "medianUsd": 13,
+      "p90Usd": 13,
+      "topShare": {
+        "n": 3,
+        "pct": 100
+      },
+      "arm": "otel"
+    },
+    "model_mix": {
+      "rows": [
+        {
+          "key": "claude-sonnet-4-6",
+          "label": "claude-sonnet-4-6",
+          "cost_usd": "13.00",
+          "tokens": 1000,
+          "gap_reason": null
+        }
+      ],
+      "total_usd": "13.00"
+    },
+    "where_it_went": {
+      "total_usd": "13.00",
+      "untagged_usd": "0.00",
+      "no_project": {
+        "worklist_usd": "0.00",
+        "activity_tagged_usd": "0.00",
+        "dismissed_usd": "0.00",
+        "untaggable_usd": "0.00"
+      },
+      "rows": [
+        {
+          "project_id": "<stable>",
+          "code": "PROJ-SCHOLARSHIP",
+          "display_name": "Scholarship",
+          "mine_usd": "13.00",
+          "project_total_usd": "13.00",
+          "is_member": false
+        }
+      ]
+    },
+    "engagement": {
+      "claude": {
+        "sessions": 1,
+        "active_days": 1,
+        "web_searches": 0,
+        "surfaces": [
+          {
+            "tool": "claude-code",
+            "usd": "13.00"
+          }
+        ]
+      },
+      "copilot": null
+    },
+    "provider_truth": {
+      "month": "2026-05",
+      "mtd_usd": "350.00",
+      "run_rate": {
+        "projected_month_end_usd": "723.33",
+        "days_elapsed": 15,
+        "days_in_month": 31,
+        "method": "linear-mtd",
+        "is_projection": true
+      }
+    },
+    "page_freshness": {
+      "telemetry_minutes_ago": "<stable>",
+      "aggregate_minutes_ago": null,
+      "provider_feed_minutes_ago": "<stable>",
+      "worst_minutes_ago": "<stable>",
+      "settled_source": "<stable>"
+    },
+    "attribution_stall": null,
+    "providerStates": [
+      {
+        "vendor": "anthropic",
+        "state": "settling",
+        "settlesAt": "2026-05-31T00:00:00.000Z",
+        "closeRun": false
+      },
+      {
+        "vendor": "github",
+        "state": "settled",
+        "settlesAt": "2026-05-08T00:00:00.000Z",
+        "closeRun": false
+      },
+      {
+        "vendor": "usage",
+        "state": "settling",
+        "settlesAt": "2026-06-05T00:00:00.000Z",
+        "closeRun": false
+      }
+    ],
+    "coverage": {
+      "applicable": true,
+      "denominator": null,
+      "connected": 0,
+      "nonConnected": 0,
+      "stale": false
+    }
+  }
+}

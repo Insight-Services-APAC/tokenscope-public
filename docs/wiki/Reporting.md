@@ -2,11 +2,11 @@
 
 > **Status:** as-built reference + the bar new reporting work is audited
 > against. Canonical model:
-> [`docs/design/provider-billing-attribution-model.md`](../design/provider-billing-attribution-model.md)
+> `docs/design/provider-billing-attribution-model.md`
 > (§A / §B). Governing decisions:
-> [ADR-0010](../decisions/0010-cost-accounting-showback-chargeback-and-billing-models.md)
+> ADR-0010
 > (showback vs chargeback) and
-> [ADR-0011](../decisions/0011-provider-governance-is-data-not-configuration.md)
+> ADR-0011
 > (governance is data, not config).
 >
 > **Not everything here is built yet.** Workstream B (2026-07-29) built the
@@ -88,7 +88,7 @@ outlives the page).
 | Drivers axis | `lane=usage` reads | `lane=chargeback` reads |
 | --- | --- | --- |
 | teammate · cost centre (practice) · surface · model | `v_complete_usage` | `provider_usage_fact`, **per provider** |
-| **budget** (`axis=project`) | `v_complete_usage` | **`v_complete_usage` — unchanged, and declared `attributed`** |
+| **budget** (`axis=project`) | `usage_rollup_daily` (mig 0138 — same seam SQL, rollup-sourced; ≤ one cadence behind the live view, item 13) | **`usage_rollup_daily` — same source both lanes, declared `attributed`** |
 
 (`axis=model` is served but is not in the Top-drivers axis picker — it is the
 dedicated Top models card's own fetch; see §2 Axis 1.)
@@ -454,6 +454,38 @@ never by axis alone: see rule 8.
    - A new report GET should wrap its computation in `withReportCache` with
      the same key discipline; `/reports/meta` (the live grant probe) and
      `/reports/export` stay uncached server-side by design.
+
+13. **Region report figures are served from `usage_rollup_daily`**, the
+   day-grain rollup of `v_complete_usage` written by the `usage-rollup` worker
+   (mig 0136), not recomputed from the live lane per request. `/api/v1/me/usage`
+   reads it too, but only for SETTLED days and only behind a gate that refuses
+   unless the rollup is provably complete AND current for that caller and
+   window; today is always live there, and a refusal puts the whole window back
+   on the view. So the freshness below describes the region reports; the My
+   usage page either matches the live lane or says which basis it used
+   (`page_freshness.settled_source`). What the lag means for the reports:
+   - A figure may lag the live §A lane by up to the worker cadence
+     (**15 minutes**) — plus, for retroactive mutations that change history
+     with no timestamp (a quarantine flip, a placement re-home), however many
+     runs the `usage_rollup_refresh` queue takes to reach the request: the
+     drain is capped per run, so a mass correction (a bulk re-home) clears in
+     batches across successive 15-minute ticks rather than on the very next
+     one. All of it sits far inside the settlement-state tolerances of §4,
+     which are hours-grain.
+   - A region report row and a drill that reads the live view can therefore
+     disagree by ≤ one cadence on the still-filling day. Transient and
+     self-healing — never a reconciliation finding.
+   - **§B is never rollup-fed.** Chargeback and every billed figure read the
+     bill lane directly; the rollup serves §A region reads only. (The one
+     §A read the chargeback lens shares is the project/budget drivers axis
+     above — attributed by declaration, rollup-sourced like the rest of §A.)
+   - **The project (budget) drivers axis and the Business-Unit population
+     read are rollup-sourced too** (mig 0138): `identity_state` joined the
+     rollup grain so the seam's provisional-exclusion filter applies
+     identically on either source, and the seam only accepts the rollup for
+     exact UTC-midnight windows. The drivers DRILL still reads the live
+     view, so a drill can disagree with the axis row that opened it by ≤ one
+     cadence — same transient class as the region rows above.
 
 ## 3a. The clock — what "today" means on a report
 
@@ -847,7 +879,7 @@ chargeback as a **charge** (`NUXT_COPILOT_CHARGEBACK_ENABLED`, default off →
 only — `copilot-pool-bill` writes `copilot_pool_bill` regardless.
 
 Report access grants are layered on top by
-[`shared/auth/report-visibility.ts`](../design/report-visibility-policy.md) — the
+`shared/auth/report-visibility.ts` (`docs/design/report-visibility-policy.md`) — the
 documented exception to the "every handler has `requireRole`" rule.
 
 

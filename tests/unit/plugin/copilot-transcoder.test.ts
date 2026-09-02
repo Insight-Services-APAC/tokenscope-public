@@ -489,7 +489,7 @@ describe('transcodeChatSpans — query_source (aux-overhead activation)', () => 
 
   it("auto-initiated chat → query_source 'auto' (the aux lane the detector counts)", () => {
     // 'auto' is the Copilot analogue of Claude's aux lanes (e.g.
-    // generate_session_title): a system/background call, not the user's
+    // side_question): a system/background call, not the user's
     // conversation. The detector keys only on '== main' vs not.
     const recs = transcodeChatSpans([makeChatSpan({ 'github.copilot.initiator': 'auto' })], {
       instanceId: TEST_INSTANCE_ID,

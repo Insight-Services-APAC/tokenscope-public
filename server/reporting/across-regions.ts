@@ -10,8 +10,11 @@
  * the entire company, exactly as intended.
  *
  * ONE lane per axis (build-design §4):
- *   - KPIs / region cards / drivers / concentration → `v_complete_usage` (the §A
- *     completeness lane: attribution ∪ the API−OTel gap), `region_id` grain.
+ *   - KPIs / region cards / drivers / concentration → the §A completeness lane
+ *     (attribution ∪ the API−OTel gap), read through `usage_rollup_daily` — the
+ *     day-grain rollup DEFINED as an aggregate of `v_complete_usage`
+ *     (docs/design/usage-rollup-lane.md R5; seasonality alone stays on the
+ *     view — it is off the page's request path), `region_id` grain.
  *   - the monetised genuine-vs-chargeable pair → `v_finance_chargeback_month`
  *     (the §B bill lane), region grain. The Copilot chargeable is gated on
  *     `copilot.mode` (build-design §6 interim labelling) — held back with a
@@ -170,7 +173,8 @@ export async function fetchAcrossKpis(
 
 // ── Daily metrics (§A usage sparkline series) ────────────────────────────────
 /**
- * The whole-company §A per-day usage series over the window (`v_complete_usage`) —
+ * The whole-company §A per-day usage series over the window (`usage_rollup_daily`,
+ * usage-rollup-lane.md R5) —
  * one row per UTC day in the window THAT HAS HAPPENED — zero-filled, so a day
  * with no usage is present with 0s rather than absent: `SUM(cost_usd)`,
  * `SUM(tokens)`, `COUNT(DISTINCT teammate_id)`, ordered by day. Dropping empty
@@ -273,7 +277,7 @@ export async function fetchAcrossChargebackLaneTrend(
 // ── §A per-surface weekly usage lanes (the usage-view composition hero) ──────
 /**
  * The whole-company canonical §A USAGE weekly lane series over the window
- * (`v_complete_usage` GROUP BY `date_trunc('week', ts_event)` × tool, tools
+ * (`usage_rollup_daily` GROUP BY `date_trunc('week', day)` × tool, tools
  * mapped to registry lane ids via `toolToVendor`) — the "Where the AI spend
  * goes" hero + its pinned "Spend by surface" donut (requirement 1). REPLACES
  * the former billed-showback-basis fetcher (`v_finance_bill_showback`) that fed
@@ -364,7 +368,9 @@ export interface AcrossRegionCard {
 /**
  * Per-region comparison cards (build-design §3 "region cards"; PRD region
  * comparison: $, %, active users, avg/user). Usage by `region_id` from
- * `v_complete_usage` merged with the finance-lane chargeable pair. The NULL
+ * `usage_rollup_daily` (the §A rollup — usage-rollup-lane.md R5; teammate_id is
+ * in its grain, so the distinct-user count is exact) merged with the
+ * finance-lane chargeable pair. The NULL
  * region_id bucket is retained as an explicit "Unassigned" card so the cards SUM
  * BACK to the genuine headline (never silently dropped).
  */
@@ -383,10 +389,10 @@ export async function fetchAcrossRegionCards(
     SELECT u.region_id::text AS region_id, r.code, r.display_name,
            COALESCE(SUM(u.cost_usd), 0)::text AS genuine,
            COUNT(DISTINCT u.teammate_id)::int AS active_users
-    FROM v_complete_usage u
+    FROM usage_rollup_daily u
     LEFT JOIN region r ON r.id = u.region_id
-    WHERE u.ts_event >= ${window.startIso}::timestamptz
-      AND u.ts_event <  ${window.endIso}::timestamptz
+    WHERE u.day >= ${window.startIso.slice(0, 10)}::date
+      AND u.day <  ${window.endIso.slice(0, 10)}::date
     GROUP BY u.region_id, r.code, r.display_name
     ORDER BY SUM(u.cost_usd) DESC NULLS LAST`)
 
@@ -511,8 +517,8 @@ export async function fetchAcrossChargebackByRegion(
 
 // ── Per-provider split (vendor breakdown over the window) ────────────────────
 /**
- * The whole-company per-provider split over the window (`v_complete_usage`, §A
- * usage lane): one bucket per named §A lane — `claude-code` → `claudeCode`,
+ * The whole-company per-provider split over the window (`usage_rollup_daily`,
+ * the §A rollup — usage-rollup-lane.md R5): one bucket per named §A lane — `claude-code` → `claudeCode`,
  * `copilot-cli` → `copilotCli`, `copilot-agent` → `copilotAgent` (the three-lane
  * §A ceiling, registry-driven via SECTION_A_USAGE_TOOLS) — plus the live `other`
  * catch-all (everything else incl. NULL tool). `spendUsd` sums back to the
@@ -543,9 +549,9 @@ export async function fetchProviderSplit(tx: Tx, window: UsageWindow): Promise<P
         COUNT(DISTINCT teammate_id) FILTER (WHERE tool = ${COPILOT_AGENT_TOOL})::int AS ca_users,
         COALESCE(SUM(cost_usd) FILTER (WHERE tool NOT IN (${laneListSql(SECTION_A_USAGE_TOOLS)}) OR tool IS NULL), 0)::text AS ot_spend,
         COUNT(DISTINCT teammate_id) FILTER (WHERE tool NOT IN (${laneListSql(SECTION_A_USAGE_TOOLS)}) OR tool IS NULL)::int AS ot_users
-      FROM v_complete_usage
-      WHERE ts_event >= ${window.startIso}::timestamptz
-        AND ts_event <  ${window.endIso}::timestamptz`)),
+      FROM usage_rollup_daily
+      WHERE day >= ${window.startIso.slice(0, 10)}::date
+        AND day <  ${window.endIso.slice(0, 10)}::date`)),
   ]
   return {
     claudeCode: { spendUsd: Number(row?.cc_spend ?? 0), activeUsers: Number(row?.cc_users ?? 0) },
@@ -573,14 +579,14 @@ export async function fetchAcrossTrend(tx: Tx, window: UsageWindow): Promise<Acr
     agent: string
     other: string
   }>(sql`
-    SELECT to_char(date_trunc('day', ts_event), 'YYYY-MM-DD') AS day,
+    SELECT to_char(day, 'YYYY-MM-DD') AS day,
            COALESCE(SUM(cost_usd) FILTER (WHERE tool = ${CLAUDE_CODE_TOOL}), 0)::text AS claude,
            COALESCE(SUM(cost_usd) FILTER (WHERE tool = ${COPILOT_CLI_TOOL}), 0)::text AS copilot,
            COALESCE(SUM(cost_usd) FILTER (WHERE tool = ${COPILOT_AGENT_TOOL}), 0)::text AS agent,
            COALESCE(SUM(cost_usd) FILTER (WHERE tool NOT IN (${laneListSql(SECTION_A_USAGE_TOOLS)}) OR tool IS NULL), 0)::text AS other
-    FROM v_complete_usage
-    WHERE ts_event >= ${window.startIso}::timestamptz
-      AND ts_event <  ${window.endIso}::timestamptz
+    FROM usage_rollup_daily
+    WHERE day >= ${window.startIso.slice(0, 10)}::date
+      AND day <  ${window.endIso.slice(0, 10)}::date
     GROUP BY 1 ORDER BY 1`)
   const series: AcrossTrendPoint[] = []
   for (const r of rows) {
@@ -648,9 +654,9 @@ export async function fetchConcentration(
 ): Promise<ConcentrationStats> {
   const rows = await tx.execute<{ cost: string }>(sql`
     SELECT COALESCE(SUM(cost_usd), 0)::text AS cost
-    FROM v_complete_usage
-    WHERE ts_event >= ${range.startIso}::timestamptz
-      AND ts_event <  ${range.endIso}::timestamptz
+    FROM usage_rollup_daily
+    WHERE day >= ${range.startIso.slice(0, 10)}::date
+      AND day <  ${range.endIso.slice(0, 10)}::date
     GROUP BY teammate_id
     HAVING COALESCE(SUM(cost_usd), 0) > 0
     ORDER BY SUM(cost_usd) DESC`)
@@ -702,7 +708,9 @@ export async function fetchAcrossSeasonality(
 
 // ── Active-user trend (distinct active teammates per tool per day) ────────────
 /**
- * The whole-company active-users-over-time series (`v_complete_usage`): per UTC
+ * The whole-company active-users-over-time series (`usage_rollup_daily`,
+ * usage-rollup-lane.md R5 — teammate is in the grain, so the distinct counts
+ * are exact): per UTC
  * day, `COUNT(DISTINCT teammate_id)` for claude-code and for copilot-cli. One point
  * per day with any usage; the two counts are NOT additive (a teammate active in
  * both tools counts in both).
@@ -712,12 +720,12 @@ export async function fetchAcrossActiveTrend(
   window: UsageWindow,
 ): Promise<ActiveTrendPoint[]> {
   const rows = await tx.execute<{ day: string; claude: number; copilot: number }>(sql`
-    SELECT to_char(date_trunc('day', ts_event), 'YYYY-MM-DD') AS day,
+    SELECT to_char(day, 'YYYY-MM-DD') AS day,
            COUNT(DISTINCT teammate_id) FILTER (WHERE tool = 'claude-code')::int AS claude,
            COUNT(DISTINCT teammate_id) FILTER (WHERE tool = 'copilot-cli')::int AS copilot
-    FROM v_complete_usage
-    WHERE ts_event >= ${window.startIso}::timestamptz
-      AND ts_event <  ${window.endIso}::timestamptz
+    FROM usage_rollup_daily
+    WHERE day >= ${window.startIso.slice(0, 10)}::date
+      AND day <  ${window.endIso.slice(0, 10)}::date
     GROUP BY 1 ORDER BY 1`)
   return [...rows].map((r) => ({
     day: r.day,

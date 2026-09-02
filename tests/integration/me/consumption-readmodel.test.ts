@@ -147,7 +147,11 @@ beforeAll(async () => {
       costBasis: 'estimated',
       tsEvent: new Date(Math.max(monthStartMs, anchorMs - 60_000)),
       sourceRunId: String(over.run),
-      querySource: 'main',
+      // The REAL Claude Code wire value, not the word 'main' — which Claude has
+      // never emitted (docs/development/claude-code-telemetry-contract.md
+      // §Query-source vocabulary). A 'main' fixture here passed while the live
+      // read-model classified 100% of the operator's volume as harness overhead.
+      querySource: 'repl_main_thread',
       ...over,
     } as never)
 
@@ -157,8 +161,8 @@ beforeAll(async () => {
   await insert({ run: 'a4', teammateId: mateId, tokens: 200_000n, costUsd: '0.600000' })
   // dev's untagged conversation (no project) — untagged pressure.
   await insert({ run: 'a5', projectId: null, costOwningUnitId: null, tokens: 30_000n, costUsd: '0.090000' })
-  // aux lane + tier-2 row for window pivots.
-  await insert({ run: 'a6', querySource: 'generate_session_title', model: 'claude-haiku-4-5', tokens: 5_000n, costUsd: '0.005000', fidelityTier: 'tier-2', costBasis: 'telemetry-only' })
+  // aux lane (a real Claude auxiliary token) + tier-2 row for window pivots.
+  await insert({ run: 'a6', querySource: 'compact', model: 'claude-haiku-4-5', tokens: 5_000n, costUsd: '0.005000', fidelityTier: 'tier-2', costBasis: 'telemetry-only' })
 
   await runAggregateRollup(t.db)
 }, 60_000)
@@ -195,7 +199,12 @@ describe('consumption read-model (aggregate-backed)', () => {
     expect(totals.by_model.length).toBeGreaterThanOrEqual(2)
     expect(totals.by_model[0]!.model).toBe('claude-fable-5') // cost-share desc
     expect(totals.aux.aux_tokens).toBe(5_000)
-    expect(totals.aux.main_tokens).toBeGreaterThan(0)
+    // EXACT, not >0: the dev's five conversation rows (100k + 10k + 50k + 30k)
+    // land in main, none in unknown. RED ON REVERT — restore the `=== 'main'`
+    // equality in fetchWindowTotals and all 190k moves into aux_tokens.
+    expect(totals.aux.main_tokens).toBe(190_000)
+    expect(totals.aux.unknown_tokens).toBe(0)
+    expect(totals.aux.aux_share).toBeCloseTo(5_000 / 195_000, 4)
     expect(totals.advisory_cost_usd).toBeCloseTo(0.005, 6)
     const pivotTotal = totals.by_token_type.reduce((a, x) => a + x.tokens, 0)
     expect(pivotTotal).toBe(totals.tokens)

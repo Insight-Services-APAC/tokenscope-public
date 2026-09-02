@@ -22,6 +22,10 @@ import { apiErrorDetail } from '../../../composables/useApiError'
 
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
+// The root is v-if="isOrgWide": the nav hides this page from region admins
+// (shared/nav/admin-nav.ts, access: 'org-wide') but a typed URL lands here, and
+// every read below is gated on isOrgWide — rendering the cards would show
+// loading states that never resolve.
 const { isOrgWide } = useAdminAccess()
 
 // ── Governance cutover ──────────────────────────────────────────────────
@@ -32,12 +36,12 @@ interface CutoverState {
   activatedAt: string | null
   rolledBackAt: string | null
 }
-const { data: cutover, refresh: refreshCutover } = await useFetch<CutoverState>(
+// Every read on this page is DECLARED, never awaited (admin-nav-responsiveness
+// D1): lazy, client-only, `null` until it lands; each card renders skeleton /
+// error / data keyed on the ABSENCE of data, never on `pending` (D2).
+const { data: cutover, error: cutoverFetchError, refresh: refreshCutover } = useLazyFetch<CutoverState | null>(
   '/api/v1/admin/governance-cutover',
-  {
-    default: () => null as unknown as CutoverState,
-    immediate: isOrgWide.value,
-  },
+  { server: false, default: () => null, immediate: isOrgWide.value },
 )
 const cutoverBusy = ref(false)
 const cutoverError = ref<string | null>(null)
@@ -127,31 +131,57 @@ interface SnapshotDelta {
   chargeableUnchanged: boolean
   attributedMoved: boolean
 }
-/** null = never recorded. Distinct from recorded-and-unchanged. */
-const period = ref<SnapshotDelta | null>(null)
+/*
+ * The snapshot read owns its data/error/refresh like every other read (D1).
+ * The route answers `null` for a month never recorded — a real answer, not
+ * "not loaded" — so the payload is wrapped: `periodData == null` means the
+ * read has not landed; `periodData.delta == null` means never recorded.
+ * `watch: [periodMonth]` is what refetches when the month changes.
+ */
+const {
+  data: periodData,
+  error: periodFetchError,
+  pending: periodPending,
+  refresh: loadPeriod,
+} = useLazyAsyncData(
+  'provider-governance-period',
+  async () => ({
+    delta: await $fetch<SnapshotDelta | null>(`/api/v1/admin/reporting-snapshots/${periodMonth.value}`),
+  }),
+  { server: false, default: () => null, immediate: isOrgWide.value, watch: [periodMonth] },
+)
+/** null = never recorded, or not yet loaded (the template tells them apart via
+ *  periodData). Distinct from recorded-and-unchanged. */
+const period = computed(() => periodData.value?.delta ?? null)
 const periodBusy = ref(false)
 const periodError = ref<string | null>(null)
-
-async function loadPeriod() {
-  periodError.value = null
-  try {
-    period.value = await $fetch<SnapshotDelta | null>(`/api/v1/admin/reporting-snapshots/${periodMonth.value}`)
-  } catch (e: unknown) {
-    periodError.value = apiErrorDetail(e, 'Failed to load the snapshot')
-  }
-}
-if (isOrgWide.value) await loadPeriod()
 
 async function closePeriod() {
   periodBusy.value = true
   periodError.value = null
   try {
+    // `loadPeriod()` re-reads `periodMonth`, so the month input is disabled
+    // while `periodBusy` (template): the confirmation the operator sees is
+    // always for the month that was written. Disabling the one control beats
+    // threading a captured month through the read's own handler.
     await $fetch(`/api/v1/admin/reporting-snapshots/${periodMonth.value}/close`, { method: 'POST', body: {} })
-    await loadPeriod()
   } catch (e: unknown) {
     // A second close is refused on purpose — replacing what was reported the
     // first time is the one thing a snapshot exists to prevent.
     periodError.value = apiErrorDetail(e, 'Could not record the month')
+    periodBusy.value = false
+    return
+  }
+  /*
+   * PAST THIS LINE THE MONTH IS RECORDED. The reload is outside the write's
+   * catch so a read failure can never render as a failed record. Nuxt's
+   * `refresh()` resolves on failure (it reports into `periodFetchError`, which
+   * the banner above renders), so this catch is the belt-and-braces path.
+   */
+  try {
+    await loadPeriod()
+  } catch (e: unknown) {
+    periodError.value = apiErrorDetail(e, 'Recorded — but the snapshot could not be reloaded. Reload the page to see it.')
   } finally {
     periodBusy.value = false
   }
@@ -168,9 +198,9 @@ interface UnresolvedDiagnostics {
   pendingPlacement?: { unresolved: number }
   bySource?: { source: string; count: number; costUsd: string }[]
 }
-const { data: unresolved, refresh: refreshUnresolved } = await useFetch<UnresolvedDiagnostics>(
+const { data: unresolved, error: unresolvedError, refresh: refreshUnresolved } = useLazyFetch<UnresolvedDiagnostics | null>(
   '/api/v1/admin/diagnostics/governance-unresolved',
-  { default: () => ({ reachable: false }), immediate: isOrgWide.value },
+  { server: false, default: () => null, immediate: isOrgWide.value },
 )
 const recheckBusy = ref(false)
 async function recheck() {
@@ -220,9 +250,9 @@ function currentMonthParam(): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`
 }
 const psMonth = ref(currentMonthParam())
-const { data: personalSubs, pending: psPending } = await useFetch<PersonalSubscriptionsResp>(
+const { data: personalSubs, error: psError, refresh: refreshPersonalSubs } = useLazyFetch<PersonalSubscriptionsResp | null>(
   '/api/v1/admin/governance/personal-subscriptions',
-  { query: { month: psMonth }, default: () => null as unknown as PersonalSubscriptionsResp, immediate: isOrgWide.value },
+  { query: { month: psMonth }, server: false, default: () => null, immediate: isOrgWide.value },
 )
 function psUsd(v: string | undefined): string {
   if (v === undefined) return '—'
@@ -236,9 +266,9 @@ interface EnterpriseOption {
   externalId: string
   displayName: string
 }
-const { data: enterprisesData } = await useFetch<{ enterprises: EnterpriseOption[] }>(
+const { data: enterprisesData, error: enterprisesError, refresh: refreshEnterprises } = useLazyFetch<{ enterprises: EnterpriseOption[] } | null>(
   '/api/v1/admin/reconciliation/enterprises',
-  { default: () => ({ enterprises: [] }), immediate: isOrgWide.value },
+  { server: false, default: () => null, immediate: isOrgWide.value },
 )
 // Copilot money-model surfaces apply to github enterprises only (ADR-0011 D9/D10/D11 —
 // GitHub is the Copilot billing unit; Anthropic is pure metered).
@@ -254,27 +284,37 @@ interface CopilotRatePlan {
   notes: string | null
   retiredAt: string | null
 }
-const ratePlans = ref<CopilotRatePlan[]>([])
+/*
+ * The rate-plan history owns its data/error/refresh like every other read (D1).
+ * `null` until the read lands; a resolved `[]` is the real "no plan recorded"
+ * answer, so the template never shows the empty row for an unloaded list (D2).
+ * With no enterprise selected the handler resolves `null` without a request.
+ * Nuxt keeps the previous `data` while a `watch`-triggered refetch is in
+ * flight, so the payload carries the enterprise it was read for and
+ * `ratePlans` is `null` (skeleton) whenever that is not the current selection —
+ * the previous enterprise's plans are never shown under the new one.
+ */
+const {
+  data: ratePlansData,
+  error: ratePlansFetchError,
+  refresh: refreshRatePlans,
+} = useLazyAsyncData<{ enterpriseId: string; plans: CopilotRatePlan[] } | null>(
+  'provider-governance-rate-plans',
+  async () => {
+    const enterpriseId = selectedEnterpriseId.value
+    if (!enterpriseId) return null
+    const { plans } = await $fetch<{ plans: CopilotRatePlan[] }>(
+      `/api/v1/admin/reconciliation/enterprises/${enterpriseId}/copilot-rate-plans`,
+    )
+    return { enterpriseId, plans }
+  },
+  { server: false, default: () => null, immediate: isOrgWide.value, watch: [selectedEnterpriseId] },
+)
+const ratePlans = computed<CopilotRatePlan[] | null>(() =>
+  ratePlansData.value?.enterpriseId === selectedEnterpriseId.value ? ratePlansData.value.plans : null,
+)
 const ratePlansBusy = ref(false)
 const ratePlansError = ref<string | null>(null)
-
-async function loadRatePlans() {
-  ratePlansError.value = null
-  if (!selectedEnterpriseId.value) {
-    ratePlans.value = []
-    return
-  }
-  try {
-    ratePlans.value = (
-      await $fetch<{ plans: CopilotRatePlan[] }>(
-        `/api/v1/admin/reconciliation/enterprises/${selectedEnterpriseId.value}/copilot-rate-plans`,
-      )
-    ).plans
-  } catch (e: unknown) {
-    ratePlansError.value = apiErrorDetail(e, 'Failed to load rate plans')
-  }
-}
-watch(selectedEnterpriseId, loadRatePlans)
 
 const newPlanValidFrom = ref('')
 const newPlanFlat = ref('')
@@ -286,6 +326,9 @@ async function createRatePlan() {
   ratePlansBusy.value = true
   ratePlansError.value = null
   try {
+    // `refreshRatePlans()` re-reads `selectedEnterpriseId`, so the enterprise
+    // select is disabled while `ratePlansBusy` (template): the history the
+    // operator sees refreshed is always the enterprise that was written to.
     await $fetch(`/api/v1/admin/reconciliation/enterprises/${selectedEnterpriseId.value}/copilot-rate-plans`, {
       method: 'POST',
       body: {
@@ -295,13 +338,27 @@ async function createRatePlan() {
         notes: newPlanNotes.value.trim() || null,
       },
     })
-    newPlanValidFrom.value = ''
-    newPlanFlat.value = ''
-    newPlanAllowance.value = ''
-    newPlanNotes.value = ''
-    await loadRatePlans()
   } catch (e: unknown) {
     ratePlansError.value = apiErrorDetail(e, 'Failed to create rate plan')
+    ratePlansBusy.value = false
+    return
+  }
+  /*
+   * PAST THIS LINE THE PLAN EXISTS. Clearing the form and reloading the history
+   * are after-effects of a committed write, so they sit outside its catch — the
+   * form is cleared because the create succeeded, and a read failure can never
+   * render as "Failed to create rate plan". Nuxt's `refresh()` resolves on
+   * failure (it reports into `ratePlansFetchError`, which the banner renders),
+   * so this catch is the belt-and-braces path.
+   */
+  newPlanValidFrom.value = ''
+  newPlanFlat.value = ''
+  newPlanAllowance.value = ''
+  newPlanNotes.value = ''
+  try {
+    await refreshRatePlans()
+  } catch (e: unknown) {
+    ratePlansError.value = apiErrorDetail(e, 'Rate plan created — but the history could not be reloaded. Reload the page to see it.')
   } finally {
     ratePlansBusy.value = false
   }
@@ -325,6 +382,18 @@ interface RepullResponse {
 }
 const repullResult = ref<RepullResponse | null>(null)
 
+/*
+ * A rate-plan error, a re-pull error and a re-pull result all belong to the
+ * enterprise they were produced for, and all three render inside the block
+ * keyed on `selectedEnterpriseId`. Selecting another enterprise clears them —
+ * the locked selector closes the in-flight window, this closes the one after it.
+ */
+watch(selectedEnterpriseId, () => {
+  ratePlansError.value = null
+  repullError.value = null
+  repullResult.value = null
+})
+
 async function triggerRepull() {
   if (!selectedEnterpriseId.value || !repullReason.value.trim()) return
   repullBusy.value = true
@@ -345,7 +414,12 @@ async function triggerRepull() {
 </script>
 
 <template>
-  <div class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-policy-provider-governance">
+  <div
+    v-if="isOrgWide"
+    class="max-w-[1600px] mx-auto px-10 py-8 pb-20"
+    data-testid="admin-policy-provider-governance"
+    data-admin-page="/admin/policies/provider-governance"
+  >
     <UiPageHead
       eyebrow="Policies"
       title="Provider governance"
@@ -359,12 +433,31 @@ async function triggerRepull() {
         rollback). After activation, every money path reads <code class="text-[11px] bg-calm/40 px-1 rounded">billing</code>
         authoritatively and the heuristic is never consulted again.
       </p>
+      <UiFetchErrorBanner :error="cutoverFetchError" label="the cutover state" class="mt-3" @retry="refreshCutover()" />
       <div class="mt-3 flex items-center gap-2">
         <span class="text-[12px] font-semibold text-carbon">Status:</span>
-        <UiBadge :kind="cutoverBadgeKind" data-testid="cutover-status-badge">{{ cutover?.status }}</UiBadge>
+        <span
+          v-if="!cutoverFetchError && cutover == null"
+          class="inline-block h-5 w-24 rounded-full bg-calm-2 animate-pulse align-middle"
+          role="status"
+          aria-busy="true"
+          data-testid="cutover-status-loading"
+        ><span class="sr-only">Loading the cutover state…</span></span>
+        <UiBadge v-else-if="cutover" :kind="cutoverBadgeKind" data-testid="cutover-status-badge">{{ cutover.status }}</UiBadge>
       </div>
       <div class="mt-4 flex flex-wrap gap-2">
-        <UiButton kind="secondary" size="sm" :disabled="cutoverBusy" data-testid="run-preflight" @click="runPreflight">
+        <!-- `activated` is the ONLY status the server refuses a preflight in
+             (server/governance/cutover.ts:244 → 409 wrong-state). `rolled_back`
+             is NOT terminal here: the state machine re-runs preflight from
+             not_started / preflight_verified / rolled_back by design, so
+             disabling it there would break the documented recovery path. -->
+        <UiButton
+          kind="secondary"
+          size="sm"
+          :disabled="cutoverBusy || cutover?.status === 'activated'"
+          data-testid="run-preflight"
+          @click="runPreflight"
+        >
           Run preflight
         </UiButton>
         <UiButton
@@ -376,6 +469,13 @@ async function triggerRepull() {
         >
           Activate
         </UiButton>
+        <p
+          v-if="cutover?.status === 'activated'"
+          class="text-[11px] text-carbon-3 basis-full"
+          data-testid="preflight-blocked-note"
+        >
+          Preflight cannot run while governance is activated — roll back first.
+        </p>
       </div>
       <div v-if="cutover?.status === 'activated'" class="mt-4 pt-4 border-t border-calm-2">
         <label for="rollback-reason" class="text-[12px] font-semibold text-carbon">Rollback reason</label>
@@ -411,18 +511,30 @@ async function triggerRepull() {
       </p>
       <div class="mt-3 flex items-center gap-2">
         <label for="period-month" class="text-[12px] font-semibold text-carbon">Month</label>
+        <!-- Locked while a record is in flight: `closePeriod`'s reload re-reads
+             this month, so letting it move mid-write would confirm a month the
+             operator did not just record. -->
         <input
           id="period-month"
           v-model="periodMonth"
           type="month"
-          class="border border-calm-2 rounded-md px-2 py-1.5 text-sm"
+          :disabled="periodBusy"
+          class="border border-calm-2 rounded-md px-2 py-1.5 text-sm disabled:bg-calm-2 disabled:text-carbon-3"
           data-testid="period-month"
-          @change="loadPeriod"
         >
-        <UiBadge :kind="period ? 'rag-green' : 'neutral'" data-testid="period-state-badge">
+        <span
+          v-if="!periodFetchError && periodData == null"
+          class="inline-block h-5 w-24 rounded-full bg-calm-2 animate-pulse align-middle"
+          role="status"
+          aria-busy="true"
+          data-testid="period-state-loading"
+        ><span class="sr-only">Loading the snapshot…</span></span>
+        <UiBadge v-else-if="!periodFetchError" :kind="period ? 'rag-green' : 'neutral'" data-testid="period-state-badge">
           {{ period ? 'recorded' : 'not recorded' }}
         </UiBadge>
+        <span v-if="periodPending && periodData != null" class="text-[11px] text-carbon-3 italic" aria-busy="true">refreshing…</span>
       </div>
+      <UiFetchErrorBanner :error="periodFetchError" label="the reporting snapshot" class="mt-3" @retry="loadPeriod()" />
 
       <div v-if="period" class="mt-3 text-[12px] text-carbon" data-testid="period-delta">
         <!-- Version 0 = closed under the old machinery, which stored a state and
@@ -459,7 +571,7 @@ async function triggerRepull() {
         <UiButton
           kind="primary"
           size="sm"
-          :disabled="periodBusy || !!period"
+          :disabled="periodBusy || !!period || periodData == null"
           data-testid="close-period"
           @click="closePeriod"
         >
@@ -479,7 +591,9 @@ async function triggerRepull() {
         Money rows whose provider org/enterprise could not be resolved. Always showback-visible; never chargeable
         while unresolved. Register or link the missing org, then recheck.
       </p>
-      <div v-if="unresolved?.reachable" class="mt-3 grid grid-cols-3 gap-4 text-sm">
+      <AdminPageSkeleton v-if="!unresolvedError && unresolved == null" :rows="2" :toolbar="false" class="mt-3" />
+      <UiFetchErrorBanner v-else-if="unresolvedError" :error="unresolvedError" label="the governance-unresolved counts" class="mt-3" @retry="refreshUnresolved()" />
+      <div v-else-if="unresolved?.reachable" class="mt-3 grid grid-cols-3 gap-4 text-sm">
         <div>
           <p class="text-[11px] uppercase text-carbon-3">actual_spend</p>
           <p class="font-mono">{{ unresolved.actualSpend?.pendingBackfill ?? 0 }} pending / {{ unresolved.actualSpend?.parkedUnresolved ?? 0 }} parked</p>
@@ -529,7 +643,8 @@ async function triggerRepull() {
         >
       </div>
 
-      <p v-if="psPending" class="text-sm text-carbon-3 mt-3">Loading…</p>
+      <AdminPageSkeleton v-if="!psError && personalSubs == null" :rows="3" :toolbar="false" class="mt-3" />
+      <UiFetchErrorBanner v-else-if="psError" :error="psError" label="personal subscription declarations" class="mt-3" @retry="refreshPersonalSubs()" />
       <template v-else-if="personalSubs">
         <div class="mt-3 grid grid-cols-3 gap-4 text-sm">
           <div>
@@ -614,12 +729,17 @@ async function triggerRepull() {
         already on the bill.
       </p>
 
+      <UiFetchErrorBanner :error="enterprisesError" label="the enterprise list" class="mt-3" @retry="refreshEnterprises()" />
       <div class="mt-3">
         <label for="copilot-ent-select" class="text-[12px] font-semibold text-carbon">GitHub enterprise</label>
+        <!-- Locked while a rate-plan create or a bill re-pull is in flight: both
+             capture this enterprise, and both report their outcome (refreshed
+             history / re-pull counts) under whatever is selected when they land. -->
         <select
           id="copilot-ent-select"
           v-model="selectedEnterpriseId"
-          class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+          :disabled="ratePlansBusy || repullBusy"
+          class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none disabled:bg-calm-2 disabled:text-carbon-3"
           data-testid="copilot-ent-select"
         >
           <option value="">Select an enterprise…</option>
@@ -634,7 +754,9 @@ async function triggerRepull() {
 
       <div v-if="selectedEnterpriseId" class="mt-4 pt-4 border-t border-calm-2">
         <p class="text-[12px] font-bold uppercase tracking-[1.2px] text-brand-harmony">Rate-plan history</p>
-        <table class="w-full mt-2 text-[12px]" data-testid="rate-plan-history">
+        <AdminPageSkeleton v-if="!ratePlansFetchError && ratePlans == null" :rows="3" :toolbar="false" class="mt-2" />
+        <UiFetchErrorBanner v-else-if="ratePlansFetchError" :error="ratePlansFetchError" label="the rate-plan history" class="mt-2" @retry="refreshRatePlans()" />
+        <table v-else class="w-full mt-2 text-[12px]" data-testid="rate-plan-history">
           <thead>
             <tr class="text-left text-carbon-3">
               <th class="font-semibold pb-1">Effective from</th>
@@ -652,7 +774,7 @@ async function triggerRepull() {
               <td class="py-1">{{ p.includedAllowanceUsd != null ? `$${p.includedAllowanceUsd}` : '—' }}</td>
               <td class="py-1">{{ p.retiredAt ? 'retired' : 'live' }}</td>
             </tr>
-            <tr v-if="ratePlans.length === 0"><td colspan="5" class="py-2 text-carbon-3">No rate plan recorded yet.</td></tr>
+            <tr v-if="ratePlans?.length === 0"><td colspan="5" class="py-2 text-carbon-3">No rate plan recorded yet.</td></tr>
           </tbody>
         </table>
 
@@ -707,5 +829,8 @@ async function triggerRepull() {
         </div>
       </div>
     </UiCard>
+  </div>
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/policies/provider-governance">
+    <div class="text-lg font-bold text-carbon">Org-wide admin access required.</div>
   </div>
 </template>

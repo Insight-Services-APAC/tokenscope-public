@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup, rebuildUsageRollup } from '../helpers/usage-rollup'
 import { injectTestSession } from '../../helpers/auth'
 import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
@@ -176,6 +177,10 @@ beforeAll(async () => {
   const [{ id: entId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM provider_enterprise WHERE external_id='ent-x'`
   await t.client`INSERT INTO copilot_pool_bill (month, provider_enterprise_id, provider_org_id, cost_owning_unit_id, seats, license_net_usd, overage_net_usd, included_allowance_usd, usage_gross_usd)
     VALUES ('2026-07-01'::date, ${entId}::uuid, NULL, ${unitA}::uuid, 5, 100, 20, 80, 90)`
+
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {
@@ -765,6 +770,9 @@ describe('GET /reports/export — the teammate-axis driver export is complete + 
       INSERT INTO attribution_record (instance_id, teammate_id, region_id, org_unit_id, tool, model, token_type, tokens, cost_usd, fidelity_tier, cost_basis, ts_event)
       SELECT ia.instance_id, ia.teammate_id, ${capRegionId}::uuid, ${capUnitId}::uuid, 'claude-code', 'claude-sonnet-4-6', 'input', 100, 1.00, 'tier-1', 'estimated', '2026-07-15T00:00:00Z'::timestamptz
       FROM instance_attestation ia WHERE ia.region_id = ${capRegionId}::uuid`
+    // New §A rows on a day the top-level setup already materialised — the
+    // rollup must be REBUILT, not re-run (usage-rollup-lane.md R8).
+    await rebuildUsageRollup(t.db)
   }, 60_000)
 
   it(`exports every one of the ${N} teammates — one row each, no synthetic tail`, async () => {
@@ -1015,6 +1023,9 @@ describe('fetchRegionalExceptions — a velocity signal carries its own drill fa
       for (const w of [1, 2, 3]) await spend(tm, w, 10) // baseline mean = 10
       await spend(tm, 0, 100) // current week = 100 ⇒ +900%
     }
+    // New §A rows after the top-level rollup build — REBUILD so the exceptions
+    // strip (a rollup read, usage-rollup-lane.md R5) can see them (R8).
+    await rebuildUsageRollup(t.db)
   })
 
   const exceptions = async () => {
@@ -1024,7 +1035,12 @@ describe('fetchRegionalExceptions — a velocity signal carries its own drill fa
       { region: regionA },
       { crossRegion: true },
     )
-    return fetchRegionalExceptions(t.db, scope, 0.25)
+    // The suite seeds its weeks from the DATABASE clock (date_trunc over
+    // now() at seed time), so the injected instant must come from the same
+    // clock — a process wall-clock here can fall in a different ISO week at
+    // a UTC week boundary and flake.
+    const [{ db_now }] = await t.client<{ db_now: string }[]>`SELECT now()::text AS db_now`
+    return fetchRegionalExceptions(t.db, scope, 0.25, new Date(db_now))
   }
 
   it('a confirmed spiker is flagged and states BOTH facts as booleans', async () => {

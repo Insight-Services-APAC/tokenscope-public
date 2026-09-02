@@ -33,6 +33,7 @@ import { modelDisplay } from '../../composables/useModelDisplay'
 import { apiErrorDetail } from '../../composables/useApiError'
 import { useModalA11y } from '../../composables/useModalA11y'
 import { TOKEN_TYPES, type SessionDetail } from '#shared/schemas/usage'
+import { querySourceLabel } from '#shared/usage/query-source'
 
 const props = defineProps<{
   /** Claude session id (conversation) to load; null = drawer closed. */
@@ -193,7 +194,9 @@ const querySplit = computed(() => {
   const total = rows.reduce((a, r) => a + Number(r.cost_usd), 0)
   return rows
     .map((r) => {
-      const label = r.query_source === null ? 'Unknown' : r.query_source === 'main' ? 'Your conversation' : r.query_source
+      // The raw wire token, not the word 'main', decides the conversation lane
+      // (shared/usage/query-source.ts) — an equality test here never matched.
+      const label = querySourceLabel(r.query_source)
       return {
         label,
         raw: r.query_source,

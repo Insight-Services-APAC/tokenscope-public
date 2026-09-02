@@ -28,6 +28,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { sql } from 'drizzle-orm'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup, rebuildUsageRollup } from '../helpers/usage-rollup'
 import {
   clampedFinance,
   clampedUsage,
@@ -294,6 +295,9 @@ beforeAll(async () => {
        license_net_usd, overage_net_usd, unclassified_net_usd, included_allowance_usd, usage_gross_usd)
     VALUES ('2026-06-01'::date, ${entId}::uuid, NULL, ${unitA}::uuid, 5,
             ${COPILOT_LICENSE_USD}, ${COPILOT_OVERAGE_USD}, ${COPILOT_UNCLASSIFIED_USD}, 80, 90)`
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {
@@ -821,6 +825,11 @@ describe('no billed axis exposes a dimension derived from a RATIO', () => {
         (teammate_id, region_id, org_unit_id, project_id, day, tool, cost_usd, tokens, source, tagged_at)
       VALUES (${bob}::uuid, ${regionB}::uuid, ${unitB}::uuid, ${projAtlas}::uuid,
               '2026-06-02'::date, 'copilot-cli', 999, 0, 'api-reconciled', now())`
+    // The project axis reads the ROLLUP since R5b — materialise the mutation
+    // or the vacuity probe below reads the pre-mutation cells. This makes the
+    // invariance claim STRONGER, not weaker: the billed snapshot must survive
+    // the attributed mutation reaching every §A source a figure could read.
+    await rebuildUsageRollup(t.db)
 
     try {
       // The attributed lane really did move — otherwise the invariance below is
@@ -834,6 +843,9 @@ describe('no billed axis exposes a dimension derived from a RATIO', () => {
       await t.client`UPDATE attribution_record SET cost_usd = cost_usd / 7
                       WHERE ts_event >= ${WIN.startIso}::timestamptz
                         AND ts_event <  ${WIN.endIso}::timestamptz`
+      // Reverted on the raw tables — reverted in the rollup too, so later
+      // tests in this file read the original estate.
+      await rebuildUsageRollup(t.db)
     }
   })
 

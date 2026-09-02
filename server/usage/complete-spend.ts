@@ -78,6 +78,7 @@
  * different rule — do not "fix" one to match the other.
  */
 import { sql, type SQL } from 'drizzle-orm'
+import { splitBounds, type RollupGate } from './rollup-gate'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type * as schema from '../../drizzle/schema'
 import { modelDriverKey, modelDriverLabel } from '../../shared/reports/model-attribution'
@@ -262,6 +263,28 @@ export interface CostCentreLaneResidual {
 /** The §A lane. Named once so a reader can grep every consumer of it. */
 const LANE = sql`v_complete_usage`
 
+/**
+ * The day-grain rollup of the lane (migs 0136/0138) — the PROJECT AXIS's
+ * second source and nothing else's (usage-rollup-lane.md R5b.2). Content is
+ * DEFINED as an aggregate of `v_complete_usage`, so the axis's grouping,
+ * ranking, cap, tail-fold and provisional filter read identically off it;
+ * what differs is freshness (≤ one worker cadence behind the live view).
+ */
+const ROLLUP = sql`usage_rollup_daily`
+
+/**
+ * Which table the project axis scans (usage-rollup-lane.md R5b).
+ *
+ * CONSTRAINT — `'rollup'` is for the two report-scoped callers ONLY:
+ * `fetchBudgetAxis` (server/reporting/engine/budget-axis.ts, the drivers
+ * project axis) and `fetchCostCentreBurnDrivers`'s project axis
+ * (server/reporting/cost-centres.ts, the Business-Unit page population read).
+ * The rollup lags the live view by up to one worker cadence (R5b.4), so a
+ * real-time consumer — budget alerting, anything that pages a human — must
+ * NOT opt in; it stays on the default `'view'`.
+ */
+export type ProjectAxisSource = 'view' | 'rollup'
+
 /*
  * Every query below aliases the lane `u`, so the predicates hard-code that
  * prefix rather than taking an alias parameter. One shape, no string building.
@@ -270,6 +293,49 @@ const LANE = sql`v_complete_usage`
 /** Half-open `[startIso, endIso)` on `ts_event` — the one window predicate. */
 function windowPredicate(w: SpendWindow): SQL {
   return sql`u.ts_event >= ${w.startIso}::timestamptz AND u.ts_event < ${w.endIso}::timestamptz`
+}
+
+/**
+ * The rollup path swaps the `ts_event` window for a `day` range, and the two
+ * are equivalent ONLY for exact-UTC-midnight bounds: the rollup's `day` is the
+ * event's UTC day, so a mid-day bound would silently drop or admit part of a
+ * day. Report windows come from `resolveReportWindow` and comply structurally;
+ * a non-midnight caller is a programmer error and must THROW, never undercount
+ * (usage-rollup-lane.md R5b.2).
+ */
+function assertUtcMidnight(iso: string, bound: 'startIso' | 'endIso'): void {
+  const d = new Date(iso)
+  const midnight =
+    !Number.isNaN(d.getTime()) &&
+    d.getUTCHours() === 0 &&
+    d.getUTCMinutes() === 0 &&
+    d.getUTCSeconds() === 0 &&
+    d.getUTCMilliseconds() === 0
+  if (!midnight) {
+    throw new Error(
+      `projectAxisRows: source 'rollup' requires exact UTC-midnight window bounds; ${bound} = ${iso}`,
+    )
+  }
+}
+
+/**
+ * A bound's UTC calendar day MUST come from the PARSED instant, never from the
+ * raw string's first ten characters: {@link assertUtcMidnight} validates the
+ * instant, so an offset-formatted UTC midnight (2026-09-01T23:00:00-01:00 IS
+ * 2026-09-02T00:00:00Z) passes it while its raw digits name the prior day —
+ * a silent full-day window shift (usage-rollup-lane.md R5b.2).
+ */
+const utcDayOf = (iso: string): string => new Date(iso).toISOString().slice(0, 10)
+
+/**
+ * Half-open `[startIso, endIso)` translated to the rollup's `day` column.
+ * Exact iff both bounds are UTC midnights ({@link assertUtcMidnight}): the
+ * start midnight admits every event of its own UTC day, and the EXCLUSIVE end
+ * midnight excludes its day on both representations (`ts_event < midnight`
+ * admits no event of that day; `day < end::date` admits no such cell).
+ */
+function rollupWindowPredicate(w: SpendWindow): SQL {
+  return sql`u.day >= ${utcDayOf(w.startIso)}::date AND u.day < ${utcDayOf(w.endIso)}::date`
 }
 
 /**
@@ -305,6 +371,20 @@ const num = (v: unknown): number => Number(v ?? 0)
  *
  * Returns a Map keyed by project id. A project with no spend in the window is
  * ABSENT from the map — callers default to 0.
+ */
+/*
+ * NO GATE PARAMETER, and the type is the enforcement.
+ *
+ * A RollupGate certifies ONE teammate's settled days. This function totals a
+ * project across ALL of them, so no gate that exists can cover its rows: a
+ * colleague's late write or pending re-home cannot close the caller's proof,
+ * and a split read here would serve their stale rollup rows behind it.
+ *
+ * It briefly took one anyway, defaulted to null, with no caller passing it —
+ * dead code holding the door open for a future caller to do the unsafe thing
+ * under a proof that looked reassuring. Removed rather than documented: a
+ * signature that cannot express the mistake is worth more than a comment
+ * asking people not to make it.
  */
 export async function completeProjectSpend(
   db: AnyDb,
@@ -452,12 +532,13 @@ export function projectAxisRemainderLabel(projects: number): string {
 export async function completeProjectAxisSpend(
   db: AnyDb,
   window: SpendWindow,
-  opts: { scope: SQL; excludeProvisional?: boolean; limit?: number },
+  opts: { scope: SQL; excludeProvisional?: boolean; limit?: number; source?: ProjectAxisSource },
 ): Promise<ProjectAxisSpend[]> {
   return projectAxisRows(db, window, {
     scope: opts.scope,
     excludeProvisional: opts.excludeProvisional,
     limit: opts.limit ?? PROJECT_AXIS_ROW_CAP,
+    source: opts.source,
   })
 }
 
@@ -494,7 +575,7 @@ export async function completeProjectAxisSpend(
 export async function completeProjectAxisPopulation(
   db: AnyDb,
   window: SpendWindow,
-  opts: { scope: SQL; excludeProvisional?: boolean },
+  opts: { scope: SQL; excludeProvisional?: boolean; source?: ProjectAxisSource },
 ): Promise<ProjectAxisSpend[]> {
   return projectAxisRows(db, window, { ...opts, limit: null })
 }
@@ -514,12 +595,30 @@ export async function completeProjectAxisPopulation(
  * With `limit === null` the rank filter and the tail row are BOTH absent, not
  * merely widened — so a caller cannot end up with a remainder row of zero
  * projects, and `remainderProjects` is 0 everywhere.
+ *
+ * `source: 'rollup'` swaps only the FROM and the window translation
+ * (usage-rollup-lane.md R5b.2). CONSTRAINT: the provisional filter is
+ * equivalent on pre-aggregated cells only because `identity_state` is IN the
+ * rollup grain (mig 0138) — removing it from the grain silently breaks
+ * `excludeProvisional` here. {@link ProjectAxisSource} says who may opt in.
  */
 async function projectAxisRows(
   db: AnyDb,
   window: SpendWindow,
-  opts: { scope: SQL; excludeProvisional?: boolean; limit: number | null },
+  opts: {
+    scope: SQL
+    excludeProvisional?: boolean
+    limit: number | null
+    source?: ProjectAxisSource
+  },
 ): Promise<ProjectAxisSpend[]> {
+  const source: ProjectAxisSource = opts.source ?? 'view'
+  if (source === 'rollup') {
+    assertUtcMidnight(window.startIso, 'startIso')
+    assertUtcMidnight(window.endIso, 'endIso')
+  }
+  const axisLane = source === 'rollup' ? ROLLUP : LANE
+  const axisWindow = source === 'rollup' ? rollupWindowPredicate(window) : windowPredicate(window)
   const limit = opts.limit
   // Both fragments are absent together: an uncapped run has no rank cut AND no
   // folded tail, so "capped" is one decision, not two that can disagree.
@@ -547,9 +646,9 @@ async function projectAxisRows(
              COALESCE(p.display_name, p.code) AS label,
              p.code AS code,
              COALESCE(SUM(u.cost_usd), 0) AS cost_usd
-        FROM ${LANE} u
+        FROM ${axisLane} u
         LEFT JOIN project p ON p.id = u.project_id
-       WHERE ${windowPredicate(window)}
+       WHERE ${axisWindow}
          AND ${includePredicate(opts.excludeProvisional)}
          AND ${opts.scope}
        GROUP BY p.id, p.display_name, p.code
@@ -920,7 +1019,25 @@ export async function completeTeammateModelMix(
   db: AnyDb,
   teammateId: string,
   window: SpendWindow,
+  gate: RollupGate | null = null,
 ): Promise<{ rows: ProjectModelRow[]; totalUsd: number }> {
+  // Same aliased source swap as completeProjectSpend: model, usage_provenance
+  // and model_gap_reason are all in the rollup grain, so the GROUP BY is
+  // answerable on both arms and the query's meaning is untouched.
+  const mb = gate ? splitBounds(gate, window) : null
+  const mixSource = gate && mb
+    ? sql`(
+        SELECT r.teammate_id, r.model, r.usage_provenance, r.model_gap_reason, r.tokens, r.cost_usd
+          FROM usage_rollup_daily r
+         WHERE r.day >= ${mb.rollupFrom}::date
+           AND r.day <= ${mb.rollupTo}::date
+        UNION ALL
+        SELECT v.teammate_id, v.model, v.usage_provenance, v.model_gap_reason, v.tokens, v.cost_usd
+          FROM ${LANE} v
+         WHERE v.ts_event >= ${mb.liveFrom}::timestamptz
+           AND v.ts_event <  ${window.endIso}::timestamptz
+      )`
+    : sql`${LANE}`
   const rows = await db.execute<{
     model: string | null
     usage_provenance: string | null
@@ -931,9 +1048,10 @@ export async function completeTeammateModelMix(
     SELECT u.model, u.usage_provenance, u.model_gap_reason AS gap_reason,
            COALESCE(SUM(u.tokens), 0)::text AS tokens,
            COALESCE(SUM(u.cost_usd), 0)::text AS cost_usd
-      FROM ${LANE} u
+      FROM ${mixSource} u
      WHERE u.teammate_id = ${teammateId}::uuid
-       AND ${windowPredicate(window)}
+       -- On the BOUNDS, not the gate: see completeProjectSpend above.
+       AND ${mb ? sql`TRUE` : windowPredicate(window)}
      GROUP BY u.model, u.usage_provenance, u.model_gap_reason
   `)
   // Fold by driver key (the engine/drivers.ts model-axis idiom): a named model

@@ -102,7 +102,7 @@ const countOn = async (table: string, unitId: string, tmId = teammateId) => {
 }
 
 beforeEach(async () => {
-  for (const tbl of ['attribution_record', 'unaccounted_usage', 'over_emission', 'actual_spend', 'reconciliation_record', 'spend_rollup_daily']) {
+  for (const tbl of ['attribution_record', 'unaccounted_usage', 'over_emission', 'actual_spend', 'reconciliation_record', 'spend_rollup_daily', 'usage_rollup_refresh']) {
     await t.client.unsafe(`DELETE FROM ${tbl}`)
   }
   delete process.env.LEDGER_ROLLUP_FREEZE_FLOOR_DAYS
@@ -138,6 +138,14 @@ describe('an admin correction moves the history with the person', () => {
       expect(await countOn(tbl, buNew), `${tbl} did not follow`).toBe(1)
       expect(await countOn(tbl, buOld), `${tbl} left a row behind`).toBe(0)
     }
+
+    // The restated dims change v_complete_usage on all history with no timestamp
+    // signal, so the SAME transaction must queue the teammate for a full-history
+    // usage_rollup_daily recompute (docs/design/usage-rollup-lane.md R4).
+    const refresh = await t.client<{ teammate_id: string }[]>`
+      SELECT teammate_id::text AS teammate_id FROM usage_rollup_refresh`
+    expect(refresh).toHaveLength(1)
+    expect(refresh[0]!.teammate_id).toBe(teammateId)
   })
 
   it('leaves OTHER teammates alone', async () => {

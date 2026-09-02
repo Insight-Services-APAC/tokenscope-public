@@ -14,6 +14,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup, rebuildUsageRollup } from '../helpers/usage-rollup'
 import { injectTestSession } from '../../helpers/auth'
 import { grantReportAccess } from '../helpers/report-access'
 import {
@@ -166,6 +167,9 @@ beforeAll(async () => {
   >`SELECT id::text AS id FROM teammate WHERE email='orgwideadmin@ko.test'`
   orgWideAdminId = a!.id
   await grantReportAccess(t.client, orgWideAdminId)
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {
@@ -884,11 +888,18 @@ describe('r4-H2 — the ranked teammate axes carry the provisional conjunct', ()
               ${ids.uApacCto}::uuid, ${ids.projScholarship}::uuid, 'claude-code',
               'claude-sonnet-4-6', 'input', 1000, ${SHADOW_USD}, 'tier-1', 'estimated',
               '2026-05-09T00:00:00Z'::timestamptz, 'r4h2-driver-shadow', 'provisional')`
+    // New §A row on an already-materialised day — REBUILD the rollup the
+    // teammate axis reads (usage-rollup-lane.md R5/R8).
+    await rebuildUsageRollup(t.db)
     resetReportCache()
   }, 60_000)
 
   afterAll(async () => {
     await t.client`DELETE FROM attribution_record WHERE claude_session_id = 'r4h2-driver-shadow'`
+    // Restore the rollup BEFORE deleting the teammate: usage_rollup_daily FKs
+    // teammate(id), so the shadow's rollup rows must vanish (their lane rows
+    // just did) for the row delete to pass.
+    await rebuildUsageRollup(t.db)
     await t.client`DELETE FROM teammate WHERE id = ${shadow}::uuid`
     resetReportCache()
   }, 60_000)

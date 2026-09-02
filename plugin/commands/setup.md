@@ -106,7 +106,14 @@ user:
 - **Emitting provisioned** — this device's Claude Code settings now carry the
   OTel plumbing.
 - **Restart `claude`** — telemetry config is read at startup, so relaunch for
-  emission to begin.
+  emission to begin. **In a repo with a `.tokenscope` tag this can take two
+  relaunches.** Such a repo keeps its own `.claude/settings.local.json` copy of
+  the enrolment, and project settings override user settings; that copy is
+  refreshed by the SessionStart hook, which necessarily runs *after* the session
+  has already read its env. So the first relaunch repairs the file while still
+  emitting under the previous device. Claude Code prints a "superseded device
+  enrolment" warning at session start when that happens — relaunch once more and
+  it clears. Untagged repos are unaffected.
 - **`/tokenscope:status` checks emit-AUTH health, not delivery.** It confirms the
   emit credential can mint an ingest bearer (the emission path is _configured and
   authorised_) — it does **not** prove any record physically landed. Ingest is
@@ -126,3 +133,4 @@ user:
 | `provision_emit` handoff expired before redeem    | Handoff codes are ~5 min single-use — re-run `provision_emit` for a fresh one.          |
 | Redeem helper reports a network error (not a 401) | The local helper couldn't reach the server; check the plugin's API base / connectivity. |
 | Sessions still not emitting after redeem          | Restart `claude` — the OTel env is read once at process start.                          |
+| "Superseded device enrolment" warning at start    | A `.tokenscope` repo's settings copy was just refreshed; relaunch `claude` once more.   |

@@ -274,6 +274,12 @@ export async function confirmProvisionalInstance(
     //     the row's org_unit_id (the untagged-spill default) so an explicit
     //     project-tagged CC is preserved (PG evaluates every SET against the row's
     //     pre-update values, so the CASE sees the OLD org_unit_id).
+    //     ts_recorded = now() MUST ride the same UPDATE: every ledger mutation
+    //     bumps the write instant (the tag-session.ts:181-200 precedent), and the
+    //     usage-rollup source-write signal keys its recompute set on it — without
+    //     the bump this historical rewrite is invisible to the rollup once the
+    //     trailing window narrows (performance-observability-baseline.md O5,
+    //     dr-H4; usage-rollup-lane.md R4).
     await tx.execute(sql`
       UPDATE attribution_record
          SET teammate_id         = ${input.realTeammateId}::uuid,
@@ -284,7 +290,8 @@ export async function confirmProvisionalInstance(
                  THEN ${real.org_unit_id}::uuid
                ELSE cost_owning_unit_id
              END,
-             org_unit_id         = ${real.org_unit_id}::uuid
+             org_unit_id         = ${real.org_unit_id}::uuid,
+             ts_recorded         = now()
        WHERE instance_id = ${input.instanceId}::uuid
          AND teammate_id = ${priorShadowTeammateId}::uuid
     `)

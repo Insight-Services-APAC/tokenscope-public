@@ -100,6 +100,14 @@ param hasGithubPatApacNfr bool = false
 @description('Whether the github-app-key-partner-demo KV secret was created (the GitHub App PRIVATE KEY, base64 PEM, for the partner-demo enterprise App-credential path; read as NUXT_GITHUB_APP_KEY_PARTNER_DEMO; credential_secret_name "partner-demo"). Default false = no KV ref emitted; flip true ONLY after the key is in Key Vault (ACA rejects a ref to a missing secret).')
 param hasGithubAppKeyPartnerDemo bool = false
 
+// Ops alerting channel (docs/design/ops-alerting.md §A1). The ntfy topic URL
+// IS the credential, so it reaches the container ONLY as a secretRef — never a
+// plain env value (ar-M20). False = no KV ref, no env var: the ops-alert
+// worker sees an empty NUXT_OPS_ALERT_NTFY_URL and alerting is disabled (the
+// sandbox/local default).
+@description('Whether the ops-alert-ntfy-url KV secret exists (the operator push channel, read as NUXT_OPS_ALERT_NTFY_URL). Default false = no KV ref emitted (ACA rejects a ref to a missing secret); alerting disabled.')
+param hasOpsAlertNtfyUrl bool = false
+
 // ── RLS enforcement: the non-owner app role (docs/design/rls-enforcement.md §9) ──
 // FOUR FLAGS, FOUR SEPARATE DECISIONS, ALL DEFAULT FALSE (a fifth,
 // rotateAppDbPassword, is a rare deliberate act — see below). They are not one
@@ -321,6 +329,15 @@ var appRoleSecrets = hasAppRoleSecrets ? [
   }
 ] : []
 
+// Ops alerting channel (§A1) — secretRef-only, the topic URL is the credential (ar-M20).
+var opsAlertSecrets = hasOpsAlertNtfyUrl ? [
+  {
+    name: 'ops-alert-ntfy-url'
+    keyVaultUrl: '${keyVaultUri}secrets/ops-alert-ntfy-url'
+    identity: identityId
+  }
+] : []
+
 var entraSecrets = hasEntraClientSecret ? [
   {
     name: 'entra-client-secret'
@@ -349,7 +366,7 @@ var oidcModuleSecrets = hasOidcModuleSecrets ? [
   }
 ] : []
 
-var allSecrets = concat(requiredSecrets, anthropicSecrets, githubPatSecrets, appRoleSecrets, entraSecrets, oidcModuleSecrets)
+var allSecrets = concat(requiredSecrets, anthropicSecrets, githubPatSecrets, appRoleSecrets, opsAlertSecrets, entraSecrets, oidcModuleSecrets)
 
 // ── Environment Variables ───────────────────────────────────────────
 
@@ -536,6 +553,13 @@ var appRoleEnvVars = concat(
   ] : []
 )
 
+// Ops alerting channel (§A1). secretRef, never a value (ar-M20 — the topic IS
+// the credential; failure logging in the worker records host + status only).
+// Absent = the worker reads an empty NUXT_OPS_ALERT_NTFY_URL = alerting off.
+var opsAlertEnvVars = hasOpsAlertNtfyUrl ? [
+  { name: 'NUXT_OPS_ALERT_NTFY_URL', secretRef: 'ops-alert-ntfy-url' }
+] : []
+
 var entraEnvVars = hasEntraClientSecret ? [
   { name: 'NUXT_OIDC_PROVIDERS_ENTRA_CLIENT_SECRET', secretRef: 'entra-client-secret' }
 ] : []
@@ -610,7 +634,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json(environment == 'production' ? '1.0' : '0.5')
             memory: environment == 'production' ? '2Gi' : '1Gi'
           }
-          env: concat(baseEnvVars, anthropicEnvVars, githubPatEnvVars, githubAppKeyEnvVars, appRoleEnvVars, entraEnvVars, oidcModuleEnvVars, aiFoundryEnvVars, gitCommitShaEnvVars, telemetryReaderEnvVars)
+          env: concat(baseEnvVars, anthropicEnvVars, githubPatEnvVars, githubAppKeyEnvVars, appRoleEnvVars, opsAlertEnvVars, entraEnvVars, oidcModuleEnvVars, aiFoundryEnvVars, gitCommitShaEnvVars, telemetryReaderEnvVars)
           probes: [
             // Startup probe: gives the Nuxt server time to bind and run
             // any first-touch DB / Redis warmups. 5s initial delay +
@@ -690,6 +714,9 @@ output fqdn string = containerApp.properties.configuration.ingress.fqdn
 
 @description('Container App resource name.')
 output appName string = containerApp.name
+
+@description('Container App resource ID — the scope target for the ops-alerts module\'s Replicas metric alert (ops-alerting.md ar-H7).')
+output appId string = containerApp.id
 
 @description('Container App Environment resource ID (for future co-deployed apps in the same env).')
 output environmentId string = containerAppEnv.id

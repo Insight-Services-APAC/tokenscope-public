@@ -17,6 +17,23 @@ export const MeResponse = z.object({
   regionId: z.string().uuid().optional(),
   orgPath: z.string().optional(),
   landing: z.string().optional(),
+  /*
+   * The Reporting nav verdict, resolved server-side (server/auth/
+   * nav-visibility.ts). The nav RENDERS this and never re-derives it — the
+   * client used to fetch two of the three inputs itself and OR them, which
+   * cost two blocking round-trips per cold load and let the browser disagree
+   * with the server about who may see what.
+   *
+   * Optional because an unauthenticated probe returns `{ authenticated: false }`
+   * alone; present on every authenticated response.
+   */
+  reporting: z
+    .object({
+      visible: z.boolean(),
+      /** 'cost-centre' deep-links a non-role owner to their P&L; null = let the shell self-land. */
+      scope: z.enum(['cost-centre']).nullable(),
+    })
+    .optional(),
   // Wave-V — persona-impersonation surface. Present only when the
   // current session was minted via the admin → persona override
   // (NUXT_ALLOW_PERSONA_OVERRIDE=true). The UI renders "Acting as

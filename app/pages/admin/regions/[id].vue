@@ -60,8 +60,7 @@ interface RegionResp {
   }
 }
 
-const { session, ensure } = useSession()
-await ensure()
+const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
@@ -102,21 +101,12 @@ function openUnplacedWorklist() {
   setPlacement('unplaced')
 }
 
-/*
- * Load ordering (perf): region metadata, the org-unit tree, the teammates
- * list and the lifecycle override all key off `regionId` (the route param) —
- * none depends on another's RESPONSE — so they're independent reads. Launch
- * each without an immediate per-call await (useFetch returns an AsyncData,
- * also a thenable) and await them together, so the page blocks on the slowest
- * read rather than the sum. Mirrors the parallel pattern on the reconciliation
- * page. (Composable rule: each useFetch stays at the top level of <script
- * setup>.)
- */
-const regionAsync = useFetch<RegionResp>(
+// All five reads are lazy, client-only, null-default and never awaited — concurrent
+// by construction: docs/design/admin-nav-responsiveness.md D1/D2.
+const { data: region, error: regionError, refresh: refreshRegion } = useLazyFetch<RegionResp | null>(
   () => `/api/v1/admin/region/${regionId}`,
-  { default: () => null as unknown as RegionResp, immediate: isAdmin.value },
+  { server: false, default: () => null, immediate: isAdmin.value },
 )
-const { data: region, error: regionError, refresh: refreshRegion } = regionAsync
 
 // Contribute the region name as the trailing breadcrumb (Admin › Regions › X).
 // Cleared automatically on navigation away by the admin layout.
@@ -130,11 +120,13 @@ watch(
   { immediate: true },
 )
 
-const treeAsync = useFetch<{ nodes: OrgNode[]; default_unit_warn_threshold: number }>(
-  () => `/api/v1/admin/org-units?region=${regionId}`,
-  { default: () => ({ nodes: [], default_unit_warn_threshold: 0 }), immediate: isAdmin.value },
-)
-const { data: tree, refresh: refreshTree } = treeAsync
+const { data: tree, error: treeError, refresh: refreshTree } = useLazyFetch<
+  { nodes: OrgNode[]; default_unit_warn_threshold: number } | null
+>(() => `/api/v1/admin/org-units?region=${regionId}`, {
+  server: false,
+  default: () => null,
+  immediate: isAdmin.value,
+})
 
 /*
  * C5 — the standing rules that place people into THIS region's Business Units.
@@ -155,11 +147,16 @@ interface UnitRule {
   org_unit_display_name: string | null
   target_placeable: boolean | null
 }
-const rulesAsync = useFetch<{ rules: UnitRule[] }>(
+// The rules read keeps its `error`: collapsed into `[]` the whole Placement
+// rules block disappears and reads as "this region has no standing rules" — the
+// false empty D2 forbids (docs/design/admin-nav-responsiveness.md). The same `[]`
+// silently disables PlacementRuleOffer's shadow check (`existingRuleFor` can only
+// return null over an empty list), so the offer would promise an outcome a
+// higher-precedence rule already overrides — it is withheld instead.
+const { data: rulesData, error: rulesError, refresh: refreshRules } = useLazyFetch<{ rules: UnitRule[] } | null>(
   () => `/api/v1/admin/directory-region-rules?region=${regionId}`,
-  { default: () => ({ rules: [] }), immediate: isAdmin.value },
+  { server: false, default: () => null, immediate: isAdmin.value },
 )
-const { data: rulesData, refresh: refreshRules } = rulesAsync
 const unitRules = computed(() => rulesData.value?.rules ?? [])
 
 /*
@@ -180,25 +177,16 @@ interface TeammateRow extends Record<string, unknown> {
   directory_captured_at: string | null
   spend_usd: string
 }
-const teammatesAsync = useFetch<{
+interface TeammatesResp {
   teammates: TeammateRow[]
   total: number
   unfiltered_total: number
   spend_window: { start: string; end: string }
-}>(
+}
+const { data: teammates, error: teammatesError, refresh: refreshTeammates } = useLazyFetch<TeammatesResp | null>(
   () => `/api/v1/admin/teammates?region=${regionId}&limit=200&placement=${placement.value}`,
-  {
-    default: () => ({
-      teammates: [],
-      total: 0,
-      unfiltered_total: 0,
-      spend_window: { start: '', end: '' },
-    }),
-    immediate: isAdmin.value,
-    watch: [placement],
-  },
+  { server: false, default: () => null, immediate: isAdmin.value, watch: [placement] },
 )
-const { data: teammates, refresh: refreshTeammates } = teammatesAsync
 
 // Project-lifecycle region override (D9): grace/warn for this region, or the
 // inherited platform default. Region admins (and org-wide) can set/clear it.
@@ -207,15 +195,13 @@ interface LifecycleResp {
   platform: { grace_hours: number; warn_days: number }
   effective: { grace_hours: number; warn_days: number }
 }
-const lifecycleAsync = useFetch<LifecycleResp>(
+// Its `error` is kept for the opposite reason to the pickers: the captions below
+// fall back to LITERAL 2h/7d, so a failed read renders a fabricated platform
+// default as fact and seeds nothing into the two inputs.
+const { data: lifecycle, error: lifecycleError, refresh: refreshLifecycle } = useLazyFetch<LifecycleResp | null>(
   () => `/api/v1/admin/regions/${regionId}/project-lifecycle`,
-  { default: () => null as unknown as LifecycleResp, immediate: isAdmin.value },
+  { server: false, default: () => null, immediate: isAdmin.value },
 )
-const { data: lifecycle, refresh: refreshLifecycle } = lifecycleAsync
-
-// All five reads above are independent (keyed off the route param, not each
-// other's response) — block on the slowest, not their sum.
-await Promise.all([regionAsync, treeAsync, teammatesAsync, lifecycleAsync, rulesAsync])
 const lcGrace = ref<number | null>(null)
 const lcWarn = ref<number | null>(null)
 const lcSaving = ref(false)
@@ -620,11 +606,11 @@ async function refreshAfterPlacement() {
 </script>
 
 <template>
-  <div v-if="!isAdmin" class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-testid="admin-access-required">
+  <div v-if="!isAdmin" class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-testid="admin-access-required" data-admin-page="/admin/regions/[id]">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 
-  <div v-else-if="!regionError && region" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="region-detail">
+  <div v-else-if="!regionError && region" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="region-detail" data-admin-page="/admin/regions/[id]">
     <UiPageHead
       eyebrow="Region"
       :title="headline"
@@ -707,10 +693,13 @@ async function refreshAfterPlacement() {
         </UiButton>
       </div>
 
+      <UiFetchErrorBanner v-if="treeError" :error="treeError" label="the Business Unit tree" @retry="refreshTree" />
+      <AdminPageSkeleton v-else-if="tree == null" :rows="6" :toolbar="false" />
+
       <!-- Get-started CTA: shown when the Business Unit tree is empty so a new
            region admin sees the very first action front-and-centre. -->
       <div
-        v-if="!nodes.length"
+        v-if="tree && !nodes.length"
         class="mb-5 p-5 rounded-lg bg-brand-harmony-sheer border border-brand-harmony/25"
         data-testid="cost-centre-getstarted"
       >
@@ -836,7 +825,20 @@ async function refreshAfterPlacement() {
       <!-- C5: the standing rules that place people into this region's cost
            centres. Created from the offer after a bulk place, and removable
            here — an offer whose result an admin cannot see or undo is a trap. -->
-      <div v-if="unitRules.length" class="mt-6 pt-5 border-t border-calm-2" data-testid="unit-rules">
+      <div v-if="rulesError" class="mt-6 pt-5 border-t border-calm-2" data-testid="unit-rules-unavailable">
+        <div class="text-[12px] font-semibold text-carbon uppercase tracking-wide">Placement rules</div>
+        <UiAuxFetchError
+          :error="rulesError"
+          label="the placement rules"
+          testid="unit-rules-error"
+          @retry="refreshRules"
+        />
+      </div>
+      <div v-else-if="rulesData == null" class="mt-6 pt-5 border-t border-calm-2" data-testid="unit-rules-loading">
+        <div class="text-[12px] font-semibold text-carbon uppercase tracking-wide">Placement rules</div>
+        <p class="text-xs text-carbon-3 mt-1" role="status" aria-busy="true">Loading placement rules…</p>
+      </div>
+      <div v-else-if="unitRules.length" class="mt-6 pt-5 border-t border-calm-2" data-testid="unit-rules">
         <div class="text-[12px] font-semibold text-carbon uppercase tracking-wide">Placement rules</div>
         <p class="text-xs text-carbon-3 mt-1 mb-3 leading-relaxed">
           A new joiner whose directory profile matches one of these lands in that Business Unit
@@ -884,6 +886,13 @@ async function refreshAfterPlacement() {
     </UiCard>
 
     <!-- Teammates: also the placement worklist (C1/C3/C4). -->
+    <UiFetchErrorBanner
+      v-else-if="activeTab === 'teammates' && teammatesError"
+      :error="teammatesError"
+      label="the teammates list"
+      @retry="refreshTeammates"
+    />
+    <AdminPageSkeleton v-else-if="activeTab === 'teammates' && teammates == null" :rows="8" />
     <EntityTable
       v-else-if="activeTab === 'teammates'"
       v-model:selected="selectedTeammateIds"
@@ -902,7 +911,7 @@ async function refreshAfterPlacement() {
              on without a click. This is what turns a one-off clean-up into
              something that stops the cluster coming back next month. -->
         <PlacementRuleOffer
-          v-if="ruleOffer"
+          v-if="ruleOffer && !rulesError"
           class="w-full"
           :teammate-ids="ruleOffer.teammateIds"
           :rows="ruleOffer.rows"
@@ -911,6 +920,14 @@ async function refreshAfterPlacement() {
           :existing-rules="unitRules"
           @created="onRuleCreated"
           @dismiss="ruleOffer = null"
+        />
+        <UiAuxFetchError
+          v-else-if="ruleOffer"
+          :error="rulesError"
+          label="the placement rules"
+          testid="rule-offer-rules-error"
+          class="w-full"
+          @retry="refreshRules"
         />
         <div class="flex items-center gap-2" data-testid="teammates-placement-filter">
           <span class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3">Placement</span>
@@ -997,15 +1014,27 @@ async function refreshAfterPlacement() {
       <!-- Project-lifecycle override (D9) -->
       <div class="mt-6 pt-5 border-t border-calm-2" data-testid="region-lifecycle">
         <div class="text-[12px] font-semibold text-carbon uppercase tracking-wide">Project lifecycle</div>
-        <p class="text-xs text-carbon-3 mt-1 mb-3 leading-relaxed">
-          End-date cadence for this region. Leave at the platform default
-          ({{ lifecycle?.platform.grace_hours ?? 2 }}h grace / {{ lifecycle?.platform.warn_days ?? 7 }}d warning),
+        <!-- The platform figures render only once the read has landed. The old
+             `?? 2` / `?? 7` fallbacks stated a default nobody had fetched, which
+             on a failed or in-flight read is a fabricated fact, not a default. -->
+        <UiAuxFetchError
+          v-if="lifecycleError"
+          :error="lifecycleError"
+          label="the project-lifecycle policy"
+          testid="region-lifecycle-error"
+          class="mt-1 mb-3"
+          @retry="refreshLifecycle"
+        />
+        <p v-else class="text-xs text-carbon-3 mt-1 mb-3 leading-relaxed">
+          End-date cadence for this region. Leave at the platform default<span
+            v-if="lifecycle"> ({{ lifecycle.platform.grace_hours }}h grace /
+            {{ lifecycle.platform.warn_days }}d warning)</span>,
           or override it for {{ region.region.display_name }}.
           <span v-if="lifecycle?.override" class="text-brand-zeal font-semibold" data-testid="region-lifecycle-overridden">
             Currently overridden.
           </span>
         </p>
-        <div class="flex flex-wrap items-end gap-3">
+        <div v-if="!lifecycleError" class="flex flex-wrap items-end gap-3">
           <label class="text-xs text-carbon-2">
             Grace (hours)
             <input
@@ -1031,7 +1060,7 @@ async function refreshAfterPlacement() {
           <UiButton
             kind="primary"
             size="sm"
-            :disabled="lcSaving"
+            :disabled="lcSaving || lcGrace === null || lcWarn === null"
             data-testid="region-lifecycle-save"
             @click="saveLifecycleOverride"
           >
@@ -1198,7 +1227,7 @@ async function refreshAfterPlacement() {
     </div>
   </div>
 
-  <div v-else-if="regionError" class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-testid="admin-error">
+  <div v-else-if="regionError" class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-testid="admin-error" data-admin-page="/admin/regions/[id]">
     <div class="text-lg font-bold text-carbon">Region not available.</div>
     <p class="text-sm text-carbon-2 mt-2">
       You don't have permission to view this region, or the region was removed.
@@ -1208,7 +1237,7 @@ async function refreshAfterPlacement() {
     </NuxtLink>
   </div>
 
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center text-carbon-3 text-sm">
-    Loading region…
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-admin-page="/admin/regions/[id]">
+    <AdminPageSkeleton :tiles="4" :rows="8" />
   </div>
 </template>

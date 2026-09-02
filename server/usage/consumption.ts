@@ -21,6 +21,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { activeProjectPredicate } from '../db/project-predicates'
 import { cacheStats, pivotByModel, pivotByTokenType, type BreakdownCell } from './breakdowns'
 import type { CacheStats, ModelSpend, TokenTypeSpend } from '../../shared/schemas/usage'
+import { classifyQuerySource } from '../../shared/usage/query-source'
 import type { InsightCell } from './insights'
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
@@ -168,8 +169,13 @@ export async function fetchWindowTotals(
     cost += c
     tokens += t
     advisory += Number(r.advisory_cost_usd)
-    if (r.query_source === null) unknownTokens += t
-    else if (r.query_source === 'main') mainTokens += t
+    // Claude Code never sends the literal 'main' (our Copilot plugin does) —
+    // so classify the raw wire token, never compare it
+    // (shared/usage/query-source.ts). An equality test here read 100% of Claude
+    // Code spend as harness overhead.
+    const lane = classifyQuerySource(r.query_source)
+    if (lane === 'unknown') unknownTokens += t
+    else if (lane === 'main') mainTokens += t
     else {
       auxTokens += t
       auxCost += c

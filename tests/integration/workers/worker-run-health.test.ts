@@ -17,6 +17,8 @@
  *   (d) the diagnostics `workers` block reports a worker with trailing
  *       failures as 'failing' with the right consecutiveFailures, and a
  *       healthy one as 'ok'.
+ *   (d6) a FAILED workers read reports `reads.workers.available: false` with a
+ *       classified reason instead of an empty list that reads as "no runs yet".
  *   (d3-d5) MEDIUM-1: a killed/wedged worker (a 'running' row that never
  *       transitioned) is surfaced as 'failing' (red), not masked as 'stale'
  *       (amber): a running row over a failure pile counts the trailing
@@ -247,6 +249,15 @@ interface DiagResp {
     finishedAt: string | null
     startedAt: string | null
   }[]
+  lastSync: unknown[]
+  postgres: { reachable: boolean }
+  // Per-read availability — `workers: []` from a failed query and `workers: []`
+  // from an empty table are otherwise identical on the wire.
+  reads: {
+    lastSync: { available: boolean; error?: string; errorCorrelationId?: string }
+    pipeline: { available: boolean; error?: string; errorCorrelationId?: string }
+    workers: { available: boolean; error?: string; errorCorrelationId?: string }
+  }
 }
 
 async function insertRun(
@@ -312,6 +323,24 @@ describe('GET /api/v1/admin/diagnostics — workers block', () => {
     expect(streak!.consecutiveFailures).toBe(2)
   })
 
+  it('(d6) skipped (admin-disabled) resets the streak like success, and reads disabled — not failing, not ok', async () => {
+    // Streak-reset rule must match ops-alert.ts (ar-M12): 'skipped' ends the
+    // streak, so failures older than the newest skipped row do not count.
+    await insertRun('diag-disabled', 'failure', '2026-06-05T07:00:00Z')
+    await insertRun('diag-disabled', 'failure', '2026-06-05T08:00:00Z')
+    await insertRun('diag-disabled', 'failure', '2026-06-05T09:00:00Z')
+    await insertRun('diag-disabled', 'skipped', '2026-06-05T10:00:00Z', 0)
+    await insertRun('diag-disabled', 'skipped', '2026-06-05T10:30:00Z', 0)
+
+    const handler = await loadHandler()
+    const result = await handler(makeEvent(finopsSession()))
+
+    const w = result.workers.find((w) => w.worker === 'diag-disabled')
+    expect(w!.status).toBe('skipped')
+    expect(w!.consecutiveFailures).toBe(0)
+    expect(w!.rag).toBe('disabled')
+  })
+
   it('(d3) MEDIUM-1: a running row over ≥1 failure is failing with the trailing failure count', async () => {
     // A worker killed mid-run: its run is stuck 'running' on top of a failure
     // pile. The streak terminator is SUCCESS-only, so the trailing failures
@@ -360,5 +389,46 @@ describe('GET /api/v1/admin/diagnostics — workers block', () => {
     expect(inflight!.consecutiveFailures).toBe(0)
     expect(inflight!.rag).not.toBe('failing')
     expect(inflight!.rag).toBe('ok')
+  })
+
+  it('a healthy request declares every read available', async () => {
+    const handler = await loadHandler()
+    const result = await handler(makeEvent(finopsSession()))
+    expect(Object.keys(result.reads).sort()).toEqual(['lastSync', 'pipeline', 'workers'])
+    expect(result.reads.workers).toEqual({ available: true })
+    expect(result.reads.lastSync).toEqual({ available: true })
+    expect(result.reads.pipeline).toEqual({ available: true })
+  })
+
+  // LAST in this describe: it renames worker_run for the length of one request.
+  it('A FAILED WORKERS READ REPORTS UNAVAILABLE, NOT "no worker runs yet"', async () => {
+    /*
+     * The workers block catches and keeps its EMPTY initialiser, which the card
+     * renders as "No worker runs recorded yet. Runs appear once the scheduler
+     * dispatches a worker." — a success-shaped nothing that reads as a quiet
+     * fleet while the query is what actually failed. Hide worker_run for one
+     * request: the array is still empty (consumers unbroken) but
+     * `reads.workers` says the emptiness is a failure, and the siblings that
+     * did answer stay available.
+     */
+    await t.client.unsafe('ALTER TABLE worker_run RENAME TO worker_run_hidden_by_test')
+    try {
+      const handler = await loadHandler()
+      const result = await handler(makeEvent(finopsSession()))
+      expect(result.workers).toEqual([])
+      expect(result.reads.workers.available).toBe(false)
+      expect(result.reads.workers.error).toBe('relation-missing')
+      expect(result.reads.workers.errorCorrelationId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      )
+      // The redacted reason carries no fragment of the driver's message.
+      expect(JSON.stringify(result.reads.workers)).not.toContain('worker_run')
+      // Its own transaction: the neighbours answered and say so.
+      expect(result.reads.lastSync).toEqual({ available: true })
+      expect(result.reads.pipeline).toEqual({ available: true })
+      expect(result.postgres.reachable).toBe(true)
+    } finally {
+      await t.client.unsafe('ALTER TABLE worker_run_hidden_by_test RENAME TO worker_run')
+    }
   })
 })

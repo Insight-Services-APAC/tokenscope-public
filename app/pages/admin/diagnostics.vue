@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { statsWindowLabel, analyzeLabel } from '~/utils/db-stats-labels'
 /*
  * Admin → Diagnostics (Wave VI). Operational health snapshot.
  *
@@ -23,6 +24,18 @@ import type { UnhomedCause } from '#shared/usage/unhomed-causes'
 import { REPORT_VISIBILITY_PERSONAS } from '#shared/auth/report-visibility'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
+/**
+ * Whether one independently-fallible server-side read answered. Mirrors
+ * `ReadAvailability` in server/utils/redact-probe-error.ts; `error` is a
+ * classified reason code (never a driver message) and the correlation id ties
+ * it to the full-fidelity server log line.
+ */
+interface ReadAvailability {
+  available: boolean
+  error?: string
+  errorCorrelationId?: string
+}
+
 interface DiagResp {
   postgres: {
     reachable: boolean
@@ -41,6 +54,37 @@ interface DiagResp {
     ledgerAgeMinutes: number | null
     status: 'ok' | 'warn' | 'stale' | 'unknown'
   }
+  workers: {
+    worker: string
+    status: string
+    finishedAt: string | null
+    startedAt: string | null
+    durationMs: number | null
+    ageMinutes: number | null
+    startedAgeMinutes: number | null
+    consecutiveFailures: number
+    rag: 'ok' | 'failing' | 'stale' | 'disabled' | 'unknown'
+    dispatchBudget: 'ok' | 'near' | 'over' | null
+    dispatchBudgetReason: string | null
+  }[]
+  dispatchBudgetMs: number
+  lastSync: { source: string; ts: string | null }[]
+  // Per-read availability (server: index.get.ts `reads`). An empty `workers` /
+  // `lastSync` and an unknown `pipeline` are the SAME bytes whether the query
+  // found nothing or failed — this is the only thing that separates them, and
+  // every panel below keys its "unavailable" state on it.
+  reads?: {
+    lastSync?: ReadAvailability
+    pipeline?: ReadAvailability
+    workers?: ReadAvailability
+  }
+  nodeEnv: string
+  containerInfo: { revision: string | null }
+}
+
+// GET /api/v1/admin/diagnostics/costing — the 7-day fact-table aggregates,
+// split off the snapshot so its panel can land on its own (D4).
+interface DiagCostingResp {
   // migs 0045/0091: our rate-card ESTIMATE vs the provider's own figure over the
   // last 7 days (v_cost_drift), across both cost vintages — pre-cutover rows
   // where cost_usd is the estimate, and provider-priced rows where the estimate
@@ -74,23 +118,18 @@ interface DiagResp {
     rateCardPct: number | null
     fallbackModels: { model: string; spans: number }[]
   }
-  workers: {
-    worker: string
-    status: string
-    finishedAt: string | null
-    startedAt: string | null
-    durationMs: number | null
-    ageMinutes: number | null
-    startedAgeMinutes: number | null
-    consecutiveFailures: number
-    rag: 'ok' | 'failing' | 'stale' | 'unknown'
-    dispatchBudget: 'ok' | 'near' | 'over' | null
-    dispatchBudgetReason: string | null
-  }[]
-  dispatchBudgetMs: number
-  lastSync: { source: string; ts: string | null }[]
-  nodeEnv: string
-  containerInfo: { revision: string | null }
+  // Per-read availability (server: costing.get.ts `reads`). Both shapes above
+  // fall back to ZEROES on a failed query, which the cards would otherwise draw
+  // as "no spans" / "no comparable spans" — a healthy-looking nothing.
+  reads?: {
+    costDrift?: ReadAvailability
+    costingRungs?: ReadAvailability
+  }
+}
+
+// GET /api/v1/admin/diagnostics/probes — the network-bound probes, each raced
+// against a 5 s budget server-side; split off the snapshot for the same reason.
+interface DiagProbesResp {
   // TCP reachability of each provisioned private endpoint — the same probe the
   // boot pre-flight runs (scripts/preflight.ts).
   services: {
@@ -116,7 +155,7 @@ interface DiagResp {
 interface NetCheckReport {
   generatedNote: string
   vnetHint: string
-  summary: { total: number; ok: number; zoneNotLinked: number; unreachable: number; dnsFail: number }
+  summary: { total: number; ok: number; dnsOnly: number; zoneNotLinked: number; unreachable: number; dnsFail: number; notWired: number }
   itReport: string // multi-line plain text
   records: Array<{
     service: string
@@ -131,7 +170,7 @@ interface NetCheckReport {
     reachable: boolean | null
     tcpLatencyMs: number | null
     tcpError?: string
-    verdict: 'ok' | 'dns-public-zone-not-linked' | 'unreachable' | 'dns-fail' | 'public-ok'
+    verdict: 'ok' | 'dns-only' | 'dns-public-zone-not-linked' | 'unreachable' | 'dns-fail' | 'public-ok' | 'not-wired'
   }>
 }
 
@@ -160,8 +199,9 @@ interface OtelDiag {
   fatalError?: Record<string, unknown>
 }
 
-const { session, ensure } = useSession()
-await ensure()
+// The admin middleware guarantees the session before this page instantiates;
+// nothing here awaits the network (docs/design/admin-nav-responsiveness.md D1).
+const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
@@ -180,13 +220,55 @@ const canSeeEstateFinance = computed(() => {
   return r === 'global-finops' || r === 'platform-admin'
 })
 
-const { data, refresh, pending } = await useFetch<DiagResp>(
-  '/api/v1/admin/diagnostics',
-  {
-    default: () => null as unknown as DiagResp,
-    immediate: isAdmin.value,
-  },
-)
+/*
+ * Every read on this page is declared lazily with a `null` default and no
+ * await, so navigation paints the shell at once and each panel renders exactly
+ * one of skeleton / error / data keyed on `!error && data == null` — never on
+ * `pending`, which only drives the refresh controls (D2). `server: false`:
+ * the page is authenticated and unindexed, and SSR data would cost the same
+ * seconds as TTFB on a hard reload.
+ */
+const { data, refresh, pending, error } = useLazyFetch<DiagResp | null>('/api/v1/admin/diagnostics', {
+  server: false,
+  default: () => null,
+  immediate: isAdmin.value,
+})
+const {
+  data: probesData,
+  refresh: refreshProbes,
+  error: probesError,
+} = useLazyFetch<DiagProbesResp | null>('/api/v1/admin/diagnostics/probes', {
+  server: false,
+  default: () => null,
+  immediate: isAdmin.value,
+})
+const {
+  data: costingData,
+  refresh: refreshCosting,
+  error: costingError,
+} = useLazyFetch<DiagCostingResp | null>('/api/v1/admin/diagnostics/costing', {
+  server: false,
+  default: () => null,
+  immediate: isAdmin.value,
+})
+
+/*
+ * "Nothing happened" vs "we could not find out" — the distinction every panel
+ * below has to make. A read that FAILED server-side still returns its zero /
+ * empty shape (so consumers keep working), so the numbers alone cannot tell the
+ * two apart; `reads.<name>.available` can. Returns the operator-facing line for
+ * an unavailable read, or null when the read answered.
+ */
+function unavailable(r: ReadAvailability | undefined): string | null {
+  if (!r || r.available !== false) return null
+  const id = r.errorCorrelationId ? ` · correlation ${r.errorCorrelationId}` : ''
+  return `unavailable — ${r.error ?? 'unknown'}${id}`
+}
+const pipelineUnavailable = computed(() => unavailable(data.value?.reads?.pipeline))
+const workersUnavailable = computed(() => unavailable(data.value?.reads?.workers))
+const lastSyncUnavailable = computed(() => unavailable(data.value?.reads?.lastSync))
+const driftUnavailable = computed(() => unavailable(costingData.value?.reads?.costDrift))
+const rungsUnavailable = computed(() => unavailable(costingData.value?.reads?.costingRungs))
 
 const pgBadge = computed(() => {
   if (!data.value?.postgres) return { kind: 'neutral' as const, label: '—' }
@@ -198,13 +280,13 @@ const pgBadge = computed(() => {
 // Overall RAG for the private-endpoint reachability card: red if a boot-critical
 // PE is down, amber if a non-critical PE is down, green otherwise.
 const servicesBadge = computed(() => {
-  const svc = data.value?.services ?? []
+  const svc = probesData.value?.services ?? []
   if (!svc.length) return { kind: 'neutral' as const, label: '—' }
   if (svc.some((s) => s.critical && s.status === 'unreachable')) return { kind: 'rag-red' as const, label: 'critical down' }
   if (svc.some((s) => s.status === 'unreachable')) return { kind: 'rag-amber' as const, label: 'degraded' }
   return { kind: 'rag-green' as const, label: 'ok' }
 })
-function svcDetail(s: DiagResp['services'][number]): string {
+function svcDetail(s: DiagProbesResp['services'][number]): string {
   if (s.status === 'ok') return `ok · ${s.latencyMs}ms`
   if (s.status === 'skipped') return 'skipped'
   return `unreachable [${s.errorClass ?? 'error'}]`
@@ -231,6 +313,9 @@ function fmtAge(min: number | null): string {
 }
 
 const pipelineBadge = computed(() => {
+  // A failed read is amber 'unavailable', never the neutral 'no data' that a
+  // genuinely quiet pipeline earns.
+  if (pipelineUnavailable.value) return { kind: 'rag-amber' as const, label: 'unavailable' }
   const s = data.value?.pipeline?.status
   if (s === 'ok') return { kind: 'rag-green' as const, label: 'flowing' }
   if (s === 'warn') return { kind: 'rag-amber' as const, label: 'slowing' }
@@ -242,6 +327,7 @@ const pipelineBadge = computed(() => {
 // red — this is the chip that would have shown the joiner failing while the
 // freshness panel still read green.
 const workersBadge = computed(() => {
+  if (workersUnavailable.value) return { kind: 'rag-amber' as const, label: 'unavailable' }
   const ws = data.value?.workers ?? []
   if (!ws.length) return { kind: 'neutral' as const, label: 'no runs' }
   if (ws.some((w) => w.rag === 'failing')) return { kind: 'rag-red' as const, label: 'failing' }
@@ -250,13 +336,16 @@ const workersBadge = computed(() => {
 })
 
 function workerChip(
-  rag: string,
+  rag: DiagResp['workers'][number]['rag'],
 ): { kind: 'rag-green' | 'rag-red' | 'rag-amber' | 'neutral'; label: string } {
   if (rag === 'ok') return { kind: 'rag-green', label: '✓ ok' }
   if (rag === 'failing') return { kind: 'rag-red', label: '✗ failing' }
   // Amber for stale — consistent with the card badge (LOW-4); the per-row chip
   // previously rendered stale as neutral/grey.
   if (rag === 'stale') return { kind: 'rag-amber', label: '— stale' }
+  // Admin has the worker switched off (its runs record 'skipped'): not a
+  // failure, not a success — nothing ran.
+  if (rag === 'disabled') return { kind: 'neutral', label: '— disabled' }
   return { kind: 'neutral', label: '? unknown' }
 }
 
@@ -275,7 +364,8 @@ function fmtWorkerRun(durationMs: number | null, ageMinutes: number | null): str
 // the forecasting/validation uses of the card. Amber/red therefore means "the
 // card needs a rate line", not "the bill is wrong".
 const driftBadge = computed(() => {
-  const d = data.value?.costDrift
+  if (driftUnavailable.value) return { kind: 'rag-amber' as const, label: 'unavailable' }
+  const d = costingData.value?.costDrift
   if (!d || d.spansCompared === 0) return { kind: 'neutral' as const, label: 'no data' }
   const pct = d.meanAbsDriftPct ?? 0
   if (pct < 1) return { kind: 'rag-green' as const, label: 'in line' }
@@ -290,7 +380,11 @@ const driftBadge = computed(() => {
 // the silent mispricing this whole change exists to stop — a new model priced at
 // the wrong model's rates looks like a small percentage right up until it isn't.
 const costingBadge = computed(() => {
-  const c = data.value?.costingRungs
+  // The alert this card carries cannot be allowed to read as a clean fleet when
+  // the query behind it failed — that is the same false-green the rung counter
+  // exists to prevent, one layer up.
+  if (rungsUnavailable.value) return { kind: 'rag-amber' as const, label: 'unavailable' }
+  const c = costingData.value?.costingRungs
   if (!c || c.spans === 0) return { kind: 'neutral' as const, label: 'no spans' }
   // Guard on ladderSpans (provider + rateCard), NOT spans (which also counts
   // `other`, i.e. backfill/telemetry-only). A window holding ONLY backfill spans
@@ -302,6 +396,109 @@ const costingBadge = computed(() => {
   return { kind: 'rag-green' as const, label: 'provider-priced' }
 })
 
+/* --- Card: database performance (GET /api/v1/admin/diagnostics/db-performance)
+ *
+ * LAUNCHABLE, not on page load. This probe reads six statistics views and this
+ * page is already the slowest in the product; running it on every navigation
+ * would charge every operator for a question almost none of them are asking.
+ * `immediate: false` + a button is the whole design decision — the panel still
+ * renders exactly one of idle / skeleton / error / data per
+ * docs/design/admin-nav-responsiveness.md D2, with `dbPerfHasRun` separating
+ * "not asked yet" from "asked, nothing back yet" (under immediate:false the two
+ * are otherwise the same `data == null`).
+ *
+ * Platform-admin only, like the network and RLS cards; a region admin gets a
+ * calm scoped-out note rather than an empty panel.
+ */
+interface DbPerfStatementRow {
+  query: string
+  truncated: boolean
+  textWithheld: boolean
+  calls: number
+  totalMs: number
+  meanMs: number
+  maxMs: number
+  rows: number
+}
+interface DbPerfResp {
+  generatedAt: string
+  topN: number
+  budget: { statementTimeoutMs: number; perReadMs: number; deadlineMs: number; elapsedMs: number }
+  statements: {
+    extension: { preloaded: boolean | null; installed: boolean | null; ready: boolean; note: string }
+    rows: DbPerfStatementRow[]
+  }
+  statsWindow?: { databaseSince: string | null; statementsSince: string | null; available: boolean }
+  sequentialScans: { table: string; seqScan: number; seqTupRead: number; idxScan: number; liveTuples: number; partitions: number; lastAnalyzed?: string | null; neverAnalyzed?: number; rowsChangedSinceAnalyze?: number }[]
+  cache: { table: string; heapHit: number; heapRead: number; idxHit: number; idxRead: number; hitRatio: number | null; partitions: number }[]
+  unusedIndexes: { minBytes: number; rows: { index: string; table: string; bytes: number; partitions: number }[] }
+  sizes: { table: string; tableBytes: number; indexBytes: number; totalBytes: number; partitions: number }[]
+  settings: { name: string; setting: string; unit: string; display: string; source: string; pendingRestart: boolean }[]
+  reads?: {
+    statements?: ReadAvailability
+    sequentialScans?: ReadAvailability
+    cache?: ReadAvailability
+    unusedIndexes?: ReadAvailability
+    sizes?: ReadAvailability
+    settings?: ReadAvailability
+  }
+}
+const {
+  data: dbPerfData,
+  refresh: runDbPerf,
+  pending: dbPerfPending,
+  error: dbPerfError,
+} = useLazyFetch<DbPerfResp | null>('/api/v1/admin/diagnostics/db-performance', {
+  server: false,
+  default: () => null,
+  immediate: false,
+})
+// "Not asked yet" vs "asked, still waiting" — under immediate:false both are
+// `data == null`, and only one of them should draw a skeleton.
+const dbPerfHasRun = ref(false)
+function launchDbPerf() {
+  dbPerfHasRun.value = true
+  return runDbPerf()
+}
+const dbPerfStatementsUnavailable = computed(() => unavailable(dbPerfData.value?.reads?.statements))
+const dbPerfSeqUnavailable = computed(() => unavailable(dbPerfData.value?.reads?.sequentialScans))
+const dbPerfCacheUnavailable = computed(() => unavailable(dbPerfData.value?.reads?.cache))
+const dbPerfUnusedUnavailable = computed(() => unavailable(dbPerfData.value?.reads?.unusedIndexes))
+const dbPerfSizesUnavailable = computed(() => unavailable(dbPerfData.value?.reads?.sizes))
+const dbPerfSettingsUnavailable = computed(() => unavailable(dbPerfData.value?.reads?.settings))
+
+/** Binary units, because that is what Postgres counts in. */
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n)) return '—'
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i += 1
+  }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`
+}
+function fmtMs(n: number): string {
+  return n >= 1000
+    ? `${(n / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 })}s`
+    : `${n.toLocaleString(undefined, { maximumFractionDigits: 1 })}ms`
+}
+function fmtRatio(r: number | null): string {
+  return r == null ? '—' : `${(r * 100).toFixed(1)}%`
+}
+/*
+ * The finding this section exists to surface: a BIG table walked sequentially
+ * while its indexes go unused. Tiny lookup tables legitimately seq-scan (the
+ * planner prefers it under a page or two), so a row is only flagged past a
+ * live-tuple floor — otherwise every reference table would read as a problem
+ * and the section would train the operator to ignore it.
+ */
+const SEQ_SCAN_TUPLE_FLOOR = 10000
+function seqScanPressure(r: { seqTupRead: number; idxScan: number; liveTuples: number }): boolean {
+  return r.liveTuples >= SEQ_SCAN_TUPLE_FLOOR && r.seqTupRead > 0 && r.seqTupRead > r.idxScan
+}
+
 // --- Card A: Private Link / DNS validation -------------------------------
 // Defensive: this fetch is independent of the main diagnostics fetch, so a
 // failure here cannot blank the rest of the page (its own error ref is shown).
@@ -310,21 +507,29 @@ const {
   refresh: refreshNet,
   pending: netPending,
   error: netError,
-} = await useFetch<NetCheckReport>('/api/v1/admin/diagnostics/network', {
-  default: () => null as unknown as NetCheckReport,
+} = useLazyFetch<NetCheckReport | null>('/api/v1/admin/diagnostics/network', {
+  server: false,
+  default: () => null,
   immediate: isAdmin.value,
 })
 
-// Surface failures first: anything that is not a clean ok/public-ok floats up.
+// Surface failures first: anything that is not clean (ok / public-ok / not-wired /
+// dns-only — the verdicts verdictBadge renders green or neutral) floats up.
 const netRecords = computed(() => {
   const recs = netData.value?.records ?? []
-  const clean = (v: string) => (v === 'ok' || v === 'public-ok' ? 1 : 0)
+  const clean = (v: string) => (v === 'ok' || v === 'public-ok' || v === 'not-wired' || v === 'dns-only' ? 1 : 0)
   return [...recs].sort((a, b) => clean(a.verdict) - clean(b.verdict))
 })
 
 function verdictBadge(
   v: NetCheckReport['records'][number]['verdict'],
-): { kind: 'rag-green' | 'rag-red'; label: string } {
+): { kind: 'rag-green' | 'rag-red' | 'neutral'; label: string } {
+  // Neutral state for deliberately-unwired services (server/azure/network-check.ts).
+  if (v === 'not-wired') return { kind: 'neutral', label: 'not mapped / not implemented' }
+  // Resolved private, deliberately not dialled: an AMPLS member we never call.
+  // Green because the DNS answer is the good one, labelled so nobody reads it
+  // as a reachability result we did not measure.
+  if (v === 'dns-only') return { kind: 'rag-green', label: 'dns ok · not dialled' }
   return v === 'ok' || v === 'public-ok'
     ? { kind: 'rag-green', label: v }
     : { kind: 'rag-red', label: v }
@@ -363,9 +568,10 @@ const {
   refresh: refreshOtel,
   pending: otelPending,
   error: otelError,
-} = await useFetch<OtelDiag>('/api/v1/admin/diagnostics/otel-logs', {
+} = useLazyFetch<OtelDiag | null>('/api/v1/admin/diagnostics/otel-logs', {
   query: { hours: 6 },
-  default: () => null as unknown as OtelDiag,
+  server: false,
+  default: () => null,
   immediate: isAdmin.value,
 })
 
@@ -437,8 +643,9 @@ const {
   refresh: refreshRls,
   pending: rlsPending,
   error: rlsError,
-} = await useFetch<RlsPostureResp>('/api/v1/admin/diagnostics/rls-posture', {
-  default: () => null as unknown as RlsPostureResp,
+} = useLazyFetch<RlsPostureResp | null>('/api/v1/admin/diagnostics/rls-posture', {
+  server: false,
+  default: () => null,
   immediate: isAdmin.value,
 })
 
@@ -493,8 +700,10 @@ const {
   data: gapsData,
   refresh: refreshGaps,
   pending: gapsPending,
-} = await useFetch<AttributionGapsResp>('/api/v1/admin/diagnostics/attribution-gaps', {
-  default: () => null as unknown as AttributionGapsResp,
+  error: gapsError,
+} = useLazyFetch<AttributionGapsResp | null>('/api/v1/admin/diagnostics/attribution-gaps', {
+  server: false,
+  default: () => null,
   immediate: isAdmin.value,
 })
 
@@ -612,9 +821,10 @@ const {
   error: abError,
   refresh: refreshAb,
   pending: abPending,
-} = await useFetch<AbDecompositionResp>('/api/v1/admin/diagnostics/ab-decomposition', {
+} = useLazyFetch<AbDecompositionResp | null>('/api/v1/admin/diagnostics/ab-decomposition', {
   query: { from: abMonth },
-  default: () => null as unknown as AbDecompositionResp,
+  server: false,
+  default: () => null,
   immediate: canSeeEstateFinance.value,
 })
 
@@ -950,10 +1160,29 @@ const {
   data: recoveryData,
   refresh: refreshRecovery,
   pending: recoveryPending,
-} = await useFetch<{ requests: RecoveryRequestRow[]; inFlight: boolean }>(
+} = useLazyFetch<{ requests: RecoveryRequestRow[]; inFlight: boolean } | null>(
   '/api/v1/admin/diagnostics/telemetry-recovery',
-  { default: () => null as unknown as { requests: RecoveryRequestRow[]; inFlight: boolean }, immediate: isAdmin.value },
+  { server: false, default: () => null, immediate: isAdmin.value },
 )
+
+/*
+ * The page-level Refresh re-issues every read this page declares (the
+ * estate-finance decomposition only where the caller can see it — refreshing
+ * a read whose card is hidden would just be a deterministic 403).
+ */
+function refreshAll() {
+  return Promise.all([
+    refresh(),
+    refreshProbes(),
+    refreshCosting(),
+    refreshNet(),
+    refreshOtel(),
+    refreshRls(),
+    refreshGaps(),
+    refreshRecovery(),
+    ...(canSeeEstateFinance.value ? [refreshAb()] : []),
+  ])
+}
 
 /*
  * Enqueueing is global-finops-only (it is not region-bounded and it spends Log
@@ -1203,7 +1432,12 @@ function pretty(obj: unknown): string {
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-diagnostics">
+  <div
+    v-if="isAdmin"
+    class="max-w-[1600px] mx-auto px-10 py-8 pb-20"
+    data-testid="admin-diagnostics"
+    data-admin-page="/admin/diagnostics"
+  >
     <UiPageHead
       eyebrow="Administration"
       title="Diagnostics"
@@ -1215,14 +1449,21 @@ function pretty(obj: unknown): string {
           size="sm"
           :disabled="pending"
           data-testid="admin-diagnostics-refresh"
-          @click="refresh()"
+          @click="refreshAll()"
         >
           {{ pending ? 'Refreshing…' : 'Refresh' }}
         </UiButton>
       </template>
     </UiPageHead>
 
-    <div v-if="data" class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+    <UiFetchErrorBanner :error="error" label="the health snapshot" @retry="refresh" />
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <!-- The DB-only snapshot (GET /diagnostics). Skeleton while its data is
+           ABSENT, never a spinner over stale figures (D2). -->
+      <div v-if="!error && data == null" class="lg:col-span-2" data-testid="admin-diag-snapshot-skeleton">
+        <AdminPageSkeleton :rows="4" :toolbar="false" />
+      </div>
+      <template v-if="data">
       <!-- Pipeline freshness (emit -> gather). The signal that flags a silent
            emission outage: 'last usage seen' going stale while the joiner runs. -->
       <UiCard accent="harmony" class="lg:col-span-2" data-testid="admin-diag-pipeline">
@@ -1230,6 +1471,20 @@ function pretty(obj: unknown): string {
           <UiEyebrow>Attribution pipeline</UiEyebrow>
           <UiBadge :kind="pipelineBadge.kind" data-testid="admin-diag-pipeline-badge">{{ pipelineBadge.label }}</UiBadge>
         </div>
+        <!-- The read failed. "never" in both figures would be an idle pipeline,
+             which is a completely different operational conclusion. -->
+        <template v-if="pipelineUnavailable">
+          <h2 class="text-lg font-bold text-carbon-2">Freshness could not be read</h2>
+          <p class="mt-1 text-xs text-brand-hunger font-mono" data-testid="admin-diag-pipeline-unavailable">
+            {{ pipelineUnavailable }}
+          </p>
+          <p class="text-xs text-carbon-3 mt-1">
+            The query behind this card failed, so nothing here is known — this is not
+            "no usage seen". Retry with Refresh; the correlation id above finds the full
+            error in the server log.
+          </p>
+        </template>
+        <template v-else>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <h2 class="text-lg font-bold text-carbon" data-testid="admin-diag-last-usage">
@@ -1252,6 +1507,7 @@ function pretty(obj: unknown): string {
           No usage seen in over 6 hours. If devs are active, check the client emit path
           (a 401 from /bearer silently drops telemetry).
         </p>
+        </template>
       </UiCard>
 
       <!-- Worker execution health. The card the freshness panel CANNOT be:
@@ -1268,7 +1524,19 @@ function pretty(obj: unknown): string {
           reads green — a partial run advances data recency. This is the signal
           that catches a silently-failing cron.
         </p>
-        <ul v-if="data.workers?.length" class="divide-y divide-carbon-6">
+        <!-- An empty list is what a failed read returns too, and it draws as the
+             reassuring "no runs yet" below. Say which one this is. -->
+        <div v-if="workersUnavailable">
+          <p class="text-sm font-bold text-carbon-2">Worker health could not be read</p>
+          <p class="mt-1 text-xs text-brand-hunger font-mono" data-testid="admin-diag-workers-unavailable">
+            {{ workersUnavailable }}
+          </p>
+          <p class="text-xs text-carbon-3 mt-1">
+            No conclusion can be drawn about the workers from this page right now — in
+            particular, this is NOT "nothing has run".
+          </p>
+        </div>
+        <ul v-else-if="data.workers?.length" class="divide-y divide-carbon-6">
           <li
             v-for="w in data.workers"
             :key="w.worker"
@@ -1329,6 +1597,17 @@ function pretty(obj: unknown): string {
         <span class="font-mono">skipped</span> run above, so it never looks like a silent gap.
       </p>
 
+      </template>
+
+      <!-- 7-day costing aggregates (GET /diagnostics/costing): its own read, its
+           own skeleton, so the snapshot above never waits on a fact-table scan. -->
+      <div v-if="costingError" class="lg:col-span-2">
+        <UiFetchErrorBanner :error="costingError" label="the costing aggregates" @retry="refreshCosting" />
+      </div>
+      <div v-else-if="costingData == null" class="lg:col-span-2" data-testid="admin-diag-costing-skeleton">
+        <AdminPageSkeleton :rows="3" :toolbar="false" />
+      </div>
+      <template v-else>
       <!-- Costing rungs. The ladder is: 1) the provider's reported cost,
            2) the rate card, 3) skip the span. A healthy fleet is ENTIRELY
            provider-priced, so any rate-card-priced span is an ALERT state, not
@@ -1340,19 +1619,35 @@ function pretty(obj: unknown): string {
           <UiBadge :kind="costingBadge.kind" data-testid="admin-diag-costing-badge">{{ costingBadge.label }}</UiBadge>
         </div>
 
-        <template v-if="data.costingRungs?.spans > 0">
+        <!-- A failed rungs read returns all-zero, which the "No Claude spans in
+             the window" branch below draws as a quiet, healthy fleet. That is the
+             false green this whole card exists to prevent, so it gets its own
+             state rather than sharing the empty one. -->
+        <template v-if="rungsUnavailable">
+          <h2 class="text-lg font-bold text-carbon-2" data-testid="admin-diag-costing-headline">
+            Costing rungs could not be read
+          </h2>
+          <p class="mt-2 text-xs text-brand-hunger font-mono" data-testid="admin-diag-costing-unavailable">
+            {{ rungsUnavailable }}
+          </p>
+          <p class="text-xs text-carbon-3 mt-1">
+            Whether any span fell back to the rate card is UNKNOWN right now. Do not read
+            this as a provider-priced fleet.
+          </p>
+        </template>
+        <template v-else-if="costingData.costingRungs?.spans > 0">
           <!-- The alert state comes FIRST and loudest when it is live. -->
-          <template v-if="data.costingRungs.rateCard > 0">
+          <template v-if="costingData.costingRungs.rateCard > 0">
             <h2 class="text-lg font-bold text-brand-hunger" data-testid="admin-diag-costing-headline">
-              {{ data.costingRungs.rateCard.toLocaleString() }}
-              span{{ data.costingRungs.rateCard === 1 ? '' : 's' }} fell back to the rate card
+              {{ costingData.costingRungs.rateCard.toLocaleString() }}
+              span{{ costingData.costingRungs.rateCard === 1 ? '' : 's' }} fell back to the rate card
               <!-- The share is OF THE LADDER-PRICED SPANS (provider + rate-card),
                    not of every span in the window: backfill traffic lands in
                    `other` and must not be able to dilute a real fallback rate. -->
               <span class="text-sm font-medium text-carbon-3">
-                — {{ data.costingRungs.rateCardPct ?? 0 }}% of
-                {{ data.costingRungs.ladderSpans.toLocaleString() }} priced
-                ({{ data.costingRungs.windowDays }}d)
+                — {{ costingData.costingRungs.rateCardPct ?? 0 }}% of
+                {{ costingData.costingRungs.ladderSpans.toLocaleString() }} priced
+                ({{ costingData.costingRungs.windowDays }}d)
               </span>
             </h2>
             <p class="text-xs text-brand-hunger mt-2">
@@ -1361,7 +1656,7 @@ function pretty(obj: unknown): string {
               alert. Expect the figure to be wrong for any model without a current rate line.
             </p>
             <div
-              v-if="data.costingRungs.fallbackModels.length"
+              v-if="costingData.costingRungs.fallbackModels.length"
               class="mt-3"
               data-testid="admin-diag-costing-fallback"
             >
@@ -1370,7 +1665,7 @@ function pretty(obj: unknown): string {
               </div>
               <ul class="divide-y divide-carbon-6">
                 <li
-                  v-for="m in data.costingRungs.fallbackModels"
+                  v-for="m in costingData.costingRungs.fallbackModels"
                   :key="m.model"
                   class="flex items-center justify-between py-1.5 text-sm"
                   :data-testid="`admin-diag-costing-fallback-${m.model}`"
@@ -1384,9 +1679,9 @@ function pretty(obj: unknown): string {
             </div>
           </template>
           <!-- Nothing on the ladder: say so rather than report a vacuous all-clear. -->
-          <template v-else-if="data.costingRungs.ladderSpans === 0">
+          <template v-else-if="costingData.costingRungs.ladderSpans === 0">
             <h2 class="text-lg font-bold text-carbon" data-testid="admin-diag-costing-headline">
-              No spans were priced in the last {{ data.costingRungs.windowDays }} days
+              No spans were priced in the last {{ costingData.costingRungs.windowDays }} days
             </h2>
             <p class="text-xs text-carbon-3 mt-2">
               The window holds only backfill / telemetry-only spans, so there is nothing to
@@ -1395,9 +1690,9 @@ function pretty(obj: unknown): string {
           </template>
           <template v-else>
             <h2 class="text-lg font-bold text-carbon" data-testid="admin-diag-costing-headline">
-              All {{ data.costingRungs.provider.toLocaleString() }} priced spans came from the provider
+              All {{ costingData.costingRungs.provider.toLocaleString() }} priced spans came from the provider
               <span class="text-sm font-medium text-carbon-3">
-                (last {{ data.costingRungs.windowDays }} days)
+                (last {{ costingData.costingRungs.windowDays }} days)
               </span>
             </h2>
             <p class="text-xs text-carbon-3 mt-2">
@@ -1410,20 +1705,20 @@ function pretty(obj: unknown): string {
                and no bucket can hide. `other` is the backfill / telemetry-only
                provenance lane — neither rung, and not an alert. -->
           <div class="mt-3 flex flex-wrap items-center gap-2 text-xs" data-testid="admin-diag-costing-counts">
-            <UiBadge :kind="data.costingRungs.provider > 0 ? 'rag-green' : 'neutral'">
-              provider {{ data.costingRungs.provider.toLocaleString() }}
+            <UiBadge :kind="costingData.costingRungs.provider > 0 ? 'rag-green' : 'neutral'">
+              provider {{ costingData.costingRungs.provider.toLocaleString() }}
             </UiBadge>
-            <UiBadge :kind="data.costingRungs.rateCard > 0 ? 'rag-red' : 'neutral'">
-              rate card {{ data.costingRungs.rateCard.toLocaleString() }}
+            <UiBadge :kind="costingData.costingRungs.rateCard > 0 ? 'rag-red' : 'neutral'">
+              rate card {{ costingData.costingRungs.rateCard.toLocaleString() }}
             </UiBadge>
-            <UiBadge kind="neutral">other {{ data.costingRungs.other.toLocaleString() }}</UiBadge>
+            <UiBadge kind="neutral">other {{ costingData.costingRungs.other.toLocaleString() }}</UiBadge>
           </div>
         </template>
         <template v-else>
           <h2 class="text-lg font-bold text-carbon-2">No Claude spans in the window</h2>
           <p class="text-xs text-carbon-3 mt-1">
             Nothing to rung. Spans appear here as usage lands in the last
-            {{ data.costingRungs?.windowDays ?? 7 }} days. Copilot is excluded — it is priced from
+            {{ costingData.costingRungs?.windowDays ?? 7 }} days. Copilot is excluded — it is priced from
             AI credits and never used a rate card.
           </p>
         </template>
@@ -1439,23 +1734,33 @@ function pretty(obj: unknown): string {
           <UiEyebrow>Cost drift (rate card vs provider)</UiEyebrow>
           <UiBadge :kind="driftBadge.kind" data-testid="admin-diag-drift-badge">{{ driftBadge.label }}</UiBadge>
         </div>
-        <template v-if="data.costDrift?.spansCompared > 0">
+        <template v-if="driftUnavailable">
+          <h2 class="text-lg font-bold text-carbon-2">Drift could not be read</h2>
+          <p class="mt-2 text-xs text-brand-hunger font-mono" data-testid="admin-diag-drift-unavailable">
+            {{ driftUnavailable }}
+          </p>
+          <p class="text-xs text-carbon-3 mt-1">
+            A pre-0045 database has no <span class="font-mono">v_cost_drift</span>; anything
+            else here is a genuine failure. Either way this is not "no comparable spans".
+          </p>
+        </template>
+        <template v-else-if="costingData.costDrift?.spansCompared > 0">
           <h2 class="text-lg font-bold text-carbon">
-            {{ data.costDrift.meanAbsDriftPct ?? 0 }}% mean drift
-            <span class="text-sm font-medium text-carbon-3">across {{ data.costDrift.spansCompared.toLocaleString() }} spans (7d)</span>
+            {{ costingData.costDrift.meanAbsDriftPct ?? 0 }}% mean drift
+            <span class="text-sm font-medium text-carbon-3">across {{ costingData.costDrift.spansCompared.toLocaleString() }} spans (7d)</span>
           </h2>
           <p class="text-xs text-carbon-3 mt-2" data-testid="admin-diag-drift-vintages">
-            <span class="font-bold">{{ data.costDrift.providerPricedSpans.toLocaleString() }}</span>
+            <span class="font-bold">{{ costingData.costDrift.providerPricedSpans.toLocaleString() }}</span>
             provider-priced ·
-            <span class="font-bold">{{ data.costDrift.rateCardPricedSpans.toLocaleString() }}</span>
+            <span class="font-bold">{{ costingData.costDrift.rateCardPricedSpans.toLocaleString() }}</span>
             rate-card-priced. Both vintages are compared the same way — our estimate against the
             provider's figure — so the number stays meaningful as history ages out.
           </p>
-          <p v-if="data.costDrift.worstSpan" class="text-xs text-carbon-3 mt-2">
-            Worst span: <span class="font-mono">{{ data.costDrift.worstSpan.model }}</span>
-            (<span class="font-mono">{{ data.costDrift.worstSpan.pricedBy }}</span>) —
-            rate-card ${{ data.costDrift.worstSpan.rateCardCostUsd }} vs provider ${{ data.costDrift.worstSpan.lawCostUsd }}
-            (Δ ${{ data.costDrift.worstSpan.driftUsd }}).
+          <p v-if="costingData.costDrift.worstSpan" class="text-xs text-carbon-3 mt-2">
+            Worst span: <span class="font-mono">{{ costingData.costDrift.worstSpan.model }}</span>
+            (<span class="font-mono">{{ costingData.costDrift.worstSpan.pricedBy }}</span>) —
+            rate-card ${{ costingData.costDrift.worstSpan.rateCardCostUsd }} vs provider ${{ costingData.costDrift.worstSpan.lawCostUsd }}
+            (Δ ${{ costingData.costDrift.worstSpan.driftUsd }}).
           </p>
         </template>
         <template v-else>
@@ -1469,7 +1774,9 @@ function pretty(obj: unknown): string {
           </p>
         </template>
       </UiCard>
+      </template>
 
+      <template v-if="data">
       <!-- Postgres -->
       <UiCard accent="harmony" data-testid="admin-diag-postgres">
         <div class="flex items-center justify-between mb-3">
@@ -1512,6 +1819,334 @@ function pretty(obj: unknown): string {
         </template>
       </UiCard>
 
+      </template>
+
+      <!-- Database performance — LAUNCHABLE. Not fetched on page load: it reads
+           six statistics views and this page is already the slowest in the
+           product. `aria-busy` rides the card region while the read is in
+           flight (D2's loading-state contract). -->
+      <UiCard
+        accent="harmony"
+        class="lg:col-span-2"
+        data-testid="admin-diag-db-performance"
+        :aria-busy="dbPerfPending ? 'true' : 'false'"
+      >
+        <div class="flex items-center justify-between mb-3">
+          <UiEyebrow>Database performance</UiEyebrow>
+          <UiButton
+            kind="secondary"
+            size="sm"
+            :disabled="dbPerfPending"
+            data-testid="admin-diag-db-performance-run"
+            @click="launchDbPerf()"
+          >
+            {{ dbPerfPending ? 'Running…' : dbPerfHasRun ? 'Run database check again' : 'Run database check' }}
+          </UiButton>
+        </div>
+        <p class="text-xs text-carbon-3 mb-3">
+          The database's own statistics views, read by the app's connection —
+          slowest statements, sequential-scan pressure, cache behaviour, unused
+          indexes, sizes and the server settings that govern them. Read-only and
+          bounded; nothing here resets a counter. Every row rolls partitions up to
+          their parent table.
+        </p>
+
+        <!-- 403: platform-admin only, like the network and RLS cards. -->
+        <p
+          v-if="dbPerfError && dbPerfError.statusCode === 403"
+          class="text-sm text-carbon-3"
+          data-testid="admin-diag-db-performance-scoped"
+        >
+          Scoped out — this probe names every table, index and server setting in the
+          estate, so it is platform-admin only. The rest of this page is unaffected.
+        </p>
+        <!-- Wrapped rather than testid'd directly: a fallthrough `data-testid`
+             would REPLACE the banner's own `fetch-error-banner` marker. -->
+        <div v-else-if="dbPerfError" data-testid="admin-diag-db-performance-error">
+          <UiFetchErrorBanner
+            :error="dbPerfError"
+            label="the database performance probe"
+            @retry="launchDbPerf"
+          />
+        </div>
+
+        <!-- Idle: asked for nothing yet. Distinct from the skeleton below. -->
+        <p
+          v-else-if="!dbPerfHasRun"
+          class="text-sm text-carbon-2"
+          data-testid="admin-diag-db-performance-idle"
+        >
+          Not run. This check is launched on demand, not on page load.
+        </p>
+
+        <!-- Asked, nothing back yet. -->
+        <div v-else-if="dbPerfData == null" data-testid="admin-diag-db-performance-skeleton">
+          <AdminPageSkeleton :rows="4" :toolbar="false" />
+        </div>
+
+        <template v-else>
+          <p class="text-[11px] text-carbon-3 font-mono mb-4">
+            {{ dbPerfData.generatedAt.slice(0, 19) }}Z · top {{ dbPerfData.topN }} ·
+            {{ dbPerfData.budget.elapsedMs }}ms of a {{ dbPerfData.budget.deadlineMs }}ms budget ·
+            statement timeout {{ dbPerfData.budget.statementTimeoutMs }}ms
+          </p>
+
+          <!-- 1. Slowest statements -->
+          <div class="mb-5">
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="text-sm font-bold text-carbon">Slowest statements (total time)</h3>
+              <UiBadge :kind="dbPerfData.statements.extension.ready ? 'rag-green' : 'neutral'">
+                {{ dbPerfData.statements.extension.ready ? 'pg_stat_statements loaded' : 'pg_stat_statements not loaded' }}
+              </UiBadge>
+            </div>
+            <p
+              v-if="dbPerfStatementsUnavailable"
+              class="text-xs text-brand-hunger font-mono"
+              data-testid="admin-diag-db-performance-statements-unavailable"
+            >
+              {{ dbPerfStatementsUnavailable }}
+            </p>
+            <template v-else>
+              <p
+                v-if="!dbPerfData.statements.extension.ready"
+                class="text-xs text-carbon-3"
+                data-testid="admin-diag-db-performance-statements-note"
+              >
+                {{ dbPerfData.statements.extension.note }}
+              </p>
+              <template v-else>
+                <p class="text-[11px] text-carbon-3 mb-2">
+                  {{ dbPerfData.statements.extension.note }}
+                </p>
+                <ul
+                  v-if="dbPerfData.statements.rows.length"
+                  class="divide-y divide-carbon-6"
+                  data-testid="admin-diag-db-performance-statements"
+                >
+                  <li v-for="(s, i) in dbPerfData.statements.rows" :key="i" class="py-2">
+                    <div class="flex flex-wrap items-center gap-2 text-[11px] font-mono text-carbon-2">
+                      <span class="font-bold text-carbon">{{ fmtMs(s.totalMs) }} total</span>
+                      <span>{{ s.calls.toLocaleString() }} calls</span>
+                      <span>mean {{ fmtMs(s.meanMs) }}</span>
+                      <span>max {{ fmtMs(s.maxMs) }}</span>
+                      <span>{{ s.rows.toLocaleString() }} rows</span>
+                    </div>
+                    <p class="mt-1 text-[11px] font-mono text-carbon-3 break-all">
+                      {{ s.query }}<span v-if="s.truncated">…</span>
+                    </p>
+                  </li>
+                </ul>
+                <p v-else class="text-xs text-carbon-3">
+                  No statements recorded yet for this database.
+                </p>
+              </template>
+            </template>
+          </div>
+
+          <!-- 2. Sequential-scan pressure -->
+          <div class="mb-5">
+            <h3 class="text-sm font-bold text-carbon mb-2">Sequential-scan pressure</h3>
+            <p
+              v-if="dbPerfSeqUnavailable"
+              class="text-xs text-brand-hunger font-mono"
+              data-testid="admin-diag-db-performance-seq-unavailable"
+            >
+              {{ dbPerfSeqUnavailable }}
+            </p>
+            <template v-else>
+              <p class="text-[11px] text-carbon-3 mb-2">
+                Highlighted when a table over {{ SEQ_SCAN_TUPLE_FLOOR.toLocaleString() }} live rows is
+                read sequentially more than it is read by index. A small lookup table
+                seq-scanning is the planner being right, not a finding.
+                <span class="font-mono" data-testid="admin-diag-db-performance-stats-window">
+                  {{ statsWindowLabel(dbPerfData.statsWindow, dbPerfData.generatedAt) }}
+                  A major-version upgrade resets them, and a single table or index can be reset on
+                  its own without moving that date.
+                </span>
+              </p>
+              <ul
+                v-if="dbPerfData.sequentialScans.length"
+                class="divide-y divide-carbon-6"
+                data-testid="admin-diag-db-performance-seq"
+              >
+                <li
+                  v-for="t in dbPerfData.sequentialScans"
+                  :key="t.table"
+                  class="flex flex-wrap items-center justify-between gap-2 py-2 text-[11px] font-mono"
+                  :data-testid="`admin-diag-db-performance-seq-${t.table}`"
+                >
+                  <span :class="seqScanPressure(t) ? 'text-brand-hunger font-bold' : 'text-carbon-2'">
+                    {{ t.table }}<span v-if="t.partitions" class="text-carbon-3"> ({{ t.partitions }} partitions)</span>
+                  </span>
+                  <span class="text-carbon-3">
+                    seq {{ t.seqScan.toLocaleString() }} · rows read {{ t.seqTupRead.toLocaleString() }} ·
+                    idx {{ t.idxScan.toLocaleString() }} · live {{ t.liveTuples.toLocaleString() }}
+                    <span
+                      v-if="analyzeLabel(t, dbPerfData.generatedAt)"
+                      class="text-carbon-3"
+                      :data-testid="`admin-diag-db-performance-analyze-${t.table}`"
+                    >· {{ analyzeLabel(t, dbPerfData.generatedAt) }}</span>
+                  </span>
+                </li>
+              </ul>
+              <p v-else class="text-xs text-carbon-3">No user tables reported.</p>
+            </template>
+          </div>
+
+          <!-- 3. Cache behaviour -->
+          <div class="mb-5">
+            <h3 class="text-sm font-bold text-carbon mb-2">Cache behaviour (block hits vs reads)</h3>
+            <p
+              v-if="dbPerfCacheUnavailable"
+              class="text-xs text-brand-hunger font-mono"
+              data-testid="admin-diag-db-performance-cache-unavailable"
+            >
+              {{ dbPerfCacheUnavailable }}
+            </p>
+            <ul
+              v-else-if="dbPerfData.cache.length"
+              class="divide-y divide-carbon-6"
+              data-testid="admin-diag-db-performance-cache"
+            >
+              <li
+                v-for="t in dbPerfData.cache"
+                :key="t.table"
+                class="flex flex-wrap items-center justify-between gap-2 py-2 text-[11px] font-mono"
+              >
+                <span class="text-carbon-2">
+                  {{ t.table }}<span v-if="t.partitions" class="text-carbon-3"> ({{ t.partitions }} partitions)</span>
+                </span>
+                <span class="text-carbon-3">
+                  hit ratio <span class="text-carbon font-bold">{{ fmtRatio(t.hitRatio) }}</span> ·
+                  heap {{ t.heapHit.toLocaleString() }}/{{ t.heapRead.toLocaleString() }} ·
+                  idx {{ t.idxHit.toLocaleString() }}/{{ t.idxRead.toLocaleString() }}
+                </span>
+              </li>
+            </ul>
+            <p v-else class="text-xs text-carbon-3">No I/O statistics reported.</p>
+          </div>
+
+          <!-- 4. Unused indexes -->
+          <div class="mb-5">
+            <h3 class="text-sm font-bold text-carbon mb-2">Unused indexes</h3>
+            <p
+              v-if="dbPerfUnusedUnavailable"
+              class="text-xs text-brand-hunger font-mono"
+              data-testid="admin-diag-db-performance-unused-unavailable"
+            >
+              {{ dbPerfUnusedUnavailable }}
+            </p>
+            <template v-else>
+              <p class="text-[11px] text-carbon-3 mb-2">
+                Never scanned and at least {{ fmtBytes(dbPerfData.unusedIndexes.minBytes) }}. They cost
+                every write and their storage for nothing. Unique, primary-key AND
+                exclusion-constraint indexes are excluded — they back a constraint, and an
+                exclusion index is enforced on write rather than scanned.
+                <span class="font-mono" data-testid="admin-diag-db-performance-unused-caveat">
+                  "Never" reaches back no earlier than the last database-wide reset, and an
+                  individual index may have been reset more recently.
+                  {{ statsWindowLabel(dbPerfData.statsWindow, dbPerfData.generatedAt) }}
+                  Over a short window an index used weekly looks identical to a dead one, so do
+                  not drop on this alone.
+                </span>
+              </p>
+              <ul
+                v-if="dbPerfData.unusedIndexes.rows.length"
+                class="divide-y divide-carbon-6"
+                data-testid="admin-diag-db-performance-unused"
+              >
+                <li
+                  v-for="ix in dbPerfData.unusedIndexes.rows"
+                  :key="ix.index"
+                  class="flex flex-wrap items-center justify-between gap-2 py-2 text-[11px] font-mono"
+                  :data-testid="`admin-diag-db-performance-unused-${ix.index}`"
+                >
+                  <span class="text-carbon-2">{{ ix.index }} <span class="text-carbon-3">on {{ ix.table }}</span></span>
+                  <span class="text-carbon font-bold">{{ fmtBytes(ix.bytes) }}</span>
+                </li>
+              </ul>
+              <p v-else class="text-xs text-carbon-3">
+                None — every index over the floor has been scanned at least once.
+              </p>
+            </template>
+          </div>
+
+          <!-- 5. Sizes -->
+          <div class="mb-5">
+            <h3 class="text-sm font-bold text-carbon mb-2">Largest tables</h3>
+            <p
+              v-if="dbPerfSizesUnavailable"
+              class="text-xs text-brand-hunger font-mono"
+              data-testid="admin-diag-db-performance-sizes-unavailable"
+            >
+              {{ dbPerfSizesUnavailable }}
+            </p>
+            <ul
+              v-else-if="dbPerfData.sizes.length"
+              class="divide-y divide-carbon-6"
+              data-testid="admin-diag-db-performance-sizes"
+            >
+              <li
+                v-for="t in dbPerfData.sizes"
+                :key="t.table"
+                class="flex flex-wrap items-center justify-between gap-2 py-2 text-[11px] font-mono"
+                :data-testid="`admin-diag-db-performance-size-${t.table}`"
+              >
+                <span class="text-carbon-2">
+                  {{ t.table }}<span v-if="t.partitions" class="text-carbon-3"> ({{ t.partitions }} partitions)</span>
+                </span>
+                <span class="text-carbon-3">
+                  <span class="text-carbon font-bold">{{ fmtBytes(t.totalBytes) }}</span> total ·
+                  table {{ fmtBytes(t.tableBytes) }} · indexes {{ fmtBytes(t.indexBytes) }}
+                </span>
+              </li>
+            </ul>
+            <p v-else class="text-xs text-carbon-3">No user tables reported.</p>
+          </div>
+
+          <!-- 6. Server settings -->
+          <div>
+            <h3 class="text-sm font-bold text-carbon mb-2">Server settings</h3>
+            <p
+              v-if="dbPerfSettingsUnavailable"
+              class="text-xs text-brand-hunger font-mono"
+              data-testid="admin-diag-db-performance-settings-unavailable"
+            >
+              {{ dbPerfSettingsUnavailable }}
+            </p>
+            <ul
+              v-else-if="dbPerfData.settings.length"
+              class="divide-y divide-carbon-6"
+              data-testid="admin-diag-db-performance-settings"
+            >
+              <li
+                v-for="st in dbPerfData.settings"
+                :key="st.name"
+                class="flex flex-wrap items-center justify-between gap-2 py-2 text-[11px] font-mono"
+                :data-testid="`admin-diag-db-performance-setting-${st.name}`"
+              >
+                <span class="text-carbon-2">{{ st.name }}</span>
+                <span class="text-carbon-3">
+                  <span class="text-carbon font-bold">{{ st.display || '(empty)' }}</span>
+                  · {{ st.source }}
+                  <span v-if="st.pendingRestart" class="text-brand-hunger">· restart pending</span>
+                </span>
+              </li>
+            </ul>
+            <p v-else class="text-xs text-carbon-3">No settings reported.</p>
+          </div>
+        </template>
+      </UiCard>
+
+      <!-- Network-bound probes (GET /diagnostics/probes): each raced against a
+           5 s budget server-side; its own read and skeleton here. -->
+      <div v-if="probesError" class="lg:col-span-2">
+        <UiFetchErrorBanner :error="probesError" label="the reachability probes" @retry="refreshProbes" />
+      </div>
+      <div v-else-if="probesData == null" class="lg:col-span-2" data-testid="admin-diag-probes-skeleton">
+        <AdminPageSkeleton :rows="3" :toolbar="false" />
+      </div>
+      <template v-else>
       <!-- Private-endpoint reachability (same TCP probe the boot pre-flight runs) -->
       <UiCard accent="harmony" data-testid="admin-diag-services">
         <div class="flex items-center justify-between mb-3">
@@ -1521,9 +2156,9 @@ function pretty(obj: unknown): string {
         <p class="text-xs text-carbon-3 mt-1">
           TCP reachability of each provisioned PE — the same probe run at boot. <span class="text-brand-hunger">*</span> = boot-critical.
         </p>
-        <ul v-if="data.services?.length" class="mt-3 divide-y divide-carbon-6">
+        <ul v-if="probesData.services?.length" class="mt-3 divide-y divide-carbon-6">
           <li
-            v-for="s in data.services"
+            v-for="s in probesData.services"
             :key="s.name"
             class="flex items-center justify-between py-2 text-sm"
             :data-testid="`admin-diag-service-${s.name}`"
@@ -1546,23 +2181,25 @@ function pretty(obj: unknown): string {
       <UiCard accent="vision" data-testid="admin-diag-telemetry-read">
         <div class="flex items-center justify-between mb-3">
           <UiEyebrow>Telemetry read (LAW)</UiEyebrow>
-          <UiBadge :kind="data.telemetryRead?.ok ? 'rag-green' : 'rag-red'">
-            {{ data.telemetryRead?.ok ? 'ok' : 'unreachable' }}
+          <UiBadge :kind="probesData.telemetryRead?.ok ? 'rag-green' : 'rag-red'">
+            {{ probesData.telemetryRead?.ok ? 'ok' : 'unreachable' }}
           </UiBadge>
         </div>
-        <h2 v-if="data.telemetryRead?.ok" class="text-lg font-bold text-carbon">{{ data.telemetryRead.latencyMs }}ms</h2>
+        <h2 v-if="probesData.telemetryRead?.ok" class="text-lg font-bold text-carbon">{{ probesData.telemetryRead.latencyMs }}ms</h2>
         <h2 v-else class="text-lg font-bold text-carbon-2">No read</h2>
         <p class="text-xs text-carbon-3 mt-1">
-          Trivial KQL via the {{ data.telemetryRead?.kind ?? 'configured' }} reader — DNS → the (private) query endpoint + token.
+          Trivial KQL via the {{ probesData.telemetryRead?.kind ?? 'configured' }} reader — DNS → the (private) query endpoint + token.
         </p>
         <p
-          v-if="data.telemetryRead && !data.telemetryRead.ok && data.telemetryRead.error"
+          v-if="probesData.telemetryRead && !probesData.telemetryRead.ok && probesData.telemetryRead.error"
           class="mt-3 text-xs text-brand-hunger font-mono break-all"
         >
-          {{ data.telemetryRead.error }}
+          {{ probesData.telemetryRead.error }}
         </p>
       </UiCard>
+      </template>
 
+      <template v-if="data">
       <!-- Queues -->
       <UiCard accent="zeal" data-testid="admin-diag-queues">
         <div class="flex items-center justify-between mb-3">
@@ -1595,7 +2232,16 @@ function pretty(obj: unknown): string {
       <UiCard accent="hunger" data-testid="admin-diag-last-sync">
         <UiEyebrow>Last sync</UiEyebrow>
         <h2 class="text-lg font-bold text-carbon mt-1 mb-3">Per-source recency</h2>
-        <dl v-if="data.lastSync.length" class="space-y-2 text-sm">
+        <div v-if="lastSyncUnavailable">
+          <p class="text-xs text-brand-hunger font-mono" data-testid="admin-diag-last-sync-unavailable">
+            {{ lastSyncUnavailable }}
+          </p>
+          <p class="text-xs text-carbon-3 mt-1">
+            The per-source recency query failed — not the same thing as a manual-mode
+            region with no sync rows.
+          </p>
+        </div>
+        <dl v-else-if="data.lastSync.length" class="space-y-2 text-sm">
           <div v-for="s in data.lastSync" :key="s.source" class="flex items-center justify-between">
             <dt class="text-carbon-2 font-mono">{{ s.source }}</dt>
             <dd class="font-mono text-xs text-carbon">{{ fmtTs(s.ts) }}</dd>
@@ -1619,8 +2265,8 @@ function pretty(obj: unknown): string {
           </div>
         </dl>
       </UiCard>
+      </template>
     </div>
-    <div v-else-if="pending" class="text-center text-sm text-carbon-3 py-8">Loading…</div>
 
     <!-- Dev-troubleshooting cards. Independent of the main /diagnostics fetch:
          each owns its own fetch + error state so one failing (or a 403) cannot
@@ -1655,7 +2301,9 @@ function pretty(obj: unknown): string {
         </div>
         <p class="text-xs text-carbon-3 mb-3">
           Requires <strong>platform-admin</strong> — region admins and global-finops will see a 403
-          here. Resolves and TCP-dials every private-link host the app depends on.
+          here. Resolves every private-link host the app depends on, and TCP-dials
+          the ones it actually calls — the other AMPLS members share that private
+          endpoint, so their DNS answer is the evidence, not a dial.
         </p>
 
         <!-- A 403 here is EXPECTED for a region admin / global-finops (this
@@ -1666,9 +2314,13 @@ function pretty(obj: unknown): string {
           Scoped out — this probe is platform-admin only, so your role can't read private-link/DNS
           validation. Nothing is wrong; every other card above still applies to your region.
         </p>
-        <p v-else-if="netError" class="text-sm text-brand-hunger font-mono" data-testid="admin-diag-network-error">
-          Could not load network validation: {{ netError.statusCode ?? '' }} {{ netError.statusMessage ?? netError.message }}
-        </p>
+        <UiFetchErrorBanner
+          v-else-if="netError"
+          :error="netError"
+          label="network validation"
+          data-testid="admin-diag-network-error"
+          @retry="refreshNet"
+        />
         <template v-else-if="netData">
           <p class="text-xs text-carbon-3">
             {{ netData.generatedNote }} <span class="font-mono">{{ netData.vnetHint }}</span>
@@ -1676,9 +2328,11 @@ function pretty(obj: unknown): string {
           <div class="mt-2 flex flex-wrap items-center gap-2 text-xs" data-testid="admin-diag-network-summary">
             <UiBadge kind="neutral">total {{ netData.summary.total }}</UiBadge>
             <UiBadge :kind="netData.summary.ok > 0 ? 'rag-green' : 'neutral'">ok {{ netData.summary.ok }}</UiBadge>
+            <UiBadge v-if="netData.summary.dnsOnly > 0" kind="neutral">dns-only {{ netData.summary.dnsOnly }}</UiBadge>
             <UiBadge :kind="netData.summary.zoneNotLinked > 0 ? 'rag-red' : 'neutral'">zone-not-linked {{ netData.summary.zoneNotLinked }}</UiBadge>
             <UiBadge :kind="netData.summary.unreachable > 0 ? 'rag-red' : 'neutral'">unreachable {{ netData.summary.unreachable }}</UiBadge>
             <UiBadge :kind="netData.summary.dnsFail > 0 ? 'rag-red' : 'neutral'">dns-fail {{ netData.summary.dnsFail }}</UiBadge>
+            <UiBadge v-if="netData.summary.notWired > 0" kind="neutral">not-wired {{ netData.summary.notWired }}</UiBadge>
           </div>
 
           <div class="mt-4 overflow-x-auto">
@@ -1730,8 +2384,7 @@ function pretty(obj: unknown): string {
             </table>
           </div>
         </template>
-        <p v-else-if="netPending" class="text-sm text-carbon-3 italic">Loading network validation…</p>
-        <p v-else class="text-sm text-carbon-3 italic">No network validation reported.</p>
+        <AdminPageSkeleton v-else :rows="3" :toolbar="false" />
       </UiCard>
 
       <!-- Card B — OTel telemetry (Log Analytics). Platform-admin only; a region
@@ -1762,9 +2415,13 @@ function pretty(obj: unknown): string {
           Scoped out — this probe is platform-admin only, so your role can't read the Log Analytics
           query path. Nothing is wrong; every other card above still applies to your region.
         </p>
-        <p v-else-if="otelError" class="text-sm text-brand-hunger font-mono" data-testid="admin-diag-otel-error">
-          Could not load OTel diagnostics: {{ otelError.statusCode ?? '' }} {{ otelError.statusMessage ?? otelError.message }}
-        </p>
+        <UiFetchErrorBanner
+          v-else-if="otelError"
+          :error="otelError"
+          label="OTel diagnostics"
+          data-testid="admin-diag-otel-error"
+          @retry="refreshOtel"
+        />
         <template v-else-if="otelData">
           <!-- config + queryEndpointNote key/value block -->
           <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-sm">
@@ -1875,8 +2532,7 @@ function pretty(obj: unknown): string {
             <pre class="text-[10px] text-brand-hunger font-mono whitespace-pre-wrap break-all bg-brand-hunger-lite/40 rounded-md p-2">{{ pretty(otelData.fatalError ?? otelData.clientError) }}</pre>
           </div>
         </template>
-        <p v-else-if="otelPending" class="text-sm text-carbon-3 italic">Loading OTel diagnostics…</p>
-        <p v-else class="text-sm text-carbon-3 italic">No OTel diagnostics reported.</p>
+        <AdminPageSkeleton v-else :rows="3" :toolbar="false" />
       </UiCard>
 
       <!-- RLS enforcement posture. The measurement that replaces "Azure docs say
@@ -1906,9 +2562,13 @@ function pretty(obj: unknown): string {
           Scoped out — this probe is platform-admin only, so your role can't read database-role
           capability. Nothing is wrong; every other card above still applies to your region.
         </p>
-        <p v-else-if="rlsError" class="text-sm text-brand-hunger font-mono" data-testid="admin-diag-rls-error">
-          Could not load RLS posture: {{ rlsError.statusCode ?? '' }} {{ rlsError.statusMessage ?? rlsError.message }}
-        </p>
+        <UiFetchErrorBanner
+          v-else-if="rlsError"
+          :error="rlsError"
+          label="RLS posture"
+          data-testid="admin-diag-rls-error"
+          @retry="refreshRls"
+        />
         <template v-else-if="rlsData">
           <pre
             class="text-[11px] font-mono text-carbon-2 bg-calm-1/60 rounded-md p-2 whitespace-pre-wrap break-all"
@@ -2038,8 +2698,7 @@ function pretty(obj: unknown): string {
             </table>
           </div>
         </template>
-        <p v-else-if="rlsPending" class="text-sm text-carbon-3 italic">Loading RLS posture…</p>
-        <p v-else class="text-sm text-carbon-3 italic">No RLS posture reported.</p>
+        <AdminPageSkeleton v-else :rows="3" :toolbar="false" />
       </UiCard>
 
       <!--
@@ -2085,10 +2744,7 @@ function pretty(obj: unknown): string {
           </div>
         </div>
 
-        <p v-if="abError && !abPending" class="text-sm text-brand-hunger">
-          Could not load the decomposition ({{ abError.statusCode ?? 'network error' }}). Use
-          Refresh to retry.
-        </p>
+        <UiFetchErrorBanner v-if="abError" :error="abError" label="the decomposition" @retry="refreshAb" />
         <template v-else-if="abData">
           <p v-if="!abData.reachable" class="text-sm text-brand-hunger">
             Probe failed: {{ abData.error }}
@@ -2710,6 +3366,7 @@ function pretty(obj: unknown): string {
             </div>
           </template>
         </template>
+        <AdminPageSkeleton v-else :rows="4" :toolbar="false" />
       </UiCard>
 
       <UiCard accent="hunger" class="lg:col-span-2" data-testid="admin-diag-attribution-gaps">
@@ -2726,7 +3383,8 @@ function pretty(obj: unknown): string {
           </UiButton>
         </div>
 
-        <template v-if="gapsData">
+        <UiFetchErrorBanner v-if="gapsError" :error="gapsError" label="attribution gaps" @retry="refreshGaps" />
+        <template v-else-if="gapsData">
           <p v-if="!gapsData.reachable" class="text-sm text-brand-hunger">
             Probe failed: {{ gapsData.error }}
           </p>
@@ -2909,7 +3567,7 @@ function pretty(obj: unknown): string {
             </div>
           </div>
         </template>
-        <p v-else-if="gapsPending" class="text-sm text-carbon-3 italic">Checking attribution gaps…</p>
+        <AdminPageSkeleton v-else :rows="3" :toolbar="false" />
       </UiCard>
 
       <!-- Card D — Provider wire shape. Platform-admin only; button-triggered
@@ -3244,7 +3902,7 @@ function pretty(obj: unknown): string {
       </UiCard>
     </div>
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/diagnostics">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

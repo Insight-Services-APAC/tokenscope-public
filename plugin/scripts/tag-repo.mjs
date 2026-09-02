@@ -256,23 +256,29 @@ function ensureRepoTagGitignored(root) {
  * no-op leaves the file — and its mtime — untouched). Merges any unrelated local
  * settings keys and preserves the 0o600 mode.
  *
- * Returns { settingsPath, changed, healed }:
+ * Returns { settingsPath, changed, healed, instanceDrifted }:
  *   - changed: whether the file was (re)written this call.
  *   - healed:  whether a stale pin was reconciled — i.e. the PREVIOUS repo env's
  *              helper path or instance differed from the current global one (a
  *              drift this rewrite just corrected). false when there was no
  *              previous repo env to compare or nothing drifted.
+ *   - instanceDrifted: the INSTANCE half of `healed`, on its own. True only when
+ *              the previous repo env pinned a DIFFERENT tokenscope.instance_id
+ *              than the current global enrolment. Callers use this — never
+ *              `healed` — to decide whether the RUNNING session is misattributing:
+ *              a helper-path move (the other half of `healed`) does not change
+ *              which instance records land against, so warning on it cries wolf.
  *
  * S1 fix (4c): anchored to the REPO ROOT (resolveRepoRoot), never a
  * subdirectory `cwd` happens to be invoked from — see resolveRepoRoot's doc.
- * Returns `{ settingsPath: null, changed: false, healed: false }` without
+ * Returns `{ settingsPath: null, changed: false, healed: false, instanceDrifted: false }` without
  * writing anything when the root cannot be resolved (not inside a git work
  * tree, or no `.git` found walking up) — refusing beats guessing a directory.
  */
 export function writeRepoTag({ cwd, enrolment, codeHash }) {
   const root = resolveRepoRoot(cwd)
   if (!root) {
-    return { settingsPath: null, changed: false, healed: false }
+    return { settingsPath: null, changed: false, healed: false, instanceDrifted: false }
   }
   ensureRepoTagGitignored(root)
   const helperPath = resolveHelperPath(enrolment)
@@ -296,14 +302,21 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   // helper path or a different instance than the current global one? If so this
   // rewrite IS the reconcile (ADR-0006 decision 3).
   let healed = false
+  // INSTANCE drift specifically, kept separate from `healed`. A helper-path move
+  // is cosmetic to attribution; a changed INSTANCE means the running process —
+  // whose OTel resource attrs froze at startup, before this rewrite — is emitting
+  // under a SUPERSEDED instance id, so its records land against an instance the
+  // device no longer claims and this device's /health reads permanently silent.
+  // That is the condition worth interrupting the developer for; `healed` is not,
+  // and warning on it would cry wolf on every helper-path bump.
+  let instanceDrifted = false
   const prevEnv = existing && typeof existing.env === 'object' ? existing.env : null
   if (prevEnv) {
     const prevHelper =
       typeof existing.otelHeadersHelper === 'string' ? existing.otelHeadersHelper : null
     const prevInstance = parseInstanceId(prevEnv.OTEL_RESOURCE_ATTRIBUTES)
-    healed =
-      (prevHelper != null && prevHelper !== helperPath) ||
-      (prevInstance != null && prevInstance !== enrolment.sessionId)
+    instanceDrifted = prevInstance != null && prevInstance !== enrolment.sessionId
+    healed = (prevHelper != null && prevHelper !== helperPath) || instanceDrifted
   }
 
   // Target env: the WHOLE current device env, with OTEL_RESOURCE_ATTRIBUTES
@@ -344,7 +357,9 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   // Change-detect: only write when the serialised content actually differs, so a
   // true no-op keeps the file/mtime stable.
   if (targetRaw === existingRaw) {
-    return { settingsPath, changed: false, healed: false }
+    // Identical content implies the previous env already pinned THIS instance, so
+    // instanceDrifted is necessarily false here — no rewrite, nothing superseded.
+    return { settingsPath, changed: false, healed: false, instanceDrifted: false }
   }
   // Write-temp-then-rename so a concurrent SessionStart hook (the per-HOST shared
   // ~/.claude means multiple `claude` launches can race the same repo file) never
@@ -371,7 +386,12 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   } catch {
     /* best-effort hardening — never fail the tag over a chmod */
   }
-  return { settingsPath, changed: true, healed: Boolean(healed) }
+  return {
+    settingsPath,
+    changed: true,
+    healed: Boolean(healed),
+    instanceDrifted: Boolean(instanceDrifted),
+  }
 }
 
 /** Extract tokenscope.instance_id from an OTEL_RESOURCE_ATTRIBUTES string, or null. */

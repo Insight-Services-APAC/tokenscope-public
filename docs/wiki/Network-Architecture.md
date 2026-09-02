@@ -187,6 +187,15 @@ private endpoint on `snet-ampls`, with `publicNetworkAccessForQuery: Disabled`.
 The `azuremonitor` PE registers A records into the `privatelink.monitor.azure.com`
 zone family; ingestion (DCE) stays public by design.
 
+**Who owns the scope.** On self-owned zones we deploy the scope and the PE. On
+central zones we must not: one zone holds one set of Monitor A records, so a
+second scope's PE overwrites the first's and blackholes it (dev, 2026-08-19, 28h
+of frozen reads). `useCentralAmpls=true` then deploys neither — IT joins the
+workspace to their scope as a scoped resource. `centralAmplsResourceId` is the
+escape hatch for a central PE our VNet cannot reach: our PE, their scope, which
+also needs a VNet-scoped zone from IT so the two PEs stop competing for the same
+record names. Gated by `tests/unit/infra/ampls-ownership.test.ts`.
+
 **ACR (private).** Premium SKU + private endpoint + `privatelink.azurecr.io`,
 public access Disabled — the 4th data-plane PE. Pull is via the user-assigned MI
 (*AcrPull*); admin user disabled. Because a default GitHub-hosted runner can't

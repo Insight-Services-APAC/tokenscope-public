@@ -89,8 +89,20 @@ export default defineEventHandler(async (event) => {
   const query = await getValidated(event, Query)
   await requireRegionScope(event, query.region)
 
-  const rows = await withRequestRls(event, async (tx) =>
-    tx.execute<NodeRow>(sql`
+  /*
+   * ONE request transaction, three reads issued concurrently
+   * (docs/design/request-floor-performance.md F5; docs/design/admin-nav-
+   * responsiveness.md D5). None depends on another's result: the tree reads
+   * org_unit for the region in the query; owner_active_unit_counts() is
+   * SECURITY DEFINER with an empty search_path and reads no current_setting
+   * (mig 0111); the governance dial reads governance_setting by the same
+   * query.region. postgres-js pipelines the three on the one connection and
+   * answers in order — the win is issuance without per-query await gaps and
+   * two fewer transactions per request, not parallelism.
+   */
+  const [rows, ownerUnitCounts, defaultUnitThreshold] = await withRequestRls(event, (tx) =>
+    Promise.all([
+      tx.execute<NodeRow>(sql`
       SELECT ou.id::text AS id,
              ou.parent_id::text AS parent_id,
              ou.path::text AS path,
@@ -149,41 +161,40 @@ export default defineEventHandler(async (event) => {
         AND ou.retired_at IS NULL
       ORDER BY ou.path
     `),
-  )
 
-  /*
-   * The ambiguity counts.
-   *
-   * The verdict has to span regions: an owner whose SECOND unit sits in another
-   * region is exactly the case this warning exists to catch, and the org_unit RLS
-   * policy (mig 0098) clamps a region `admin` to their own region — so a
-   * region-scoped count would report that owner as WORKING.
-   *
-   * Reading it on the pooled handle would get the right answer and be an RLS
-   * bypass inside a handler, which scripts/check-handler-rls-context.mjs exists
-   * to ratchet down; moving the same call into a helper module would slip past
-   * the scanner while changing nothing. So it comes from
-   * `owner_active_unit_counts()` (mig 0111, SECURITY DEFINER), called INSIDE the
-   * request transaction. That function returns only (owner_oid, unit_count) —
-   * never a unit id, name or region — so nothing this caller could not otherwise
-   * see leaves the database, and it behaves the same before and after FORCE RLS.
-   */
-  const ownerUnitCounts = await withRequestRls(event, async (tx) => {
-    const counts = await tx.execute<{ owner_oid: string; unit_count: string }>(
-      sql`SELECT owner_oid, unit_count FROM owner_active_unit_counts()`,
-    )
-    return new Map([...counts].map((c) => [c.owner_oid, Number(c.unit_count)]))
-  })
+      /*
+       * The ambiguity counts.
+       *
+       * The verdict has to span regions: an owner whose SECOND unit sits in
+       * another region is exactly the case this warning exists to catch, and the
+       * org_unit RLS policy (mig 0098) clamps a region `admin` to their own
+       * region — so a region-scoped count would report that owner as WORKING.
+       *
+       * Reading it on the pooled handle would get the right answer and be an RLS
+       * bypass inside a handler, which scripts/check-handler-rls-context.mjs
+       * exists to ratchet down; moving the same call into a helper module would
+       * slip past the scanner while changing nothing. So it comes from
+       * `owner_active_unit_counts()` (mig 0111, SECURITY DEFINER), called INSIDE
+       * the request transaction. That function returns only (owner_oid,
+       * unit_count) — never a unit id, name or region — so nothing this caller
+       * could not otherwise see leaves the database, and it behaves the same
+       * before and after FORCE RLS.
+       */
+      tx
+        .execute<{ owner_oid: string; unit_count: string }>(
+          sql`SELECT owner_oid, unit_count FROM owner_active_unit_counts()`,
+        )
+        .then((counts) => new Map([...counts].map((c) => [c.owner_oid, Number(c.unit_count)]))),
 
-  /*
-   * C9's threshold — a governance dial, resolved for THIS region (a region
-   * override beats the platform baseline). Read once per request, and the VERDICT
-   * is computed here rather than in the client: span of control is configuration,
-   * and a client that compared against a number of its own would warn at a
-   * different point than the panel behind it.
-   */
-  const defaultUnitThreshold = await withRequestRls(event, (tx) =>
-    resolveGovernanceSetting(tx, GOV_DEFAULT_UNIT_WARN_THRESHOLD, query.region),
+      /*
+       * C9's threshold — a governance dial, resolved for THIS region (a region
+       * override beats the platform baseline). Read once per request, and the
+       * VERDICT is computed here rather than in the client: span of control is
+       * configuration, and a client that compared against a number of its own
+       * would warn at a different point than the panel behind it.
+       */
+      resolveGovernanceSetting(tx, GOV_DEFAULT_UNIT_WARN_THRESHOLD, query.region),
+    ]),
   )
 
   return {

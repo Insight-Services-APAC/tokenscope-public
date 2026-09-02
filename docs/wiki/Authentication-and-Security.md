@@ -113,7 +113,7 @@ Deactivation is enforced on every credential path, not just the cookie:
 
 | Path | Where |
 |---|---|
-| Cookie session (`tryAuth`/`requireAuth`) | `isRevoked` reads `revoked_at` **and** `is_active` for the primary identity — a missing row denies outright — and again for the impersonator's row when the session carries one (a missing impersonator row is not itself a denial) |
+| Cookie session (`tryAuth`/`requireAuth`) | `revocationDenies` judges `revoked_at` **and** `is_active` for the primary identity from the same fused query that resolved it — a missing row denies outright. When the session carries a persona override, `isRevoked` re-reads and judges the override target and the impersonator's row on the same two axes (a missing impersonator row is not itself a denial) |
 | OAuth bearer (MCP, the four instance-scoped emit routes) | `requireOAuthBearer` joins `teammate.is_active` and rejects with `invalid_token` |
 | Refresh-token grant | `tm.is_active IS TRUE` is a conjunct of the refresh `UPDATE`, so no match ⇒ `invalid_grant` |
 | Authorization-code exchange | part of `consumeAuthCode`'s compare-and-swap predicate, so a deactivation landing mid-exchange cannot be straddled. A refused code is left **unburned** and reports the same opaque `invalid_grant` as an unknown one — no deactivation oracle |
@@ -240,7 +240,7 @@ teammate whose baseline lacks that scope — a region admin included — to
 company-wide reporting, or **revoke** a person's report
 access entirely — per-teammate, revocable, optionally-expiring rows
 (`report_access_grant`, migs 0129 + 0130), without touching anyone's platform
-role. Design: [`docs/design/report-visibility-policy.md`](../design/report-visibility-policy.md).
+role. Design: `docs/design/report-visibility-policy.md`.
 
 **To grant report access** (requires Global finance or Platform admin — the
 roster is org-wide only): **Admin → Policies → Report access** → search the
@@ -445,7 +445,7 @@ The everyday self-service connect path (sequence above). The read-scoped `provis
 
 - `GET /api/v1/instances/[instanceId]/bearer` (`server/auth/obo.ts`) returns an Azure Entra token scoped to `https://monitor.azure.com/.default`. Despite the filename this is **not** a per-developer On-Behalf-Of flow — it is an **app-level Managed Identity token** (same token every session), from the container app's user-assigned MI holding *Monitoring Metrics Publisher* on the Data Collection Rule.
 - Gates issuance on the OAuth `tokenscope.emit` access token (the bound teammate must own the instance), then returns the MI-minted token; refreshed within Claude's ~29-min headers-helper window. Each mint doubles as an authenticated heartbeat for the heartbeat-coverage check. Cached app-wide with a 5-min refresh skew + single-flight guard (racing `/bearer` requests collapse onto one `getToken`).
-- **The emit credential is bound to its device at USE, not only at mint.** `oauth_token.instance_id` is written when the credential is minted, but the four instance-scoped routes (`/bearer`, `/health`, `/end`, `/project-resolve`) never *read* it — so any of a teammate's own emit credentials could drive any of that teammate's other instances. `requireOAuthBearer` now takes the target instance and rejects a **mismatched** binding with a `401 invalid_token`. A **NULL** binding stays permissive and logs: `oauth_token.instance_id` is `ON DELETE SET NULL`, so deleting an attestation silently de-binds a live credential, and read/tag grants are never instance-bound at all. This is what makes [ADR-0008](../decisions/0008-emission-spoof-detection-and-quarantine.md) §2's anti-spoof claim — *"a cross-instance spoofer cannot mint a bearer for a victim's instance"* — true; before the at-use check it was an assertion the code did not enforce.
+- **The emit credential is bound to its device at USE, not only at mint.** `oauth_token.instance_id` is written when the credential is minted, but the four instance-scoped routes (`/bearer`, `/health`, `/end`, `/project-resolve`) never *read* it — so any of a teammate's own emit credentials could drive any of that teammate's other instances. `requireOAuthBearer` now takes the target instance and rejects a **mismatched** binding with a `401 invalid_token`. A **NULL** binding stays permissive and logs: `oauth_token.instance_id` is `ON DELETE SET NULL`, so deleting an attestation silently de-binds a live credential, and read/tag grants are never instance-bound at all. This is what makes ADR-0008 §2's anti-spoof claim — *"a cross-instance spoofer cannot mint a bearer for a victim's instance"* — true; before the at-use check it was an assertion the code did not enforce.
 - Rationale (inline STRIDE note): token is **write-only, narrow-scope** — ingests to one DCR only, so leakage caps at ingest noise, not exfiltration; per-developer Azure RBAC is unnecessary for telemetry.
 - `NUXT_AZURE_MONITOR_AUTH` mode: `'mi'` (real `ManagedIdentityCredential`, optional `NUXT_AZURE_MI_CLIENT_ID`; needs Azure IMDS), `'static'` (`NUXT_AZURE_MONITOR_STATIC_BEARER` verbatim — local/test seam), else deterministic mock. **Static mode is guarded in production** — throws unless `NUXT_ALLOW_STATIC_BEARER=1`, so a copy-pasted non-production config can't ship a live operator credential.
 
@@ -464,8 +464,8 @@ hand-write **spoofed** `attribution_record` rows claiming a victim's
 We **deliberately do not** defend this by trusting the wire or signing per record
 — emitted telemetry is transitionary, reconciled data, not budget truth, and a
 signing collector / proof-of-possession was rejected as over-engineering
-([ADR-0005](../decisions/0005-durable-emission-auth-and-attestation.md),
-[ADR-0008](../decisions/0008-emission-spoof-detection-and-quarantine.md)). The
+(ADR-0005,
+ADR-0008). The
 defense is **revoke + detect + reconcile**, behind strict **emit-credential
 isolation**.
 

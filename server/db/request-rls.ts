@@ -14,11 +14,17 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type * as schema from '../../drizzle/schema'
 import { getDb } from './index'
 import { requireAuth } from '../utils/auth'
-import { withRlsContext, rlsRoleFor } from './rls'
+import { withRlsContext, type RlsIsolation, rlsRoleFor } from './rls'
 
 export async function withRequestRls<T>(
   event: H3Event,
   fn: (tx: PostgresJsDatabase<typeof schema>) => Promise<T>,
+  /**
+   * READ-ONLY handlers only. See withRlsContext — 'repeatable read' makes every
+   * query in the handler read one moment, which a handler comparing figures
+   * derived from different bases needs and a writer must not take.
+   */
+  opts: { isolationLevel?: RlsIsolation } = {},
 ): Promise<T> {
   const session = await requireAuth(event)
   return withRlsContext(
@@ -31,5 +37,6 @@ export async function withRequestRls<T>(
       userTeammateId: session.teammateId,
     },
     fn,
+    opts,
   )
 }

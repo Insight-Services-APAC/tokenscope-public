@@ -61,16 +61,18 @@ export async function fetchSpendTrend(
   scope: UsageScope,
   range: UsageWindow,
 ): Promise<{ series: TrendPoint[]; windowDays: number }> {
+  // Day-grain §A read → usage_rollup_daily (usage-rollup-lane.md R5): `tool` is
+  // in the rollup grain, so the per-lane FILTER sums translate 1:1.
   const rows = await tx.execute<{ day: string; claude: string; copilot: string; agent: string; other: string }>(sql`
-    SELECT to_char(date_trunc('day', u.ts_event), 'YYYY-MM-DD') AS day,
+    SELECT to_char(u.day, 'YYYY-MM-DD') AS day,
            COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool = ${CLAUDE_CODE_TOOL}), 0)::text AS claude,
            COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool = ${COPILOT_CLI_TOOL}), 0)::text AS copilot,
            COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool = ${COPILOT_AGENT_TOOL}), 0)::text AS agent,
            COALESCE(SUM(u.cost_usd) FILTER (WHERE u.tool NOT IN (${laneListSql(SECTION_A_USAGE_TOOLS)}) OR u.tool IS NULL), 0)::text AS other
-    FROM v_complete_usage u
+    FROM usage_rollup_daily u
     WHERE ${scopeSql(scope)}
-      AND u.ts_event >= ${range.startIso}::timestamptz
-      AND u.ts_event <  ${range.endIso}::timestamptz
+      AND u.day >= ${range.startIso.slice(0, 10)}::date
+      AND u.day <  ${range.endIso.slice(0, 10)}::date
     GROUP BY 1 ORDER BY 1`)
   const series: TrendPoint[] = []
   for (const r of rows) {
@@ -106,14 +108,16 @@ export async function fetchActiveTrend(
   scope: UsageScope,
   window: UsageWindow,
 ): Promise<ActiveTrendPoint[]> {
+  // COUNT(DISTINCT teammate_id) is exact on the rollup — teammate_id is in the
+  // grain (usage-rollup-lane.md R2/R5), so a cell-set spans the same people.
   const rows = await tx.execute<{ day: string; claude: number; copilot: number }>(sql`
-    SELECT to_char(date_trunc('day', u.ts_event), 'YYYY-MM-DD') AS day,
+    SELECT to_char(u.day, 'YYYY-MM-DD') AS day,
            COUNT(DISTINCT u.teammate_id) FILTER (WHERE u.tool = ${CLAUDE_CODE_TOOL})::int AS claude,
            COUNT(DISTINCT u.teammate_id) FILTER (WHERE u.tool = ${COPILOT_CLI_TOOL})::int AS copilot
-    FROM v_complete_usage u
+    FROM usage_rollup_daily u
     WHERE ${scopeSql(scope)}
-      AND u.ts_event >= ${window.startIso}::timestamptz
-      AND u.ts_event <  ${window.endIso}::timestamptz
+      AND u.day >= ${window.startIso.slice(0, 10)}::date
+      AND u.day <  ${window.endIso.slice(0, 10)}::date
     GROUP BY 1 ORDER BY 1`)
   return [...rows].map((r) => ({
     day: r.day,

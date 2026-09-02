@@ -58,7 +58,11 @@ const showFooter = computed(() => props.total != null && props.rows.length < (pr
     <div v-if="$slots.toolbar" class="px-5 pt-5 pb-3 flex flex-wrap items-center gap-3 border-b border-calm-2">
       <slot name="toolbar" />
     </div>
-    <div v-if="loading" class="px-5 py-12 text-center text-sm text-carbon-3">Loading…</div>
+    <!-- Absent-data state: pulse rows, announced via aria-busy (smoke-gate contract, D2). -->
+    <div v-if="loading" class="px-5 py-6 animate-pulse space-y-2" data-testid="admin-skeleton" aria-busy="true" role="status">
+      <span class="sr-only">Loading…</span>
+      <div v-for="r in 6" :key="r" class="h-8 rounded-md bg-calm-1" />
+    </div>
     <UiEmptyState
       v-else-if="rows.length === 0"
       :headline="emptyHeadline ?? 'No rows'"

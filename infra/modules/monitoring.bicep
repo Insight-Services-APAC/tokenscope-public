@@ -47,11 +47,17 @@ param deployRbac bool = false
 @description('Deploy the Azure Monitor Workspace (Prometheus-shape OTLP metrics, preview). NOTHING consumes its outputs today — the token-usage path is LOGS via DCE/DCR. Set FALSE where the Microsoft.Monitor resource provider is not registered and the SP cannot register it (dev: your-subscription has it NotRegistered, registration is an IT-level action). Re-enable if/when the metrics path ships AND IT registers the provider.')
 param deployAzureMonitorWorkspace bool = true
 
-@description('Make the Log Analytics QUERY path private: publicNetworkAccessForQuery=Disabled + an Azure Monitor Private Link Scope (AMPLS, query=PrivateOnly / ingest=Open) + a private endpoint, so the corpus is queryable ONLY from inside the VNet. INGESTION stays public (clients emit OTLP from outside the zone). See docs/design/telemetry-query-network-posture.md. Empty privateEndpointSubnetId disables the PE regardless. Default false. Live on dev (2026-06-19): IT has linked the five Azure-Monitor privatelink zones to the VNet, so DNS is in place; the query path resolves over the AMPLS private endpoint. VERIFIED dev 2026-07-01: api.loganalytics.io (the reader SDK default) resolves to that private endpoint (same 10.0.0.x as api.monitor.azure.com) and queries succeed, so NUXT_AZURE_MONITOR_QUERY_ENDPOINT is left EMPTY — do NOT set api.monitor.azure.com (it 404s the LA query path). The 2026-06 outage was a stale app revision caching the pre-cutover public DNS; a fresh revision re-resolves private. #84 resolved.')
+@description('Make the Log Analytics QUERY path private: publicNetworkAccessForQuery=Disabled, so the corpus is queryable ONLY over an Azure Monitor Private Link Scope. INGESTION stays public (clients emit OTLP from outside the zone). Who owns the scope is useCentralAmpls. Default false — the back-out lever. Leave NUXT_AZURE_MONITOR_QUERY_ENDPOINT EMPTY: the reader SDK default api.loganalytics.io resolves over the PE, while api.monitor.azure.com 404s the LA query path. Redeploy the app after any posture change — a running revision caches the pre-change resolution. See docs/design/telemetry-query-network-posture.md.')
 param enableQueryPrivateLink bool = false
 
-@description('PE subnet resource id for the AMPLS private endpoint (from the networking module). Empty = no PE (AMPLS still scopes the workspace).')
+@description('PE subnet resource id for the AMPLS private endpoint (from the networking module). Empty = no PE.')
 param privateEndpointSubnetId string = ''
+
+@description('IT owns the Azure Monitor Private Link Scope: create neither the scope nor its scoped-resource link — IT joins our workspace to theirs. TRUE wherever the privatelink DNS zones are central, because one shared zone holds ONE set of Monitor A records and a second scope PE overwrites the first, blackholing it. ARM is incremental, so flipping this does NOT delete a scope already deployed — remove it by hand. See docs/design/telemetry-query-network-posture.md.')
+param useCentralAmpls bool = false
+
+@description('Resource ID of the central AMPLS to point OUR private endpoint at, for when the central PE is not reachable from our VNet. Read only when useCentralAmpls. Empty (default) = create no PE either and reach the central scope over IT\'s own PE. Two prerequisites: privateEndpointSubnetId must be set (no subnet, no PE — the id is otherwise ignored in silence), and no PE of the same name may already point at a different scope, because privateLinkServiceId is IMMUTABLE — Azure rejects the retarget, so delete that PE first. Cross-subscription: the connection lands Pending until IT approves it.')
+param centralAmplsResourceId string = ''
 
 // ── Log Analytics Workspace ─────────────────────────────────────────
 
@@ -79,15 +85,13 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 
 // ── Azure Monitor Private Link Scope (private QUERY, public INGEST) ──
 // ingestionAccessMode=Open keeps the DCE/ingest path public; queryAccessMode=
-// PrivateOnly forces scoped-resource queries through the AMPLS private
-// endpoint. Scoped resource = the Log Analytics workspace (the query target
-// the read-joiner uses). The PE carries no DNS zone group in central-DNS
-// envs (registerDnsZoneGroups=false) — IT registers the A records in the
-// Azure-Monitor privatelink zones from the infra.yml handoff (privatelink.
-// {monitor.azure.com, oms/ods.opinsights.azure.com, agentsvc.azure-automation.net,
-// blob.core.windows.net}). Gated entirely on enableQueryPrivateLink.
+// PrivateOnly forces scoped-resource queries through an AMPLS private endpoint.
+// Scoped resource = the Log Analytics workspace (what the read-joiner queries).
+// We deploy a scope ONLY where we own one (useCentralAmpls=false); the PE
+// carries no DNS zone group, so IT registers the A records in the Azure-Monitor
+// privatelink zones from the infra.yml handoff.
 
-resource ampls 'Microsoft.Insights/privateLinkScopes@2021-07-01-preview' = if (enableQueryPrivateLink) {
+resource ampls 'Microsoft.Insights/privateLinkScopes@2021-07-01-preview' = if (enableQueryPrivateLink && !useCentralAmpls) {
   name: 'ampls-${name}'
   location: 'global'
   tags: tags
@@ -99,7 +103,7 @@ resource ampls 'Microsoft.Insights/privateLinkScopes@2021-07-01-preview' = if (e
   }
 }
 
-resource amplsScopedLaw 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-01-preview' = if (enableQueryPrivateLink) {
+resource amplsScopedLaw 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-01-preview' = if (enableQueryPrivateLink && !useCentralAmpls) {
   parent: ampls
   name: 'scoped-law'
   properties: {
@@ -107,7 +111,11 @@ resource amplsScopedLaw 'Microsoft.Insights/privateLinkScopes/scopedResources@20
   }
 }
 
-resource amplsPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (enableQueryPrivateLink && !empty(privateEndpointSubnetId)) {
+// Our own PE: always when we own the scope, and on a central scope only when
+// IT's PE cannot serve our VNet (centralAmplsResourceId set).
+var deployAmplsPrivateEndpoint = enableQueryPrivateLink && !empty(privateEndpointSubnetId) && (!useCentralAmpls || !empty(centralAmplsResourceId))
+
+resource amplsPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (deployAmplsPrivateEndpoint) {
   name: 'pe-ampls-${name}'
   location: location
   tags: tags
@@ -119,7 +127,7 @@ resource amplsPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = 
       {
         name: 'pe-ampls-${name}'
         properties: {
-          privateLinkServiceId: ampls.id
+          privateLinkServiceId: useCentralAmpls ? centralAmplsResourceId : ampls!.id
           groupIds: [
             'azuremonitor'
           ]
@@ -511,3 +519,6 @@ output dcrImmutableId string = dataCollectionRule.properties.immutableId
 
 @description('DCR name.')
 output dcrName string = dataCollectionRule.name
+
+@description('Action group resource ID (empty when notificationEmail is empty — alerts still fire, no email). Consumed by the LATE ops-alerts module (ops-alerting.md ar-M19: ONE action group, reused — never a second one) whose alert rules scope resources this module must not depend on (monitoring is their producer; see main.bicep\'s deployment graph).')
+output actionGroupId string = empty(notificationEmail) ? '' : actionGroup.id

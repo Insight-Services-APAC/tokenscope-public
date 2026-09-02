@@ -25,6 +25,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { sql } from 'drizzle-orm'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup, rebuildUsageRollup } from '../helpers/usage-rollup'
 import {
   wholeCompanyUsage,
   wholeCompanyFinance,
@@ -117,6 +118,9 @@ beforeAll(async () => {
       (month, provider_enterprise_id, provider_org_id, cost_owning_unit_id, seats,
        license_net_usd, overage_net_usd, unclassified_net_usd, included_allowance_usd, usage_gross_usd)
     VALUES (DATE '2026-06-01', ${ent!.id}::uuid, ${po!.id}::uuid, ${ccA!.id}::uuid, 5, 200, 100, 55, 400, 350)`
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 })
 
 /** The whole of June — month-aligned, so the pooled Copilot lane is eligible. */
@@ -342,12 +346,18 @@ describe('the §A usage engine threads the clamp on its own lane', () => {
         VALUES (${inst!.id}::uuid, ${m!.id}::uuid, ${regionA}::uuid, ${u!.id}::uuid, 'claude-code',
                 'claude-sonnet-4-6', 'input', 500, 1, 'tier-1', 'estimated',
                 '2026-06-02T12:00:00Z'::timestamptz, 'conv-sa-second')`
+      // Mid-test §A mutation → the rollup the engine reads must be recomputed
+      // (usage-rollup-lane.md R8; a plain re-run would skip the already-
+      // materialised day, so this is the rebuild variant).
+      await rebuildUsageRollup(t.db)
       const rows = await fetchDailyMetrics(t.db, clampAUsage(), MONTH_WINDOW, CLOCK)
       const day = rows.find((r) => r.day === '2026-06-02')!
       expect(day.activeUsers).toBe(1) // one PERSON, two emissions
       expect(day.genuineUsd).toBeCloseTo(12, 2) // and both emissions' money counts
     } finally {
       await t.client`DELETE FROM attribution_record WHERE claude_session_id = 'conv-sa-second'`
+      // Restore the rollup to the fixture state the sibling tests read.
+      await rebuildUsageRollup(t.db)
     }
   })
 
@@ -750,19 +760,25 @@ describe('one implementation, not two', () => {
      * (tests/unit/server/reports-lane-firewall.test.ts, which scans all of
      * server/reporting/**): no raw ledger, aggregate or actual_spend read.
      */
+    // The §A source of record for these engines is usage_rollup_daily — the
+    // day-grain rollup DEFINED as an aggregate of v_complete_usage
+    // (docs/design/usage-rollup-lane.md R5/R7). Same lane, same wall: none of
+    // them may touch a v_finance_* view, and the bill engine may touch neither
+    // the §A view nor its rollup.
     const usage = read('server/reporting/engine/usage-series.ts')
     const coverage = read('server/reporting/engine/usage-coverage.ts')
     const drivers = read('server/reporting/engine/drivers.ts')
     const bill = read('server/reporting/engine/chargeback-series.ts')
-    expect(usage).toContain('v_complete_usage')
+    expect(usage).toContain('usage_rollup_daily')
     expect(usage).not.toContain('v_finance_bill_chargeback')
-    expect(coverage).toContain('v_complete_usage')
+    expect(coverage).toContain('usage_rollup_daily')
     expect(coverage).not.toMatch(/v_finance_/)
     expect(coverage).not.toContain('attribution_record')
     expect(coverage).not.toContain('attribution_aggregate')
-    expect(drivers).toContain('v_complete_usage')
+    expect(drivers).toContain('usage_rollup_daily')
     expect(drivers).not.toMatch(/v_finance_/)
     expect(bill).toContain('v_finance_bill_chargeback')
     expect(bill).not.toContain('v_complete_usage')
+    expect(bill).not.toContain('usage_rollup_daily')
   })
 })

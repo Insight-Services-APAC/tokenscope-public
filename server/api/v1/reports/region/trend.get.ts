@@ -66,18 +66,29 @@ export default defineEventHandler(async (event) => {
     ['region/trend', normalizedQuery(query), idKey, regionRequestKey(req)],
     () => withRequestRls(event, async (tx) => {
     if (req.width === 'all-regions') {
-      const series = await fetchAcrossTrend(tx, win)
-      // The same series the composite's chargeDaily carries — memoized (D8) so
-      // the page's concurrent XHRs compute it once.
-      const chargeSeries = await memoizedScan(
-        ['across-charge-trend', idKey, win.startIso, win.endIso, clock.settledThrough],
-        () => fetchAcrossChargebackTrend(tx, win, clock),
-      )
-      // Σ lanes per day == chargeSeries[day], cent-exact (test-pinned).
-      const chargeLanes = await fetchAcrossChargebackLaneTrend(tx, win)
-      // Σ cells == this window's genuine usage total (test-pinned); `window` below is
-      // the ONE shared window object the hero + its pinned donut both bind on.
-      const usageWeeklyLanes = await fetchAcrossUsageWeeklyLanes(tx, win)
+      // Concurrent issuance on ONE tx connection: postgres-js pipelines and
+      // answers in order — no per-query await gaps (fully one wave on
+      // prepared statements), no cross-dependencies
+      // (docs/design/request-floor-performance.md F5).
+      const [
+        series,
+        // The same series the composite's chargeDaily carries — memoized (D8) so
+        // the page's concurrent XHRs compute it once.
+        chargeSeries,
+        // Σ lanes per day == chargeSeries[day], cent-exact (test-pinned).
+        chargeLanes,
+        // Σ cells == this window's genuine usage total (test-pinned); `window` below is
+        // the ONE shared window object the hero + its pinned donut both bind on.
+        usageWeeklyLanes,
+      ] = await Promise.all([
+        fetchAcrossTrend(tx, win),
+        memoizedScan(
+          ['across-charge-trend', idKey, win.startIso, win.endIso, clock.settledThrough],
+          () => fetchAcrossChargebackTrend(tx, win, clock),
+        ),
+        fetchAcrossChargebackLaneTrend(tx, win),
+        fetchAcrossUsageWeeklyLanes(tx, win),
+      ])
       return {
         month,
         width: 'all-regions' as const,
@@ -92,13 +103,17 @@ export default defineEventHandler(async (event) => {
     }
 
     const { scope } = req
-    const { series, windowDays } = await fetchRegionalTrend(tx, scope, win)
-    const chargeSeries = await memoizedScan(
-      ['regional-charge-trend', idKey, scope.scopeKey, win.startIso, win.endIso, clock.settledThrough],
-      () => fetchRegionalChargebackTrend(tx, scope, win, clock),
-    )
-    const chargeLanes = await fetchRegionalChargebackLaneTrend(tx, scope, win)
-    const usageWeeklyLanes = await fetchRegionalUsageWeeklyLanes(tx, scope, win)
+    // One round-trip wave, no cross-dependencies (request-floor-performance.md F5).
+    const [{ series, windowDays }, chargeSeries, chargeLanes, usageWeeklyLanes] =
+      await Promise.all([
+        fetchRegionalTrend(tx, scope, win),
+        memoizedScan(
+          ['regional-charge-trend', idKey, scope.scopeKey, win.startIso, win.endIso, clock.settledThrough],
+          () => fetchRegionalChargebackTrend(tx, scope, win, clock),
+        ),
+        fetchRegionalChargebackLaneTrend(tx, scope, win),
+        fetchRegionalUsageWeeklyLanes(tx, scope, win),
+      ])
     return {
       month,
       width: 'region' as const,

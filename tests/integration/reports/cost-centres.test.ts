@@ -17,6 +17,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { buildUsageRollup } from '../helpers/usage-rollup'
 import { injectTestSession } from '../../helpers/auth'
 import { grantReportAccess } from '../helpers/report-access'
 import type { Session } from '../../../server/utils/auth'
@@ -264,6 +265,10 @@ beforeAll(async () => {
        region_id, org_unit_id, cost_owning_unit_id, dimension_source)
     VALUES (${phil}::uuid, '2026-07-07'::date, 'claude-ai', 100, 100, 7, 'anthropic-analytics-api', false,
        ${regionB}::uuid, ${ccB}::uuid, ${ccB}::uuid, 'ingest-snapshot')`
+
+  // The region reports' §A reads come from usage_rollup_daily (usage-rollup-
+  // lane.md R5/R8): materialise it from the seeds above via the real worker.
+  await buildUsageRollup(t.db)
 }, 180_000)
 
 afterAll(async () => {

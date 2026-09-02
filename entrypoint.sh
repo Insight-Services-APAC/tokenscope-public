@@ -22,6 +22,15 @@ if [ -n "${DATABASE_URL:-}" ]; then
     echo "[entrypoint] migration failed; aborting boot"
     exit 1
   }
+  # Create pg_stat_statements if this role may. BEST EFFORT and NEVER fatal:
+  # the extension is a diagnostic, and no failure to create it is a reason to
+  # refuse traffic. Deliberately NOT a migration — a migration runs inside the
+  # transaction whose failure aborts boot above, and runs only once, so a
+  # transient failure would become permanent. This retries every boot.
+  echo "[entrypoint] ensuring pg_stat_statements extension (best effort)..."
+  node node_modules/.bin/tsx drizzle/ensure-stat-statements.ts || \
+    echo "[entrypoint] pg_stat_statements step exited non-zero (ignored by design)"
+
   # Provision the NON-OWNER app role that makes the RLS policies execute
   # (docs/design/rls-enforcement.md §9). DORMANT BY DEFAULT: a no-op unless
   # TOKENSCOPE_PROVISION_APP_ROLE=true, so shipping it changes nothing until

@@ -22,6 +22,7 @@
  * means nothing.
  */
 import { sql } from 'drizzle-orm'
+import { splitBounds, type RollupGate } from '../usage/rollup-gate'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type { SpendLens } from '../../shared/usage/lens'
 import { toolLabel } from '../../shared/usage/surface'
@@ -308,6 +309,27 @@ export async function getMyDeclaredPersonal(
                  * sql template literal, so one closes the query mid-comment
                  * and the parse error lands on a line that looks fine.)
                  */
+                /*
+                 * THE ONE READ ON THIS PAGE STILL WHOLLY ON THE VIEW.
+                 *
+                 * It cannot take the settled/today split: the lower bound is a
+                 * PER-DECLARATION mid-day instant inside a correlated
+                 * subquery, and a whole-day rollup cannot express "from 14:20
+                 * on the 9th". Splitting it would mean a per-row three-range
+                 * union for a read that is not on the page's hot path.
+                 *
+                 * Which leaves this figure on a DIFFERENT BASIS from the
+                 * headline it is asserted against (declared <= attributed,
+                 * lens-headline.test.ts) — and a pair of bases is only safe
+                 * while a disagreement cannot be REACHED. Two things bound
+                 * it: resolveRollupGate proves the rollup carries no lag that a
+                 * committed write instant can reveal before it opens, and the
+                 * route reads everything from ONE repeatable-read snapshot so a
+                 * write committing after that proof cannot land in one basis
+                 * and not the other. What is left is the commit-order case in
+                 * usage-rollup-lane.md, which no timestamp here can see and
+                 * which the worker shares.
+                 */
                 AND u.ts_event >= GREATEST(${monthStartIso}::timestamptz, psd.declared_at)
                 AND u.ts_event <  ${spendEndIso}::timestamptz
            ), 0)::text AS usage_usd
@@ -428,10 +450,37 @@ export async function getMyToolGaps(
   tx: Tx,
   teammateId: string,
   now: Date = new Date(),
+  gate: RollupGate | null = null,
 ): Promise<MeToolGap[]> {
   const monthStartIso = monthStartIsoFor(now)
   const spendEndIso = monthToDateWindow(now).endIso
   const monthStartDay = monthStartIso.slice(0, 10)
+  /*
+   * Split on getMyToolGaps' OWN gate: it windows month-to-date, like getMyUsage
+   * and unlike the page window, and a gate proves coverage for the window it
+   * was resolved against.
+   */
+  const tb = gate ? splitBounds(gate, { startIso: monthStartIso, endIso: spendEndIso }) : null
+  const attributedSource = gate && tb
+    ? sql`
+        SELECT r.tool, r.cost_usd
+          FROM usage_rollup_daily r
+         WHERE r.teammate_id = ${teammateId}::uuid
+           AND r.day >= ${tb.rollupFrom}::date
+           AND r.day <= ${tb.rollupTo}::date
+        UNION ALL
+        SELECT u.tool, u.cost_usd
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.ts_event >= ${tb.liveFrom}::timestamptz
+           AND u.ts_event <  ${spendEndIso}::timestamptz`
+    : sql`
+        SELECT u.tool, u.cost_usd
+          FROM v_complete_usage u
+         WHERE u.teammate_id = ${teammateId}::uuid
+           AND u.ts_event >= ${monthStartIso}::timestamptz
+           AND u.ts_event <  ${spendEndIso}::timestamptz`
+
   const rows = await tx.execute<{
     tool: string
     attributed_usd: string
@@ -440,12 +489,9 @@ export async function getMyToolGaps(
     has_open_review: boolean
   }>(sql`
     WITH attributed AS (
-      SELECT u.tool, SUM(u.cost_usd) AS usd
-        FROM v_complete_usage u
-       WHERE u.teammate_id = ${teammateId}::uuid
-         AND u.ts_event >= ${monthStartIso}::timestamptz
-         AND u.ts_event <  ${spendEndIso}::timestamptz
-       GROUP BY u.tool
+      SELECT a.tool, SUM(a.cost_usd) AS usd
+        FROM (${attributedSource}) a
+       GROUP BY a.tool
     ),
     reported AS (
       SELECT d.tool, SUM(d.usage_usd) AS usd
@@ -681,13 +727,15 @@ export async function buildMeLensDisclosure(
     attributedUsageUsd: string
     providerReportedUsd: string
     now?: Date
+    /** The MTD coverage gate, threaded from the route (usage-rollup-lane R5c). */
+    gate?: RollupGate | null
   },
 ): Promise<MeLensDisclosure> {
   const now = args.now ?? new Date()
   const [chargeable, declared, toolGaps, costCentre] = await Promise.all([
     getMyChargeableMtd(tx, args.teammateId, now),
     getMyDeclaredPersonal(tx, args.teammateId, now),
-    getMyToolGaps(tx, args.teammateId, now),
+    getMyToolGaps(tx, args.teammateId, now, args.gate ?? null),
     getMyCostCentre(tx, args.teammateId),
   ])
   // Sequenced after `declared` rather than joined into the Promise.all: it

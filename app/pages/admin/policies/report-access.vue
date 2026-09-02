@@ -18,22 +18,26 @@ definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 const { isOrgWide } = useAdminAccess()
 
-const { data, refresh } = await useFetch<ReportAccessData>('/api/v1/admin/report-access', {
-  default: () => null as unknown as ReportAccessData,
+// Lazy, client-only, null default: docs/design/admin-nav-responsiveness.md D1/D2.
+const { data, error, refresh } = useLazyFetch<ReportAccessData | null>('/api/v1/admin/report-access', {
+  server: false,
+  default: () => null,
   immediate: isOrgWide.value,
 })
 </script>
 
 <template>
-  <div v-if="isOrgWide" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-policy-report-access">
+  <div v-if="isOrgWide" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-policy-report-access" data-admin-page="/admin/policies/report-access">
     <UiPageHead
       eyebrow="Policies"
       title="Report access"
       sub="Grant a named teammate company-wide reporting access, on top of what their role already sees."
     />
-    <AdminReportAccessSection :data="data" @changed="refresh()" />
+    <UiFetchErrorBanner v-if="error" :error="error" label="report access grants" @retry="refresh" />
+    <AdminPageSkeleton v-else-if="data == null" :rows="5" />
+    <AdminReportAccessSection v-else :data="data" @changed="refresh()" />
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/policies/report-access">
     <div class="text-lg font-bold text-carbon">Global finance access required.</div>
   </div>
 </template>

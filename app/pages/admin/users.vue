@@ -55,8 +55,7 @@ interface UsersResp {
   offset: number
 }
 
-const { session, ensure } = useSession()
-await ensure()
+const { session } = useSession()
 
 const regionId = computed(() => session.value?.regionId ?? '')
 const callerTeammateId = computed(() => session.value?.teammateId ?? '')
@@ -67,15 +66,19 @@ const isOrgWide = computed(() => {
   const r = session.value?.role
   return r === 'global-finops' || r === 'platform-admin'
 })
-// Regions list — independent of the users + org-units fetches below; all three
-// are launched without an immediate await and awaited together (parallel) so
-// the page blocks on the slowest, not the sum. See the Promise.all after the
-// org-units fetch.
-const regionsAsync = useFetch<{ regions: { id: string; code: string; display_name: string }[] }>(
+// All three reads are declared lazily and never awaited: navigation is never
+// gated on data (docs/design/admin-nav-responsiveness.md D1/D2).
+// The auxiliary reads keep their `error` too: a picker that collapses a failed
+// read into `[]` is the false empty D2 forbids — "this region has no regions to
+// move to" and "we could not load them" must not look alike.
+const {
+  data: regionsData,
+  error: regionsError,
+  refresh: refreshRegions,
+} = useLazyFetch<{ regions: { id: string; code: string; display_name: string }[] } | null>(
   '/api/v1/admin/regions',
-  { default: () => ({ regions: [] }) },
+  { server: false, default: () => null },
 )
-const regionsData = regionsAsync.data
 const viewRegionId = ref('')
 watch(regionId, (r) => { if (!viewRegionId.value && r) viewRegionId.value = r }, { immediate: true })
 
@@ -99,15 +102,18 @@ const usersUrl = computed(() => {
   return `/api/v1/admin/users?${parts.join('&')}`
 })
 
-const usersAsync = useFetch<UsersResp>(
+// Explicit key because the getter can be '' (D1); the watch carries the refetch.
+const { data, error, refresh } = useLazyFetch<UsersResp | null>(
   () => usersUrl.value,
   {
-    default: () => ({ users: [], total: 0, adminCount: 0, limit: LIMIT, offset: 0 }),
+    key: 'admin-users-list',
+    server: false,
+    default: () => null,
     immediate: !!regionId.value,
     watch: [usersUrl],
   },
 )
-const { data, refresh, pending } = usersAsync
+const skeleton = computed(() => !error.value && data.value == null)
 
 // Org units for the in-scope region — drive the per-row Business Unit placement
 // select + the Add-teammate dialog. Region admins see their own region; org-wide
@@ -120,19 +126,21 @@ interface OrgUnitNode {
 const scopeRegion = computed(() =>
   isOrgWide.value ? (viewRegionId.value || regionId.value) : regionId.value,
 )
-const orgUnitsAsync = useFetch<{ nodes: OrgUnitNode[] }>(
+const {
+  data: orgUnitsData,
+  error: orgUnitsError,
+  refresh: refreshOrgUnits,
+} = useLazyFetch<{ nodes: OrgUnitNode[] } | null>(
   () => (scopeRegion.value ? `/api/v1/admin/org-units?region=${scopeRegion.value}` : ''),
   {
-    default: () => ({ nodes: [] }),
+    key: 'admin-users-org-units',
+    server: false,
+    default: () => null,
     immediate: !!regionId.value,
     watch: [scopeRegion],
   },
 )
-const orgUnitsData = orgUnitsAsync.data
 
-// All three reads (regions list, users page, org-units) are independent — block
-// on the slowest, not their sum.
-await Promise.all([regionsAsync, usersAsync, orgUnitsAsync])
 // Active units only for placement (a retired unit shouldn't be a target).
 const orgUnitOptions = computed<{ id: string; display_name: string }[]>(() =>
   (orgUnitsData.value?.nodes ?? [])
@@ -526,7 +534,7 @@ function roleOptionsFor(current: string): Role[] {
 </script>
 
 <template>
-  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-users">
+  <div v-if="isAdmin" class="max-w-[1600px] mx-auto px-10 py-8 pb-20" data-testid="admin-users" data-admin-page="/admin/users">
     <UiPageHead
       eyebrow="Administration"
       title="Teammates"
@@ -622,11 +630,13 @@ function roleOptionsFor(current: string): Role[] {
       {{ toast.message }}
     </div>
 
+    <UiFetchErrorBanner v-if="error" :error="error" label="teammates" @retry="refresh" />
     <AdminDataTable
+      v-else
       :rows="rows"
       :columns="columns"
       :total="data?.total"
-      :loading="pending"
+      :loading="skeleton"
       empty-headline="No teammates"
       empty-sub="No teammates match the current filters in this region."
     >
@@ -649,15 +659,29 @@ function roleOptionsFor(current: string): Role[] {
           <option value="">All roles</option>
           <option v-for="r in SELECTABLE_ROLES" :key="r" :value="r">{{ roleLabel(r) }}</option>
         </select>
-        <select
-          v-if="isOrgWide"
-          v-model="viewRegionId"
-          class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white"
-          data-testid="admin-users-region-view"
-          title="Browse users in another region"
-        >
-          <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
-        </select>
+        <div v-if="isOrgWide">
+          <select
+            v-model="viewRegionId"
+            :disabled="!regionsData"
+            class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white disabled:bg-calm/40 disabled:cursor-not-allowed"
+            data-testid="admin-users-region-view"
+            :title="regionsError ? 'The region list could not be loaded.' : 'Browse users in another region'"
+          >
+            <option v-for="r in regionsData?.regions" :key="r.id" :value="r.id">{{ r.display_name }}</option>
+          </select>
+          <UiAuxFetchError
+            :error="regionsError"
+            label="regions"
+            testid="admin-users-regions-error"
+            @retry="refreshRegions"
+          />
+        </div>
+        <UiAuxFetchError
+          :error="orgUnitsError"
+          :label="`${BU_LABEL}s`"
+          testid="admin-users-org-units-error"
+          @retry="refreshOrgUnits"
+        />
         <UiButton
           kind="primary"
           size="sm"
@@ -718,15 +742,25 @@ function roleOptionsFor(current: string): Role[] {
                 :selected="u.id === asUserRow(row).orgUnitId"
               >{{ u.display_name }}</option>
             </select>
-            <span v-else class="text-carbon-2">{{ asUserRow(row).orgUnitName }}</span>
+            <span v-else class="text-carbon-2">
+              {{ asUserRow(row).orgUnitName }}
+              <!-- A failed org-units read must not read as "nowhere to move
+                   them to" — the toolbar notice carries the retry. -->
+              <span
+                v-if="orgUnitsError"
+                class="text-[11px] font-semibold text-brand-hunger"
+                :title="`The ${BU_LABEL} list could not be loaded, so this teammate cannot be moved. Retry above the table.`"
+              >(can't move)</span>
+            </span>
           </td>
           <td class="px-5 py-3 text-sm text-carbon-3">{{ fmtTs(asUserRow(row).lastSyncAt) }}</td>
           <td class="px-5 py-3 text-sm">
             <div class="flex items-center gap-2">
             <select
-              v-if="isOrgWide"
+              v-if="isOrgWide && !regionsError"
               :data-testid="`admin-users-region-${asUserRow(row).id}`"
-              class="px-2 py-1 text-sm border border-calm-2 rounded-md bg-white"
+              :disabled="!regionsData"
+              class="px-2 py-1 text-sm border border-calm-2 rounded-md bg-white disabled:bg-calm/40 disabled:cursor-not-allowed"
               title="Move this teammate to another region"
               @change="(e) => reassignRegion(asUserRow(row), (e.target as HTMLSelectElement).value)"
             >
@@ -737,6 +771,13 @@ function roleOptionsFor(current: string): Role[] {
                 :selected="r.id === asUserRow(row).regionId"
               >{{ r.display_name }}</option>
             </select>
+            <!-- Never an empty region picker over a failed read: the toolbar
+                 notice above carries the reason and the retry. -->
+            <span
+              v-else-if="isOrgWide"
+              class="text-[11px] font-semibold text-brand-hunger"
+              title="The region list could not be loaded, so this teammate cannot be re-homed. Retry above the table."
+            >regions unavailable</span>
             <!-- Reachable, and discoverable. See `askRepairHistory`: a select
                  cannot offer "the value you already have". -->
             <UiButton
@@ -791,12 +832,14 @@ function roleOptionsFor(current: string): Role[] {
       :open="addOpen"
       :region-id="scopeRegion"
       :org-units="orgUnitOptions"
+      :org-units-error="orgUnitsError"
       :caller-role="session?.role ?? ''"
       @close="addOpen = false"
       @added="onTeammateAdded"
+      @retry-org-units="refreshOrgUnits"
     />
   </div>
-  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center">
+  <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/users">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

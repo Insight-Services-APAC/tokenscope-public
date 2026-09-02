@@ -174,6 +174,53 @@ afterAll(async () => {
   await stopTestDb(t)
 }, 30_000)
 
+describe('worklist ordering is deterministic', () => {
+  /*
+   * `ORDER BY last_event_ts DESC LIMIT n` with no unique tiebreaker returns
+   * tied rows in whatever order the scan produced, so WHICH sessions appear at
+   * all varies between identical requests — on a queue people act on, a
+   * session can stay permanently invisible. These conversations are seeded
+   * with the SAME ts_event so every row is a tie, and in ASCENDING id order so
+   * physical order is the opposite of the expected answer: a handler without
+   * the tiebreaker cannot pass by accident.
+   */
+  const TIED = ['zz-tie-a', 'zz-tie-b', 'zz-tie-c', 'zz-tie-d']
+
+  afterAll(async () => {
+    // This suite shares one database: rows left behind change what the sibling
+    // tests see. seedConversation writes an instance_attestation row as well as
+    // the ledger rows, so all three go — deleting the attestation LAST because
+    // attribution_record references it.
+    for (const conv of TIED) {
+      const rows = await t.client<{ instance_id: string }[]>`
+        SELECT DISTINCT instance_id::text FROM attribution_record WHERE claude_session_id = ${conv}`
+      await t.client`DELETE FROM attribution_record WHERE claude_session_id = ${conv}`
+      await t.client`DELETE FROM session_assignment WHERE claude_session_id = ${conv}`
+      for (const r of rows) {
+        await t.client`DELETE FROM instance_attestation WHERE instance_id = ${r.instance_id}::uuid`
+      }
+    }
+  })
+
+  it('orders tied last_event by session_id DESC, and repeats identically', async () => {
+    const tsEvent = new Date(Date.now() - 5_000).toISOString()
+    for (const conv of TIED) {
+      await seedConversation(conv, '1.00')
+      await t.client`UPDATE attribution_record SET ts_event = ${tsEvent}::timestamptz
+                      WHERE claude_session_id = ${conv} AND teammate_id = ${devId}::uuid`
+    }
+
+    const first = await worklist()
+    const seen = first.sessions.map((x: { session_id: string }) => x.session_id).filter((id: string) => TIED.includes(id))
+    expect(seen).toEqual([...TIED].sort().reverse())
+
+    // Identical on a repeat: the whole point is that it does not drift.
+    const second = await worklist()
+    expect(second.sessions.map((x: { session_id: string }) => x.session_id))
+      .toEqual(first.sessions.map((x: { session_id: string }) => x.session_id))
+  })
+})
+
 describe('worklist bulk — validation', () => {
   it('rejects an empty selection', async () => {
     await expect(bulk({ action: 'dismiss', sessions: [], unaccounted: [] })).rejects.toMatchObject({ statusCode: 400 })

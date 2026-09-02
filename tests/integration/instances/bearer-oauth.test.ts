@@ -367,3 +367,90 @@ describe('no existence oracle — an unknown id and a peer\'s real instance are 
     }
   })
 })
+
+/**
+ * /health PAYLOAD contract.
+ *
+ * Rule 10 ("a module test is not a route test"), in its other costume: this route
+ * was already exercised above, but only ever as `resolves.toBeDefined()` — an AUTH
+ * smoke check. Its actual product contract, `last_emission =
+ * MAX(attribution_record.ts_event) for THIS instance`, had NO coverage anywhere:
+ * every last_emission test in the repo (landed-check / statusline / copilot-status)
+ * is a CLIENT unit test with a mocked `fetch`, i.e. the client is verified against a
+ * mock of a server contract nothing verified. On 2026-09-01 a device read
+ * permanently-silent while its records were landing, and no test could have caught it.
+ *
+ * These run through the real handler → withMachineRls → Postgres.
+ */
+async function landRecord(instanceId: string, teammateId: string, tsEvent: Date): Promise<void> {
+  await t.client.unsafe(`
+    INSERT INTO attribution_record
+      (instance_id, teammate_id, region_id, org_unit_id, tool, model, token_type,
+       tokens, cost_usd, fidelity_tier, cost_basis, ts_event)
+    VALUES ('${instanceId}','${teammateId}','${regionId}','${ouId}','claude-code','opus-5','input',
+            100, 1.234567, 'exact', 'rate_card', '${tsEvent.toISOString()}')`)
+}
+
+type HealthBody = {
+  instance_id: string
+  last_emission: string | null
+  last_bearer_at: string | null
+  ts_start: string
+  silent: boolean
+  revoked: boolean
+}
+
+async function health(instanceId: string, token: string): Promise<HealthBody> {
+  return (await healthHandler(instanceEvent(instanceId, token) as never)) as HealthBody
+}
+
+describe('/health payload contract (the assertion whose absence hid a live incident)', () => {
+  it('a NEVER-landed enrolment reports last_emission null AND silent', async () => {
+    const { instanceId } = await enrolInstance(ownerId, 'bo-owner@x.test')
+    const tok = await boundEmitAccessTokenFor(ownerId, instanceId)
+
+    const body = await health(instanceId, tok)
+    expect(body.last_emission).toBeNull()
+    expect(body.silent).toBe(true)
+    expect(body.revoked).toBe(false)
+  })
+
+  it('a landed record SURFACES as last_emission = MAX(ts_event) — not null', async () => {
+    const { instanceId } = await enrolInstance(ownerId, 'bo-owner@x.test')
+    const tok = await boundEmitAccessTokenFor(ownerId, instanceId)
+    const older = new Date(Date.now() - 60 * 60_000)
+    const newest = new Date(Date.now() - 5 * 60_000)
+    await landRecord(instanceId, ownerId, older)
+    await landRecord(instanceId, ownerId, newest)
+
+    const body = await health(instanceId, tok)
+    // The regression that shipped: this came back null while rows existed.
+    expect(body.last_emission).not.toBeNull()
+    expect(Date.parse(body.last_emission!)).toBe(newest.getTime())
+    expect(body.silent).toBe(false) // a recent landing is not silent
+  })
+
+  it("does NOT leak another instance's landings into this instance's watermark", async () => {
+    const { instanceId: mine } = await enrolInstance(ownerId, 'bo-owner@x.test')
+    const { instanceId: other } = await enrolInstance(ownerId, 'bo-owner@x.test')
+    const tok = await boundEmitAccessTokenFor(ownerId, mine)
+    await landRecord(other, ownerId, new Date(Date.now() - 5 * 60_000))
+
+    const body = await health(mine, tok)
+    // Instance-SCOPED: the sibling's row must not make this device look healthy.
+    expect(body.last_emission).toBeNull()
+    expect(body.silent).toBe(true)
+  })
+
+  it('returns ts_start so a client can AGE a never-landed enrolment', async () => {
+    const enrolledAt = new Date(Date.now() - 3 * 60 * 60_000)
+    const { instanceId } = await enrolInstance(ownerId, 'bo-owner@x.test', enrolledAt)
+    const tok = await boundEmitAccessTokenFor(ownerId, instanceId)
+
+    const body = await health(instanceId, tok)
+    // Without this the statusline cannot tell a 90-second-old enrolment whose first
+    // record is in flight from one that has never landed in hours — both are null.
+    expect(Date.parse(body.ts_start)).toBe(enrolledAt.getTime())
+    expect(body.last_emission).toBeNull()
+  })
+})
