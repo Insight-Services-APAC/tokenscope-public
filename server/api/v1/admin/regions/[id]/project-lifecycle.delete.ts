@@ -12,7 +12,7 @@ import { recordAuditEvent } from '../../../../../db/audit'
 import { clearRegionLifecyclePolicy } from '../../../../../db/project-lifecycle-policy'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const parsed = z.string().uuid().safeParse(getRouterParam(event, 'id'))
   if (!parsed.success) throw createError({ statusCode: 400, statusMessage: 'Invalid region id' })

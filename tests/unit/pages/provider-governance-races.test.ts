@@ -200,7 +200,7 @@ const ENTERPRISES = {
 
 function stubGlobals() {
   vi.stubGlobal('definePageMeta', () => {})
-  vi.stubGlobal('useSession', () => ({ session: ref({ role: 'global-finops' }), ensure: async () => {} }))
+  vi.stubGlobal('useSession', () => ({ session: ref({ role: 'platform-admin' }), ensure: async () => {} }))
   vi.stubGlobal('useLazyFetch', fakeLazyFetch)
   vi.stubGlobal('useLazyAsyncData', fakeAsyncData)
   vi.stubGlobal('$fetch', fetchStub)

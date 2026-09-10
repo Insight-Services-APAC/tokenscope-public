@@ -17,7 +17,7 @@
  * and our own ledger. Reasoning from the ledger alone cannot distinguish them,
  * because "no rows" is equally consistent with both.
  *
- * RBAC: admin / global-finops — the same tier as the attribution-gaps card this
+ * RBAC: admin / platform-admin — the same tier as the attribution-gaps card this
  * hangs off, and the same class of data (one instance id, its counts, its
  * self-reported versions). Deliberately NOT the platform-admin tier that
  * otel-logs.get.ts uses: that endpoint returns RAW Azure result and error packets
@@ -59,7 +59,7 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const { instanceId, hours } = await getValidated(event, Query)
 
   return withRequestRls(event, async (db) => {
@@ -102,7 +102,7 @@ export default defineEventHandler(async (event) => {
 
     // EXPLICIT app-level region clamp, BEFORE the ledger count and BEFORE the
     // ingest probe — clamping after either would leave the disclosure intact
-    // (the count/probe would already have run). No-op for global-finops /
+    // (the count/probe would already have run). No-op for platform-admin /
     // platform-admin; throws 403 for a region-scoped admin outside their
     // region. A genuinely unknown instance (inst === null) has no region to
     // clamp against — it degrades to "unanswerable" below without a leak,

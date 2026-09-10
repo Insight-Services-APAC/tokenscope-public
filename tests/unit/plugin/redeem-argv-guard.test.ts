@@ -27,7 +27,7 @@
  * POST") are only answerable from outside the process.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, existsSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, existsSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createServer } from 'node:http'
@@ -443,7 +443,9 @@ describe('claude-redeem main() — no flag can redirect the handoff POST', () =>
   // loop, so a synchronous spawn would deadlock.
   const run = (args: string[]) =>
     new Promise<{ status: number | null; out: string }>((resolve) => {
-      const child = spawn('node', [HELPER, ...args], {
+      // --state-dir keeps the spawned CLI's credential store in the sandbox; the
+      // store now refuses to write the real ~/.tokenscope under a test runner.
+      const child = spawn('node', [HELPER, ...args, '--state-dir', join(dir, 'state')], {
         env: {
           ...process.env,
           // The ONLY off-argv source in play: a LOOPBACK TOKENSCOPE_API_BASE is
@@ -553,4 +555,107 @@ describe('copilot-redeem main() — --shell-rc cannot name a file outside the ho
     expect(r.status).toBe(0)
     expect(r.out).toContain('nothing to remove')
   })
+})
+
+describe('the repository refusal survives a symlinked home', () => {
+  it('canonicalises the stop root, so a symlinked home does not skip the repo check', () => {
+    /*
+     * The candidate arrives already realpath'd. If the confinement ROOT is only
+     * resolved lexically, then the moment the account home is itself reached
+     * through a symlink (/home/x -> /mnt/home/x, common on macOS and on mounted
+     * homes) the prefix test is false immediately, the walk never runs, and a
+     * credential destination inside a git repository is accepted.
+     *
+     * Modelled here by anchoring to a symlinked root rather than by moving the
+     * real home: same asymmetry between a canonical candidate and a lexical root.
+     */
+    const base = mkdtempSync(join(realHome(), '.ts-symlink-root-'))
+    try {
+      const physical = join(base, 'physical')
+      const repo = join(physical, 'cloned-repo')
+      const target = join(repo, 'nested')
+      mkdirSync(target, { recursive: true })
+      mkdirSync(join(repo, '.git'), { recursive: true })
+      const link = join(base, 'via-link')
+      symlinkSync(physical, link)
+
+      expect(() =>
+        assertConfinedPath(join(link, 'cloned-repo', 'nested'), {
+          flag: '--state-dir',
+          roots: [link],
+          refuseInsideRepo: true,
+        }),
+      ).toThrow(/inside a git repository/i)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('--state-dir is confined (the flag added for tests must not be a sink)', () => {
+  /*
+   * This flag exists so the suite can redirect the credential store after
+   * trustedStateDir() stopped honouring TOKENSCOPE_STATE_DIR. Unconfined it
+   * reopened the sink this whole module exists to close: the setup command's
+   * grant ends in `:*`, so a prompt-injected model can append any argv tail with
+   * no permission prompt — and this path receives the DURABLE refresh token.
+   * argv may SELECT a file under the account's own home; it may never INTRODUCE
+   * one, which is exactly what an unconfined --state-dir did.
+   */
+  it('refuses a state dir outside the account home', () => {
+    expect(() =>
+      parseClaudeArgs(['--handoff-code', 'GOOD', '--state-dir', '/tmp/anywhere']),
+    ).toThrow(/inside your home directory|outside-home|could not be resolved/i)
+  })
+
+  it('accepts one inside the home', () => {
+    const inside = mkdtempSync(join(realHome(), '.ts-state-dir-'))
+    try {
+      const out = parseClaudeArgs(['--handoff-code', 'GOOD', '--state-dir', inside])
+      expect(out.stateDir).toBe(realpathSync(inside))
+    } finally {
+      rmSync(inside, { recursive: true, force: true })
+    }
+  })
+
+  /*
+   * HOME CONTAINMENT IS NOT ENOUGH FOR A CREDENTIAL DESTINATION.
+   *
+   * A cloned repository normally lives under the account's own home, so
+   * "inside your home directory" cheerfully accepts `~/projects/<repo>/exfil`.
+   * A durable refresh token written there is then committed and pushed by the
+   * very repo that chose the path — exfiltration through ordinary git, with no
+   * second bug required. Both flags are the same sink: --state-dir writes
+   * config.json, and --settings-path writes the env block that CARRIES the
+   * token.
+   */
+  for (const flag of ['--state-dir', '--settings-path'] as const) {
+    it(`refuses ${flag} inside a git repository even though it is under the home`, () => {
+      const home = mkdtempSync(join(realHome(), '.ts-repo-sink-'))
+      try {
+        const repo = join(home, 'cloned-repo')
+        const target = join(repo, 'nested', 'deeper')
+        mkdirSync(target, { recursive: true })
+        mkdirSync(join(repo, '.git'), { recursive: true })
+        const value = flag === '--settings-path' ? join(target, 'settings.json') : target
+        expect(() => parseClaudeArgs(['--handoff-code', 'GOOD', flag, value])).toThrow(
+          /inside a git repository/i,
+        )
+      } finally {
+        rmSync(home, { recursive: true, force: true })
+      }
+    })
+
+    it(`still accepts ${flag} in a plain home directory that is not a repository`, () => {
+      const home = mkdtempSync(join(realHome(), '.ts-repo-sink-ok-'))
+      try {
+        const target = join(home, 'nested')
+        mkdirSync(target, { recursive: true })
+        const value = flag === '--settings-path' ? join(target, 'settings.json') : target
+        expect(() => parseClaudeArgs(['--handoff-code', 'GOOD', flag, value])).not.toThrow()
+      } finally {
+        rmSync(home, { recursive: true, force: true })
+      }
+    })
+  }
 })

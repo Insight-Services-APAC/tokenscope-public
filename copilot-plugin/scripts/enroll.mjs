@@ -62,6 +62,7 @@ import { homedir, hostname } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
+import { trustedGitPath } from './trusted-git.mjs'
 import https from 'node:https'
 import http from 'node:http'
 import { resolveEnrollmentSecret } from './enrollment-secret.mjs'
@@ -293,7 +294,9 @@ function emailFromCopilotConfig(obj) {
 export function readClaimedEmail({ cwd = process.cwd(), home = homedir() } = {}) {
   // 1. The repo's / global git identity — the email the developer commits as.
   try {
-    const e = execFileSync('git', ['config', 'user.email'], {
+    const git = trustedGitPath()
+    if (!git) throw new Error('no trusted git') // caught below; never a name lookup
+    const e = execFileSync(git, ['config', 'user.email'], {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],

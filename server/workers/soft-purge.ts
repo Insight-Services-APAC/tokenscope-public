@@ -4,7 +4,8 @@
  *
  * Per data-model.md §instance_attestation Retention (R1 F6 / R2 F2):
  *   - 12-month active retention.
- *   - At month 13, clear principal_email, raw_project_code, notes; set
+ *   - At month 13, clear principal_email, claimed_email, raw_project_code,
+ *     notes; set
  *     ts_purged = NOW().
  *   - Keep session_id, principal_oid, region_id, org_unit_id,
  *     cost_owning_unit_id, attestation_state so attribution_record's FK
@@ -44,6 +45,9 @@ export async function runSoftPurge(
     await db.execute(sql`
       UPDATE instance_attestation
       SET principal_email = NULL,
+          -- claimed_email is the same PII class as principal_email and belongs in
+          -- the same purge set (epic-mdash-remediation.md, W2.3).
+          claimed_email = NULL,
           raw_project_code = NULL,
           notes = NULL,
           ts_purged = ${nowIso}::timestamptz

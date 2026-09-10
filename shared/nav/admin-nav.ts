@@ -122,10 +122,14 @@ export function allAdminNavItems(): AdminNavItem[] {
 export function roleMeetsAccess(role: string | null | undefined, access: AdminAccess): boolean {
   if (role === 'platform-admin') return true
   if (access === 'platform') return false
-  const orgWide = role === 'global-finops'
-  if (access === 'org-wide') return orgWide
-  // 'admin' — any admin role
-  return role === 'admin' || orgWide
+  // 'org-wide' is platform-admin ONLY since `global-finops` was retired
+  // (2026-09-05) — and platform-admin already returned true above, so nothing
+  // else can satisfy it. Kept as an explicit arm rather than folded into the
+  // line below: the two levels mean different things and the nav items carry
+  // both, so collapsing them would silently widen 'org-wide' to region admins.
+  if (access === 'org-wide') return false
+  // 'admin' — the region-scoped admin role
+  return role === 'admin'
 }
 
 /**

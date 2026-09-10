@@ -76,7 +76,7 @@ const gfo = (): Session =>
     teammateId: '00000000-0000-0000-0000-000000000009',
     email: 'g@p.test',
     displayName: 'G',
-    role: 'global-finops',
+    role: 'platform-admin',
     regionId,
     orgPath: 'pop',
     issuedAt: new Date().toISOString(),
@@ -123,7 +123,7 @@ beforeAll(async () => {
    * is safe: no admin/manager/developer/403 case shares this id.
    */
   await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
-    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-gfo', 'gfo@p.test', 'GFO', ${regionId}::uuid, ${ccId}::uuid, 'global-finops', true)`
+    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-gfo', 'gfo@p.test', 'GFO', ${regionId}::uuid, ${ccId}::uuid, 'platform-admin', true)`
   await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   for (let i = 0; i < PROJECT_COUNT; i++) {

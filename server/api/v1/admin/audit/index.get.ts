@@ -3,7 +3,7 @@
  * Wave-VI Admin → Audit sub-page.
  *
  * RBAC:
- *   - requireRole(admin, global-finops) at the edge
+ *   - requireRole(admin) at the edge
  *   - withRequestRls so the audit_event RLS policy
  *     (audit_event_admin_only — `app.user_role` IN admin / global-finops)
  *     applies. RLS denial → empty rows; never 5xx.
@@ -12,7 +12,7 @@
  * through actor_teammate_id → teammate.region_id. An admin caller is
  * filtered to events whose actor belongs to their home region, OR
  * whose subject is a teammate in their region, so they see the
- * footprint their region's admins generated. global-finops sees the
+ * footprint their region's admins generated. platform-admin sees the
  * full audit. The filter is explicit SQL on top of the RLS policy
  * (which is admin-broad, not region-scoped).
  *
@@ -49,7 +49,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
   const query = await getValidated(event, Query)
 
   const eventTypeClause = query.eventType
@@ -67,12 +67,12 @@ export default defineEventHandler(async (event) => {
   const untilClause = query.until
     ? sql`AND ae.ts_recorded < ${query.until}::timestamptz`
     : sql``
-  // admin → region scope; global-finops → full audit. The check uses
+  // admin → region scope; platform-admin → full audit. The check uses
   // the caller's home region (session.regionId) so a region-A admin
   // never sees region-B's mutation trail even though the RLS policy
   // would let them. The OR-by-subject branch keeps role-change events
   // visible to the admin whose subject is in their region even if the
-  // actor was a global-finops (cross-region steward).
+  // actor was a platform-admin (cross-region steward).
   const regionScopeClause =
     session.role === 'admin'
       ? sql`AND (

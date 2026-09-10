@@ -41,7 +41,7 @@ let devInCc = '' // a developer placed IN ccA — subtree covers it, owns nothin
 let projA = ''
 let projB = '' // ccB's lead project — the three-arm clamp fixture
 /*
- * mig 0129: a DEDICATED teammate for this file's 'global-finops' sessions —
+ * mig 0129: a DEDICATED teammate for this file's 'platform-admin' sessions —
  * NEVER the shared sess() default sentinel ('00000000-0000-0000-0000-
  * 000000000009', already backed by the "Caller" row below for the audit FK).
  * adminA() and the anti-IDOR 403 tests ALSO resolve to that sentinel, and
@@ -143,10 +143,10 @@ beforeAll(async () => {
     VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-caller', 'caller@a.test', 'Caller',
             ${regionA}::uuid, ${s3RegionARootId}::uuid, true)`
 
-  // A SEPARATE, DEDICATED teammate for this file's 'global-finops' sessions
+  // A SEPARATE, DEDICATED teammate for this file's 'platform-admin' sessions
   // (mig 0129) — see the `costCentresElevatedId` declaration above.
   await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
-    VALUES ('oid-finops-elevated', 'finops-elevated@a.test', 'Finops Elevated', ${regionA}::uuid, ${ccA}::uuid, 'global-finops', true)`
+    VALUES ('oid-finops-elevated', 'finops-elevated@a.test', 'Finops Elevated', ${regionA}::uuid, ${ccA}::uuid, 'platform-admin', true)`
   ;[{ id: costCentresElevatedId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='finops-elevated@a.test'`
   await grantReportAccess(t.client, costCentresElevatedId)
 
@@ -309,8 +309,8 @@ describe('GET /reports/cost-centres — RBAC scope (owned ∪ subtree cost-ownin
     expect(r.cards.map((c) => c.code).sort()).toEqual(['a', 'cur'])
   })
 
-  it('global-finops sees every cost-owning unit across regions', async () => {
-    const r = (await cardsHandler(ev(sess('global-finops', 'a', regionA, costCentresElevatedId), 'month=2026-07'))) as unknown as CardsResp
+  it('platform-admin sees every cost-owning unit across regions', async () => {
+    const r = (await cardsHandler(ev(sess('platform-admin', 'a', regionA, costCentresElevatedId), 'month=2026-07'))) as unknown as CardsResp
     expect(r.cards.map((c) => c.code).sort()).toEqual(['a', 'b', 'cur'])
   })
 
@@ -593,7 +593,7 @@ describe('the PROJECT drill axis is clamped on the PROJECT’s cost centre, not 
   //   arm 1 $10  emitted    — CoU ccB, project PROJ-B
   //   arm 2 $40  reconciled — CoU NULL (by construction), project PROJ-B
   //   arm 3 $7   ingest-only— CoU ccB, project NULL (by construction)
-  const finops = () => sess('global-finops', 'a', regionA, costCentresElevatedId)
+  const finops = () => sess('platform-admin', 'a', regionA, costCentresElevatedId)
   const projectDrill = () =>
     drillHandler(ev(finops(), 'month=2026-07&axis=project', { ccId: ccB })) as unknown as Promise<DrillResp>
 

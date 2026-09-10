@@ -9,7 +9,7 @@
  * the mig-0062 lowercase CHECK never trips, and the case-insensitive UNIQUE is
  * pre-checked for a clean 409.
  *
- * RBAC: requireRole(admin, global-finops) + assertSameOrigin. Audited.
+ * RBAC: requireRole(admin) + assertSameOrigin. Audited.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { readValidated } from '../../../../../utils/validated-body'
@@ -75,7 +75,7 @@ interface CurrentRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'provider-enterprise id')
   const body = await readValidated(event, Body)

@@ -6,7 +6,7 @@
  * (APAC today) on their first Entra sign-in, with no way to place them in their
  * real region. This is that placement action. Cross-region reassignment is an
  * ORG-WIDE operation, so a region-scoped `admin` must NOT do it — only
- * global-finops (org-wide) or platform-admin (bypasses requireRole).
+ * platform-admin (org-wide) or platform-admin (bypasses requireRole).
  *
  * Re-scoping a teammate changes what they can see, so we bump `revoked_at`
  * (their existing cookie 401s on its next request and they re-login into the
@@ -35,7 +35,7 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'global-finops')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
 
   const id = z.string().uuid().safeParse(getRouterParam(event, 'id'))

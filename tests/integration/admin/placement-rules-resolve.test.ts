@@ -117,7 +117,7 @@ beforeAll(async () => {
       { entraOid: 'oid-prr-admin-a', email: 'prr-admin-a@x.test', role: 'admin', regionId: regionAId, orgUnitId: couAId },
       { entraOid: 'oid-prr-admin-b', email: 'prr-admin-b@x.test', role: 'admin', regionId: regionBId, orgUnitId: couBId },
       { entraOid: 'oid-prr-admin-c', email: 'prr-admin-c@x.test', role: 'admin', regionId: regionCId, orgUnitId: couCId },
-      { entraOid: 'oid-prr-finops', email: 'prr-finops@x.test', role: 'global-finops', regionId: regionAId, orgUnitId: couAId },
+      { entraOid: 'oid-prr-finops', email: 'prr-finops@x.test', role: 'platform-admin', regionId: regionAId, orgUnitId: couAId },
     ])
     .returning()
   adminAId = admins[0]!.id
@@ -182,7 +182,7 @@ const adminC = (): Session => ({
 })
 const finops = (): Session => ({
   teammateId: finopsId, email: 'prr-finops@x.test', displayName: 'Fin',
-  role: 'global-finops', regionId: regionAId, orgPath: 'prra.core',
+  role: 'platform-admin', regionId: regionAId, orgPath: 'prra.core',
 })
 const developer = (): Session => ({
   teammateId: adminAId, email: 'prr-admin-a@x.test', displayName: 'Dev',
@@ -306,7 +306,7 @@ describe('C5 — a unit rule is the region rule mechanism, retargeted', () => {
     ).rejects.toMatchObject({ statusCode: 403 })
   })
 
-  it('global-finops still creates region rules, and they carry no unit', async () => {
+  it('platform-admin still creates region rules, and they carry no unit', async () => {
     const res = await call<{ org_unit_id: string | null; region_id: string }>(rulesPost, ev({
       session: finops(),
       body: { attribute: 'country', match_value: 'Australia', region_id: regionAId },

@@ -1,6 +1,6 @@
 /*
  * POST /api/v1/admin/regions/{id}/leaders — assign a region leader
- * (region derivation, mig 0068). admin (region-scoped) / global-finops.
+ * (region derivation, mig 0068). admin (region-scoped) / platform-admin.
  *
  * The leader is the manager-walk fallback target for unplaced users: an
  * unplaced user's manager chain is walked up to the nearest ancestor that
@@ -12,7 +12,7 @@
  * region; a duplicate active oid 409s.
  *
  * Region-admin scope: a region admin may only manage their OWN region
- * (requireRegionScope); platform-admin / global-finops may manage any
+ * (requireRegionScope); platform-admin may manage any
  * region (cross-region + the Global/Shared region).
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
@@ -35,7 +35,7 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'region id')
   const body = await readValidated(event, Body)

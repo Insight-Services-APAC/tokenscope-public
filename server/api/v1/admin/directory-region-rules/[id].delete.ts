@@ -24,11 +24,11 @@ import { recordAuditEvent } from '../../../../db/audit'
 import { isPlatformAdmin } from '../../../../../shared/auth/roles'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const id = z.string().uuid().safeParse(getRouterParam(event, 'id'))
   if (!id.success) throw createError({ statusCode: 400, statusMessage: 'Invalid rule id' })
-  const orgWide = isPlatformAdmin(caller.role) || caller.role === 'global-finops'
+  const orgWide = isPlatformAdmin(caller.role)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
   const ua = getHeader(event, 'user-agent') ?? null
 

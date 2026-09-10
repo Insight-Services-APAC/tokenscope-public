@@ -224,7 +224,7 @@ consulted again — see `server/governance/verdict.ts`.
 
 A row whose governance key (`provider_org_id` / `provider_enterprise_id`,
 migration 0103) cannot be resolved is **governance-unresolved**: always
-showback-visible, never chargeable, surfaced on the global-finops
+showback-visible, never chargeable, surfaced on the platform-admin
 `governance-unresolved` diagnostic with a recheck action — never silently
 defaulted either way. See §6b.
 
@@ -819,7 +819,7 @@ since preflight) and then — and only then — every money path switches to
 reading `billing` authoritatively; the heuristic is never consulted again
 (`server/governance/verdict.ts`). `rollback` is allowed only before any recorded
 month has used the new regime. Admin surface:
-`/admin/policies/provider-governance` (global-finops only); API:
+`/admin/policies/provider-governance` (platform-admin only); API:
 `/api/v1/admin/governance-cutover/{preflight,activate,rollback}`.
 
 **Reporting snapshots** (`reporting_snapshot`, one row per calendar month once

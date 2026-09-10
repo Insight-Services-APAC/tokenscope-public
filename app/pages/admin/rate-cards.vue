@@ -45,11 +45,11 @@ const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+  return r === 'admin' || r === 'platform-admin'
 })
 const isOrgWide = computed(() => {
   const r = session.value?.role
-  return r === 'global-finops' || r === 'platform-admin'
+  return r === 'platform-admin'
 })
 const regionId = computed(() => session.value?.regionId ?? '')
 
@@ -375,7 +375,7 @@ async function createCard() {
               <span
                 v-else-if="!asCard(row).retired_at"
                 class="text-[11px] text-carbon-3 italic cursor-help"
-                title="Global rate cards can only be retired by a platform-admin or global-finops."
+                title="Global rate cards can only be retired by a platform-admin."
                 :data-testid="`rate-card-readonly-${asCard(row).id}`"
               >
                 read-only
@@ -447,7 +447,7 @@ async function createCard() {
                 @retry="refreshRegions"
               />
               <p v-if="!isOrgWide" class="text-[11px] text-carbon-3 mt-1">
-                Region admins create cards for their own region. Global cards need global-finops.
+                Region admins create cards for their own region. Global cards need platform-admin.
               </p>
             </div>
             <div>

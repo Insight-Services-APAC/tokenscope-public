@@ -2,7 +2,7 @@
  * POST /api/v1/allocations — create the baseline budget pool for a
  * project (Journey 3a: "sets total budget + effective range"; first
  * allocation flips the project to is_onboarded). manager / admin /
- * global-finops, scoped to the project.
+ * platform-admin, scoped to the project.
  *
  * This is the shared-pool baseline (teammate_id NULL). Per-developer
  * caps are layered on via POST /allocations/{id}/split.
@@ -32,7 +32,7 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'manager', 'admin', 'global-finops')
+  await requireRole(event, 'manager', 'admin')
   assertSameOrigin(event)
   const session = await requireAuth(event)
   const body = await readValidatedBody(event, (d) => Body.parse(d))

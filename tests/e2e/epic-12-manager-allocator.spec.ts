@@ -139,7 +139,7 @@ test.describe('RBAC on allocator endpoints', () => {
     await page.waitForURL(`${baseUrl}/finance`)
     // Find any allocation id by hitting the list endpoint (finance can
     // read allocations? Actually no — the list endpoint requires
-    // manager/admin/global-finops. Finance maps to 'global-finops'
+    // manager/admin/platform-admin. Finance maps to 'platform-admin'
     // role per shared/auth/roles.ts so it CAN read. The PATCH test
     // below validates the write side specifically.)
     const listResp = await page.request.get(`${baseUrl}/api/v1/allocations`)
@@ -147,7 +147,7 @@ test.describe('RBAC on allocator endpoints', () => {
     const list = await listResp.json()
     const firstId = list.allocations?.[0]?.id
     expect(firstId).toBeDefined()
-    // Finance persona is mapped to 'global-finops' which IS permitted to
+    // Finance persona is mapped to 'platform-admin' which IS permitted to
     // edit allocations (per the requireRole list). Verifying the
     // contrapositive: a developer cannot PATCH.
     await signIn(page, 'developer')

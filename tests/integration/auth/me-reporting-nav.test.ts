@@ -160,7 +160,7 @@ describe('GET /auth/me — reporting nav verdict', () => {
     // simply returns empty rows. The no-DB-read claim is proven directly, with
     // a poisoned transaction, in the resolver test below.)
     const ghost = '9a1e0000-0000-4000-8000-00000000beef'
-    for (const role of ['manager', 'admin', 'global-finops', 'platform-admin']) {
+    for (const role of ['manager', 'admin', 'platform-admin']) {
       const r = await call(sessionFor(ghost, role, `${role}@n.test`))
       expect(r.reporting, role).toEqual({ visible: true, scope: null })
     }
@@ -179,7 +179,7 @@ describe('GET /auth/me — reporting nav verdict', () => {
       },
     } as unknown as Parameters<typeof resolveReportingNav>[1]
 
-    for (const role of ['manager', 'admin', 'global-finops', 'platform-admin']) {
+    for (const role of ['manager', 'admin', 'platform-admin']) {
       const verdict = await resolveReportingNav(
         ev(sessionFor(ownerId, role, 'x@n.test')) as never,
         poisoned,

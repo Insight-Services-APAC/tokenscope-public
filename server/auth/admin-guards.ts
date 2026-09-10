@@ -13,16 +13,16 @@
  * Refusal modes for evaluateRoleChange (status, reason):
  *     400 self-demote-blocked — caller is changing their OWN role. The
  *         "lock-yourself-out" foot-gun applies whether the caller is
- *         admin or global-finops (both are privileged roles that the
+ *         admin or platform-admin (both are privileged roles that the
  *         user could lock themselves out of). A peer admin must demote
  *         you. R1 F3 — narrowing this to only admin callers left
- *         global-finops with the same lock-out vector.
+ *         platform-admin with the same lock-out vector.
  *     400 same-role-noop      — target already has the requested role.
  *         400 (not 200) so the UI surfaces a clear "nothing to do"
  *         signal instead of silently succeeding.
  *     409 last-admin-protected — target is the LAST active admin in
  *         their REGION and is being demoted. Per-region (not install-
- *         wide) because admin scope IS region-scoped; global-finops
+ *         wide) because admin scope IS region-scoped; platform-admin
  *         peers are cross-region and intentionally NOT counted. The
  *         handler runs the count under withRequestRls in the target's
  *         region, so this is consistent with what the mutation sees.
@@ -31,12 +31,13 @@
  *     { allowed: true } — handler proceeds with the update + audit
  *     row.
  *
- * The caller's role gate (admin / global-finops only) is NOT
+ * The caller's role gate (admin / platform-admin only) is NOT
  * evaluated here — requireRole(...) handles that at the handler edge.
  * This module assumes the caller is already an authorised mutator.
  */
 import type { Session } from '../utils/auth'
 import type { Role } from '../../shared/auth/roles'
+import { isRetiredRole } from '../../shared/auth/roles'
 
 export interface RoleChangeTarget {
   id: string
@@ -57,7 +58,7 @@ export function evaluateRoleChange(
   // (R1 F3 — earlier scope was admin-callers-only, which left global-
   // finops able to lock themselves out by self-demoting to developer).
   // The brief was explicit: "Both checks (Recommended)" — interpret
-  // strictly. Even an admin promoting themselves to global-finops is
+  // strictly. Even an admin promoting themselves to platform-admin is
   // refused — same-id changes require a peer mutator. The same-role-no-op
   // case is handled by the predicate below, so this only fires on a
   // genuine role-change.
@@ -129,14 +130,41 @@ export function evaluateRevokeSessions(
 //
 // Privilege-escalation guard for any mutation that SETS a teammate's role
 // (provision-from-directory; also applicable to the role-change PATCH). The
-// org-wide privileged roles (global-finops, platform-admin) are cross-region
-// by nature, so only an org-wide actor may grant them — a region-scoped
-// `admin` granting global-finops would be a region admin minting a role
-// outside their own scope. Region-scoped roles (developer/manager/admin/
-// finance) are assignable by any authorised mutator (the region clamp on the
-// endpoint already bounds WHERE they land).
+// `platform-admin` is the one org-wide privileged role and is cross-region by
+// nature, so only an org-wide actor may grant it — a region-scoped `admin`
+// minting it would be handing out a role outside their own scope. The
+// region-scoped roles (developer / manager / admin) are assignable by any
+// authorised mutator; the region clamp on the endpoint bounds WHERE they land.
+/**
+ * May `callerRole` MODIFY a teammate who currently HOLDS `currentRole`?
+ *
+ * Distinct from `canAssignRole`, which answers "may they GRANT this role". The
+ * role-change route asks both, and collapsing them stranded the retirement's own
+ * cleanup path: a retired role is not assignable BY ANYONE, so running the
+ * current-role direction through `canAssignRole` meant not even a platform-admin
+ * could demote a stray `global-finops` or `finance` holder. Migration 0140 exists
+ * precisely for rows that should not be there; refusing to let anyone fix a row
+ * it missed, raced, or that reappeared is the opposite of what the retirement is
+ * for.
+ *
+ * Holding a retired role confers nothing, so its holder is not a privileged
+ * target — but the remediation is an org-wide anomaly cleanup, so it stays with
+ * platform-admin rather than any region admin who happens to see the row.
+ */
+export function canModifyHolderOf(callerRole: Role, currentRole: Role): boolean {
+  if (isRetiredRole(currentRole)) return callerRole === 'platform-admin'
+  if (currentRole === 'platform-admin') return callerRole === 'platform-admin'
+  return true
+}
+
 export function canAssignRole(callerRole: Role, targetRole: Role): boolean {
-  const orgWideGrant = targetRole === 'global-finops' || targetRole === 'platform-admin'
-  if (orgWideGrant) return callerRole === 'platform-admin' || callerRole === 'global-finops'
+  // A retired role grants nothing and may never be minted — by anyone, including
+  // platform-admin. Without this arm, retiring `global-finops` would have
+  // LOOSENED the guard: once it stopped counting as an org-wide grant it fell
+  // through to the permissive tail below, so a region admin could have assigned
+  // it. The same arm closes the identical, older hole for `finance`.
+  if (isRetiredRole(targetRole)) return false
+  const orgWideGrant = targetRole === 'platform-admin'
+  if (orgWideGrant) return callerRole === 'platform-admin'
   return true
 }

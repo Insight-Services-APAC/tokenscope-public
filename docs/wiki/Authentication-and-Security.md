@@ -145,7 +145,7 @@ flowchart TB
     G -->|override off| R404[404 — override-disabled]
     G -->|on, no session| R401[401]
     G -->|on, wrong role| R403[403]
-    G -->|DEV_MODE=true OR<br/>ALLOW_PERSONA_OVERRIDE + Entra admin/global-finops/platform-admin| OK[mint ts_persona_override cookie]
+    G -->|DEV_MODE=true OR<br/>ALLOW_PERSONA_OVERRIDE + Entra admin/platform-admin| OK[mint ts_persona_override cookie]
     OK --> T["tryAuth returns persona identity<br/>+ impersonatorOid/Email/At"]
     T --> AUD[persona-impersonation audit<br/>fail-closed if insert fails]
 ```
@@ -157,7 +157,7 @@ flowchart TB
   refused the literal string `'production'` and left `dev`/`staging`/`''`
   failing OPEN.
 - HMAC-signed sidecar cookie `ts_persona_override` (`server/utils/persona-override-cookie.ts`), separate from the OIDC cookie; minted only when the gate is on (i.e. only in a demo-capable env). Wire format `base64url(payload).hex(HMAC-SHA256(payload))`, signed with `NUXT_SESSION_SECRET`; `httpOnly`, `sameSite=lax`, path `/`, `secure` on every deployed env.
-- Behind the floor the gate keys on `NUXT_OIDC_AUTH_DEV_MODE` (true → sidecar is *primary* identity, no Entra) and `NUXT_ALLOW_PERSONA_OVERRIDE` (true + Entra `admin`/`global-finops`/`platform-admin`). The env classification keys on `NUXT_DEPLOY_ENV` (falling back to `NODE_ENV` only to fail closed), **not `NODE_ENV`** alone (which is always `'production'` on deployed containers).
+- Behind the floor the gate keys on `NUXT_OIDC_AUTH_DEV_MODE` (true → sidecar is *primary* identity, no Entra) and `NUXT_ALLOW_PERSONA_OVERRIDE` (true + Entra `admin`/`platform-admin`). The env classification keys on `NUXT_DEPLOY_ENV` (falling back to `NODE_ENV` only to fail closed), **not `NODE_ENV`** alone (which is always `'production'` on deployed containers).
 - Two hardening guards: override honoured only when its `impersonatorOid` matches the live OIDC identity (stale cookie can't elevate another user), and target must be a `DEMO_PERSONAS` member (leaked HMAC secret still can't impersonate an arbitrary teammate). Cleared by `POST /api/v1/auth/stop-impersonating` and logout.
 
 ## RBAC — roles & scoping
@@ -167,16 +167,25 @@ flowchart TB
 | `developer` | Developer | Own data |
 | `manager` | Manager | Own org subtree (allocations within the org path) |
 | `admin` | **Region admin** | A single home region (region-scoped) |
-| `finance` | **Finance (retired)** | **Retired / unassignable** — kept in the `ROLES` enum only for exhaustiveness / historical rows; **excluded from `SELECTABLE_ROLES`**, never offered in role dropdowns and assigned to no one. Region-scoped finance is served by `admin`; org-wide finance by `global-finops`. |
-| `global-finops` | **Global finance** | Cross-region, org-wide finance / finops |
-| `platform-admin` | Platform admin | Cross-region super-admin — satisfies every gate |
+| `finance` | **Finance (retired)** | **Retired / unassignable** — kept in the `ROLES` enum only for exhaustiveness / historical rows; **excluded from `SELECTABLE_ROLES`**, never offered in role dropdowns and assigned to no one. Region-scoped finance is served by `admin`; org-wide finance by `platform-admin`. |
+| `global-finops` | **Global finance (retired)** | **Retired 2026-09-05 / unassignable.** It read as a finance-reporting role but carried the org-wide ADMIN surface — 122 routes, 66 of them writes, including changing a teammate's role and granting report access. Company-wide report access is now a per-teammate `report_access_grant` (mig 0129) needing no role, so the reporting half was redundant and the admin half was never meant to be handed out. In **no** capability set; kept in the enum for historical rows only. |
+| `platform-admin` | Platform admin | Cross-region super-admin — satisfies every gate. The **only** org-wide role. |
+
+> **Two vocabularies, one spelling.** The string `global-finops` also appears as
+> the value of the `app.user_role` GUC (`server/db/rls.ts`, `worker-db.ts`, and
+> the scope predicates below). That is a **scope value**, not this role:
+> `platform-admin` maps *onto* it (`rlsRoleFor`) and the worker lane runs *as*
+> it. Retiring the role did not touch it, and removing it would break
+> platform-admin's own data scope and every worker.
 
 Canonical human-facing labels come from `ROLE_LABELS` (`shared/auth/roles.ts`) —
-`admin` = "Region admin", `global-finops` = "Global finance", deliberately
-distinct from the retired `finance` = "Finance (retired)".
+`admin` = "Region admin" and `platform-admin` = "Platform admin". Both retired
+members label themselves as such — `finance` = "Finance (retired)",
+`global-finops` = "Global finance (retired)" — so a historical row never reads
+as a live role.
 
 - `requireRole(event, ...allowed)` — variadic; permits if role ∈ `allowed`. `platform-admin` short-circuits every check. `403` RFC-9457 on denial.
-- `requireRegionScope(event, regionId)` — binds an `admin` to their home region; `global-finops`/`platform-admin` are region-unbounded.
+- `requireRegionScope(event, regionId)` — binds an `admin` to their home region; `platform-admin` are region-unbounded.
 
 Per-resource scope helpers — the data-scope boundary:
 
@@ -225,7 +234,7 @@ Two halves close that:
 > **Product-visible.** A developer or manager who is *currently* placed on a region
 > root sees their Regional and Cost-Centre views collapse from region-wide to their
 > own placement. That is the intended least-privilege outcome and the pilot cohort
-> will notice it. `admin` (region-bounded), `global-finops` and `platform-admin` are
+> will notice it. `admin` (region-bounded), `platform-admin` and `platform-admin` are
 > unaffected. Separately, the teammate-axis driver CSV export is capped at 100 rows
 > plus an explicit `(all other)` remainder row, so the totals still reconcile but a
 > finance user exporting for every name will not get every name.
@@ -234,7 +243,7 @@ Two halves close that:
 
 The full RBAC above decides *what a role can ever see*, and the admin roles see
 reports **by their role**: a region `admin` sees their own region, and
-`global-finops` / `platform-admin` see the whole company (all regions, all
+`platform-admin` see the whole company (all regions, all
 Business Units, the finance pack). On top of that, an admin can **widen** a named
 teammate whose baseline lacks that scope — a region admin included — to
 company-wide reporting, or **revoke** a person's report
@@ -270,14 +279,14 @@ positive grants and revokes are the per-person overrides on top.
 - **Baseline + grant − deny.** `effectiveReportGrants(role, ownsCostCentre,
   permissions, revoked)` is a role-shaped **baseline**
   (`developer`/`finance` own-region only, Business Unit tab via ownership;
-  `manager`/`admin` own-region + subtree Business Units; `global-finops` /
+  `manager`/`admin` own-region + subtree Business Units; `platform-admin` /
   `platform-admin` the WHOLE COMPANY — all regions, all Business Units, finance)
   widened **field-wise** by whichever positive permissions the caller's active
   grants buy, then **zeroed entirely** if an active `revoke-all` is present
   (**deny-wins**, checked before anything is unioned). A static **WHO-SEES-WHAT
   matrix** export (baseline and fully-elevated, per persona) drives both the
   admin-pane preview and the tests, so the preview can never drift from the gate.
-- **Admins see reports by role; a revoke is the only way off.** `global-finops`
+- **Admins see reports by role; a revoke is the only way off.** `platform-admin`
   and `platform-admin` see the whole company by role — no grant needed — and a
   region `admin` sees their own region by role. There is no cross-region widening
   for a region admin (the anti-IDOR clamp stays): "all reports" is delivered to
@@ -302,7 +311,7 @@ positive grants and revokes are the per-person overrides on top.
   `regional` and `cost-centre` resolvers take a grant-computed `crossRegion` /
   `unbounded` flag. `finance` is a plain **boolean** grant — `true` sees the
   whole-company `/reports/finance` pack (region-unbounded by design); it is held
-  at BASELINE by the org-wide roles (`global-finops` / `platform-admin`), and
+  at BASELINE by the org-wide roles (`platform-admin`), and
   every other caller — a region `admin` included — reaches it only via an active
   `finance` grant.
 - **Pure app gate.** `requireReportScope` is the boundary, like every scope
@@ -371,7 +380,7 @@ positive grants and revokes are the per-person overrides on top.
 
 - **Admin surface — org-wide only, end to end.** `GET/POST
   /api/v1/admin/report-access` + `DELETE .../{id}` — every one is
-  `requireRole('global-finops')` (`platform-admin` passes any `requireRole`
+  `requireRole('platform-admin')` (`platform-admin` passes any `requireRole`
   gate) with **no region-admin read access at all**: a per-teammate grant
   roster is company-wide PII, a narrower surface than the retired org-wide
   dial (whose GET a region admin could read). POST is CSRF-protected, requires
@@ -389,7 +398,7 @@ Every authenticated request does its DB work inside a transaction opened by
 `withRequestRls(event, fn)`. It resolves the session via `requireAuth` and
 `SET LOCAL`s four session variables — `app.user_region_id`, `app.user_org_path`,
 `app.user_role`, `app.user_teammate_id` — mapping `platform-admin` onto the
-unbounded `global-finops` value. `SET LOCAL` is what makes this safe on a pooled
+unbounded `platform-admin` value. `SET LOCAL` is what makes this safe on a pooled
 connection: the settings vanish when the transaction returns, so the next
 checkout cannot inherit the previous caller's identity. Workers use
 `withMachineRls` on their own pool.

@@ -10,7 +10,7 @@
  *
  * SAFETY: never throws for a probe failure (computeGithubEnterpriseHealth catches +
  * classifies every stage), never returns/logs the App key, PEM, installation token, PAT,
- * or a raw provider error body. RBAC: requireRole(admin, global-finops) — same guard as the
+ * or a raw provider error body. RBAC: requireRole(admin) — same guard as the
  * enterprises reader. No assertSameOrigin: this is a GET (read-only probe), not a mutation,
  * matching the Anthropic health route's convention.
  *
@@ -56,7 +56,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   // safeParse → a proper 400 on a missing/invalid enterpriseId (never an unhandled 500;
   // never echo the input back).
   const query = await getValidatedQuery(event, (data) => {

@@ -149,13 +149,13 @@ describe('GET /api/v1/rollups/org-tree', () => {
     await expect(handler(ev(sess('admin', 'apps', regionA), `ouId=${holdAId}`))).rejects.toMatchObject({ statusCode: 403 })
   })
 
-  it('global-finops gets a region selector and can switch to another region', async () => {
-    const home = (await handler(ev(sess('global-finops', 'apps', regionA)))) as Resp
+  it('platform-admin gets a region selector and can switch to another region', async () => {
+    const home = (await handler(ev(sess('platform-admin', 'apps', regionA)))) as Resp
     expect(home.selectedRegionId).toBe(regionA) // defaults to home region
     expect(home.regionOptions.map((r) => r.id).sort()).toEqual([regionA, regionB].sort()) // both selectable
     expect(home.root!.rolledCostUsd).toBe(22) // region A
 
-    const picked = (await handler(ev(sess('global-finops', 'apps', regionA), `regionId=${regionB}`))) as Resp
+    const picked = (await handler(ev(sess('platform-admin', 'apps', regionA), `regionId=${regionB}`))) as Resp
     expect(picked.selectedRegionId).toBe(regionB)
     expect(picked.root!.rolledCostUsd).toBe(100) // region B's spend, now in view
   })
@@ -168,7 +168,7 @@ describe('GET /api/v1/rollups/org-tree', () => {
   })
 
   it('a cross-region leader homed in __unassigned__ defaults to a real, selectable region', async () => {
-    const r = (await handler(ev(sess('global-finops', 'apps', unassignedRegion)))) as Resp
+    const r = (await handler(ev(sess('platform-admin', 'apps', unassignedRegion)))) as Resp
     // selectedRegionId must be a real region present in the picker (never the phantom unassigned one)
     expect(r.regionOptions.map((o) => o.id)).toContain(r.selectedRegionId)
     expect(r.regionOptions.map((o) => o.code)).not.toContain('__unassigned__')

@@ -151,7 +151,7 @@ describe('model drivers — named rows from BOTH fanned arms + reason-typed rema
   it('fetchRegionalDrivers (region scope)', async () => {
     const scope = await resolveRegionalScope(
       tx,
-      { role: 'global-finops', regionId },
+      { role: 'platform-admin', regionId },
       { region: regionId },
     )
     const { rows, headlineUsd } = await fetchRegionalDrivers(tx, scope, WIN, 'model')

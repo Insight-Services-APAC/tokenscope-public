@@ -39,7 +39,7 @@ beforeAll(async () => {
   ouId = o!.id
   const [f] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'oid-rc-fin', email: 'rc-fin@x.test', role: 'global-finops', regionId, orgUnitId: ouId })
+    .values({ entraOid: 'oid-rc-fin', email: 'rc-fin@x.test', role: 'platform-admin', regionId, orgUnitId: ouId })
     .returning()
   finopsId = f!.id
   const [a] = await t.db
@@ -84,7 +84,7 @@ function ev(opts: { method: string; body?: unknown; session: Session; params?: R
   return e as unknown as Parameters<typeof createPost>[0]
 }
 
-const finops = (): Session => ({ teammateId: finopsId, email: 'rc-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'rc.svc' })
+const finops = (): Session => ({ teammateId: finopsId, email: 'rc-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId, orgPath: 'rc.svc' })
 const admin = (): Session => ({ teammateId: adminId, email: 'rc-admin@x.test', displayName: 'Admin', role: 'admin', regionId, orgPath: 'rc.svc' })
 
 const LINES = [
@@ -332,7 +332,7 @@ describe('retire — one-shot, scoped, audited', () => {
     ).rejects.toMatchObject({ statusCode: 409 })
   })
 
-  it('a region admin cannot retire a GLOBAL card (403) nor another region\'s card (403); global-finops can retire global', async () => {
+  it('a region admin cannot retire a GLOBAL card (403) nor another region\'s card (403); platform-admin can retire global', async () => {
     await expect(
       retirePost(ev({ method: 'POST', session: admin(), params: { id: globalCardV1 } })),
     ).rejects.toMatchObject({ statusCode: 403 })

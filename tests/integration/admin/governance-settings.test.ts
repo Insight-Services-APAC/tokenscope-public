@@ -46,7 +46,7 @@ beforeAll(async () => {
   ouId = o!.id
   const [f] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'oid-gs-fin', email: 'gs-fin@x.test', role: 'global-finops', regionId, orgUnitId: ouId })
+    .values({ entraOid: 'oid-gs-fin', email: 'gs-fin@x.test', role: 'platform-admin', regionId, orgUnitId: ouId })
     .returning()
   finopsId = f!.id
   const [a] = await t.db
@@ -96,7 +96,7 @@ function ev(opts: { method: string; body?: unknown; session: Session }) {
   return e as unknown as Parameters<typeof adminPut>[0]
 }
 
-const finops = (): Session => ({ teammateId: finopsId, email: 'gs-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'gs.svc' })
+const finops = (): Session => ({ teammateId: finopsId, email: 'gs-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId, orgPath: 'gs.svc' })
 const admin = (): Session => ({ teammateId: adminId, email: 'gs-admin@x.test', displayName: 'Admin', role: 'admin', regionId, orgPath: 'gs.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'gs-dev@x.test', displayName: 'Dev', role: 'developer', regionId, orgPath: 'gs.svc' })
 
@@ -187,7 +187,7 @@ describe('PUT validation + scope authority', () => {
     ).rejects.toMatchObject({ statusCode: 404 })
   })
 
-  it('global-finops sets the platform default; repeated PUTs upsert one row; audited with before/after', async () => {
+  it('platform-admin sets the platform default; repeated PUTs upsert one row; audited with before/after', async () => {
     await adminPut(ev({ method: 'PUT', body: { key: GOV_RECONCILIATION_EPSILON_USD, scope_type: 'platform', value: 0.05 }, session: finops() }))
     await adminPut(ev({ method: 'PUT', body: { key: GOV_RECONCILIATION_EPSILON_USD, scope_type: 'platform', value: 0.02 }, session: finops() }))
     const rows = await t.db.execute<{ n: string }>(sql`

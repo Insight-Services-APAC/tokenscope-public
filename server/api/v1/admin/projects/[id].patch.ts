@@ -2,7 +2,7 @@
  * PATCH /api/v1/admin/projects/:id — edit a project (admin-project-lifecycle,
  * Screen 5 admin Projects tab).
  *
- * Admin / global-finops only; a region admin is bounded to the project's own
+ * Admin / platform-admin only; a region admin is bounded to the project's own
  * region (requireRegionScope, applied after we read region_id inside the tx).
  *
  * All body fields are optional but at least one must be present (zod refine).
@@ -112,7 +112,7 @@ const Body = z
   })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
 
   const parsedId = z.string().uuid().safeParse(getRouterParam(event, 'id'))
@@ -163,7 +163,7 @@ export default defineEventHandler(async (event) => {
     }
 
     // Region-scope check — admin caller cannot mutate a project outside
-    // their home region. (global-finops is unbounded.)
+    // their home region. (platform-admin is unbounded.)
     await requireRegionScope(event, projectRow.region_id)
 
     // Migrating spend without saying where to is not a request anyone can mean.

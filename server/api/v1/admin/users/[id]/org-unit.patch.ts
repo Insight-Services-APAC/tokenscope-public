@@ -10,7 +10,7 @@
  * endpoint must NOT bump revoked_at: the teammate's live sessions stay
  * valid.
  *
- * Admin / global-finops only. Everything below the request parsing —
+ * Admin / platform-admin only. Everything below the request parsing —
  * the region-scope check, the target-unit containment, the provenance
  * strip and the audit row — is server/db/place-teammate.ts, SHARED with
  * POST /admin/users/bulk-place so the two surfaces cannot drift on who
@@ -49,7 +49,7 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
 
   const idParse = z.string().uuid().safeParse(getRouterParam(event, 'id'))

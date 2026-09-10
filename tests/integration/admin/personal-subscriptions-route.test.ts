@@ -146,9 +146,9 @@ type Resp = {
 }
 
 describe('GET /admin/governance/personal-subscriptions', () => {
-  it('allows global-finops and lists a declaration nobody but its owner could see before', async () => {
+  it('allows platform-admin and lists a declaration nobody but its owner could see before', async () => {
     await declare(alice, 'claude-code', 100)
-    const res = (await handler(ev({ session: sess('global-finops', bob), query: { month: MONTH } }))) as Resp
+    const res = (await handler(ev({ session: sess('platform-admin', bob), query: { month: MONTH } }))) as Resp
     expect(res.month).toBe(MONTH)
     expect(res.declarations).toHaveLength(1)
     expect(res.declarations[0]!.email).toBe('psa-alice@x.test')
@@ -176,7 +176,7 @@ describe('GET /admin/governance/personal-subscriptions', () => {
     await declare(bob, 'claude-code', 50)
     // bob has a declaration and no provider-backed spend.
 
-    const res = (await handler(ev({ session: sess('global-finops', bob), query: { month: MONTH } }))) as Resp
+    const res = (await handler(ev({ session: sess('platform-admin', bob), query: { month: MONTH } }))) as Resp
     const byEmail = new Map(res.declarations.map((d) => [d.email, d]))
     expect(byEmail.get('psa-alice@x.test')!.providerSpendUsd).toBe('42.000000')
     expect(byEmail.get('psa-bob@x.test')!.providerSpendUsd).toBe('0.000000')
@@ -187,7 +187,7 @@ describe('GET /admin/governance/personal-subscriptions', () => {
   it('includes a declaration that ended during the month in that month\'s exposure totals', async () => {
     await declare(alice, 'claude-code', 100, { revokedAt: '2026-06-20T00:00:00Z' })
     await bill(alice, 'claude-code', 77, false)
-    const res = (await handler(ev({ session: sess('global-finops', bob), query: { month: MONTH } }))) as Resp
+    const res = (await handler(ev({ session: sess('platform-admin', bob), query: { month: MONTH } }))) as Resp
     expect(res.declarations).toHaveLength(1)
     expect(res.declarations[0]!.revokedAt).not.toBeNull()
     expect(res.declarations[0]!.providerSpendUsd).toBe('77.000000')
@@ -200,7 +200,7 @@ describe('GET /admin/governance/personal-subscriptions', () => {
 
   it('keeps a declaration that covers nothing — the one a reviewer most wants to ask about', async () => {
     await declare(alice, 'claude-code', 100)
-    const res = (await handler(ev({ session: sess('global-finops', bob), query: { month: MONTH } }))) as Resp
+    const res = (await handler(ev({ session: sess('platform-admin', bob), query: { month: MONTH } }))) as Resp
     expect(res.declarations).toHaveLength(1)
     expect(res.declarations[0]!.usageUsd).toBe('0.000000')
     expect(res.declarations[0]!.providerSpendUsd).toBe('0.000000')
@@ -209,12 +209,12 @@ describe('GET /admin/governance/personal-subscriptions', () => {
   it('returns only declarations effective during the selected month', async () => {
     await declare(alice, 'claude-code', 100)
     await bill(alice, 'claude-code', 42, false) // dated 2026-06-10
-    const res = (await handler(ev({ session: sess('global-finops', bob), query: { month: '2026-07' } }))) as Resp
+    const res = (await handler(ev({ session: sess('platform-admin', bob), query: { month: '2026-07' } }))) as Resp
     expect(res.declarations).toHaveLength(1)
     expect(res.declarations[0]!.providerSpendUsd).toBe('0.000000')
 
     const beforeDeclaration = (await handler(
-      ev({ session: sess('global-finops', bob), query: { month: '2026-05' } }),
+      ev({ session: sess('platform-admin', bob), query: { month: '2026-05' } }),
     )) as Resp
     expect(beforeDeclaration.declarations).toHaveLength(0)
     expect(beforeDeclaration.totals.effectiveCount).toBe(0)
@@ -229,7 +229,7 @@ describe('GET /admin/governance/personal-subscriptions', () => {
     await bill(alice, 'claude-code', 22, false, '2026-06-15')
     await bill(alice, 'claude-code', 33, false, '2026-06-25')
 
-    const res = (await handler(ev({ session: sess('global-finops', bob), query: { month: MONTH } }))) as Resp
+    const res = (await handler(ev({ session: sess('platform-admin', bob), query: { month: MONTH } }))) as Resp
     expect(res.declarations).toHaveLength(1)
     expect(res.declarations[0]!.providerSpendUsd).toBe('22.000000')
     expect(res.totals.effectiveProviderSpendUsd).toBe('22.000000')
@@ -253,7 +253,7 @@ describe('GET /admin/governance/personal-subscriptions', () => {
     await usage(alice, 'claude-code', 22, '2026-06-15') // inside
     await usage(alice, 'claude-code', 33, '2026-06-25') // after it was revoked
 
-    const res = (await handler(ev({ session: sess('global-finops', bob), query: { month: MONTH } }))) as Resp
+    const res = (await handler(ev({ session: sess('platform-admin', bob), query: { month: MONTH } }))) as Resp
     expect(res.declarations).toHaveLength(1)
     // Not 66: a declaration cannot vouch for usage that predates it or follows
     // its revocation, and crediting it with the whole month overstates what the
@@ -287,7 +287,7 @@ describe('GET /admin/governance/personal-subscriptions', () => {
     await bill(alice, 'claude-code', 22, false, '2026-06-15') // both intervals touch this day
     await bill(alice, 'claude-code', 33, false, '2026-06-20')
 
-    const res = (await handler(ev({ session: sess('global-finops', bob), query: { month: MONTH } }))) as Resp
+    const res = (await handler(ev({ session: sess('platform-admin', bob), query: { month: MONTH } }))) as Resp
     expect(res.declarations).toHaveLength(2)
     // The contested day goes to the LATER declaration, once. Never 88.
     expect(res.declarations.map((d) => d.providerSpendUsd).sort()).toEqual(['11.000000', '55.000000'])
@@ -306,7 +306,7 @@ describe('GET /admin/governance/personal-subscriptions', () => {
     await bill(alice, 'claude-code', 22, false, '2026-06-15')
     await bill(alice, 'claude-code', 33, false, '2026-06-20')
 
-    const res = (await handler(ev({ session: sess('global-finops', bob), query: { month: MONTH } }))) as Resp
+    const res = (await handler(ev({ session: sess('platform-admin', bob), query: { month: MONTH } }))) as Resp
     expect(res.declarations).toHaveLength(2)
     expect(res.declarations.map((d) => d.providerSpendUsd).sort()).toEqual(['11.000000', '55.000000'])
     expect(res.totals.effectiveProviderSpendUsd).toBe('66.000000')
@@ -314,7 +314,7 @@ describe('GET /admin/governance/personal-subscriptions', () => {
 
   it('rejects a malformed month rather than silently defaulting to now', async () => {
     await expect(
-      handler(ev({ session: sess('global-finops', bob), query: { month: '2026-6' } })),
+      handler(ev({ session: sess('platform-admin', bob), query: { month: '2026-6' } })),
     ).rejects.toMatchObject({ statusCode: 400 })
   })
 })

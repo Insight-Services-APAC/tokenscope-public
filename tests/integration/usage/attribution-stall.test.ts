@@ -74,12 +74,17 @@ async function insertReaderRun(opts: {
   startedAtMs: number
   rowsAffected?: number | null
   scoped?: boolean
+  // Ingest-side coverage verdict; defaults to 'rows-arrived' (the outage shape).
+  sourceCoverage?: 'rows-arrived' | 'no-rows' | 'unknown' | null
 }): Promise<void> {
   const started = new Date(opts.startedAtMs).toISOString()
+  const coverage = opts.sourceCoverage === undefined ? 'rows-arrived' : opts.sourceCoverage
   const result = JSON.stringify({
     sessionsProcessed: 5,
     attributionRowsWritten: opts.rowsAffected ?? 0,
     errors: 0,
+    newEventsSeen: 5,
+    ...(coverage === null ? {} : { sourceCoverage: { status: coverage, rowsReceived: coverage === 'rows-arrived' ? 42 : coverage === 'no-rows' ? 0 : null } }),
     ...(opts.scoped === undefined ? {} : { scoped: opts.scoped }),
   })
   await t.client`
@@ -109,11 +114,15 @@ async function seedFleetEmit(bearerAtMs: number): Promise<void> {
   })
 }
 
-/** Zero-write successes at 5/35/65/95/125 min ago — a streak spanning > 90 min. */
-async function seedWindowSpanningZeroStreak(): Promise<number> {
+/** Zero-write successes at 5/35/65/95/125 min ago — a streak spanning > 90 min.
+ *  `coverage` is the ingest verdict on each run (default 'rows-arrived' = the DCR
+ *  received rows the joiner did not land; pass 'no-rows' for a genuine idle estate). */
+async function seedWindowSpanningZeroStreak(
+  coverage: 'rows-arrived' | 'no-rows' | 'unknown' = 'rows-arrived',
+): Promise<number> {
   const oldestMs = NOW.getTime() - 125 * MIN
   for (const minsAgo of [5, 35, 65, 95, 125]) {
-    await insertReaderRun({ startedAtMs: NOW.getTime() - minsAgo * MIN, rowsAffected: 0 })
+    await insertReaderRun({ startedAtMs: NOW.getTime() - minsAgo * MIN, rowsAffected: 0, sourceCoverage: coverage })
   }
   return oldestMs
 }
@@ -153,14 +162,31 @@ describe('attributionStall — healthy / unprovable cases are null', () => {
     expect(await attributionStall(t.db, { now: NOW })).toBeNull()
   })
 
-  it('no bearers at all (idle estate) = null, even over a perfect zero streak', async () => {
-    await seedWindowSpanningZeroStreak()
+  it('idle estate (coverage no-rows) = null, even over a perfect zero streak with no bearer', async () => {
+    // Nothing arrived at the DCR → not a stall, whatever the bearer says.
+    await seedWindowSpanningZeroStreak('no-rows')
     expect(await attributionStall(t.db, { now: NOW })).toBeNull()
   })
 
-  it('a bearer OLDER than the window = null (nothing recent to land)', async () => {
+  it('idle estate (coverage no-rows) + a bearer OLDER than the window = null', async () => {
     await seedFleetEmit(NOW.getTime() - 91 * MIN)
-    await seedWindowSpanningZeroStreak()
+    await seedWindowSpanningZeroStreak('no-rows')
+    expect(await attributionStall(t.db, { now: NOW })).toBeNull()
+  })
+
+  it('a real BACKLOG (coverage rows-arrived) with NO bearer now pages (coverage is primary, §4.4)', async () => {
+    // Design §4.4: a burst the reader never landed, then the editor closed. Today
+    // this was silent (no bearer); the ingest coverage makes it a real stall.
+    const oldestMs = await seedWindowSpanningZeroStreak('rows-arrived')
+    expect(await attributionStall(t.db, { now: NOW })).toEqual({ since: new Date(oldestMs).toISOString() })
+  })
+
+  it('coverage UNKNOWN falls back to the bearer gate: fresh → stall, stale → null', async () => {
+    await seedFleetEmit(NOW.getTime() - 10 * MIN)
+    const oldestMs = await seedWindowSpanningZeroStreak('unknown')
+    expect(await attributionStall(t.db, { now: NOW })).toEqual({ since: new Date(oldestMs).toISOString() })
+    await t.client`DELETE FROM instance_attestation`
+    await seedFleetEmit(NOW.getTime() - 3 * 60 * MIN) // stale
     expect(await attributionStall(t.db, { now: NOW })).toBeNull()
   })
 

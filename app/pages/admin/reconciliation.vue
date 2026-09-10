@@ -33,14 +33,14 @@ definePageMeta({ layout: 'admin', middleware: 'admin' })
 const { session } = useSession()
 const isAdmin = computed(() => {
   const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+  return r === 'admin' || r === 'platform-admin'
 })
-// The "Run now" worker trigger is global-finops + platform-admin only (matches the
+// The "Run now" worker trigger is platform-admin only (matches the
 // endpoint) — every safelisted worker is global, so a region-scoped admin can't run
 // them. Hide the control for them rather than show a button that 403s.
 const canRunWorkers = computed(() => {
   const r = session.value?.role
-  return r === 'global-finops' || r === 'platform-admin'
+  return r === 'platform-admin'
 })
 
 // URL-synced tab (?tab=runs|records|providers) so a tab is deep-linkable and
@@ -491,13 +491,13 @@ function orgHealth(o: OrgRow): OrgHealth | null {
 }
 
 // Workstream B: whether the governance cutover is activated (ADR-0011 D11) —
-// global-finops-only endpoint, so gated the same way as canRunWorkers below
+// platform-admin-only endpoint, so gated the same way as canRunWorkers below
 // (a region admin simply sees the pre-activation org-level billing field,
 // which is harmless — they are not the audience for the cutover anyway).
 const { data: cutoverData } = useLazyFetch<{ status: string } | null>(() => '/api/v1/admin/governance-cutover', {
   server: false,
   default: () => null,
-  immediate: session.value?.role === 'global-finops' || session.value?.role === 'platform-admin',
+  immediate: session.value?.role === 'platform-admin',
 })
 const governanceActivated = computed(() => cutoverData.value?.status === 'activated')
 
@@ -1216,7 +1216,7 @@ function onBackfillSaved() {
     <div v-show="tab === 'runs'" data-testid="admin-recon-runs">
       <!-- on-demand trigger: force a reconciliation-family worker to run now
            (e.g. bind freshly-onboarded Copilot seats without waiting for cron).
-           global-finops + platform-admin only — the workers are global. -->
+           platform-admin only — the workers are global. -->
       <div v-if="canRunWorkers" class="flex flex-wrap items-center gap-2 mb-4 p-3 rounded-md border border-carbon-6">
         <span class="text-[11px] uppercase font-bold text-carbon-3">Run now</span>
         <select v-model="triggerWorker" class="text-sm border border-carbon-6 rounded-md px-3 py-1.5 bg-white" data-testid="admin-recon-trigger-worker">

@@ -143,7 +143,7 @@ flowchart LR
   never names or emails — and a **k-anonymity floor of `MIN_CELL = 5`** suppresses
   any value cell seen fewer than 5 times (rare values fold into an "other"
   bucket), so a rare value + count can't de-anonymise one person. The endpoint is
-  **global-roles-only** (`requireRole('global-finops', 'platform-admin')`), the
+  **global-roles-only** (`requireRole('platform-admin')`), the
   same posture as the region rules it feeds. **[Current]**
 
 ---

@@ -2,7 +2,7 @@
  * GET /api/v1/admin/report-access — list report-access grants (mig 0129,
  * replaces the three-mode admin dial's read side, task #19).
  *
- * ORG-WIDE ONLY (A4): `requireRole(event, 'global-finops')` — platform-admin
+ * ORG-WIDE ONLY (A4): `requireRole(event, 'platform-admin')` — platform-admin
  * passes any requireRole gate (shared/auth/roles.ts:28); no 'admin' read
  * access and no re-narrow step, unlike the retired report-visibility.get.ts
  * (a REGION admin could read that org-wide dial; a per-teammate grant list is
@@ -35,7 +35,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'global-finops')
+  await requireRole(event, 'platform-admin')
 
   return await withRequestRls(event, async (tx) => {
     const rows = await tx.execute<Row>(sql`

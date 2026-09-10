@@ -3,7 +3,7 @@
  * scope (docs/design/reporting-consolidation/00-build-design.md §2/§3/§4/§5).
  *
  * WHOLE-OF-COMPANY. This scope has no region/ou params — it is the enterprise
- * rollup, and its ONLY audience is global-finops / platform-admin (RBAC enforced
+ * rollup, and its ONLY audience is platform-admin (RBAC enforced
  * in the endpoints via requireRole; there is no per-caller scope predicate to
  * apply because there is nothing to clamp — it is every region). RLS is inert at
  * runtime (see server/db/request-rls.ts), so a query with no scope clause sums
@@ -41,7 +41,7 @@ import {
   fetchChargebackLanes,
 } from './engine/chargeback-series'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
-import { csvEscape } from '../utils/csv-escape'
+import { csvEscape, csvMetaLine } from '../utils/csv-escape'
 import { laneListSql, SECTION_A_USAGE_TOOLS } from '../../shared/usage/vendor'
 import { CLAUDE_CODE_TOOL } from '../../shared/usage/surface'
 import type { SpendLens } from '../../shared/usage/lens'
@@ -755,7 +755,9 @@ export function acrossDriversToCsv(
   },
 ): string {
   const lines = [
-    `# tokenscope across-regions drivers · axis=${meta.axis} · lane=${meta.lane} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=whole-company`,
+    csvMetaLine(
+      `# tokenscope across-regions drivers · axis=${meta.axis} · lane=${meta.lane} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=whole-company`
+    ),
     'driver,spend_usd,share_pct,spend_class,otel_emitted_usd,api_reconciled_usd,provider_usage_usd,surface_mix',
     ...rows.map(
       (r) =>
@@ -781,7 +783,9 @@ export function acrossRegionsToCsv(
   meta: { month: string; asOfDate: string | null },
 ): string {
   const lines = [
-    `# tokenscope across-regions region-comparison · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=whole-company`,
+    csvMetaLine(
+      `# tokenscope across-regions region-comparison · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=whole-company`
+    ),
     'region,genuine_usd,active_users,avg_per_user_usd,share_pct',
     ...cards.map(
       (c) =>
@@ -797,7 +801,9 @@ export function concentrationToCsv(
   meta: { month: string; asOfDate: string | null },
 ): string {
   const lines = [
-    `# tokenscope across-regions concentration · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=whole-company · active_users=${stats.activeUsers}`,
+    csvMetaLine(
+      `# tokenscope across-regions concentration · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=whole-company · active_users=${stats.activeUsers}`
+    ),
     'cohort,share_pct',
     `Top 1%,${(stats.top1 * 100).toFixed(1)}`,
     `Top 5%,${(stats.top5 * 100).toFixed(1)}`,

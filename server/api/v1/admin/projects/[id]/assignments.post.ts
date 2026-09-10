@@ -2,7 +2,7 @@
  * POST /api/v1/admin/projects/{id}/assignments — assign a person to a project
  * (Journey 3a: confirm assigned devs during onboarding).
  *
- * manager / admin / global-finops, scoped to the project (admin → region,
+ * manager / admin / platform-admin, scoped to the project (admin → region,
  * manager → org subtree).
  *
  * Two ways to identify the member — a PM/admin must be able to add ANY person
@@ -48,7 +48,7 @@ const Body = z
   })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'manager', 'admin', 'global-finops')
+  const caller = await requireRole(event, 'manager', 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'project id')
   const body = await readValidated(event, Body)

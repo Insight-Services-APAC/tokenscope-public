@@ -52,7 +52,7 @@ beforeAll(async () => {
   couC = await mkCou('ca-c')
   const [actor] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'oid-ca-actor', email: 'ca-actor@x.test', role: 'global-finops', regionId, orgUnitId: couA })
+    .values({ entraOid: 'oid-ca-actor', email: 'ca-actor@x.test', role: 'platform-admin', regionId, orgUnitId: couA })
     .returning()
   financeActorId = actor!.id
 }, 180_000)

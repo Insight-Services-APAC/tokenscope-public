@@ -1,7 +1,7 @@
 /*
  * DELETE /api/v1/admin/department-map/{departmentLower} — remove a
  * department → region mapping (region derivation, mig 0068). admin /
- * global-finops.
+ * platform-admin.
  *
  * HARD delete: department_to_region is curated CONFIG, not history (unlike
  * the soft-revoked cou_owner / region_leader), so removing a mapping drops
@@ -17,7 +17,7 @@ import { recordAuditEvent } from '../../../../db/audit'
 
 export default defineEventHandler(async (event) => {
   // Org-wide cross-region placement config → GLOBAL roles only (per design).
-  const caller = await requireRole(event, 'global-finops', 'platform-admin')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
 
   const raw = getRouterParam(event, 'departmentLower')

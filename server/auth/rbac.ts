@@ -41,7 +41,7 @@ export async function requireRole(event: H3Event, ...allowed: Role[]): Promise<S
 
 /*
  * requireRegionScope — admin-role callers are bounded to their home
- * region; global-finops / platform-admin are region-unbounded. Apply
+ * region; platform-admin are region-unbounded. Apply
  * before reading region-scoped resources to keep the cross-region
  * check uniform across the admin endpoints.
  *
@@ -64,7 +64,7 @@ export async function requireRole(event: H3Event, ...allowed: Role[]): Promise<S
  * paths are byte-identical rather than merely both-404. Throwing inside the caller's
  * transaction still rolls back any write already issued.
  *
- * `platform-admin` / `global-finops` pass through unchanged.
+ * `platform-admin` pass through unchanged.
  */
 export async function requireRegionScopeOrNotFound(
   event: H3Event,
@@ -81,7 +81,7 @@ export async function requireRegionScopeOrNotFound(
 
 export async function requireRegionScope(event: H3Event, regionId: string): Promise<Session> {
   const session = await utilsRequireAuth(event)
-  if (isPlatformAdmin(session.role) || session.role === 'global-finops') return session
+  if (isPlatformAdmin(session.role)) return session
   if (session.role === 'admin') {
     if (session.regionId !== regionId) {
       throw createError({

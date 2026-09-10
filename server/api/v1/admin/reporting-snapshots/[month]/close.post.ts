@@ -10,7 +10,7 @@
  *
  * Serialised via the reportingSnapshot advisory lock + SELECT FOR UPDATE, so a
  * snapshot can never record a half-recomputed month. RBAC: admin or
- * global-finops; audited.
+ * platform-admin; audited.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { requireRole } from '../../../../../auth/rbac'
@@ -20,7 +20,7 @@ import { requireMonthParam } from '../../../../../utils/require-month-param'
 import { closeReportingSnapshot, ReportingSnapshotError } from '../../../../../governance/reporting-snapshot'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'global-finops', 'platform-admin')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const month = requireMonthParam(event, 'month')
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

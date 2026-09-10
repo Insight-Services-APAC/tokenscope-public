@@ -490,11 +490,11 @@ async function upsertConditionInbox(
     now,
   })
   if (dispatched.length === 0) {
-    // ar-M18: an estate without an active platform-admin/global-finops just
+    // ar-M18: an estate without an active platform-admin just
     // dropped its parity item. dispatchInbox already warns; this worker is the
     // OPERATOR channel, so it says it louder.
     consola.error(
-      `[${OPS_ALERT_WORKER}] operations-recipient set is EMPTY — no active platform-admin/global-finops; inbox parity item for condition=${key} was dropped (ar-M18)`,
+      `[${OPS_ALERT_WORKER}] operations-recipient set is EMPTY — no active platform-admin; inbox parity item for condition=${key} was dropped (ar-M18)`,
     )
     return 'dropped'
   }
@@ -771,9 +771,13 @@ export async function runOpsAlert(db: Db, opts: OpsAlertOpts = {}): Promise<OpsA
   }, budget(probeTimeoutMs))
   if (stall.ok) {
     if (stall.value !== null) {
+      // The reason is the coverage basis the verdict fired on (D1):
+      // 'source-backlog' (the DCR received rows the joiner did not land) vs
+      // 'coverage-unknown-bearer-fresh' (the probe could not measure, paged on
+      // the bearer fallback). Both are in the closed OpsAlertReason vocabulary.
       observations.set(OPS_ALERT_CONDITION.attributionStall, {
         severity: 'critical',
-        reason: 'zero-write-streak',
+        reason: stall.value.basis,
         count: stall.value.zeroRuns,
       })
     }

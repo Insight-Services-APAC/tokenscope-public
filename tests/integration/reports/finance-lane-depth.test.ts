@@ -45,7 +45,7 @@ const ev = (session: Session, query = '', params: Record<string, string> = {}) =
   return e as unknown as Parameters<typeof indexHandler>[0]
 }
 const gfo = (): Session =>
-  ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role: 'global-finops', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
+  ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role: 'platform-admin', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
 
 const cents = (n: number) => Math.round(n * 100)
 
@@ -72,12 +72,12 @@ beforeAll(async () => {
 
   /*
    * gfo()'s teammateId (mig 0129) — hardcoded inline in this file, and used by
-   * NO other persona (this file exercises only the global-finops session), so a
+   * NO other persona (this file exercises only the platform-admin session), so a
    * real backing row + a direct grant is safe: there is no admin/manager/
    * developer/403 case sharing this id to silently elevate.
    */
   await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
-    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-gfo', 'gfo@a.test', 'GFO', ${regionA}::uuid, ${ccA}::uuid, 'global-finops', true)`
+    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-gfo', 'gfo@a.test', 'GFO', ${regionA}::uuid, ${ccA}::uuid, 'platform-admin', true)`
   await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   // Anthropic bill (actual_spend): cent-odd figures so conservation is genuinely

@@ -99,10 +99,10 @@ export default defineEventHandler(async (event) => {
   // Authenticate at the wider surface first, then narrow by what is being written:
   // a REGION rule still demands a global role, checked below before anything reads
   // the database.
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
-  const orgWide = isPlatformAdmin(caller.role) || caller.role === 'global-finops'
+  const orgWide = isPlatformAdmin(caller.role)
   if (!body.org_unit_id && !orgWide) {
     refuse(
       403,

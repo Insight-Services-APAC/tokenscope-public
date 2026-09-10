@@ -10,7 +10,7 @@ import { withRequestRls } from '../../../../../db/request-rls'
 import { getLifecyclePolicyRow, DEFAULT_LIFECYCLE_POLICY } from '../../../../../db/project-lifecycle-policy'
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const parsed = z.string().uuid().safeParse(getRouterParam(event, 'id'))
   if (!parsed.success) throw createError({ statusCode: 400, statusMessage: 'Invalid region id' })
   const regionId = parsed.data

@@ -115,7 +115,7 @@ export default defineEventHandler(async (event) => {
      *     silently narrowed its per-CoU table — tests/unit/pages/reporting-shell).
      *   - It is now WRONG. The Regional default splits on the caller's ROLE, never
      *     on where their own record happens to sit: an ORG-WIDE role
-     *     (`ORG_WIDE_ROLES` — global-finops AND platform-admin) answers for no
+     *     (`ORG_WIDE_ROLES` — platform-admin AND platform-admin) answers for no
      *     single region, so it opens on the FIRST region by (display_name, code);
      *     only a REGION-BOUND role opens on its own home region. That rule lives in
      *     resolveRegionalScope, which reflects the effective region back on every

@@ -7,7 +7,7 @@
  *
  *  1. RBAC. The response names every table, index and server setting in the
  *     estate, so the gate is platform-admin — not the region `admin` most of
- *     this page answers to, and not global-finops either. A route test is the
+ *     this page answers to, and not platform-admin either. A route test is the
  *     only thing that can see that boundary (CLAUDE.md rule 10).
  *  2. Each section answers against a REAL Postgres, and declares itself
  *     available.
@@ -102,7 +102,6 @@ let regionId: string
 let ouId: string
 let devId: string
 let adminId: string
-let finopsId: string
 let platformId: string
 
 /** Minimal h3-shaped event with a query string + injected session. */
@@ -147,7 +146,6 @@ const session = (role: Session['role'], id: () => string, email: string): Sessio
 })
 const dev = () => session('developer', () => devId, 'dbp-dev@x.test')
 const admin = () => session('admin', () => adminId, 'dbp-admin@x.test')
-const finops = () => session('global-finops', () => finopsId, 'dbp-fin@x.test')
 const platform = () => session('platform-admin', () => platformId, 'dbp-pa@x.test')
 
 /** A table whose only non-unique index is never scanned and is big enough to matter. */
@@ -173,7 +171,6 @@ beforeAll(async () => {
   }
   devId = await mk('developer', 'dbp-dev@x.test', 'oid-dbp-dev')
   adminId = await mk('admin', 'dbp-admin@x.test', 'oid-dbp-admin')
-  finopsId = await mk('global-finops', 'dbp-fin@x.test', 'oid-dbp-fin')
   platformId = await mk('platform-admin', 'dbp-pa@x.test', 'oid-dbp-pa')
 
   // A real unused index, over the handler's 64 KiB floor: 20k rows of a
@@ -214,9 +211,6 @@ describe('GET /admin/diagnostics/db-performance — RBAC', () => {
     await expect(handler(ev({ session: admin() }))).rejects.toMatchObject({ statusCode: 403 })
   })
 
-  it('REJECTS global-finops — the finance super-role is still not an infra role', async () => {
-    await expect(handler(ev({ session: finops() }))).rejects.toMatchObject({ statusCode: 403 })
-  })
 
   it('allows platform-admin', async () => {
     const res = await handler(ev({ session: platform() }))
@@ -354,17 +348,29 @@ describe('GET /admin/diagnostics/db-performance — constraint indexes are not "
      */
     // Purpose-built, because the estate's own exclusion indexes are all one
     // page and the query's floor is 64 KiB.
+    //
+    // ORDER MATTERS, and it is the whole reason this test is stable. Enforcing
+    // an exclusion constraint SCANS its own index once per inserted row, so
+    // creating the constraint first and then inserting left the probe with
+    // idx_scan = 8000 — and the `scans = 0` precondition below could only hold
+    // while pg_stat_user_indexes had not caught up yet. The test passed by
+    // winning a race against the stats collector and failed whenever it lost
+    // (CI, 2026-09-05). Loading the rows FIRST and adding the constraint after
+    // builds the index from existing data — a build is not an `idx_scan` — so
+    // nothing ever scans it and the count is 0 by construction, not by timing.
     await t.client.unsafe(`
       CREATE TABLE IF NOT EXISTS excl_probe (
         id int GENERATED ALWAYS AS IDENTITY,
         k text NOT NULL,
-        span int4range NOT NULL,
-        EXCLUDE USING gist (k WITH =, span WITH &&)
+        span int4range NOT NULL
       )`)
     await t.client.unsafe(`
       INSERT INTO excl_probe (k, span)
-      SELECT 'k' || g, int4range(g, g + 1) FROM generate_series(1, 4000) g
-      ON CONFLICT DO NOTHING`)
+      SELECT 'k' || g, int4range(g, g + 1) FROM generate_series(1, 4000) g`)
+    await t.client.unsafe(`
+      ALTER TABLE excl_probe
+        ADD CONSTRAINT excl_probe_k_span_excl
+        EXCLUDE USING gist (k WITH =, span WITH &&)`)
 
     const candidates = [
       ...(await t.client<{ name: string; bytes: string; scans: string }[]>`

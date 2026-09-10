@@ -33,7 +33,7 @@
  * size any of them. Same argument as above — the question is about production
  * numbers nobody can query, so the answer belongs in the product.
  *
- * RBAC: global-finops ONLY — deliberately narrower than the sibling diagnostics
+ * RBAC: platform-admin ONLY — deliberately narrower than the sibling diagnostics
  * probes, which admit a region admin. The reason is at the requireRole call.
  *
  * NOT WIDENED for the cause split, even though two of the four remediations it
@@ -203,7 +203,7 @@ export function classifyDecomposition(result: AbDecompositionResult): {
 
 export default defineEventHandler(async (event) => {
   /*
-   * global-finops (and platform-admin, which satisfies every gate) ONLY —
+   * platform-admin (and platform-admin, which satisfies every gate) ONLY —
    * deliberately NARROWER than the sibling diagnostics probes, which admit a
    * region `admin`.
    *
@@ -220,7 +220,7 @@ export default defineEventHandler(async (event) => {
    * explaining it made it acceptable. When the shape of the data conflicts with
    * the scope of the role, the role loses.
    */
-  await requireRole(event, 'global-finops')
+  await requireRole(event, 'platform-admin')
   const q = await getValidated(event, querySchema)
 
   const window = { startIso: monthStartIso(q.from), endIso: monthEndIso(q.to) }
@@ -234,7 +234,7 @@ export default defineEventHandler(async (event) => {
        * while §A kept its region-scoped rows, and the residual would be non-zero
        * for a reason that is an artefact of the filter rather than a real gap.
        * A decomposition is a statement about a whole estate or it is nothing.
-       * Because it cannot be region-scoped, it is restricted to global-finops
+       * Because it cannot be region-scoped, it is restricted to platform-admin
        * (the role gate above) rather than opened to region admins.
        */
       const result = await computeAbDecomposition(db, window)

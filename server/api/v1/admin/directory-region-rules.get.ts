@@ -31,10 +31,10 @@ const Query = z.object({
 export default defineEventHandler(async (event) => {
   const query = await getValidated(event, Query)
   if (query.region) {
-    await requireRole(event, 'admin', 'global-finops')
+    await requireRole(event, 'admin')
     await requireRegionScope(event, query.region)
   } else {
-    await requireRole(event, 'global-finops', 'platform-admin')
+    await requireRole(event, 'platform-admin')
   }
 
   return await withRequestRls(event, async (tx) => {

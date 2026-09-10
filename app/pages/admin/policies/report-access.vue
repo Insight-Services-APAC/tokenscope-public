@@ -4,7 +4,7 @@
  * 0129, task #19) — replaces the retired org-wide report-visibility dial.
  *
  * ORG-WIDE ONLY, end to end (post external design review, amendment B1): the
- * server-side endpoints are requireRole(event, 'global-finops') with no
+ * server-side endpoints are requireRole(event, 'platform-admin') with no
  * region-admin read access at all (a per-teammate grant list is a narrower,
  * more sensitive surface than the retired org-wide dial was). The sidebar
  * item is 'org-wide' too, so a region admin sees this page locked with a hint

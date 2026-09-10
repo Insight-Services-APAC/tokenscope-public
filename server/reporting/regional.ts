@@ -46,7 +46,7 @@ import {
 import { orgSubtreeIds } from '../auth/org-subtree'
 import { TEAMMATE_DRILL_FACTS, teammateDrillFacts } from './teammate-drill-facts'
 import { isOrgWideRole } from '../../shared/auth/roles'
-import { csvEscape } from '../utils/csv-escape'
+import { csvEscape, csvMetaLine } from '../utils/csv-escape'
 import { laneListSql, SECTION_A_USAGE_TOOLS } from '../../shared/usage/vendor'
 import { CLAUDE_CODE_TOOL } from '../../shared/usage/surface'
 import type { SpendLens } from '../../shared/usage/lens'
@@ -1198,7 +1198,9 @@ export function driversToCsv(
   },
 ): string {
   const lines = [
-    `# tokenscope regional drivers · axis=${meta.axis} · lane=${meta.lane} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=${meta.scopeLabel}`,
+    csvMetaLine(
+      `# tokenscope regional drivers · axis=${meta.axis} · lane=${meta.lane} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=${meta.scopeLabel}`
+    ),
     'driver,spend_usd,share_pct,spend_class,otel_emitted_usd,api_reconciled_usd,provider_usage_usd,surface_mix',
     ...rows.map(
       (r) =>
@@ -1230,7 +1232,9 @@ export function trendToCsv(
   meta: { month: string; asOfDate: string | null; scopeLabel: string },
 ): string {
   const lines = [
-    `# tokenscope regional trend · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=${meta.scopeLabel}`,
+    csvMetaLine(
+      `# tokenscope regional trend · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=${meta.scopeLabel}`
+    ),
     'day,vendor,spend_usd',
     ...series.map((s) => `${s.day},${csvEscape(TREND_CSV_LABELS[s.key])},${usd(s.value)}`),
   ]
@@ -1243,7 +1247,9 @@ export function practicesToCsv(
   meta: { month: string; asOfDate: string | null; scopeLabel: string },
 ): string {
   const lines = [
-    `# tokenscope regional practices · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=${meta.scopeLabel}`,
+    csvMetaLine(
+      `# tokenscope regional practices · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · scope=${meta.scopeLabel}`
+    ),
     'practice,spend_usd,spend_class',
     ...rows.map((r) => `${csvEscape(r.label)},${usd(r.value)},${csvEscape(r.spendClass)}`),
   ]

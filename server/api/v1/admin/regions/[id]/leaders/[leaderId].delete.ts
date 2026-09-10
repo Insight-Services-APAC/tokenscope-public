@@ -3,7 +3,7 @@
  * leader (region derivation, mig 0068). Soft-revoke: the row keeps its
  * history (revoked_at/revoked_by); re-assignment later is a new row, which
  * the partial-unique index permits once the old one is revoked.
- * admin (region-scoped) / global-finops.
+ * admin (region-scoped) / platform-admin.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -14,7 +14,7 @@ import { recordAuditEvent } from '../../../../../../db/audit'
 import { requireUuidParam } from '../../../../../../utils/require-uuid-param'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'region id')
   const leaderId = requireUuidParam(event, 'leaderId', 'leader id')

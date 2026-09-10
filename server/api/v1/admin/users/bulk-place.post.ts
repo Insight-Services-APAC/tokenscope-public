@@ -27,7 +27,7 @@
  * nothing — and by the two interleaving tests there, because a check that another
  * transaction can invalidate before the UPDATE lands is advisory, not enforced.
  *
- * `global-finops` is region-unbounded and passes both scope checks, but is NOT
+ * `platform-admin` is region-unbounded and passes both scope checks, but is NOT
  * exempt from containment: the target unit must still be in the teammate's own
  * region, so no role can use this endpoint to move a person across regions. That
  * is the region PATCH's job, and it runs a revoke cascade this one must not.
@@ -151,7 +151,7 @@ function isPerIdRefusal(err: unknown): boolean {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
 
   const body = await readValidated(event, Body)

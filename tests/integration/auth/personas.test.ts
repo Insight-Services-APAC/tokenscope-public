@@ -35,8 +35,21 @@ describe('demo personas', () => {
     expect(getPersona('cc-owner')?.landing).toBe('/reporting?scope=cost-centre')
   })
 
-  it('finance persona uses global-finops role for cross-region RLS bypass', () => {
-    expect(getPersona('finance')?.role).toBe('global-finops')
+  it('finance persona is a plain DEVELOPER — its reach comes from grants, not a role', () => {
+    /*
+     * This asserted `global-finops` until that role was retired, then briefly
+     * `platform-admin` because the persona was repointed there to keep its
+     * landing page resolving — which silently made "Sign in as Global finance"
+     * the 122-route org-wide super-admin.
+     *
+     * The company-wide finance lens is a per-teammate `report_access_grant`
+     * (mig 0129), which is the whole reason the role could be retired at all.
+     * The seed gives Mara `operational` + `finance`; she administers nothing.
+     * So the persona demonstrates the grant model rather than quietly handing
+     * a demo session the widest role in the product.
+     */
+    expect(getPersona('finance')?.role).toBe('developer')
+    expect(getPersona('finance')?.landing).toBe('/reporting?scope=finance')
   })
 
   it('emails resolve to teammates seeded by drizzle/seed.ts', () => {

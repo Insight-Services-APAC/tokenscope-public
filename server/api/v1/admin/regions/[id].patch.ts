@@ -2,7 +2,7 @@
  * PATCH /api/v1/admin/regions/:id — rename a region (admin-region-lifecycle).
  *
  * platform-admin ONLY (same rationale as POST /regions: a region is a
- * cross-region object). global-finops and region admins 403.
+ * cross-region object). platform-admin and region admins 403.
  *
  * display_name is the ONLY editable field — `code` is IMMUTABLE. Region-scoped
  * queries hardcode region codes (e.g. 'apac'); changing a

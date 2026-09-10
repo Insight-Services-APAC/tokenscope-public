@@ -126,12 +126,13 @@ describe('runSoftPurge', () => {
     // interfere with the assertion.
     await t.client.unsafe(`
       INSERT INTO instance_attestation
-        (instance_id, principal_oid, principal_email, teammate_id, project_code_hash,
+        (instance_id, principal_oid, principal_email, claimed_email, teammate_id,
+         project_code_hash,
          raw_project_code, tool, session_token_hash, ts_start, ts_expected_end,
          ts_actual_end, ts_purged, region_id, org_unit_id, cost_owning_unit_id,
          notes)
       VALUES
-        ('00000000-0000-4000-8000-00000000000e', 'oid-e', 'e@i.com',
+        ('00000000-0000-4000-8000-00000000000e', 'oid-e', 'e@i.com', 'claimed-e@i.com',
          (SELECT id FROM teammate LIMIT 1), 'h', 'PRJ-E',
          'claude-code', 'hashE', '2025-04-01 00:00:00+00', NULL, NULL, NULL,
          (SELECT id FROM region LIMIT 1),
@@ -145,15 +146,20 @@ describe('runSoftPurge', () => {
 
     const [row] = await t.client<{
       principal_email: string | null
+      claimed_email: string | null
       raw_project_code: string | null
       notes: unknown
       ts_purged: string | null
     }[]>`
-      SELECT principal_email, raw_project_code, notes, ts_purged::text AS ts_purged
+      SELECT principal_email, claimed_email, raw_project_code, notes, ts_purged::text AS ts_purged
       FROM instance_attestation
       WHERE instance_id = '00000000-0000-4000-8000-00000000000e'
     `
     expect(row!.principal_email).toBeNull()
+    // claimed_email is the SAME class of PII and was surviving this purge. The
+    // fixture seeds it deliberately: without that, adding the column to the
+    // UPDATE could be reverted and this test would stay green.
+    expect(row!.claimed_email).toBeNull()
     expect(row!.raw_project_code).toBeNull()
     expect(row!.notes).toBeNull()
     expect(row!.ts_purged).not.toBeNull()

@@ -15,9 +15,8 @@
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { stateDir as resolveStateDir } from './plugin-runtime.mjs'
+import { trustedStateDir, trustedGlobalSettingsEnv } from './plugin-runtime.mjs'
 import { assertSafeEndpoint } from './endpoint-guard.mjs'
 
 const TIMEOUT_MS = 4000
@@ -35,14 +34,45 @@ function readJson(p) {
  * @param {{ env?: Record<string,string>, stateDir?: string }} opts
  */
 export async function refreshLanded({ env = {}, stateDir } = {}) {
-  // S1 fix 2: route through the shared stateDir() resolver rather than
-  // reading process.env.TOKENSCOPE_STATE_DIR directly here — one deletion
-  // (safeProcessEnv, or repoTagEnv never carrying it at all) then covers
-  // every call site, this one included, instead of leaving a second,
-  // independent read a repo-tagged process.env could still poison.
-  const dir = stateDir || resolveStateDir(env)
-  const bearerEndpoint =
-    env.TOKENSCOPE_BEARER_ENDPOINT || process.env.TOKENSCOPE_BEARER_ENDPOINT || ''
+  /*
+   * THE DELIVERY CACHE IS TRUST-BEARING, so its directory is not negotiable by
+   * the environment. last-landed.json drives the status line's health indicator
+   * AND the refresh throttle (landedRefreshDue reads it), so a repository that
+   * can choose this directory can pre-seed a fresh, healthy cache: the status
+   * line then reports delivery that is not happening, and suppresses the very
+   * refresh that would discover it. Silence dressed as health.
+   *
+   * The deployment PIN survives, on a channel a repository cannot write: the
+   * device's own global settings file on the passwd home, which is where redeem
+   * writes and where the endpoints are already read from. What is dropped is the
+   * AMBIENT process.env read — the one Claude Code fills from a repo's
+   * .claude/settings.json. An explicit stateDir still wins; that is how the
+   * tests sandbox it.
+   */
+  const pinned = trustedGlobalSettingsEnv().TOKENSCOPE_STATE_DIR
+  const dir = stateDir || (pinned && String(pinned).trim()) || trustedStateDir()
+  /*
+   * A TEST MUST NEVER WRITE THE REAL DEVICE STORE. Moving this default off the
+   * ambient env means any caller that used to redirect it with
+   * TOKENSCOPE_STATE_DIR now lands on the passwd home instead — which is how a
+   * test suite silently starts writing a developer's own ~/.tokenscope. That
+   * already happened once on this branch, in redeem. The signal is the vitest
+   * worker global, not process.env.VITEST, because the environment is the
+   * channel this function has just stopped trusting.
+   */
+  const underVitest =
+    typeof globalThis.__vitest_worker__ === 'object' && globalThis.__vitest_worker__ !== null
+  if (underVitest && dir === trustedStateDir()) {
+    return { ok: false, reason: 'refusing to write the real device store from a test' }
+  }
+  /*
+   * NO AMBIENT FALLBACK (MDASH F116 follow-up). refreshLanded posts the device's
+   * real cached access token to this endpoint as a Bearer. Repointing the CLI at
+   * trustedGlobalSettingsEnv did NOT close this sink: the function still reached
+   * past its argument into process.env, which is the repo-merged environment.
+   * The caller supplies a trusted env or there is no request.
+   */
+  const bearerEndpoint = env.TOKENSCOPE_BEARER_ENDPOINT || ''
   const attrs = env.OTEL_RESOURCE_ATTRIBUTES || process.env.OTEL_RESOURCE_ATTRIBUTES || ''
   const instanceId = attrs.match(/tokenscope\.instance_id=([^,]+)/)?.[1]
   if (!bearerEndpoint || !instanceId) return { ok: false, reason: 'not-configured' }
@@ -117,9 +147,14 @@ export async function refreshLanded({ env = {}, stateDir } = {}) {
 }
 
 // CLI: refresh using the global settings.json env (best-effort, prints the result).
+//
+// TRUSTED read (F116). This env names TOKENSCOPE_BEARER_ENDPOINT, and
+// refreshLanded sends the device's real cached access token there as a Bearer.
+// Resolved through homedir() it was a repo-moved HOME's choice of destination —
+// nothing repairs HOME on this path, because neutraliseRepoHome runs only in
+// the SessionStart hook.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const settings = readJson(join(homedir(), '.claude', 'settings.json'))
-  refreshLanded({ env: settings?.env || {} }).then((r) =>
+  refreshLanded({ env: trustedGlobalSettingsEnv() }).then((r) =>
     process.stdout.write(`${JSON.stringify(r)}\n`),
   )
 }

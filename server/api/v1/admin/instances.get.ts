@@ -2,7 +2,7 @@
  * GET /api/v1/admin/instances — region-scoped instance (device)
  * visibility for admins (ADR-0005 decision 3: "admin: region-wide").
  *
- * Two-layer RBAC: requireRole(admin / global-finops) at the edge +
+ * Two-layer RBAC: requireRole(admin) at the edge +
  * requireRegionScope(region) so a region admin can't pivot to another
  * region by passing ?region=. The READ carries an EXPLICIT
  * `WHERE region_id = <region>` predicate — RLS is inert under the owner
@@ -43,7 +43,7 @@ interface AdminInstanceRow extends InstanceMetricRow, Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
   const query = await getValidated(event, Query)
   // Default to the caller's home region; an org-wide role may target any.
   const region = query.region ?? session.regionId

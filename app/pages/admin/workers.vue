@@ -25,14 +25,14 @@ useHead({ title: 'Worker controls · TokenScope' })
 const { session } = useSession()
 
 // The two enablement endpoints sit at DIFFERENT tiers, so this page needs two
-// checks, not one. Reading is admin / global-finops (enablement.get); the fetch
+// checks, not one. Reading is admin / platform-admin (enablement.get); the fetch
 // stays cold for anyone else so an unauthorised visit does not fire a 403 on load.
 const isAdmin = computed(() => {
   const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+  return r === 'admin' || r === 'platform-admin'
 })
 
-// Writing is global-finops only (enablement.put) — `worker_enablement` has no
+// Writing is platform-admin only (enablement.put) — `worker_enablement` has no
 // region column and every worker it governs runs estate-wide, so a toggle exceeds
 // a region admin's scope. A region admin still SEES the card: knowing which
 // kill-switches are thrown is not a region boundary crossing, and hiding it would
@@ -40,7 +40,7 @@ const isAdmin = computed(() => {
 // the real gate — withholding the button just avoids offering a certain 403.
 const canToggle = computed(() => {
   const r = session.value?.role
-  return r === 'global-finops' || r === 'platform-admin'
+  return r === 'platform-admin'
 })
 
 interface WorkerEnablementRow {
@@ -67,7 +67,7 @@ const {
 
 // 24 h duty-cycle summary — this card is O4's SPECIFIED consumer
 // (docs/design/performance-observability-baseline.md, dr-H7). Same read gate as
-// the list above (admin | global-finops), so the same cold-fetch guard applies.
+// the list above (admin | platform-admin), so the same cold-fetch guard applies.
 // A worker with no completed run in the window has no entry; the row renders
 // em-dashes for it.
 const {

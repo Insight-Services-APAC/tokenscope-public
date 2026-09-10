@@ -18,9 +18,9 @@ const SidSchema = z.string().uuid()
 
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
-  // admin (region-scoped) + global-finops (org-wide) — both can revoke an
+  // admin (region-scoped) + platform-admin (org-wide) — both can revoke an
   // instance from the admin instances view; requireRegionScope below bounds admin.
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
   // safeParse → 400 (AUTH-7): a bare .parse throws a raw ZodError → 500.
   const parsed = SidSchema.safeParse(getRouterParam(event, 'instanceId'))
   if (!parsed.success) {

@@ -15,7 +15,7 @@ const { roleDisplay } = useAdminAccess()
 // Grouped for scannability. `id` matches the AdminHelpLink `anchor` prop.
 const roles = [
   { id: 'region-admin', term: 'Region admin', enum: 'admin', body: 'Administers ONE region — its teammates, Business Units, projects and connectors. Region-scoped: cannot see or change other regions.' },
-  { id: 'global-finance', term: 'Global finance', enum: 'global-finops', body: 'Cross-region finance super-role — sees every region and the finance rollups. This is the role behind the "Finance" persona.' },
+  { id: 'global-finance', term: 'Global finance (retired)', enum: 'global-finops', body: 'Retired 2026-09-05. It was the cross-region finance super-role, but it held the whole org-wide ADMIN surface rather than just reports — so it was withdrawn and its reach folded into Platform admin. Company-wide report access is now granted per person with a report-access grant, which needs no role at all. Kept in the enum for historical records only; it grants nothing.' },
   { id: 'platform-admin', term: 'Platform admin', enum: 'platform-admin', body: 'Cross-region super-admin. Satisfies every gate; unbounded data scope. Can rename regions and manage devices across regions.' },
   { id: 'manager-role', term: 'Manager (role)', enum: 'manager', body: 'The RBAC role for a team/practice lead. Distinct from a project manager assignment and from the Entra manager chain (below).' },
   { id: 'developer', term: 'Developer', enum: 'developer', body: 'The default role. May also hold Business Unit ownership — that is a relationship, not a role (see Business Unit owner).' },

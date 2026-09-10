@@ -14,7 +14,7 @@
  */
 import { consola } from 'consola'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import * as schema from '../../drizzle/schema'
 import { isUuid } from '../utils/uuid'
 import { monthStartIso as monthStartIsoFor } from '../utils/period'
@@ -89,12 +89,12 @@ export async function dispatchInbox(
     // unassigned project) doesn't crash the worker. But it must not be SILENT —
     // an admin-paging category (read-path-stale, attribution-gap, connector-health)
     // resolving to zero recipients means a deployment with no active
-    // platform-admin/global-finops just dropped an urgent page, and a per-dev
+    // platform-admin just dropped an urgent page, and a per-dev
     // category dropped means its producer forgot recipientTeammateIdHint. Both
     // are the silent-no-op class; log so they are diagnosable.
     consola.warn(
       `[dispatch] "${input.category}" resolved to ZERO recipients — inbox item DROPPED (routing=${routingScope ?? 'n/a'}). ` +
-        `Admin categories need an active platform-admin/global-finops; per-dev categories need recipientTeammateIdHint.`,
+        `Admin categories need an active platform-admin; per-dev categories need recipientTeammateIdHint.`,
     )
     return []
   }
@@ -194,7 +194,7 @@ async function resolveRecipients(
       // Admin-routed, region-scoped when derivable (the org's region, passed as input.regionId);
       // otherwise the cross-region finance/ops roles only. A missing-license-SKU month — or an
       // unclassified/conservation-break month (D3) — is a finance data-correctness concern
-      // → global-finops / platform-admin (+ the region's admin).
+      // → platform-admin (+ the region's admin).
       const region = await deriveAlertRegion(db, input)
       return {
         recipientIds: await resolveAdmins(db, region),
@@ -207,7 +207,7 @@ async function resolveRecipients(
       // path — a stall/outage starves EVERY region's attribution, not one
       // region's, and a per-run scan cap is a property of the deployment, not of
       // any region. So these alerts always route to the cross-region ops roles
-      // (platform-admin / global-finops) only, never a single region's admins.
+      // (platform-admin) only, never a single region's admins.
       // No region is derived (there is none to derive).
       return {
         recipientIds: await resolveAdmins(db, null),
@@ -216,7 +216,7 @@ async function resolveRecipients(
     }
     case 'ops-alert':
       // The operations-recipient policy (ops-alerting A5, ar-M18): platform-admin
-      // AND global-finops — an estate without an active platform-admin must not
+      // AND platform-admin — an estate without an active platform-admin must not
       // receive nothing. Deployment-level conditions (a dead read path, a failing
       // fleet, a broken private-link route) have no region to derive, so this is
       // always the cross-region set, matching read-path-stale.
@@ -279,6 +279,18 @@ async function resolveOverBudgetRecipients(
   const now = nowAnchor ?? new Date()
   const monthStartIso = monthStartIsoFor(now)
 
+  /*
+   * These three branches decide WHO IS RESPONSIBLE. None of them filters on
+   * activity, deliberately: activity is applied once, below, after the branches
+   * have been combined. Filtering here instead makes an all-inactive branch
+   * indistinguishable from an unmatched one and hands the alert to the whole
+   * Business Unit via the fallback.
+   *
+   * `cou_owner.revoked_at` IS right here — it ends a GRANT, which is a question
+   * about responsibility. `teammate.revoked_at` would not be: that column is a
+   * session/emit anchor, not a deactivation flag.
+   * See docs/security-sprint/epic-mdash-remediation.md (W2.4).
+   */
   const responsibleRows = await db.execute<{ teammate_id: string }>(sql`
     SELECT pa.teammate_id::text AS teammate_id
     FROM project_assignment pa
@@ -303,13 +315,27 @@ async function resolveOverBudgetRecipients(
     WHERE ar.project_id = ${projectId}::uuid
       AND ar.ts_event >= ${monthStartIso}::timestamptz
   `)
-  const recipients = [
+  /*
+   * MATCHED and ACTIVE are separate signals, and conflating them changes who is
+   * notified. Filtering inactive people out inside the SQL made an
+   * inactive-only contributor set indistinguishable from "no contributors ever
+   * existed", so the fallback below fired and told unrelated CoU teammates a
+   * project's spend. Match first, then filter: a branch that matched returns its
+   * ACTIVE members even when that list is empty.
+   */
+  const matched = [
     ...new Set([
       ...[...responsibleRows].map((r) => r.teammate_id),
       ...[...contributorRows].map((r) => r.teammate_id),
     ]),
   ]
-  if (recipients.length > 0) return recipients
+  if (matched.length > 0) {
+    const activeRows = await db.execute<{ id: string }>(sql`
+      SELECT id::text AS id FROM teammate
+      WHERE id = ANY(${sql.param(matched)}::uuid[]) AND is_active = TRUE
+    `)
+    return [...activeRows].map((r) => r.id)
+  }
 
   // Fallback to CoU teammates only when there are no responsible
   // parties or contributors at all. Pilot rule preserved.
@@ -319,10 +345,11 @@ async function resolveOverBudgetRecipients(
     .where(eq(schema.project.id, projectId))
     .limit(1)
   if (!proj) return []
+  // Same active-only rule as the branches above (W2.4).
   const rows = await db
     .select({ id: schema.teammate.id })
     .from(schema.teammate)
-    .where(eq(schema.teammate.orgUnitId, proj.costOwningUnitId))
+    .where(and(eq(schema.teammate.orgUnitId, proj.costOwningUnitId), eq(schema.teammate.isActive, true)))
   return rows.map((r) => r.id)
 }
 
@@ -381,7 +408,7 @@ async function deriveAlertRegion(
  * structural-conflict / connector-health).
  *
  * The cross-region roles — `platform-admin` (ops super-admin) and
- * `global-finops` — ALWAYS receive these (they answer for every region); a
+ * `platform-admin` — ALWAYS receive these (they answer for every region); a
  * region's own `admin`s are ADDED on top when the alert's region is known.
  * `regionId === null` (underivable) routes to the cross-region roles ONLY: an
  * unscoped ops alert must not leak one region's data (the conflicting project's
@@ -405,7 +432,7 @@ async function resolveAdmins(
     FROM teammate
     WHERE is_active = true
       AND (
-        role IN ('platform-admin', 'global-finops')
+        role = 'platform-admin'
         -- region-scoped: when regionId is null, region_id = NULL::uuid is
         -- UNKNOWN (falsy), so no region admin matches -- i.e. cross-region roles
         -- only. No explicit null-guard needed.

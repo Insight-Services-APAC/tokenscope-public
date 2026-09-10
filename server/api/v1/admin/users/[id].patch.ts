@@ -6,7 +6,7 @@
  * admin-count) state and threads it through.
  *
  * Two-layer RBAC:
- *   1. requireRole(admin, global-finops) — app-level gate, 403 on miss.
+ *   1. requireRole(admin) — app-level gate, 403 on miss.
  *   2. withRequestRls — RLS GUCs set so RLS-protected reads honour the
  *      caller's scope. Note teammate itself isn't RLS-protected (per
  *      0002_rls.sql — region scoping happens explicitly via region_id
@@ -36,7 +36,7 @@ import { z } from 'zod'
 import { requireRole, requireRegionScope } from '../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../auth/csrf'
 import { withRequestRls } from '../../../../db/request-rls'
-import { evaluateRoleChange, canAssignRole } from '../../../../auth/admin-guards'
+import { evaluateRoleChange, canAssignRole, canModifyHolderOf } from '../../../../auth/admin-guards'
 import { recordAuditEvent } from '../../../../db/audit'
 import { requireUuidParam } from '../../../../utils/require-uuid-param'
 import { ROLES, isRole, type Role } from '../../../../../shared/auth/roles'
@@ -53,7 +53,7 @@ interface TargetRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   // CSRF check BEFORE any DB I/O so a cross-origin POST doesn't even
   // touch the teammate row (load + timing-side-channel hardening, same
   // pattern as dev-login.post.ts).
@@ -98,7 +98,7 @@ export default defineEventHandler(async (event) => {
       })
     }
     // Region-scope check — admin caller cannot mutate a row outside
-    // their home region. (global-finops is unbounded.)
+    // their home region. (platform-admin is unbounded.)
     await requireRegionScope(event, target.region_id)
 
     const adminRows = await tx.execute<{ count: string }>(sql`
@@ -121,10 +121,10 @@ export default defineEventHandler(async (event) => {
     // Privilege-escalation guard (adversarial R1 HIGH). canAssignRole exists
     // for exactly this, but was only wired into directory-provision; this is
     // the pre-existing role-CHANGE surface that also needs it. A region-scoped
-    // admin must not GRANT an org-wide role (global-finops/platform-admin), nor
+    // admin must not GRANT an org-wide role (platform-admin), nor
     // mutate a teammate who already HOLDS one (the target.role direction). Only
     // org-wide actors can. requireRole already let region admins this far.
-    if (!canAssignRole(caller.role, newRole) || !canAssignRole(caller.role, target.role)) {
+    if (!canAssignRole(caller.role, newRole) || !canModifyHolderOf(caller.role, target.role)) {
       throw createError({
         statusCode: 403,
         statusMessage: 'Role grant not permitted',
@@ -132,7 +132,11 @@ export default defineEventHandler(async (event) => {
           type: 'https://tokenscope.example.com/errors/role-grant',
           title: 'Role grant not permitted',
           status: 403,
-          detail: `Role '${caller.role}' cannot grant or modify org-wide roles (global-finops, platform-admin).`,
+          // Names the ACTUAL denial, both directions. This branch fires for an
+          // org-wide grant AND for a retired-role holder, and a message that
+          // only mentions platform-admin tells a region admin the wrong reason
+          // when the target holds `global-finops` or `finance`.
+          detail: `Role '${caller.role}' cannot change '${target.role}' to '${newRole}': only platform-admin may grant org-wide roles or modify a holder of an org-wide or retired role.`,
         },
       })
     }
@@ -151,7 +155,7 @@ export default defineEventHandler(async (event) => {
       }
       const detailByReason: Record<string, string> = {
         'self-role-change-blocked':
-          'You cannot change your own role. Have another admin (or global-finops) do it.',
+          'You cannot change your own role. Have another admin (or platform-admin) do it.',
         'same-role-noop':
           'Target already has the requested role; no change applied.',
         'last-admin-protected':

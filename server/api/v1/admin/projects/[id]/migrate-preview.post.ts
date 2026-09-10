@@ -14,7 +14,7 @@
  * with 409 if the picture has moved — the preview and the write are two
  * requests, and a shared predicate is not a shared row set.
  *
- * Same authorisation as the PATCH it precedes: admin/global-finops, bounded to
+ * Same authorisation as the PATCH it precedes: admin/platform-admin, bounded to
  * the project's own region. A preview that leaked another region's spend totals
  * would be an information-disclosure bug wearing a dry-run's clothes.
  */
@@ -45,7 +45,7 @@ const Body = z.object({
 
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
 
   const parsedId = z.string().uuid().safeParse(getRouterParam(event, 'id'))
   if (!parsedId.success) {

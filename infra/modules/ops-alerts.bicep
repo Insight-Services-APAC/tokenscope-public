@@ -36,6 +36,9 @@ param postgresServerId string
 @description('Resource ID of the caj-ts-ops-alert Container Apps Job — scope of the dead-man alert (ar-H4). Empty = the job is not deployed (phase-1 / workerBaseUrl unset) and the dead-man rule is elided: a metric alert cannot scope a resource that does not exist.')
 param opsAlertJobId string = ''
 
+@description('Log Analytics workspace the app logs to. Empty disables the security-audit log alert (phase-1 applies before monitoring exists).')
+param logAnalyticsId string = ''
+
 @description('Tags applied to every resource in this module.')
 param tags object = {}
 
@@ -127,23 +130,12 @@ resource pgAliveAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
 // 3. Evaluator dead-man — successful caj-ts-ops-alert executions < 1 over 1 h
 // (ar-H4: a bug that throws every run, or a dispatch wedge, pages even though
 // ops-alert itself cannot). The job's cron (9,24,39,54 — ar-L22) puts 4
-// scheduled runs in every trailing hour, so a healthy hour totals 4.
-// `Executions` / Microsoft.App/jobs verified against the supported-metrics
-// reference ("Job Executions — executions run by the Container Apps Job",
-// Count, PT1M grain, Total aggregation, dimensions state/jobName/
-// executionName). WHAT FIRES IT: Total(Executions, state=Succeeded) < 1 over
-// the trailing hour. 'Succeeded' is the ARM JobExecution status enum spelling
-// (Degraded/Failed/Processing/Running/Stopped/Succeeded/Unknown) — the
-// dimension's values are not enumerated in the metrics reference, so the
-// post-deploy Dev assertion in the design's validation plan (observe one
-// fired probe / inspect the metric in the portal) MUST confirm the value
-// before this leg is trusted. KNOWN RESIDUAL, stated rather than papered
-// over: an hour with NO executions AT ALL (the dispatch-wedge case) only
-// evaluates if the platform gap-fills the filtered series with zeros; if it
-// reports no-data instead, this alert covers the throws-every-run case but
-// not total dispatch silence. The same live Dev assertion settles which —
-// and if it comes back no-data, the honest fix is dropping the state filter
-// (any-execution dead-man) plus the worker-fleet predicate for failures.
+// scheduled runs in every trailing hour. `Executions` / Microsoft.App/jobs:
+// Count, PT1M grain, Total aggregation, dimension `state` = 'Succeeded' (the
+// ARM JobExecution status enum). The dimension value AND the no-executions
+// behaviour (the filtered series evaluates as 0, not no-data, so total
+// dispatch silence fires too) were confirmed live on Dev 2026-08-20 —
+// docs/design/ops-alerting.md §Validation plan.
 resource opsAlertDeadmanAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = if (!empty(opsAlertJobId)) {
   name: 'alert-ops-alert-deadman-${name}'
   location: 'global'
@@ -177,5 +169,101 @@ resource opsAlertDeadmanAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = if 
       ]
     }
     actions: actionGroups
+  }
+}
+
+// 4. Security-audit write failure — a LOG alert, not a metric one.
+//
+// `[SECURITY-AUDIT-WRITE-FAILED]` is emitted by the two paths that record a
+// REFUSAL and then continue: report-scope's deny-audit, whose own comment calls
+// it "the only record of a denied privilege-escalation attempt", and the
+// named-person drill audit. The marker was described as something ops must be
+// able to alert on, and a repo-wide grep found two emitters, one test asserting
+// the STRING is present, and nothing consuming it (MDASH §3.1).
+//
+// WHY A LOG ALERT AND NOT A COUNTER IN OUR OWN DB: the marker fires when a
+// DATABASE WRITE FAILED. Recording "the audit write failed" in the same database
+// is unreliable in exactly the case that matters, so the signal has to leave the
+// process by the path that does not depend on Postgres — the log pipeline.
+//
+// The known trigger (a client-supplied X-Forwarded-For that Postgres `inet`
+// rejects) is fixed separately by validating the address with net.isIP, so this
+// is defence in depth for the causes that remain: the database being down,
+// permissions, a schema drift.
+//
+// NOT YET VALIDATED ON DEV, and the FIRST version of this rule is why that
+// matters: it queried AppTraces, a table nothing in this deployment writes, so
+// it would have deployed successfully and never fired. Like the dead-man rule
+// above, this needs one post-deploy assertion — emit the marker on Dev, confirm
+// the query returns the row and the rule evaluates — before it is trusted.
+// Gated on the WORKSPACE only. Gating on actionGroupId as well would delete the
+// rule whenever no notification email is configured, which contradicts this
+// module's contract that alerts still EXIST in Azure Monitor without email — the
+// other rules here follow that, and a rule you can see in the portal is worth
+// having even when nothing is paged.
+resource securityAuditWriteAlert 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = if (!empty(logAnalyticsId)) {
+  name: 'alert-security-audit-write-${name}'
+  location: resourceGroup().location
+  tags: tags
+  properties: {
+    displayName: 'Security audit write failed (${name})'
+    description: 'A security-critical audit row could not be written; the action it recorded still happened.'
+    severity: 1
+    enabled: true
+    scopes: [logAnalyticsId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // Deploy-time KQL validation resolves table references BEFORE `isfuzzy` gets
+    // runtime semantics, and a freshly created workspace has materialised
+    // neither console table — so validating this rule can fail the whole infra
+    // deployment. Validation would not have caught either way this rule has
+    // already been wrong (a table nothing writes; a term-based operator on a
+    // punctuated marker), so the post-deploy assertion in
+    // epic-mdash-remediation.md §3b is what settles whether it matches.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          // NOT AppTraces. That table is populated by the Application Insights
+          // Node SDK, which this app does not depend on or initialise — the
+          // Container App ships stdout/stderr straight to Log Analytics
+          // (container-app.bicep appLogsConfiguration destination: 'log-analytics'),
+          // and consola writes there. Querying AppTraces would have deployed a
+          // rule that reads an empty table forever: present, green, and mute.
+          //
+          // `contains`, NOT `has`. KQL's `has` matches whole TERMS, and this
+          // marker is punctuated — the brackets and hyphens split it, so `has`
+          // would not reliably match the literal inside a log line. That would
+          // have been the SECOND way this rule could deploy green and stay mute.
+          //
+          // union isfuzzy=true because the console table has two schemas across
+          // Azure generations (ContainerAppConsoleLogs_CL with Log_s, and
+          // ContainerAppConsoleLogs with Log) and the workspace is behind AMPLS,
+          // so which one this environment uses cannot be read from here. isfuzzy
+          // tolerates the absent table instead of failing the whole query — and
+          // the post-deploy assertion below is what settles which one is live.
+          //
+          // The empty datatable leg is NOT decoration. isfuzzy tolerates a
+          // missing source only while at least one still RESOLVES; on a freshly
+          // deployed workspace neither console table has been materialised yet,
+          // and the query errors rather than returning zero rows — an alert rule
+          // that errors is not an alert rule that is quiet. The literal leg
+          // always resolves, so the first evaluation is a clean zero. Both real
+          // legs project to one common column so the union has a single schema.
+          query: 'union isfuzzy=true (datatable(Msg: string)[]), (ContainerAppConsoleLogs_CL | where Log_s contains "[SECURITY-AUDIT-WRITE-FAILED]" | project Msg = Log_s), (ContainerAppConsoleLogs | where Log contains "[SECURITY-AUDIT-WRITE-FAILED]" | project Msg = Log)'
+          timeAggregation: 'Count'
+          operator: 'GreaterThanOrEqual'
+          threshold: 1
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: empty(actionGroupId) ? [] : [actionGroupId]
+    }
   }
 }

@@ -13,7 +13,7 @@
  *      audited historical bill re-pull for one enterprise + month
  *      (design §5.3/§5.4/§8.4).
  *
- * global-finops / platform-admin ONLY (org-wide access) — mirrors the
+ * platform-admin ONLY (org-wide access) — mirrors the
  * server-side RBAC on every endpoint this page calls.
  */
 import { ref, computed, watch } from 'vue'

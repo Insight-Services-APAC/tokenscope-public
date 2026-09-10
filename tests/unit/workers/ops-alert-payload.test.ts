@@ -112,6 +112,8 @@ describe('OpsAlertReason — the CLOSED reason vocabulary (D1)', () => {
         'probe-unhealthy',
         'hosts-failing',
         'zero-write-streak',
+        'source-backlog',
+        'coverage-unknown-bearer-fresh',
         'workers-failing',
         'worker-failing',
         'items-aged',

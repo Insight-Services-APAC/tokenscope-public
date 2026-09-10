@@ -1,6 +1,6 @@
 /*
  * POST /api/v1/admin/org-units/{id}/owners — assign a cost-centre owner
- * (J4, mig 0048). admin (region-scoped) / global-finops.
+ * (J4, mig 0048). admin (region-scoped) / platform-admin.
  *
  * The org unit must be a cost-owning unit — ownership is the P&L relationship,
  * and the owner is typically 2-3 levels removed from the unit in the org chart,
@@ -47,7 +47,7 @@ const Body = z
   })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'org unit id')
   const body = await readValidated(event, Body)
@@ -149,7 +149,7 @@ export default defineEventHandler(async (event) => {
     // provision lands in ou.region_id, but the oid path can also resolve to an
     // EXISTING cross-region teammate — bill: adoptee or the person's other live
     // identity (#121) — so this check bites on both body shapes.)
-    const callerIsGlobal = caller.role === 'global-finops' || caller.role === 'platform-admin'
+    const callerIsGlobal = caller.role === 'platform-admin'
     if (!callerIsGlobal && ownerRegionId !== ou.region_id) {
       throw createError({
         statusCode: 422,
@@ -159,7 +159,7 @@ export default defineEventHandler(async (event) => {
           title: 'Cross-region owner',
           status: 422,
           detail:
-            'This teammate belongs to another region. Only global-finops / platform-admin may assign cross-region cost-centre owners.',
+            'This teammate belongs to another region. Only platform-admin may assign cross-region cost-centre owners.',
         },
       })
     }

@@ -26,11 +26,11 @@
  * worker_run ledger carries the OUTCOME (status/duration/result/runId), so we don't
  * duplicate (or size-cap-bust) the result here.
  *
- * RBAC: requireRole(global-finops) + assertSameOrigin. NOT region-scoped `admin`:
+ * RBAC: requireRole(platform-admin) + assertSameOrigin. NOT region-scoped `admin`:
  * every safelisted worker operates GLOBALLY (no region param — identity-sync sweeps
  * the whole enterprise, placement-sync drains the whole queue, reconciliation-sync
  * reconciles all scopes), so forcing one exceeds a region admin's scope. Only
- * global-finops + platform-admin (which requireRole always admits) may trigger.
+ * platform-admin (which requireRole always admits) may trigger.
  */
 import { createError, defineEventHandler, getRouterParam, getRequestIP, getHeader } from 'h3'
 import { requireRole } from '../../../../../auth/rbac'
@@ -42,7 +42,7 @@ import { dispatchWorker } from '../../../../../workers/dispatch'
 import { getWorker, UI_TRIGGERABLE_WORKERS } from '../../../../../workers/registry'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'global-finops')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
 
   const name = getRouterParam(event, 'name')
@@ -68,7 +68,7 @@ export default defineEventHandler(async (event) => {
   // GUC: every UI-triggerable worker operates globally (identity-sync sweeps the
   // enterprise, reconciliation-sync reconciles all scopes), so under FORCE it
   // must not inherit the triggering admin's scope. requireRole already limits
-  // this route to global-finops/platform-admin, so this widens nothing — it
+  // this route to platform-admin, so this widens nothing — it
   // stops the scope being an ambient consequence of which pool the code landed
   // on.
   const db = await getWorkerDb()

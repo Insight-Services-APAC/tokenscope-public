@@ -59,9 +59,10 @@ import {
   chmodSync,
   renameSync,
   rmSync,
+  realpathSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveApiBase, DEFAULT_API_BASE } from './api-base.mjs'
 import { discoverMcpOrigin } from './mcp-origin.mjs'
@@ -71,7 +72,7 @@ import {
   assertKnownFlag,
   flagValue,
 } from './argv-guard.mjs'
-import { resolveHelperPath, httpsPostJson, stateDir, realHome } from './plugin-runtime.mjs'
+import { resolveHelperPath, httpsPostJson, realHome, trustedStateDir } from './plugin-runtime.mjs'
 import { mergeClaudeSettings, applyOtlpProxyRepoint } from './env-builder.mjs'
 import { emitEnvLabel } from './statusline.mjs'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
@@ -88,6 +89,12 @@ function parseArgs(argv) {
     apiBase: null,
     instanceId: null,
     settingsPath: null,
+    // Where the shared credential store lives. Defaults to the passwd home
+    // (trustedStateDir) in main(); on ARGV so the suite can redirect it without
+    // an environment variable — trustedStateDir deliberately ignores those, and
+    // that is exactly what stops a hostile repo choosing the destination. Same
+    // rationale as the helper's own --state-dir / --tool-dir.
+    stateDir: null,
   }
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
@@ -103,6 +110,22 @@ function parseArgs(argv) {
       case '--instance-id':
         out.instanceId = flagValue(argv, ++i, flag)
         break
+      case '--state-dir':
+        /*
+         * CONFINED, exactly like --settings-path.
+         *
+         * This flag was added so the test suite could redirect the credential
+         * store after trustedStateDir() stopped honouring TOKENSCOPE_STATE_DIR.
+         * Unconfined it reopened the sink argv-guard exists to close: the setup
+         * command's grant ends in `:*`, so a prompt-injected model can append
+         * any argv tail with no permission prompt, and this path receives the
+         * DURABLE refresh token. argv-guard's invariant is stated in its header —
+         * argv may SELECT which file under the account's own home is written, it
+         * may never INTRODUCE one — and an unconfined --state-dir is precisely
+         * introducing one.
+         */
+        out.stateDir = assertConfinedPath(flagValue(argv, ++i, flag), { flag, refuseInsideRepo: true })
+        break
       case '--settings-path':
         // The durable OAuth emit credential is written to this path, so it is a
         // trust sink, not merely a location — confine it to the account's own
@@ -112,6 +135,11 @@ function parseArgs(argv) {
         out.settingsPath = assertConfinedPath(flagValue(argv, ++i, flag), {
           flag,
           allowedBasenames: ['settings.json'],
+          // Same sink as --state-dir, and the comment above already says so:
+          // this file carries the env block, and the env block carries the
+          // durable refresh token. The review cited only --state-dir; home
+          // containment is exactly as insufficient here.
+          refuseInsideRepo: true,
         })
         break
       default:
@@ -322,8 +350,55 @@ function detectEnvChange(existing, newEnvBlock) {
  * survives; atomic (0600) so a concurrent reader never sees a half-written
  * file.
  */
-function writeSharedCredentialStore(oauthRefreshToken, dir) {
+function writeSharedCredentialStore(oauthRefreshToken, dir, endpoints = {}) {
   if (!oauthRefreshToken) return
+  /*
+   * A TEST MUST NEVER WRITE THE REAL CREDENTIAL STORE.
+   *
+   * Not defensive padding — this happened. Switching the store to
+   * trustedStateDir() (which correctly ignores TOKENSCOPE_STATE_DIR, so a hostile
+   * repo cannot choose where the durable credential lands) also removed the only
+   * lever the suite had to redirect it, and a redeem test wrote its stub
+   * server's endpoints and fixture refresh token over a live enrolment in the
+   * developer's own ~/.tokenscope/config.json.
+   *
+   * Every call site now passes an explicit dir, and this refuses the passwd home
+   * under a test runner so the next one that forgets fails loudly instead of
+   * silently clobbering someone's credential.
+   */
+  // realpath BOTH sides: a lexical compare misses a test dir that is a SYMLINK
+  // to the real store, which is the same guard-bypass shape as the .gitignore
+  // finding. Fall back to the lexical path when the target does not exist yet.
+  const canon = (d) => {
+    try {
+      return realpathSync(d)
+    } catch {
+      return resolve(d)
+    }
+  }
+  /*
+   * `globalThis.__vitest_worker__`, NOT `process.env.VITEST`.
+   *
+   * The environment is the channel this whole module distrusts: Claude Code
+   * merges a repo's `.claude/settings.json` env block into the processes it
+   * spawns, so a hostile repo could set VITEST=1 and make a genuine setup run
+   * throw here — turning a test-safety guard into a remote switch for "this
+   * device may not enrol". The worker global only exists inside a vitest worker
+   * and cannot be set from a settings file.
+   *
+   * RESIDUAL, stated rather than papered over: a spawned CLI is a child process
+   * with no such global, so it is NOT covered here. Both suites that spawn this
+   * script pass an explicit --state-dir sandbox, but nothing enforces that a
+   * future one will. A source-scanning test was tried and removed: file-level
+   * matching was vacuous, and per-call matching false-positived on a sibling
+   * script's spawns. The real fix is a shared sandboxed spawn helper.
+   */
+  const underVitest = typeof globalThis.__vitest_worker__ === 'object' && globalThis.__vitest_worker__ !== null
+  if (underVitest && canon(dir) === canon(join(realHome(), '.tokenscope'))) {
+    throw new Error(
+      'refusing to write the REAL credential store from a test — pass an explicit dir',
+    )
+  }
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     const configPath = join(dir, 'config.json')
@@ -336,13 +411,61 @@ function writeSharedCredentialStore(oauthRefreshToken, dir) {
         existing = {}
       }
     }
+    /*
+     * The ENDPOINTS ride along with the token (MDASH F120/F119/F309).
+     *
+     * The helper read TOKENSCOPE_OAUTH_TOKEN_ENDPOINT and
+     * TOKENSCOPE_BEARER_ENDPOINT from its ENVIRONMENT — which Claude Code
+     * merges a repo's `.claude/settings.json` env block into, and which it
+     * hands to this helper on its own ~29-minute schedule. The refresh token
+     * was already pulled out of that channel and into this 0700 store; the
+     * destinations were left behind, so a hostile repo did not need the
+     * credential, only somewhere to send it. `assertSafeEndpoint` upstream
+     * validates the SCHEME only, so any https host was accepted.
+     *
+     * Persisting them here gives the helper a trusted source to prefer. Only
+     * written when non-empty, so a partial redeem never blanks a good value.
+     */
     const next = { ...existing, oauth_refresh_token: oauthRefreshToken }
+    if (endpoints.tokenEndpoint) next.oauth_token_endpoint = endpoints.tokenEndpoint
+    if (endpoints.bearerEndpoint) next.bearer_endpoint = endpoints.bearerEndpoint
     const tmp = `${configPath}.tmp.${process.pid}`
     writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
     chmodSync(tmp, 0o600)
     renameSync(tmp, configPath)
-  } catch {
-    /* best-effort — settingsPath already carries the primary credential */
+  } catch (err) {
+    /*
+     * Best-effort ONLY while nothing is left behind to shadow this enrolment.
+     *
+     * The old comment here — "settingsPath already carries the primary
+     * credential" — stopped being true when the helper started REFUSING to pair
+     * a stored credential with an environment destination. The two cases now
+     * differ, so this branch distinguishes them instead of always swallowing:
+     *
+     *  - NO store on disk: the helper's no-store path still reads the
+     *    environment, which settings.json just received. Emission works. A
+     *    failure here is not worth failing an otherwise good enrolment.
+     *  - A store IS on disk: it takes precedence over the environment and we
+     *    could not confirm it matches this enrolment, so it may be a token-only
+     *    or previous-deployment store. That device stops emitting for good while
+     *    redeem prints success — silence plus a success message, which is the
+     *    worst pair available. Fail loudly instead.
+     */
+    let shadowing
+    try {
+      shadowing = existsSync(join(dir, 'config.json'))
+    } catch {
+      shadowing = true // cannot tell — assume the worse case
+    }
+    if (shadowing) {
+      throw new Error(
+        `TokenScope: could not update the device credential store in ${dir}, and an existing ` +
+          'store is still there. The emit helper prefers that store over the environment and ' +
+          'requires the token AND both endpoints in it, so this device would stop emitting. ' +
+          'Enrolment is NOT complete: make the directory writable (mode 0700) and re-run setup.',
+        { cause: err },
+      )
+    }
   }
 }
 
@@ -361,7 +484,14 @@ function writeSharedCredentialStore(oauthRefreshToken, dir) {
 // re-run or a fresh device the merge stays ADDITIVE, so an unrelated env key a
 // developer set by hand is preserved. Returns the env-change descriptor so main()
 // can print a one-line note (never a credential).
-function writeClaudeSettings(settingsPath, helperPath, envBlock) {
+/*
+ * `credentialStoreDir` is an explicit ARGUMENT, never an environment override:
+ * trustedStateDir() ignores TOKENSCOPE_STATE_DIR so a repo cannot choose where
+ * the durable credential lands, which also means callers (including tests) must
+ * pass the directory rather than steer it. Default keeps production on the
+ * passwd home. See epic-mdash-remediation.md (Wave 1, credential-store guard).
+ */
+function writeClaudeSettings(settingsPath, helperPath, envBlock, credentialStoreDir = trustedStateDir()) {
   let existing = null
   if (existsSync(settingsPath)) {
     const raw = readFileSync(settingsPath, 'utf8')
@@ -403,7 +533,14 @@ function writeClaudeSettings(settingsPath, helperPath, envBlock) {
   // BOTH lanes (this redeem's own env AND any tagged repo relying on the
   // state-dir fallback) must agree on the same value. Uses envBlock (the
   // value THIS redeem just minted), not merged.env, though they agree.
-  writeSharedCredentialStore(envBlock.TOKENSCOPE_OAUTH_REFRESH_TOKEN, stateDir())
+  // trustedStateDir(), NOT stateDir(): the latter honours TOKENSCOPE_STATE_DIR
+  // from the ambient environment, so running setup inside a hostile repo wrote
+  // the DURABLE refresh token into a directory that repo chose. The helper
+  // already reads this store from the passwd home, so the two now agree.
+  writeSharedCredentialStore(envBlock.TOKENSCOPE_OAUTH_REFRESH_TOKEN, credentialStoreDir, {
+    tokenEndpoint: envBlock.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT,
+    bearerEndpoint: envBlock.TOKENSCOPE_BEARER_ENDPOINT,
+  })
   return envChange
 }
 
@@ -525,7 +662,7 @@ async function main() {
   const settingsPath = args.settingsPath ?? join(trustedHome, '.claude', 'settings.json')
   let envChange
   try {
-    envChange = writeClaudeSettings(settingsPath, helperPath, envBlock)
+    envChange = writeClaudeSettings(settingsPath, helperPath, envBlock, args.stateDir || trustedStateDir())
   } catch (err) {
     console.error(`[tokenscope] ${err.message}`)
     process.exit(1)

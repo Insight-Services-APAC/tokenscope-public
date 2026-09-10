@@ -3,7 +3,7 @@
  * Epic 13 admin endpoints — cross-region RBAC contract.
  *
  * Pins: an `admin` role with home region A must NOT see region B's
- * data. A `global-finops` role can see any region. This is the
+ * data. A `platform-admin` role can see any region. This is the
  * server-side gate behind the admin 6-tab page.
  *
  * Tests run the SQL through the handlers indirectly via the
@@ -72,7 +72,7 @@ beforeAll(async () => {
       adminAId = admin!.id
       const [finops] = await t.db
         .insert(schema.teammate)
-        .values({ entraOid: 'oid-a-finops', email: 'finops-a@example.com', regionId: r, orgUnitId: bu!.id, role: 'global-finops' })
+        .values({ entraOid: 'oid-a-finops', email: 'finops-a@example.com', regionId: r, orgUnitId: bu!.id, role: 'platform-admin' })
         .returning()
       finopsId = finops!.id
     }
@@ -130,11 +130,11 @@ const adminASession = (): Session => ({
   regionId: regionAId,
   orgPath: 'a.svc',
 })
-const finopsSession = (): Session => ({
+const orgWideSession = (): Session => ({
   teammateId: finopsId,
   email: 'finops-a@example.com',
   displayName: 'Finops',
-  role: 'global-finops',
+  role: 'platform-admin',
   regionId: regionAId,
   orgPath: 'a.svc',
 })
@@ -149,7 +149,7 @@ describe('admin region SQL contract', () => {
     `)
     const aList = [...rowsA].map((r) => r.email)
     const bList = [...rowsB].map((r) => r.email)
-    // Region A also carries the admin / global-finops fixtures used by the
+    // Region A also carries the admin / platform-admin fixtures used by the
     // github/map region-clamp tests below (admin-a@, finops-a@).
     expect(aList).toEqual(['admin-a@example.com', 'finops-a@example.com', 'one-a@example.com', 'two-a@example.com'])
     expect(bList).toEqual(['one-b@example.com', 'two-b@example.com'])
@@ -177,7 +177,7 @@ describe('admin region SQL contract', () => {
     const list = [...counts]
     expect(list.length).toBe(2)
     const byRegion = new Map(list.map((r) => [r.region_id, Number(r.count)]))
-    // Region A: the 2 base fixtures + the admin/global-finops fixtures added for
+    // Region A: the 2 base fixtures + the admin/platform-admin fixtures added for
     // the github/map region-clamp tests below. Region B: the 2 base fixtures only.
     expect(byRegion.get(regionAId)).toBe(4)
     expect(byRegion.get(regionBId)).toBe(2)
@@ -214,9 +214,9 @@ describe('github/map region clamp — both ends (server-api-app:idor:0004 / T3-x
   })
 
   it('region-A admin re-maps a login currently bound to a region-B teammate → 403, binding unchanged', async () => {
-    // global-finops binds it to the region-B teammate first (the SOURCE binding).
+    // platform-admin binds it to the region-B teammate first (the SOURCE binding).
     await mapPost(ev({
-      session: finopsSession(),
+      session: orgWideSession(),
       body: { enterpriseId: ghEnterpriseId, teammateId: teammateOneBId, login: 'octo-bound-b' },
     }))
     expect(await boundTeammateId('octo-bound-b')).toBe(teammateOneBId)
@@ -233,18 +233,18 @@ describe('github/map region clamp — both ends (server-api-app:idor:0004 / T3-x
     expect(await boundTeammateId('octo-bound-b')).toBe(teammateOneBId)
   })
 
-  it('global-finops maps a login to a region-B teammate → succeeds (region-unbounded)', async () => {
+  it('platform-admin maps a login to a region-B teammate → succeeds (region-unbounded)', async () => {
     const res = (await mapPost(ev({
-      session: finopsSession(),
+      session: orgWideSession(),
       body: { enterpriseId: ghEnterpriseId, teammateId: teammateOneBId, login: 'octo-finops-b' },
     }))) as { teammateId: string }
     expect(res.teammateId).toBe(teammateOneBId)
   })
 
-  it('global-finops re-maps a login bound to a region-B teammate over to a region-A teammate → succeeds', async () => {
-    // Bound to region B by the previous test; global-finops can freely re-bind across regions.
+  it('platform-admin re-maps a login bound to a region-B teammate over to a region-A teammate → succeeds', async () => {
+    // Bound to region B by the previous test; platform-admin can freely re-bind across regions.
     const res = (await mapPost(ev({
-      session: finopsSession(),
+      session: orgWideSession(),
       body: { enterpriseId: ghEnterpriseId, teammateId: teammateOneAId, login: 'octo-finops-b' },
     }))) as { teammateId: string }
     expect(res.teammateId).toBe(teammateOneAId)

@@ -74,7 +74,7 @@ function ev(opts: { session: Session; query?: Record<string, string> }) {
 }
 
 const admin = (): Session => ({ teammateId: adminId, email: 'it-admin@x.test', displayName: 'Admin', role: 'admin', regionId, orgPath: 'it.svc' })
-const finops = (): Session => ({ teammateId: finopsId, email: 'it-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'it.svc' })
+const finops = (): Session => ({ teammateId: finopsId, email: 'it-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId, orgPath: 'it.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'it-dev@x.test', displayName: 'Dev', role: 'developer', regionId, orgPath: 'it.svc' })
 
 interface Resp {
@@ -115,7 +115,7 @@ beforeAll(async () => {
   ouId = o!.id
   const [a] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-it-admin', email: 'it-admin@x.test', role: 'admin', regionId, orgUnitId: ouId }).returning()
   adminId = a!.id
-  const [f] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-it-fin', email: 'it-fin@x.test', role: 'global-finops', regionId, orgUnitId: ouId }).returning()
+  const [f] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-it-fin', email: 'it-fin@x.test', role: 'platform-admin', regionId, orgUnitId: ouId }).returning()
   finopsId = f!.id
   const [d] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-it-dev', email: 'it-dev@x.test', role: 'developer', regionId, orgUnitId: ouId }).returning()
   devId = d!.id
@@ -206,7 +206,7 @@ describe('instance-telemetry — RBAC', () => {
     await expect(handler(ev({ session: dev(), query: { instanceId: id } }))).rejects.toMatchObject({ statusCode: 403 })
   })
 
-  it('allows an admin and global-finops', async () => {
+  it('allows an admin and platform-admin', async () => {
     const id = await enrol()
     expect(((await handler(ev({ session: admin(), query: { instanceId: id } }))) as Resp).known).toBe(true)
     expect(((await handler(ev({ session: finops(), query: { instanceId: id } }))) as Resp).known).toBe(true)

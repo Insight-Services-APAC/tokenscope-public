@@ -20,7 +20,7 @@
  * correlation id when false). Zero spans and a failed query are otherwise the
  * same bytes, and the card would report "no data" for "we could not find out".
  *
- * RBAC: admin / global-finops (the same gate as the snapshot). Read-only.
+ * RBAC: admin / platform-admin (the same gate as the snapshot). Read-only.
  */
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -30,7 +30,7 @@ import { withRequestRls } from '../../../../db/request-rls'
 import { readUnavailable, type ReadAvailability } from '../../../../utils/redact-probe-error'
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
   // The SERVER owns `now`, once per request (CLAUDE.md §The clock). SQL's own
   // `now()` is a SECOND clock: two predicates in one response could straddle
   // different instants, and a clock-pinned request would be ignored outright.

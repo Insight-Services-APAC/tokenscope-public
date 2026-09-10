@@ -156,6 +156,13 @@ function encodeResourceLogs(rl) {
  *   - resource attrs → string_value (KQL `tostring(...)`)
  *   - time_unix_nano → fixed64; Azure sets TimeGenerated from it.
  */
+/*
+ * MUST encode every resourceLogs entry it is given. A size cap that DROPS
+ * entries silently loses telemetry: callers put a whole batch in ONE entry, POST
+ * whatever comes back, and commit their offset on a 2xx. Any bound here has to
+ * chunk and return the encoded count instead.
+ * See docs/security-sprint/epic-mdash-remediation.md (W2.5).
+ */
 export function encodeExportLogsServiceRequest(payload) {
   const parts = []
   for (const rl of payload.resourceLogs ?? []) parts.push(lenDelim(1, encodeResourceLogs(rl)))
@@ -180,7 +187,10 @@ function resolveAttr(attrs, key) {
   if (!attrs) return undefined
   if (Array.isArray(attrs)) {
     // OTLP/HTTP JSON wire shape: [{key, value:{stringValue|intValue|doubleValue}}]
-    const kv = attrs.find((a) => a.key === key)
+    // Filter to OBJECT entries first (MDASH F310): a non-object element makes
+    // `a.key` a property read on a string/number/null, and `null` throws
+    // outright. One guard covers every array-shaped attribute, not just events.
+    const kv = attrs.find((a) => a && typeof a === 'object' && a.key === key)
     if (!kv) return undefined
     const v = kv.value
     if (v == null) return undefined
@@ -210,9 +220,30 @@ function resolveAttr(attrs, key) {
  *   - Anything else (floats, numbers, BigInt): Math.round(Number()), then guard —
  *     BigInt(NaN)/BigInt(Infinity) throw and negatives are invalid → '0'.
  */
+/*
+ * A digit STRING is bounded before BigInt sees it (MDASH F127).
+ *
+ * BigInt('9'.repeat(n)) is superlinear in n, and these values arrive from
+ * telemetry attributes rather than from us. 40 digits is far past any real token
+ * count (2^128 has 39) and far short of anything expensive. Out-of-range reads
+ * as 0, which is what every other unparseable value here does.
+ */
+const MAX_INT_DIGITS = 40
+// Timestamps get their own cap: the value may be an ISO 8601 instant, which is
+// not digits-only, so MAX_INT_DIGITS would reject legitimate input.
+const MAX_TS_CHARS = 64
+
 export function safeIntString(v) {
   if (v == null) return '0'
-  if (typeof v === 'string' && /^\d+$/.test(v.trim())) return String(BigInt(v.trim()))
+  if (typeof v === 'string') {
+    // LENGTH FIRST, and length ONLY: trimming and regex-testing a megabyte
+    // string IS the unbounded work this bound exists to avoid. Length only,
+    // because the non-digit fall-through below is load-bearing — "24278.0" is a
+    // real attribute and must still become 24278.
+    if (v.length > MAX_INT_DIGITS + 2) return '0' // +2 tolerates surrounding space
+    const t = v.trim()
+    if (/^\d+$/.test(t)) return String(BigInt(t))
+  }
   const n = Math.round(Number(v))
   return Number.isFinite(n) && n >= 0 ? String(BigInt(n)) : '0'
 }
@@ -261,22 +292,41 @@ function getOperationName(span) {
  * Handles both file-exporter shape ([sec, nsec] array or ISO string)
  * and OTLP wire shape (nanosecond string e.g. "1780825137573805196").
  */
+/*
+ * EVERY branch below goes through fixed64OrNow. timeUnixNano is encoded with
+ * Buffer.writeBigUInt64LE, which THROWS above 2^64-1 and takes the whole batch
+ * down with it — so an out-of-range instant is not a wrong number, it is a lost
+ * export. Each branch can reach that range from ordinary-looking input: a
+ * far-future ISO date (year 275760 is 8.6e21 ns), a long digit string, an
+ * unbounded [sec, nsec] tuple, or a large ms number.
+ */
+const MAX_UINT64 = 18446744073709551615n
+
 function resolveTimeUnixNano(ts) {
   const nowNano = () => String(BigInt(Date.now()) * 1000000n)
+  const fixed64OrNow = (v) => (v > 0n && v <= MAX_UINT64 ? String(v) : nowNano())
   if (ts == null) return nowNano()
 
   // OTLP/HTTP wire shape: nanosecond count as a string
   if (typeof ts === 'string') {
+    // LENGTH FIRST, on the RAW value, before trim/Date.parse/regex touch it. This
+    // string is a span ATTRIBUTE, so its length is chosen by the emitter, and a
+    // cap placed after the scans bounds nothing — every superlinear step has
+    // already run by then. 64 leaves room for the longest real shape (an ISO
+    // 8601 instant with fractional seconds and an offset is ~35).
+    if (ts.length > MAX_TS_CHARS) return nowNano()
     const s = ts.trim()
     // ISO 8601 date string. Guard ms >= 0: Date.parse('-100') yields a NEGATIVE ms
     // (a pre-1970 date) which would produce a negative timeUnixNano; reject it.
     const ms = Date.parse(s)
-    if (!Number.isNaN(ms) && ms >= 0) return String(BigInt(ms) * 1000000n)
+    if (!Number.isNaN(ms) && ms >= 0) return fixed64OrNow(BigInt(ms) * 1000000n)
     // Raw nanosecond string (OTLP wire) — DIGITS ONLY. BigInt('abc'/'NaN') throws,
     // which would abort transcodeChatSpans and lose the whole batch; guard first.
-    if (/^\d+$/.test(s)) {
-      const parsed = BigInt(s)
-      if (parsed > 0n) return String(parsed)
+    // The digit cap is SEMANTIC and separate from the length bound above: a real
+    // nanosecond instant is 19 digits, so a 40+ digit value is not a timestamp
+    // and must fall back rather than become a garbage far-future one.
+    if (/^\d+$/.test(s) && s.length <= MAX_INT_DIGITS) {
+      return fixed64OrNow(BigInt(s))
     }
     return nowNano()
   }
@@ -286,14 +336,14 @@ function resolveTimeUnixNano(ts) {
     const sec = Number(ts[0])
     const nsec = Number(ts[1])
     if (Number.isFinite(sec) && sec >= 0 && Number.isFinite(nsec) && nsec >= 0) {
-      return String(BigInt(Math.round(sec)) * 1000000000n + BigInt(Math.round(nsec)))
+      return fixed64OrNow(BigInt(Math.round(sec)) * 1000000000n + BigInt(Math.round(nsec)))
     }
     return nowNano()
   }
 
   // Number (ms)
   if (typeof ts === 'number' && Number.isFinite(ts) && ts >= 0) {
-    return String(BigInt(Math.round(ts)) * 1000000n)
+    return fixed64OrNow(BigInt(Math.round(ts)) * 1000000n)
   }
 
   return nowNano()
@@ -430,10 +480,18 @@ export function transcodeChatSpans(spans, opts = {}) {
  * is guarded — a garbage value must not abort the flush batch, cf. the numeric
  * safety helpers above).
  */
+/*
+ * Reject an oversized string BEFORE parsing it (MDASH F124). We only want the
+ * LENGTH of an array; parsing megabytes of attacker-shaped JSON to learn a
+ * number is work we never needed to do.
+ */
+const MAX_JSON_ATTR_BYTES = 64 * 1024
+
 export function jsonArrayLength(v) {
   if (v == null) return null
   if (Array.isArray(v)) return v.length
   if (typeof v !== 'string') return null
+  if (v.length > MAX_JSON_ATTR_BYTES) return null
   try {
     const parsed = JSON.parse(v)
     return Array.isArray(parsed) ? parsed.length : null

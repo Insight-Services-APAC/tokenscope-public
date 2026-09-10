@@ -37,7 +37,7 @@ beforeAll(async () => {
   ouId = o!.id
   const [f] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'oid-lp-fin', email: 'lp-fin@x.test', role: 'global-finops', regionId, orgUnitId: ouId })
+    .values({ entraOid: 'oid-lp-fin', email: 'lp-fin@x.test', role: 'platform-admin', regionId, orgUnitId: ouId })
     .returning()
   finopsId = f!.id
   const [a] = await t.db
@@ -82,7 +82,7 @@ function ev(opts: { method: string; id?: string; body?: unknown; session: Sessio
   return e as unknown as Parameters<typeof platformPut>[0]
 }
 
-const finops = (): Session => ({ teammateId: finopsId, email: 'lp-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'lp.svc' })
+const finops = (): Session => ({ teammateId: finopsId, email: 'lp-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId, orgPath: 'lp.svc' })
 const admin = (): Session => ({ teammateId: adminId, email: 'lp-admin@x.test', displayName: 'Admin', role: 'admin', regionId, orgPath: 'lp.svc' })
 
 describe('resolver precedence', () => {
@@ -111,7 +111,7 @@ describe('resolver precedence', () => {
 })
 
 describe('platform endpoint authorization', () => {
-  it('global-finops can set the platform default; GET reflects it', async () => {
+  it('platform-admin can set the platform default; GET reflects it', async () => {
     await platformPut(ev({ method: 'PUT', body: { grace_hours: 4, warn_days: 10 }, session: finops() }))
     const got = (await platformGet(ev({ method: 'GET', session: admin() }))) as {
       platform: { grace_hours: number; warn_days: number }

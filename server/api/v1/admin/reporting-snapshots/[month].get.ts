@@ -32,7 +32,7 @@ import { requireMonthParam } from '../../../../utils/require-month-param'
 import { reportingSnapshotDelta } from '../../../../governance/reporting-snapshot'
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'global-finops', 'platform-admin')
+  await requireRole(event, 'platform-admin')
   const month = requireMonthParam(event, 'month')
   return withRequestRls(event, async (tx) => {
     // null = never recorded. The caller distinguishes that from "recorded and

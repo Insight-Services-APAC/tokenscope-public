@@ -422,7 +422,7 @@ function makeEvent(session: Session) {
   return ev
 }
 
-// Region-scoped 'admin' (not global-finops): the costing-rung query applies an
+// Region-scoped 'admin' (not platform-admin): the costing-rung query applies an
 // explicit region filter for that role, which both isolates this suite's counts
 // and proves the filter is wired.
 const adminSession = (): Session => ({
@@ -547,7 +547,7 @@ describe('GET /api/v1/admin/diagnostics/costing — costing rungs', () => {
     resp = await handler(makeEvent(adminSession()))
   }, 60_000)
 
-  it('REJECTS a developer — diagnostics is admin / global-finops only', async () => {
+  it('REJECTS a developer — diagnostics is admin / platform-admin only', async () => {
     const handler = await loadHandler()
     await expect(handler(makeEvent(devSession()))).rejects.toMatchObject({ statusCode: 403 })
   })

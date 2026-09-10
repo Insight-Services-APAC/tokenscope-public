@@ -63,6 +63,15 @@ interface DiagResp {
     ageMinutes: number | null
     startedAgeMinutes: number | null
     consecutiveFailures: number
+    // The attribution-stall evidence from the latest run (server: index.get.ts).
+    // null = the run recorded no such figure, shown as "?" (unknown), not 0.
+    rowsAffected: number | null
+    sessionsProcessed: number | null
+    newEventsSeen: number | null
+    // The ingest-side coverage verdict the stall alerts gate on + its metrics.
+    sourceCoverage: string | null
+    sourceRowsReceived: number | null
+    sourceRowsDropped: number | null
     rag: 'ok' | 'failing' | 'stale' | 'disabled' | 'unknown'
     dispatchBudget: 'ok' | 'near' | 'over' | null
     dispatchBudgetReason: string | null
@@ -149,7 +158,7 @@ interface DiagProbesResp {
 // Card A — Private Link / DNS validation (GET /api/v1/admin/diagnostics/network).
 // Per provisioned host: does DNS resolve to a private address (zone linked) and
 // is the TCP port reachable? itReport is the plain-text artefact for networking.
-// Platform-admin only (region admins AND global-finops 403) — this returns
+// Platform-admin only (region admins 403) — this returns
 // infrastructure topology (private IPs, internal host:port pairs), the same
 // class of exposure otel-logs.get.ts is gated on.
 interface NetCheckReport {
@@ -205,19 +214,19 @@ const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+  return r === 'admin' || r === 'platform-admin'
 })
 
 /*
  * The §A/§B decomposition is estate-wide and its endpoint is gated to
- * global-finops (see server/api/v1/admin/diagnostics/ab-decomposition.get.ts).
+ * platform-admin (see server/api/v1/admin/diagnostics/ab-decomposition.get.ts).
  * A region admin passes `isAdmin` but would get a deterministic 403, so the card
  * must not fetch or render for them: an empty panel with no explanation reads as
  * a broken diagnostic, which is the opposite of what a diagnostics page is for.
  */
 const canSeeEstateFinance = computed(() => {
   const r = session.value?.role
-  return r === 'global-finops' || r === 'platform-admin'
+  return r === 'platform-admin'
 })
 
 /*
@@ -347,6 +356,35 @@ function workerChip(
   // failure, not a success — nothing ran.
   if (rag === 'disabled') return { kind: 'neutral', label: '— disabled' }
   return { kind: 'neutral', label: '? unknown' }
+}
+
+/*
+ * The stall evidence, as one line under the reader's row. This is the line an
+ * operator paged by attribution-stall / read-path-stale opens the page for. It
+ * reads "source <verdict> (N received[, D dropped]) · reader saw M new · wrote R
+ * · N selected": `source` is the ingest-coverage verdict the alert GATES on
+ * (rows-arrived = the DCR received rows we did not land = the fault; no-rows =
+ * idle; unknown = the probe could not measure, so the alert fell back to the
+ * bearer gate); "new" (JoinResult.newEventsSeen) is the reader-side middle term;
+ * "selected" is the selection size, which an idle open editor keeps at >= 1, so
+ * it is context, not evidence. A null renders "?" — a run recorded before the
+ * field existed, which is unknown and must not read as zero. Only the reader
+ * records these, so only its row carries the line.
+ */
+function stallEvidence(w: DiagResp['workers'][number]): string | null {
+  if (
+    w.rowsAffected === null &&
+    w.sessionsProcessed === null &&
+    w.newEventsSeen === null &&
+    w.sourceCoverage === null
+  )
+    return null
+  const n = (v: number | null) => (v === null ? '?' : String(v))
+  const received = w.sourceRowsReceived === null ? '' : ` (${w.sourceRowsReceived} received`
+  const dropped = received && w.sourceRowsDropped ? `, ${w.sourceRowsDropped} dropped` : ''
+  const close = received ? ')' : ''
+  const cov = `source ${w.sourceCoverage ?? '?'}${received}${dropped}${close}`
+  return `${cov} · reader saw ${n(w.newEventsSeen)} new · wrote ${n(w.rowsAffected)} · ${n(w.sessionsProcessed)} selected`
 }
 
 function fmtWorkerRun(durationMs: number | null, ageMinutes: number | null): string {
@@ -926,11 +964,11 @@ const PERSONA_LABEL = Object.fromEntries(
 /** The role that owns a region-scoped fix — and cannot read this page. */
 const REGION_ADMIN_LABEL = PERSONA_LABEL.admin
 /** The role that owns an estate-wide fix, and is reading this page. */
-const GLOBAL_FINANCE_LABEL = PERSONA_LABEL['global-finops']
+const ORG_WIDE_LABEL = PERSONA_LABEL['platform-admin']
 
 /*
  * Each cause names its ACTION and its OWNER. Two of the four owners cannot read
- * this page (it is global-finops only, for a sound reason — see the endpoint),
+ * this page (it is platform-admin only, for a sound reason — see the endpoint),
  * so the panel says the work must be handed over rather than implying the reader
  * can fix everything.
  */
@@ -938,7 +976,7 @@ const UNHOMED_ACTIONS: Record<UnhomedCause, { action: string; owner: string; han
   'no-region': {
     action:
       'Give the person a region, or add a directory region rule / region leader so the re-enrichment worker heals the whole population in bulk.',
-    owner: GLOBAL_FINANCE_LABEL,
+    owner: ORG_WIDE_LABEL,
     handover: false,
   },
   'region-no-unit': {
@@ -954,7 +992,7 @@ const UNHOMED_ACTIONS: Record<UnhomedCause, { action: string; owner: string; han
   },
   'pooled-copilot': {
     action: 'Home the provider organisation to a cost-owning unit, on the reconciliation surface.',
-    owner: `${REGION_ADMIN_LABEL}, escalating to ${GLOBAL_FINANCE_LABEL} for an organisation in no region`,
+    owner: `${REGION_ADMIN_LABEL}, escalating to ${ORG_WIDE_LABEL} for an organisation in no region`,
     handover: true,
   },
 }
@@ -1185,19 +1223,19 @@ function refreshAll() {
 }
 
 /*
- * Enqueueing is global-finops-only (it is not region-bounded and it spends Log
+ * Enqueueing is platform-admin-only (it is not region-bounded and it spends Log
  * Analytics query budget); the Diagnose probe above is open to the wider admin
  * tier. Gate the control rather than letting a region admin press a button that
  * can only 403 — an operator mid-incident should not have to discover their own
  * permissions from an error.
  */
 const canRecover = computed(() => {
-  // MUST match the POST endpoint's requireRole exactly (global-finops only).
+  // MUST match the POST endpoint's requireRole exactly (platform-admin only).
   // This previously also allowed platform-admin, which the endpoint rejects — so
   // the button rendered and deterministically 403'd, the precise thing the note
   // above says not to do. If platform-admin should be able to enqueue a
   // recovery, widen the ENDPOINT deliberately and change both together.
-  return session.value?.role === 'global-finops'
+  return session.value?.role === 'platform-admin'
 })
 
 const recoveryLookbackDays = ref(30)
@@ -1578,6 +1616,15 @@ function pretty(obj: unknown): string {
               :data-testid="`admin-diag-worker-${w.worker}-budget-reason`"
             >
               {{ w.dispatchBudgetReason }}
+            </p>
+            <!-- The stall evidence (ingest coverage · reader saw new · wrote ·
+                 selected). Only the reader records it, so only its row shows it. -->
+            <p
+              v-if="stallEvidence(w)"
+              class="mt-1 text-[11px] font-mono text-carbon-3"
+              :data-testid="`admin-diag-worker-${w.worker}-evidence`"
+            >
+              {{ stallEvidence(w) }}
             </p>
           </li>
         </ul>
@@ -2300,13 +2347,13 @@ function pretty(obj: unknown): string {
           </div>
         </div>
         <p class="text-xs text-carbon-3 mb-3">
-          Requires <strong>platform-admin</strong> — region admins and global-finops will see a 403
+          Requires <strong>platform-admin</strong> — region admins will see a 403
           here. Resolves every private-link host the app depends on, and TCP-dials
           the ones it actually calls — the other AMPLS members share that private
           endpoint, so their DNS answer is the evidence, not a dial.
         </p>
 
-        <!-- A 403 here is EXPECTED for a region admin / global-finops (this
+        <!-- A 403 here is EXPECTED for a region admin (this
              probe is now platform-admin-only, matching the OTel card) —
              render it as a calm scoped-out note, not an alarming error.
              Genuine failures (500 / network) keep the red treatment. -->
@@ -2554,7 +2601,7 @@ function pretty(obj: unknown): string {
           </UiButton>
         </div>
         <p class="text-xs text-carbon-3 mb-3">
-          Requires <strong>platform-admin</strong> — region admins and global-finops will see a 403
+          Requires <strong>platform-admin</strong> — region admins will see a 403
           here. Read-only: catalog queries only — no role is created and no table is changed.
         </p>
 
@@ -3351,7 +3398,7 @@ function pretty(obj: unknown): string {
                   PB-1, said out loud rather than left for the reader to
                   discover: this is a whole-estate finance view, and two of the
                   four fixes belong to a Region admin who cannot open this page.
-                  The endpoint is global-finops-only because a region filter would
+                  The endpoint is platform-admin-only because a region filter would
                   drop the pooled lanes from §B and blow the residual for an
                   artefact reason — so the worklist is something to HAND OVER, not
                   a reason to widen who reads it.
@@ -3520,7 +3567,7 @@ function pretty(obj: unknown): string {
                 </p>
               </div>
               <p v-else class="text-xs text-carbon-3">
-                Requesting a re-read needs the global-finops role — it is not region-bounded and
+                Requesting a re-read needs the platform-admin role — it is not region-bounded and
                 it spends Log Analytics query budget. Diagnose above is available to you; the
                 progress below is read-only.
               </p>

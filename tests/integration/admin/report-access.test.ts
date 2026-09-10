@@ -81,8 +81,8 @@ function ev(opts: {
   return e as never
 }
 
-const finopsSession = (): Session =>
-  ({ teammateId: finopsId, email: 'ra-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'ra' }) as Session
+const orgWideSession = (): Session =>
+  ({ teammateId: finopsId, email: 'ra-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId, orgPath: 'ra' }) as Session
 const platformAdminSession = (): Session =>
   ({ teammateId: platformAdminId, email: 'ra-pa@x.test', displayName: 'PA', role: 'platform-admin', regionId, orgPath: 'ra' }) as Session
 const regionAdminSession = (): Session =>
@@ -114,7 +114,7 @@ beforeAll(async () => {
       .returning()
     return row!.id
   }
-  finopsId = await mk('oid-rag-fin', 'ra-fin@x.test', 'Fin', 'global-finops')
+  finopsId = await mk('oid-rag-fin', 'ra-fin@x.test', 'Fin', 'platform-admin')
   platformAdminId = await mk('oid-rag-pa', 'ra-pa@x.test', 'PA', 'platform-admin')
   regionAdminId = await mk('oid-rag-adm', 'ra-adm@x.test', 'Adm', 'admin')
   devId = await mk('oid-rag-dev', 'ra-dev@x.test', 'Dev', 'developer')
@@ -144,11 +144,11 @@ async function forbidden(p: Promise<unknown>) {
 }
 
 describe('GET /api/v1/admin/report-access', () => {
-  it('org-wide (global-finops) lists grants with joined teammate + granter names', async () => {
+  it('org-wide (platform-admin) lists grants with joined teammate + granter names', async () => {
     await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
     )
-    const got = (await getHandler(ev({ session: finopsSession() }))) as {
+    const got = (await getHandler(ev({ session: orgWideSession() }))) as {
       grants: Array<{
         id: string
         teammate_id: string
@@ -189,7 +189,7 @@ describe('GET /api/v1/admin/report-access', () => {
 describe('POST /api/v1/admin/report-access', () => {
   it('org-wide grants a permission → row created + report-access-granted audit (before/after/context)', async () => {
     const created = (await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'finance' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'finance' } }),
     )) as { id: string; teammate_id: string; permission: string }
     expect(created.teammate_id).toBe(targetId)
     expect(created.permission).toBe('finance')
@@ -221,7 +221,7 @@ describe('POST /api/v1/admin/report-access', () => {
     await expect(
       postHandler(
         ev({
-          session: finopsSession(),
+          session: orgWideSession(),
           method: 'POST',
           origin: 'http://evil.example',
           body: { teammate_id: targetId, permission: 'operational' },
@@ -233,12 +233,12 @@ describe('POST /api/v1/admin/report-access', () => {
   it('an invalid permission literal is a 400 naming the field', async () => {
     await expect(
       postHandler(
-        ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'bogus' } }),
+        ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'bogus' } }),
       ),
     ).rejects.toMatchObject({ statusCode: 400 })
     try {
       await postHandler(
-        ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'bogus' } }),
+        ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'bogus' } }),
       )
       expect.unreachable()
     } catch (err) {
@@ -249,11 +249,11 @@ describe('POST /api/v1/admin/report-access', () => {
 
   it('a duplicate ACTIVE grant is a 409', async () => {
     await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
     )
     await expect(
       postHandler(
-        ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
+        ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
       ),
     ).rejects.toMatchObject({ statusCode: 409 })
   })
@@ -262,7 +262,7 @@ describe('POST /api/v1/admin/report-access', () => {
     await expect(
       postHandler(
         ev({
-          session: finopsSession(),
+          session: orgWideSession(),
           method: 'POST',
           body: { teammate_id: inactiveTargetId, permission: 'operational' },
         }),
@@ -274,7 +274,7 @@ describe('POST /api/v1/admin/report-access', () => {
     await expect(
       postHandler(
         ev({
-          session: finopsSession(),
+          session: orgWideSession(),
           method: 'POST',
           body: { teammate_id: provisionalTargetId, permission: 'operational' },
         }),
@@ -287,7 +287,7 @@ describe('POST /api/v1/admin/report-access', () => {
     await expect(
       postHandler(
         ev({
-          session: finopsSession(),
+          session: orgWideSession(),
           method: 'POST',
           body: { teammate_id: targetId, permission: 'operational', expires_at: past },
         }),
@@ -299,11 +299,11 @@ describe('POST /api/v1/admin/report-access', () => {
 describe('DELETE /api/v1/admin/report-access/{id}', () => {
   it('revokes an active grant, sets revoked_at, and audits report-access-revoked (before/after/context)', async () => {
     const created = (await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
     )) as { id: string }
 
     const revoked = (await deleteHandler(
-      ev({ session: finopsSession(), method: 'DELETE', routerParams: { id: created.id } }),
+      ev({ session: orgWideSession(), method: 'DELETE', routerParams: { id: created.id } }),
     )) as { revoked: boolean; id: string }
     expect(revoked).toEqual({ revoked: true, id: created.id })
 
@@ -327,29 +327,29 @@ describe('DELETE /api/v1/admin/report-access/{id}', () => {
 
   it('a second revoke on the same grant is 404', async () => {
     const created = (await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
     )) as { id: string }
-    await deleteHandler(ev({ session: finopsSession(), method: 'DELETE', routerParams: { id: created.id } }))
+    await deleteHandler(ev({ session: orgWideSession(), method: 'DELETE', routerParams: { id: created.id } }))
     await expect(
-      deleteHandler(ev({ session: finopsSession(), method: 'DELETE', routerParams: { id: created.id } })),
+      deleteHandler(ev({ session: orgWideSession(), method: 'DELETE', routerParams: { id: created.id } })),
     ).rejects.toMatchObject({ statusCode: 404 })
   })
 
   it('a developer cannot revoke (403)', async () => {
     const created = (await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
     )) as { id: string }
     await forbidden(deleteHandler(ev({ session: devSession(), method: 'DELETE', routerParams: { id: created.id } })))
   })
 
   it('post-revoke re-grant succeeds — the partial unique index respects a revoked row', async () => {
     const created = (await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
     )) as { id: string }
-    await deleteHandler(ev({ session: finopsSession(), method: 'DELETE', routerParams: { id: created.id } }))
+    await deleteHandler(ev({ session: orgWideSession(), method: 'DELETE', routerParams: { id: created.id } }))
 
     const regranted = (await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
     )) as { id: string }
     expect(regranted.id).not.toBe(created.id)
 
@@ -364,13 +364,13 @@ describe('DELETE /api/v1/admin/report-access/{id}', () => {
   it('a revoked org-wide admin CANNOT clear their OWN revoke-all (403) — but a DIFFERENT admin can', async () => {
     // finops revokes THEMSELVES (an admin can set a revoke on anyone, incl self).
     const rev = (await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: finopsId, permission: 'revoke-all' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: finopsId, permission: 'revoke-all' } }),
     )) as { id: string }
 
     // The revoked finops still passes requireRole (role unchanged) and can reach
     // the endpoint — but lifting their OWN revoke is refused.
     await expect(
-      deleteHandler(ev({ session: finopsSession(), method: 'DELETE', routerParams: { id: rev.id } })),
+      deleteHandler(ev({ session: orgWideSession(), method: 'DELETE', routerParams: { id: rev.id } })),
     ).rejects.toMatchObject({ statusCode: 403 })
 
     // …and the revoke is still active (the refused DELETE did nothing).
@@ -390,13 +390,13 @@ describe('DELETE /api/v1/admin/report-access/{id}', () => {
     // finops is revoked, AND targetId is revoked. finops lifting target's revoke
     // is fine — the guard is strictly self-scoped.
     await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: finopsId, permission: 'revoke-all' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: finopsId, permission: 'revoke-all' } }),
     )
     const targetRev = (await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'revoke-all' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'revoke-all' } }),
     )) as { id: string }
     const lifted = (await deleteHandler(
-      ev({ session: finopsSession(), method: 'DELETE', routerParams: { id: targetRev.id } }),
+      ev({ session: orgWideSession(), method: 'DELETE', routerParams: { id: targetRev.id } }),
     )) as { revoked: boolean }
     expect(lifted.revoked).toBe(true)
   })
@@ -409,7 +409,7 @@ describe('A5: expiry lifecycle — GET shows status, POST supersedes, resolveRep
       INSERT INTO report_access_grant (teammate_id, permission, granted_by, expires_at)
       VALUES (${targetId}::uuid, 'finance', ${finopsId}::uuid, ${past}::timestamptz)`
 
-    const got = (await getHandler(ev({ session: finopsSession() }))) as {
+    const got = (await getHandler(ev({ session: orgWideSession() }))) as {
       grants: Array<{ teammate_id: string; permission: string; status: string }>
     }
     const row = got.grants.find((g) => g.teammate_id === targetId && g.permission === 'finance')
@@ -443,7 +443,7 @@ describe('A5: expiry lifecycle — GET shows status, POST supersedes, resolveRep
       RETURNING id::text AS id`
 
     const regranted = (await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'finance' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'finance' } }),
     )) as { id: string }
     expect(regranted.id).not.toBe(expired!.id)
 
@@ -470,11 +470,11 @@ describe('A5: expiry lifecycle — GET shows status, POST supersedes, resolveRep
 
   it('a LIVE (unexpired) duplicate is untouched by the supersede step and still 409s', async () => {
     await postHandler(
-      ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
+      ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
     )
     await expect(
       postHandler(
-        ev({ session: finopsSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
+        ev({ session: orgWideSession(), method: 'POST', body: { teammate_id: targetId, permission: 'operational' } }),
       ),
     ).rejects.toMatchObject({ statusCode: 409 })
   })
@@ -483,14 +483,14 @@ describe('A5: expiry lifecycle — GET shows status, POST supersedes, resolveRep
 describe('GET /api/v1/admin/report-access/teammate-search (A7)', () => {
   it('org-wide finds active, non-provisional teammates by name/email substring', async () => {
     const got = (await searchHandler(
-      ev({ session: finopsSession(), query: { q: 'ra-target' } }),
+      ev({ session: orgWideSession(), query: { q: 'ra-target' } }),
     )) as { results: Array<{ id: string; email: string }> }
     expect(got.results.some((r) => r.id === targetId)).toBe(true)
   })
 
   it('excludes inactive and provisional teammates', async () => {
     const got = (await searchHandler(
-      ev({ session: finopsSession(), query: { q: 'ra-' } }),
+      ev({ session: orgWideSession(), query: { q: 'ra-' } }),
     )) as { results: Array<{ id: string }> }
     const ids = got.results.map((r) => r.id)
     expect(ids).not.toContain(inactiveTargetId)
@@ -502,7 +502,7 @@ describe('GET /api/v1/admin/report-access/teammate-search (A7)', () => {
   })
 
   it('a q shorter than 2 chars is a 400', async () => {
-    await expect(searchHandler(ev({ session: finopsSession(), query: { q: 'a' } }))).rejects.toMatchObject({
+    await expect(searchHandler(ev({ session: orgWideSession(), query: { q: 'a' } }))).rejects.toMatchObject({
       statusCode: 400,
     })
   })

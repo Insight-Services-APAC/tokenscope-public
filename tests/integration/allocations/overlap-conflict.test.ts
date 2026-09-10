@@ -45,7 +45,7 @@ beforeAll(async () => {
   ouId = o!.id
   const [f] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'oid-oc-fin', email: 'oc-fin@x.test', role: 'global-finops', regionId, orgUnitId: ouId })
+    .values({ entraOid: 'oid-oc-fin', email: 'oc-fin@x.test', role: 'platform-admin', regionId, orgUnitId: ouId })
     .returning()
   finopsId = f!.id
   const [p] = await t.db
@@ -97,7 +97,7 @@ const finops = (): Session => ({
   teammateId: finopsId,
   email: 'oc-fin@x.test',
   displayName: 'Fin',
-  role: 'global-finops',
+  role: 'platform-admin',
   regionId,
   orgPath: 'oc.svc',
 })

@@ -64,7 +64,7 @@ const gfo = (): Session =>
     teammateId: '00000000-0000-0000-0000-000000000009',
     email: 'g@a.test',
     displayName: 'G',
-    role: 'global-finops',
+    role: 'platform-admin',
     regionId,
     orgPath: 'd',
     issuedAt: new Date().toISOString(),

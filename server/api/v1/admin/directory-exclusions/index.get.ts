@@ -11,7 +11,7 @@ import { requireRole } from '../../../../auth/rbac'
 import { withRequestRls } from '../../../../db/request-rls'
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   return await withRequestRls(event, async (tx) => {
     const rows = await tx.execute<{
       id: string

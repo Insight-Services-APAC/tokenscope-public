@@ -76,7 +76,7 @@ beforeAll(async () => {
     { email: 'admin-a2@wvii.test', oid: 'oid-admin-a2-wvii', role: 'admin', regionId: regionAId, orgUnitId: ouA!.id, var: 'adminA2' },
     { email: 'dev-a@wvii.test', oid: 'oid-dev-a-wvii', role: 'developer', regionId: regionAId, orgUnitId: ouA!.id, var: 'devA' },
     { email: 'admin-b@wvii.test', oid: 'oid-admin-b-wvii', role: 'admin', regionId: regionBId, orgUnitId: ouB!.id, var: 'adminB' },
-    { email: 'finops@wvii.test', oid: 'oid-finops-wvii', role: 'global-finops', regionId: regionAId, orgUnitId: ouA!.id, var: 'finops' },
+    { email: 'finops@wvii.test', oid: 'oid-finops-wvii', role: 'platform-admin', regionId: regionAId, orgUnitId: ouA!.id, var: 'finops' },
   ]) {
     const [row] = await t.db
       .insert(schema.teammate)
@@ -105,7 +105,7 @@ beforeEach(async () => {
   // Reset role + revoked_at + audit between tests so each starts clean.
   await t.db.execute(sql`UPDATE teammate SET role = 'admin', revoked_at = NULL WHERE id IN (${sql.raw(`'${adminAId}'::uuid`)}, ${sql.raw(`'${adminA2Id}'::uuid`)}, ${sql.raw(`'${adminBId}'::uuid`)})`)
   await t.db.execute(sql`UPDATE teammate SET role = 'developer', revoked_at = NULL WHERE id = ${devAId}::uuid`)
-  await t.db.execute(sql`UPDATE teammate SET role = 'global-finops', revoked_at = NULL WHERE id = ${finopsId}::uuid`)
+  await t.db.execute(sql`UPDATE teammate SET role = 'platform-admin', revoked_at = NULL WHERE id = ${finopsId}::uuid`)
   await t.db.execute(sql`TRUNCATE TABLE audit_event RESTART IDENTITY CASCADE`)
 })
 
@@ -205,12 +205,12 @@ function adminASession(opts?: { issuedAt?: string }): Session {
   }
 }
 
-function finopsSession(): Session {
+function orgWideSession(): Session {
   return {
     teammateId: finopsId,
     email: 'finops@wvii.test',
     displayName: 'Finops',
-    role: 'global-finops',
+    role: 'platform-admin',
     regionId: regionAId,
     orgPath: 'wvii-a.svc',
   }
@@ -288,14 +288,14 @@ describe('POST /api/v1/admin/users/:id/revoke-sessions (Wave VII)', () => {
   })
 
   it('admin revoking sole admin in their region → allowed (NO last-admin gate on revoke; user just signs back in)', async () => {
-    // adminB is the sole admin in region B; global-finops can revoke them.
+    // adminB is the sole admin in region B; platform-admin can revoke them.
     const handler = await loadHandler()
     const ev = makeEvent({
       method: 'POST',
       path: `/api/v1/admin/users/${adminBId}/revoke-sessions`,
       body: {},
       routerParams: { id: adminBId },
-      initialSession: finopsSession(),
+      initialSession: orgWideSession(),
     })
     const result = (await handler(ev as never)) as { ok: boolean }
     expect(result.ok).toBe(true)

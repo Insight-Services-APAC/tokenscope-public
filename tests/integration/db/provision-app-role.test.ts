@@ -67,6 +67,26 @@ import {
 const REPO_ROOT = resolve(__dirname, '../../..')
 
 /*
+ * NEEDS A PRISTINE CLUSTER — skipped under TEST_PG_URL, run on CI.
+ *
+ * Postgres roles are CLUSTER-global, not per-database. A testcontainer gives
+ * this file a cluster nobody has touched, and every case below starts from
+ * "`tokenscope_app` is ABSENT" (dormant runs must leave it absent; refusals
+ * must not half-provision; the first opt-in must CREATE it). On a shared
+ * TEST_PG_URL server (the devcontainer's local Postgres) the role survives the
+ * first run — with whatever password and posture that run left it — and every
+ * later run fails at those assertions, correctly. The per-file throwaway
+ * DATABASE the helper provisions cannot isolate this. The suffixed fixture
+ * roles further down are the part of the problem that CAN be isolated; the
+ * fixed name `tokenscope_app` is the part that cannot.
+ *
+ * Do not "fix" this by dropping the role in beforeAll: a leaked role is
+ * evidence a previous run was killed mid-transaction, and the drop would hide
+ * it. CI's testcontainers job keeps full coverage of this file.
+ */
+const ON_SHARED_CLUSTER = Boolean(process.env.TEST_PG_URL)
+
+/*
  * Walk up for `node_modules/.bin/tsx`: a git worktree has no node_modules of its
  * own and resolves against the checkout it was branched from. Hardcoding
  * `${REPO_ROOT}/node_modules/.bin/tsx` made every case in this file fail with
@@ -253,7 +273,7 @@ afterAll(async () => {
   await stopTestDb(t)
 })
 
-describe('dormant only when nobody asked — all four combinations', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('dormant only when nobody asked — all four combinations', () => {
   // These run FIRST and assert the role does not exist. They are the reason the
   // change can be merged and deployed while the measurement it depends on is
   // still being built.
@@ -318,7 +338,7 @@ describe('dormant only when nobody asked — all four combinations', () => {
 /** The output of the ONE run that creates the role. */
 let createRunOut = ''
 
-describe('opted in: it creates the role, and changes nothing else', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('opted in: it creates the role, and changes nothing else', () => {
   it('creates a NON-SUPERUSER login role and reports what it did', async () => {
     const r = await runProvision({
       DATABASE_URL: t.url,
@@ -412,7 +432,7 @@ describe('opted in: it creates the role, and changes nothing else', () => {
 })
 
 
-describe('the role it creates actually works', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('the role it creates actually works', () => {
   /*
    * THESE CASES NEED RLS OFF ON THE TABLES THEY READ, AND PROVISIONING NO LONGER
    * TURNS IT OFF. In production that is `drizzle/cutover-rls-sweep.ts`, proven
@@ -567,7 +587,7 @@ describe('the role it creates actually works', () => {
  * ROTATION — a boot no longer moves a password on its own. That is also the only
  * remaining path where an operator's cleartext reaches this code at all.
  */
-describe('the cleartext password never reaches the server', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('the cleartext password never reaches the server', () => {
   const canReadLogs = () => Boolean(t.container)
 
   afterAll(async () => {
@@ -648,7 +668,7 @@ function collectLogs(stream: Readable, ms: number): Promise<string> {
  * role is CREATED. `TOKENSCOPE_ROTATE_APP_DB_PASSWORD=true` is the only other
  * path, it is off by default, and it is meant to be on for one deliberate boot.
  */
-describe('the password is set once, and a later boot never moves it', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('the password is set once, and a later boot never moves it', () => {
   /*
    * The log-statement case above ROTATED the role to PW_LOGGED, so pin the
    * starting credential rather than inheriting it — and pin it the only way
@@ -792,7 +812,7 @@ describe('the password is set once, and a later boot never moves it', () => {
  * the classification is the same in all four (opted in, no password), so the
  * only variable is the runtime URL.
  */
-describe('exit 3 is about the RUNTIME credential, and only when it is really broken', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('exit 3 is about the RUNTIME credential, and only when it is really broken', () => {
   it('a credential the SERVER REFUSES is exit 3, and names the recovery', async () => {
     const r = await runProvision({
       DATABASE_URL: t.url,
@@ -963,7 +983,7 @@ describe('exit 3 is about the RUNTIME credential, and only when it is really bro
  * lock is for), even though neither of them will ever rotate the other's
  * password now.
  */
-describe('provisioning serialises across replicas', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('provisioning serialises across replicas', () => {
   it('waits on the advisory lock another replica holds, then completes when it is released', async () => {
     const holder = postgres(t.url, { max: 1, idle_timeout: 5 })
     let run: Promise<RunResult> | undefined
@@ -1087,7 +1107,7 @@ describe('provisioning serialises across replicas', () => {
  * attributes are converged, the owner membership is refused. The second case
  * below measures why.
  */
-describe('a pre-existing role is converged to the promised posture', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('a pre-existing role is converged to the promised posture', () => {
   it('clears SUPERUSER, BYPASSRLS and INHERIT, and verifies the result', async () => {
     await t.client.unsafe(`ALTER ROLE ${APP_DB_ROLE} SUPERUSER BYPASSRLS INHERIT`)
     // Non-vacuity: the bad posture is really in place before the run.
@@ -1657,7 +1677,7 @@ async function whileBlocking<T>(lockStatement: string, body: () => Promise<T>): 
  * ACCESS SHARE MODE` blocker left it completely unblocked (17ms). Blocking the
  * SCHEMA grant is what puts the failure in the right place.
  */
-describe('the whole run is one transaction', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('the whole run is one transaction', () => {
   const BLOCKER_ROLE = `prov_grantblock_${sfx}`
 
   beforeAll(async () => {
@@ -1720,7 +1740,7 @@ describe('the whole run is one transaction', () => {
  * same test seam `PREFLIGHT_TIMEOUT_MS` uses in scripts/preflight.ts) and read
  * what the process did.
  */
-describe('the startup deadline fires mid-run and still classifies the credential', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('the startup deadline fires mid-run and still classifies the credential', () => {
   const SHORT_BUDGET = '2000'
 
   it('fires while waiting on the provisioning lock, and reports honestly', async () => {
@@ -1841,7 +1861,7 @@ describe('the startup deadline fires mid-run and still classifies the credential
  * or the secret can drift with provisioning firmly on, so it has to exist
  * anyway, and once it does, coupling the two flags in Bicep buys nothing.
  */
-describe('dormant provisioning still refuses to boot on a broken runtime credential', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('dormant provisioning still refuses to boot on a broken runtime credential', () => {
   it('exit 3 when TOKENSCOPE_APP_DATABASE_URL is set and broken, with no opt-in at all', async () => {
     const r = await runProvision({
       DATABASE_URL: t.url,
@@ -1879,7 +1899,7 @@ describe('dormant provisioning still refuses to boot on a broken runtime credent
  * the env set both ways, because the resolver having the right `if` in it says
  * nothing about whether the pools call it.
  */
-describe('the runtime pools take the app role only when it is configured', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('the runtime pools take the app role only when it is configured', () => {
   const saved = { db: process.env.DATABASE_URL, app: process.env.TOKENSCOPE_APP_DATABASE_URL }
 
   afterAll(() => {
@@ -1969,7 +1989,7 @@ describe('the runtime pools take the app role only when it is configured', () =>
  * It runs last: it drops and re-creates the app role so the assumed CREATEROLE
  * role holds ADMIN OPTION on it, which is what a non-superuser needs to ALTER it.
  */
-describe('provisioning agrees with the probe: SET ROLE when that is the only route', () => {
+describe.skipIf(ON_SHARED_CLUSTER)('provisioning agrees with the probe: SET ROLE when that is the only route', () => {
   afterAll(async () => {
     // Roles are CLUSTER-wide, so on a shared TEST_PG_URL server a leaked
     // fixture role outlives the per-suite database. DROP OWNED BY first —

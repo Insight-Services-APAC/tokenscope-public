@@ -71,6 +71,12 @@ const FILES = [
   // store, and the whole point of the module is that exactly one audited reader
   // exists and it prints only non-secret fields.
   { name: 'device-id.mjs', type: 'js' },
+  // trusted-git.mjs — the ONE answer to "which git binary may we execute".
+  // Gated like the rest, and for a reason specific to this lane: the Copilot
+  // forwarder starts automatically with a repository as its cwd, and Windows
+  // resolves a bare command name from the cwd before PATH. A drifted copy here
+  // is a repository executing its own git.exe on one client only.
+  { name: 'trusted-git.mjs', type: 'js' },
 ]
 
 // Single-line SYNC NOTE markers — the parity check strips lines starting with these.

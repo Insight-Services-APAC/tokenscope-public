@@ -18,7 +18,7 @@
  * RBAC: platform-admin ONLY, matching network.get.ts and otel-logs.get.ts. The
  * response names database roles, the table owner, and precisely which security
  * controls are and are not in force — infrastructure and control-state, not
- * region-scoped operational data. A region-scoped `admin` and global-finops both
+ * region-scoped operational data. A region-scoped `admin` and platform-admin both
  * get a 403, which the diagnostics page renders as a calm scoped-out note.
  *
  * The probe module lives in `scripts/` because the entrypoint pre-flight also

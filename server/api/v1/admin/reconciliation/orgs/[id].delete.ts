@@ -8,7 +8,7 @@
  * back to the 'unknown' lane (telemetry-only) until it is re-onboarded. Historical
  * reconciliation/attribution records are untouched (they pin their own ids/text).
  *
- * RBAC: requireRole(admin, global-finops) + assertSameOrigin. Audited. Unknown
+ * RBAC: requireRole(admin) + assertSameOrigin. Audited. Unknown
  * id → 404; malformed id → 400 (requireUuidParam).
  *
  * Region-scope: DELETE … RETURNING stays the atomic exists-check (no TOCTOU
@@ -40,7 +40,7 @@ interface DeletedRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'provider-org id')
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

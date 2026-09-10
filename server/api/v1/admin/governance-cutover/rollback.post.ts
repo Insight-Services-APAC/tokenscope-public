@@ -2,7 +2,7 @@
  * POST /api/v1/admin/governance-cutover/rollback { reason } — reverts to the
  * legacy heuristic path. Only allowed while ACTIVATED and before any closed
  * period has used the new regime (design: "allowed only before any closed
- * period uses the new regime"). global-finops ONLY.
+ * period uses the new regime"). platform-admin ONLY.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { z } from 'zod'
@@ -24,7 +24,7 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'global-finops')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

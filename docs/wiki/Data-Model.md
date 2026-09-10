@@ -646,7 +646,7 @@ The grain-unique index keys on `COALESCE` expressions (sentinel uuid for the
 nullable id dims, `''` for the nullable text dims) — same idiom as
 `spend_rollup_daily`; mig 0136 is the source of truth. Read indexes: `(day)`,
 `(region_id, day)`, `(org_unit_id, day)`, `(teammate_id, day)`. RLS is enabled
-with the 0098-converged admin policy (`global-finops` / `platform-admin` —
+with the 0098-converged admin policy (`platform-admin` —
 never bare `admin`) mirroring `attribution_aggregate`, plus
 `REVOKE ALL FROM PUBLIC` — the reporting endpoints authorize via their
 in-query scope predicates, as on every report read.
@@ -1384,7 +1384,7 @@ admin (via `inbox_item`).
 
 A per-teammate, revocable, optionally-expiring reporting-access row (migs 0129,
 0130). The admin roles already see reports by ROLE — a region admin sees their
-own region, `global-finops` / `platform-admin` see the whole company — so a row
+own region, `platform-admin` see the whole company — so a row
 here is an OVERRIDE of that default, not the only source of access:
 
 - `operational` (whole-company reporting) or `finance` (the whole-company finance
@@ -1531,7 +1531,7 @@ Tables with policies defined:
 
 - `attribution_record` — `attribution_record_region_scope` and
   `attribution_record_org_scope` (the org policy matches on `org_unit.path <@
-  app.user_org_path`); both fall through for `global-finops` / `platform-admin`
+  app.user_org_path`); both fall through for `platform-admin`
   (mig 0098 removed the region-scoped `admin` from that arm).
 - `instance_attestation` — `instance_attestation_region_scope`.
 - `project` — `project_region_scope`.
@@ -1539,7 +1539,7 @@ Tables with policies defined:
   `repo_project_map`, `audit_event` — admin-only policies.
 - `inbox_item` — `inbox_item_self` (recipient-scoped).
 - `allocation` — **two** OR-combined permissive policies. `allocation_admin_only`
-  (mig 0002) gives admin / global-finops full access. `allocation_manager_scope`
+  (mig 0002) gives admin / platform-admin full access. `allocation_manager_scope`
   (mig 0007) adds manager visibility: a `FOR ALL` policy where an allocation is
   in scope iff it is project-scoped *and* the project's cost-owning-unit path is
   within the caller's org subtree. This was added because the allocator editor

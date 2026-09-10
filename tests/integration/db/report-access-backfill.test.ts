@@ -184,9 +184,9 @@ describe('mig 0129 backfill', () => {
         const managerId = await mkTeammate(db, region, unit, 'manager@bf-std.test', 'manager')
         const ownerId = await mkTeammate(db, region, unit, 'owner@bf-std.test', 'developer')
         await mkCouOwner(db, unit, ownerId)
-        const finopsId = await mkTeammate(db, region, unit, 'finops@bf-std.test', 'global-finops')
+        const finopsId = await mkTeammate(db, region, unit, 'finops@bf-std.test', 'platform-admin')
         const platformId = await mkTeammate(db, region, unit, 'platform@bf-std.test', 'platform-admin')
-        const inactiveFinopsId = await mkTeammate(db, region, unit, 'inactive-finops@bf-std.test', 'global-finops', {
+        const inactiveFinopsId = await mkTeammate(db, region, unit, 'inactive-finops@bf-std.test', 'platform-admin', {
           active: false,
         })
         const provisionalAdminId = await mkTeammate(db, region, unit, 'prov-admin@bf-std.test', 'admin', {
@@ -220,7 +220,7 @@ describe('mig 0129 backfill', () => {
         const managerId = await mkTeammate(db, region, unit, 'manager@bf-ras.test', 'manager')
         const ownerId = await mkTeammate(db, region, unit, 'owner@bf-ras.test', 'developer')
         await mkCouOwner(db, unit, ownerId)
-        const finopsId = await mkTeammate(db, region, unit, 'finops@bf-ras.test', 'global-finops')
+        const finopsId = await mkTeammate(db, region, unit, 'finops@bf-ras.test', 'platform-admin')
 
         await db`INSERT INTO report_visibility_setting (key, mode) VALUES ('policy', 'region-admins-see-all')`
         await apply0129(db)
@@ -291,12 +291,12 @@ describe('mig 0129 backfill', () => {
       await withPreMigrationDb(async (db) => {
         const region = await mkRegion(db, 'bf-dup')
         const unit = await mkUnit(db, region, 'bfdup', 'bf-dup-unit')
-        // global-finops AND an active cou_owner row: eligible via the
+        // platform-admin AND an active cou_owner row: eligible via the
         // unconditional org-wide-role arm AND (under 'all-admins-see-all') the
         // ownership arm. The backfill's `eligible` CTE is `SELECT DISTINCT`
         // before the permission cross-join, so this must still land exactly two
         // rows — never four.
-        const bothArmsId = await mkTeammate(db, region, unit, 'both-arms@bf-dup.test', 'global-finops')
+        const bothArmsId = await mkTeammate(db, region, unit, 'both-arms@bf-dup.test', 'platform-admin')
         await mkCouOwner(db, unit, bothArmsId)
 
         await db`INSERT INTO report_visibility_setting (key, mode) VALUES ('policy', 'all-admins-see-all')`

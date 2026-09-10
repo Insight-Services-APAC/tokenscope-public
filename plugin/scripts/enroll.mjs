@@ -41,6 +41,7 @@ import { homedir, hostname } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
+import { trustedGitPath } from './trusted-git.mjs'
 import { resolveApiBase } from './api-base.mjs'
 import { discoverMcpOrigin } from './mcp-origin.mjs'
 import { httpsPostJson, resolveHelperPath } from './plugin-runtime.mjs'
@@ -113,7 +114,9 @@ export function readClaimedEmail({ cwd = process.cwd(), home = homedir() } = {})
   }
   // 2. Fallback: the repo's configured git identity.
   try {
-    const e = execFileSync('git', ['config', 'user.email'], {
+    const git = trustedGitPath()
+    if (!git) throw new Error('no trusted git') // caught below; never a name lookup
+    const e = execFileSync(git, ['config', 'user.email'], {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],

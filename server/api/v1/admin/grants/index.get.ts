@@ -3,12 +3,12 @@
  * connections, for the admin grants surface. Design doc §Grant lifecycle (F3.3).
  *
  * Two-layer RBAC:
- *   - requireRole(admin, global-finops) at the edge.
+ *   - requireRole(admin) at the edge.
  *   - Region scope (F3.3): `oauth_token` has NO region of its own, so we resolve
  *     the TARGET teammate's region_id (oauth_token → teammate) and run
  *     requireRegionScope(event, teammate.region_id). A region admin querying a
  *     peer-region teammate's grants gets the requireRegionScope 403
- *     (platform-admin / global-finops are region-unbounded). RLS is inert under
+ *     (platform-admin are region-unbounded). RLS is inert under
  *     the owner connection, so this explicit check is the live gate.
  *
  * Returns the same per-grant projection as /me/grants (derived state, scopes,
@@ -30,7 +30,7 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const { teammate_id } = await getValidated(event, Query)
 
   // Resolve the target teammate's region — the scope axis for oauth_token, which
@@ -47,7 +47,7 @@ export default defineEventHandler(async (event) => {
       throw createError({ statusCode: 404, statusMessage: 'Teammate not found' })
     }
 
-    // Region-bound the admin to the teammate's region (platform-admin / global-finops
+    // Region-bound the admin to the teammate's region (platform-admin
     // pass through).
     await requireRegionScope(event, tm.regionId)
 

@@ -40,7 +40,7 @@ beforeAll(async () => {
     .returning()
   const [actor] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'oid-rp-actor', email: 'rp-actor@x.test', role: 'global-finops', regionId: r!.id, orgUnitId: ou!.id })
+    .values({ entraOid: 'oid-rp-actor', email: 'rp-actor@x.test', role: 'platform-admin', regionId: r!.id, orgUnitId: ou!.id })
     .returning()
   actorId = actor!.id
 }, 180_000)

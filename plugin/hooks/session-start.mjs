@@ -39,7 +39,7 @@ import { spawn } from 'node:child_process'
 import http from 'node:http'
 import { resolveRepoProjectCode, computeCodeHash, readGlobalEnrolment, writeRepoTag, resolveRepoRoot } from '../scripts/tag-repo.mjs'
 import { reconcilePluginPaths, applyOtlpProxyRepoint, otlpForwarderPath, mergeClaudeSettings, otlpProxyStashMissing, isLoopbackHost, OTLP_DCE_ENV_KEY } from '../scripts/env-builder.mjs'
-import { readSettingsEnv, readEmitSentinel, runEmitHelper, stateDir, globalSettingsEnv, repoTagEnv, safeProcessEnv, realHome } from '../scripts/plugin-runtime.mjs'
+import { readSettingsEnv, readEmitSentinel, runEmitHelper, stateDir, globalSettingsEnv, repoTagEnv, safeProcessEnv, realHome, migrateStoredEndpoints } from '../scripts/plugin-runtime.mjs'
 import { resolveShim, shimActive } from '../scripts/otlp-shim-policy.mjs'
 import { refreshLanded } from '../scripts/landed-check.mjs'
 import { checkRepoProjectBillable } from '../scripts/project-check.mjs'
@@ -162,18 +162,21 @@ function realpathOr(p) {
  * regardless. With no git root at all (not a work tree) it inspects the cwd
  * alone — outside a repository there is no principled place to stop.
  *
- * Symlinked cwd: the walk runs on the REAL cwd, because `resolveRepoRoot` asks
- * git, which answers with a physical path — a lexical walk from a symlinked cwd
- * would never meet it. If the chain still fails to reach the root (a bind
- * mount, an exotic layout), the collected ancestors are discarded and only the
- * three directories whose provenance is certain — the cwd as given, the real
- * cwd, and the root — are inspected.
+ * Symlinked cwd: the walk runs on the REAL cwd, and `resolveRepoRoot` is given
+ * that real path, so both ends are physical and the chain meets. (It used to be
+ * git that guaranteed a physical root; `resolveRepoRoot` no longer spawns
+ * anything — see its header — so the realpath here is what carries the property.)
+ * If the chain still fails to reach the root (a bind mount, an exotic layout),
+ * the collected ancestors are discarded and only the three directories whose
+ * provenance is certain — the cwd as given, the real cwd, and the root — are
+ * inspected.
  *
  * Memoised per resolved cwd: `hookStateDir()` is called from five points in one
- * hook run and `resolveRepoRoot` shells out to `git rev-parse`. A directory's git
- * root cannot change inside the lifetime of this short-lived process, so the
- * cache cannot go stale in production; it is per-process, so nothing outlives
- * the hook. Exported for tests.
+ * hook run and each asks for the repo root. A directory's git root cannot change
+ * inside the lifetime of this short-lived process, so the cache cannot go stale
+ * in production; it is per-process, so nothing outlives the hook. (The memo was
+ * originally there to avoid five `git rev-parse` spawns; the spawn is gone, but
+ * five filesystem walks are still worth doing once.) Exported for tests.
  */
 const REPO_DIRS_CACHE = new Map()
 
@@ -420,6 +423,15 @@ export function neutraliseRepoExecEnv(cwd = process.cwd()) {
 export function hookStateDir(cwd = process.cwd()) {
   // FIRST — the global settings file is what the restore below trusts, and a
   // repo-claimed HOME would choose which file that is. See neutraliseRepoHome.
+  //
+  // This ordering was itself the F34 finding: neutraliseRepoHome asks
+  // `resolveRepoRoot` which directory the repo is, and that used to spawn `git`
+  // — through a PATH the repo could set, seven lines before the repair that
+  // strips it. The order could not simply be flipped (the exec repair reads the
+  // global settings file, so the HOME repair must precede it, and BOTH ask for
+  // the repo root). It is safe now because `resolveRepoRoot` spawns NOTHING:
+  // there is no exec on this path to steer. Keep it that way — a subprocess
+  // added anywhere under these two calls is executing with the repo's env.
   neutraliseRepoHome(cwd)
   // Then the keys that decide which CODE runs in anything spawned from here.
   // Ordered after the HOME repair because this one also reads the global
@@ -982,6 +994,10 @@ async function main() {
   }
 
   try {
+    // Legacy enrolments stored a credential but no endpoint; copy the endpoints
+    // across from the device's OWN settings so the helper's refuse-to-pair rule
+    // never becomes an outage. Trusted source only — see migrateStoredEndpoints.
+    migrateStoredEndpoints()
     selfHealPluginPaths()
   } catch {
     /* fail-open */

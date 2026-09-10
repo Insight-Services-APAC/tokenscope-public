@@ -40,6 +40,7 @@ import {
   type ParseCounters,
   emptyParseCounters,
 } from '../azure/reader'
+import type { SourceCoverage } from '../azure/dcr-metrics'
 import { recordAuditEvent } from '../db/audit'
 import { dispatchInbox, type InboxCategory } from '../notifications/dispatch'
 import { canonicaliseEmail } from '../../shared/identity/email'
@@ -74,8 +75,47 @@ export interface TelemetryOnlyRegionDay {
 }
 
 export interface JoinResult {
+  /*
+   * How many instances this run SELECTED and handed to processSession — the size
+   * of the selection query's result, NOT how many had usage. The selection
+   * deliberately includes every open instance with a fresh bearer mint, and
+   * Claude Code mints one at startup and every ~29 min for as long as the editor
+   * is open, so an idle laptop is `sessionsProcessed: 1` every tick. It is
+   * evidence the reader RAN a selection, never that there was work to attribute.
+   */
   sessionsProcessed: number
   attributionRowsWritten: number
+  /*
+   * Usage records the reader RETURNED this run, summed over every session,
+   * before pricing/dedup. DIAGNOSTIC only: a healthy tick re-fetches
+   * already-attributed rows (the reader re-reads from watermark −
+   * WATERMARK_LOOKBACK_MS and onConflictDoNothing drops them), so "fetched > 0,
+   * written 0" is the NORMAL quiet shape, not a fault.
+   */
+  usageRowsFetched: number
+  /*
+   * DIAGNOSTIC (folded from PR #316): usage records whose ts_event is STRICTLY
+   * NEWER than the instance watermark — MAX(attribution_record.ts_event) already
+   * written for that instance — summed over every session. It is NOT the stall
+   * gate (that is `sourceCoverage`, an ingest-side signal independent of this
+   * reader's output); it is the middle term of the operator's narrative "source
+   * received N · reader saw M new · wrote R", which names WHICH stage lost the
+   * rows. Counted at fetch time, before pricing, so a session that throws
+   * mid-write still reports what it saw. Under-counts by design (out-of-order
+   * events below the watermark, parse-rejects), only ever smaller.
+   */
+  newEventsSeen: number
+  /*
+   * INGEST-SIDE COVERAGE (PR #319): the DCR platform-metric verdict for this
+   * tick's window — did the pipeline physically receive rows (RowsReceived_Count)
+   * the joiner did not land? THE work-evidence signal the two stall alerts gate
+   * on, independent of everything above (selection, watermark, parser, the LA
+   * query path). Stamped by the registry entry (server/azure/dcr-metrics.ts),
+   * threaded in via JoinOptions.sourceCoverage — runReadJoiner only echoes it.
+   * Optional/null: a run recorded before this shipped, or a caller (recovery)
+   * that ran no probe, reads as "not measured" = unknown, never as 0.
+   */
+  sourceCoverage?: SourceCoverage | null
   /*
    * Dismissed conversations handed BACK to the needs-tagging queue because this
    * tick's spend pushed them materially past what was dismissed (mig 0094 /
@@ -175,6 +215,27 @@ export interface JoinResult {
   costingRungs: CostingRungCounts
 }
 
+/**
+ * How many of `usage` are STRICTLY newer than `watermark` — the per-instance
+ * contribution to JoinResult.newEventsSeen (a diagnostic). No watermark (an
+ * instance with no attribution yet) = every record is new. Strict: the watermark
+ * IS the ts_event of an already-written row, so a record AT it is attributed.
+ * Compared at millisecond precision on both sides. A record with an unparseable
+ * ts_event (NaN) is not counted: it cannot be shown newer than anything.
+ */
+export function countNewerThanWatermark(
+  usage: ReadonlyArray<{ tsEvent: string }>,
+  watermark: Date | undefined,
+): number {
+  if (!watermark) return usage.length
+  const wm = watermark.getTime()
+  let n = 0
+  for (const u of usage) {
+    if (new Date(u.tsEvent).getTime() > wm) n += 1
+  }
+  return n
+}
+
 export interface JoinOptions {
   sessionIds?: string[]
   sinceMs?: number
@@ -197,6 +258,14 @@ export interface JoinOptions {
   selectionCapHit?: number | null
   /** True when `sessionIds` came from an operator override, not the selection. */
   scoped?: boolean
+  /*
+   * The ingest-side coverage verdict for this tick, measured by the caller
+   * (the registry entry) BEFORE selection so it covers the selection-dead-zone
+   * shape too, and echoed into JoinResult.sourceCoverage. Passed in rather than
+   * probed here so runReadJoiner stays a pure joiner and telemetry-recovery /
+   * the tests need no Azure metrics client.
+   */
+  sourceCoverage?: SourceCoverage | null
 }
 
 const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000
@@ -1096,10 +1165,12 @@ export async function runReadJoiner(
   // onConflictDoNothing dedups the overlap. An instance with NO attribution yet
   // has no watermark → undefined → the reader does a full-window read (unchanged).
   // Batched into ONE query (instance_id → max_ts_event) to avoid N round-trips.
-  // A deep-rescan tick (ING-1) skips the watermarks entirely → every instance
-  // gets a full-window read; the dedup index absorbs the re-reads.
+  // A deep-rescan tick (ING-1) WITHHOLDS the watermark from the reader (full
+  // re-read) but the watermarks are still LOADED, because newEventsSeen measures
+  // every fetched record against them — without that, a daily deep pass on a
+  // quiet estate would report its whole re-read history as new work.
   const watermarks = new Map<string, Date>()
-  if (sessions.length > 0 && !opts.deepRescan) {
+  if (sessions.length > 0) {
     const wmRows = await db.execute<{ instance_id: string; max_ts: string | null }>(sql`
       SELECT instance_id::text AS instance_id, MAX(ts_event)::text AS max_ts
       FROM attribution_record
@@ -1150,6 +1221,10 @@ export async function runReadJoiner(
   // queries on the hot path (D9). grace is resolved by the PROJECT's region.
   const lifecyclePolicyFor = await loadLifecyclePolicyResolver(db)
   let written = 0
+  // Diagnostics (see JoinResult.usageRowsFetched / newEventsSeen). Counted at
+  // fetch time so a session that throws later (ING-6) still reports what it saw.
+  let usageRowsFetched = 0
+  let newEventsSeen = 0
   let skippedNoCard = 0
   let spilledUnauthorized = 0
   let spilledEnded = 0
@@ -1186,7 +1261,17 @@ export async function runReadJoiner(
     // JoinResult REGARDLESS of what usage.length turns out to be — merged
     // before the early-return below, so a session whose records were ALL
     // rejected still reports the reject instead of vanishing silently.
-    const usage = await reader.getSessionUsage(session.instance_id, watermarks.get(session.instance_id), parseCounters)
+    const watermark = watermarks.get(session.instance_id)
+    const usage = await reader.getSessionUsage(
+      session.instance_id,
+      // A deep-rescan tick re-reads the full window; the watermark is still
+      // measured against below (JoinResult.newEventsSeen), so a re-read is not
+      // mistaken for new work.
+      opts.deepRescan ? undefined : watermark,
+      parseCounters,
+    )
+    usageRowsFetched += usage.length
+    newEventsSeen += countNewerThanWatermark(usage, watermark)
     if (usage.length === 0) return
 
     /*
@@ -2134,6 +2219,11 @@ export async function runReadJoiner(
   return {
     sessionsProcessed: sessions.length,
     attributionRowsWritten: written,
+    usageRowsFetched,
+    newEventsSeen,
+    // Echoed from the caller's ingest-side probe (JoinOptions.sourceCoverage);
+    // null when no probe ran (recovery / tests). runReadJoiner never probes.
+    sourceCoverage: opts.sourceCoverage ?? null,
     staleDismissalsReturned: staleDismissals.sessions,
     spansSkippedNoRateCard: skippedNoCard,
     costingRungs,

@@ -52,7 +52,7 @@ beforeAll(async () => {
     .values({ regionId, path: 'cm.cou', code: 'cm-cou', displayName: 'CoU', unitType: 'bu', isCostOwningUnit: true })
     .returning()
   couA = couRow!.id
-  const [f] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-cm-fin', email: 'cm-fin@x.test', role: 'global-finops', regionId, orgUnitId: ouId }).returning()
+  const [f] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-cm-fin', email: 'cm-fin@x.test', role: 'platform-admin', regionId, orgUnitId: ouId }).returning()
   finopsId = f!.id
   const [d] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-cm-dev', email: 'cm-dev@x.test', role: 'developer', regionId, orgUnitId: ouId }).returning()
   devId = d!.id
@@ -109,7 +109,7 @@ function ev(opts: {
   return e as unknown as Parameters<typeof entPost>[0]
 }
 
-const finops = (): Session => ({ teammateId: finopsId, email: 'cm-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'cm.svc' })
+const finops = (): Session => ({ teammateId: finopsId, email: 'cm-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId, orgPath: 'cm.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'cm-dev@x.test', displayName: 'Dev', role: 'developer', regionId, orgPath: 'cm.svc' })
 
 async function mkGithubEnterprise(externalId: string): Promise<string> {
@@ -259,7 +259,7 @@ describe('copilot-bill-repull route', () => {
   it('403s a REGION admin — provider_enterprise has no region to clamp them to', async () => {
     // External review, sprint 3: `admin` is region-scoped, but provider_enterprise
     // carries no region column, so admitting it here let any region admin delete and
-    // rewrite ANY enterprise's bill month. Money-of-record; gated to global-finops.
+    // rewrite ANY enterprise's bill month. Money-of-record; gated to platform-admin.
     const entId = await mkGithubEnterprise(`rbac-ent-${randomUUID().slice(0, 8)}`)
     const regionAdmin: Session = {
       teammateId: finopsId,

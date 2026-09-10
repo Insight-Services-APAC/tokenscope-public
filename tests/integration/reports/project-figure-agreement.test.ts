@@ -75,7 +75,7 @@ const ev = (session: Session, query = '', params: Record<string, string> = {}) =
 const evAll = (session: Session, query = '', params: Record<string, string> = {}) =>
   ev(session, query ? `${query}&region=all` : 'region=all', params)
 
-const patSession = (role = 'global-finops'): Session =>
+const patSession = (role = 'platform-admin'): Session =>
   ({
     teammateId: patId,
     email: 'pat@p.test',
@@ -132,7 +132,7 @@ beforeAll(async () => {
    * persona in this file shares it, and nothing here asserts a 403 or a
    * narrower scope for it, so a direct grant is safe. Granted BOTH permissions
    * to restore the pre-mig-0129 unconditional org-wide reach the default
-   * 'global-finops' `patSession()` used to get from its role alone (needed for
+   * 'platform-admin' `patSession()` used to get from its role alone (needed for
    * the whole-company `region=all` drivers calls below). `/me/cost-centres`
    * (meHandler) is unaffected — it is grants-free by design (project-depth.ts's
    * own comment), and `resolveCostCentreDrill`'s unbounded/owner-only arms both

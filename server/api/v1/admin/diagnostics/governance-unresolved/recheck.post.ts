@@ -6,7 +6,7 @@
  * inline, so an operator who just registered/linked the missing org sees the
  * effect immediately rather than waiting for the next cron tick.
  *
- * RBAC: global-finops (write-adjacent — triggers a bulk UPDATE, though a
+ * RBAC: platform-admin (write-adjacent — triggers a bulk UPDATE, though a
  * read-only/idempotent one). CSRF-guarded. Audited (a bulk UPDATE on money
  * rows is consequential even when every change is a resolution, not a
  * verdict flip).
@@ -19,7 +19,7 @@ import { recordAuditEvent } from '../../../../../db/audit'
 import { runGovernanceKeyBackfill } from '../../../../../workers/governance-key-backfill'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'global-finops')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
   const ua = getHeader(event, 'user-agent') ?? null
@@ -32,9 +32,9 @@ export default defineEventHandler(async (event) => {
    * an estate-wide computation. It cannot happen on this route, for two
    * independent reasons — neither of them "the pool it happened to land on":
    *
-   *   1. requireRole pins this route to `global-finops` (and platform-admin,
+   *   1. requireRole pins this route to `platform-admin` (and platform-admin,
    *      which requireRole always admits and withRequestRls maps to
-   *      `global-finops` at the RLS layer). There is no region-scoped caller to
+   *      `platform-admin` at the RLS layer). There is no region-scoped caller to
    *      inherit a region FROM. The scope is stated by the RBAC gate, which is
    *      the first line of this handler, not implied by plumbing.
    *   2. runGovernanceKeyBackfill touches actual_spend, reconciliation_record

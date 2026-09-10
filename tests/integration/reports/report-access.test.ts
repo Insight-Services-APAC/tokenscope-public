@@ -5,11 +5,13 @@
  *
  * Per-literal-endpoint proof (sg-M6/M8): every merged Region route (×5, incl. the
  * `region=all` width) and every /reports/finance surface (index + drill + export)
- * asserts 200/403 against `effectiveReportGrants` for SIX personas — plain
- * developer, cost-centre owner, region admin, global-finops and platform-admin —
- * crossed with the states a `report_access_grant` row can put a caller in. Plus:
+ * asserts 200/403 against `effectiveReportGrants` for FIVE personas — plain
+ * developer, cost-centre owner, region admin, manager, platform-admin — crossed
+ * with the states a `report_access_grant` row can put a caller in. (It said SIX
+ * and listed four: retiring `global-finops` collapsed two personas into one and
+ * dropped manager coverage without changing this sentence.) Plus:
  *   - THE ROLE-DEFAULT PROOF (PO decision 2026-08-13, reversing #251 for the
- *     org-wide roles only): an ungranted global-finops/platform-admin is 200 on
+ *     org-wide roles only): an ungranted platform-admin is 200 on
  *     every whole-company width by ROLE, while an ungranted region `admin` stays
  *     region-bound (403 on region=all and on finance) — the anti-IDOR clamp.
  *   - THE DENY PROOF (mig 0130): an active 'revoke-all' row zeroes a caller's
@@ -66,10 +68,10 @@ let couB = '' // cost-owning unit, region B
 let adminId = ''
 let ownerId = '' // developer WITH an active cou_owner row on couA
 let plainDevId = '' // developer with NO cou_owner row (S3 part d)
-let finopsId = '' // global-finops, NO ownership — the disconnect-proof persona
+let finopsId = '' // platform-admin, NO ownership — the disconnect-proof persona
 let platformId = '' // platform-admin, NO ownership — same disconnect
-let finopsOwnerId = '' // global-finops WITH active cou_owner on couA (C3 ownerOnly seal)
-let demotedId = '' // seeded global-finops, demoted to developer mid-suite (C3 role-demotion pin)
+let finopsOwnerId = '' // platform-admin WITH active cou_owner on couA (C3 ownerOnly seal)
+let demotedId = '' // seeded platform-admin, demoted to developer mid-suite (C3 role-demotion pin)
 let subjectId = '' // a teammate with in-scope spend — the drill's SUBJECT
 
 const ev = (session: Session, query = '', params: Record<string, string> = {}) => {
@@ -115,11 +117,13 @@ const ownerSess = (): Session =>
 const plainDevSess = (): Session =>
   ({ teammateId: plainDevId, email: 'plaindev@a.test', displayName: 'PD', role: 'developer', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
 const finopsSess = (): Session =>
-  ({ teammateId: finopsId, email: 'finops@a.test', displayName: 'F', role: 'global-finops', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
+  ({ teammateId: finopsId, email: 'finops@a.test', displayName: 'F', role: 'platform-admin', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
+const managerSess = (): Session =>
+  ({ teammateId: plainDevId, email: 'plaindev@a.test', displayName: 'M', role: 'manager', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
 const platformSess = (): Session =>
   ({ teammateId: platformId, email: 'platform@a.test', displayName: 'P', role: 'platform-admin', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
 const finopsOwnerSess = (): Session =>
-  ({ teammateId: finopsOwnerId, email: 'finopsowner@a.test', displayName: 'FO', role: 'global-finops', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
+  ({ teammateId: finopsOwnerId, email: 'finopsowner@a.test', displayName: 'FO', role: 'platform-admin', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
 
 /** DELETE every grant between cases — the grant-model successor of `setMode(null)`. */
 async function clearGrants(): Promise<void> {
@@ -177,10 +181,10 @@ beforeAll(async () => {
   adminId = await mkTeammate(regionA, couA, 'admin@a.test', 'admin')
   ownerId = await mkTeammate(regionA, couA, 'owner@a.test', 'developer')
   plainDevId = await mkTeammate(regionA, couA, 'plaindev@a.test', 'developer') // S3 part (d): no cou_owner row
-  finopsId = await mkTeammate(regionA, couA, 'finops@a.test', 'global-finops') // disconnect-proof: no ownership either
+  finopsId = await mkTeammate(regionA, couA, 'finops@a.test', 'platform-admin') // disconnect-proof: no ownership either
   platformId = await mkTeammate(regionA, couA, 'platform@a.test', 'platform-admin')
-  finopsOwnerId = await mkTeammate(regionA, couA, 'finopsowner@a.test', 'global-finops') // C3 ownerOnly seal
-  demotedId = await mkTeammate(regionA, couA, 'demoted@a.test', 'global-finops') // C3 role-demotion pin
+  finopsOwnerId = await mkTeammate(regionA, couA, 'finopsowner@a.test', 'platform-admin') // C3 ownerOnly seal
+  demotedId = await mkTeammate(regionA, couA, 'demoted@a.test', 'platform-admin') // C3 role-demotion pin
   const billerA = await mkTeammate(regionA, couA, 'billa@a.test', 'developer')
   const billerB = await mkTeammate(regionB, couB, 'billb@b.test', 'developer')
 
@@ -252,7 +256,7 @@ describe('the endpoint matrix — persona × grant state', () => {
   })
 
   // ── The ROLE-DEFAULT proof (PO decision 2026-08-13, reversing #251 for the
-  // ORG-WIDE roles ONLY). `global-finops` and `platform-admin` see the WHOLE
+  // ORG-WIDE roles ONLY). `platform-admin` and `platform-admin` see the WHOLE
   // COMPANY with NO grant at all: region=all, the finance pack, the unbounded BU
   // list, the across-frame teammate drill, and region-wide project depth. A
   // region `admin` is NOT in this set — the test directly above proves it stays
@@ -280,12 +284,28 @@ describe('the endpoint matrix — persona × grant state', () => {
     await ok(projectDepth(ev(adminSess(), 'month=2026-07', { code: 'RV-PROJ' })))
   })
 
-  it('global-finops, no grants: FULL company access by role', async () => {
-    await fullAccessByRole(finopsSess)
+  it('platform-admin, no grants: FULL company access by role', async () => {
+    /*
+     * ONE case, not two. These were `global-finops` and `platform-admin` until
+     * the former was retired; the rename made both sessions platform-admin, so
+     * the identical assertion ran twice under the identical name while the
+     * boundary it used to prove — that a non-org-wide role does NOT get this by
+     * role — quietly disappeared. The manager case below is that boundary,
+     * restored.
+     */
+    await fullAccessByRole(platformSess)
   })
 
-  it('platform-admin, no grants: FULL company access by role', async () => {
-    await fullAccessByRole(platformSess)
+  it('a MANAGER gets no WHOLE-COMPANY access by role — that is org-wide only', async () => {
+    /*
+     * Asserts what the matrix actually denies a manager: `across: false` (so no
+     * region=all width) and `finance: false`. NOT the cost-centre list — a
+     * manager holds `costCentre: 'owned-or-subtree'` and is legitimately 200
+     * there, which is the assertion this case got wrong on the first attempt.
+     */
+    await clearGrants()
+    await expectAll(regionCallsAll(managerSess()), false)
+    await expectAll(financeCalls(managerSess()), false)
   })
 
   // ── The NEW disconnect proof (mig 0130): an explicit 'revoke-all' row zeroes
@@ -465,7 +485,7 @@ describe('the endpoint matrix — persona × grant state', () => {
     await ok(projectDepth(ev(plainDevSess(), 'month=2026-07', { code: 'RV-PROJ' })))
   })
 
-  it('global-finops + both (the backfill-equivalent state): old org-wide expectations, byte-identical', async () => {
+  it('platform-admin + both (the backfill-equivalent state): old org-wide expectations, byte-identical', async () => {
     await clearGrants()
     await grantReportAccess(t.client, finopsId)
     await expectAll(regionCallsAll(finopsSess()), true)
@@ -509,7 +529,7 @@ describe('grant lifecycle — expired / revoked behave as no grant; re-grant aft
  * ── C3 (post external design review) ────────────────────────────────────────
  */
 describe('org-wide role, NO grants: a FOREIGN-region ?ou= drill on /reports/region now OPENS (full access by role)', () => {
-  it('global-finops', async () => {
+  it('platform-admin', async () => {
     await clearGrants()
     await ok(regionIndex(ev(finopsSess(), `month=2026-07&ou=${couB}`)))
   })
@@ -572,9 +592,9 @@ describe('org-wide role + active cou_owner, NO grants: sees the WHOLE company by
 })
 
 describe('C3: role demotion does NOT retract an already-active grant (designed persistence)', () => {
-  it('a teammate demoted global-finops → developer keeps ACTIVE grants elevating (200 on finance + region=all)', async () => {
+  it('a teammate demoted platform-admin → developer keeps ACTIVE grants elevating (200 on finance + region=all)', async () => {
     await clearGrants()
-    await grantReportAccess(t.client, demotedId) // both permissions, while still global-finops
+    await grantReportAccess(t.client, demotedId) // both permissions, while still platform-admin
     // `report_access_grant` carries no role column (mig 0129) and
     // `resolveReportPermissions` never joins `teammate.role` — a grant is keyed
     // on `teammate_id` alone. Demoting the role therefore does NOT re-evaluate or
@@ -595,7 +615,7 @@ describe('C3: role demotion does NOT retract an already-active grant (designed p
       await ok(regionIndex(evAll(demotedSess, 'month=2026-07')))
       await ok(financeIndex(ev(demotedSess, 'month=2026-06')))
     } finally {
-      await t.client`UPDATE teammate SET role = 'global-finops' WHERE id = ${demotedId}::uuid`
+      await t.client`UPDATE teammate SET role = 'platform-admin' WHERE id = ${demotedId}::uuid`
     }
   })
 })

@@ -14,7 +14,7 @@
  * SAME safe vocabulary health.ts uses. The KEY IS NEVER returned or logged, and no
  * raw provider error text (which could echo the key) is surfaced.
  *
- * RBAC: requireRole(admin, global-finops) + assertSameOrigin. (No audit row: this
+ * RBAC: requireRole(admin) + assertSameOrigin. (No audit row: this
  * is a read-only probe — it writes nothing. The onboarding orgs.post that follows
  * is the audited mutation.)
  */
@@ -31,7 +31,7 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
 

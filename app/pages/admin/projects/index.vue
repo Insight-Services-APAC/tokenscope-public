@@ -3,7 +3,7 @@
  * Admin → Projects (top-level). Promotes the per-region Projects tab to a
  * first-class admin page with edit / retire / member management.
  *
- * Region scope mirrors Admin → Users: org-wide roles (global-finops /
+ * Region scope mirrors Admin → Users: the org-wide role (
  * platform-admin) get a region-view picker (defaults to their own region);
  * region admins are pinned to their own region.
  */
@@ -51,11 +51,11 @@ const regionId = computed(() => session.value?.regionId ?? '')
 
 const isAdmin = computed(() => {
   const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+  return r === 'admin' || r === 'platform-admin'
 })
 const isOrgWide = computed(() => {
   const r = session.value?.role
-  return r === 'global-finops' || r === 'platform-admin'
+  return r === 'platform-admin'
 })
 
 // All three reads are declared lazily and never awaited: navigation is never

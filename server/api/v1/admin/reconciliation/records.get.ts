@@ -2,13 +2,13 @@
  * GET /api/v1/admin/reconciliation/records — paginated reconciliation_record reader
  * + summary aggregates. The "what did the engine produce?" surface.
  *
- * RBAC: requireRole(admin, global-finops). reconciliation_record has NO RLS policy, so
+ * RBAC: requireRole(admin). reconciliation_record has NO RLS policy, so
  * the in-query region filter is the SOLE clamp (test it as such):
  *   - admin -> AND rr.region_id = <home region>. This naturally EXCLUDES org-scope rows
  *     (region_id IS NULL), so a region admin sees teammate-scope records in their region
- *     only; org-grain (web/code-exec) records are visible to global-finops only. The
+ *     only; org-grain (web/code-exec) records are visible to platform-admin only. The
  *     response carries regionScoped + scopeNote so the UI can label it.
- *   - global-finops -> no clamp (full ledger incl org-grain).
+ *   - platform-admin -> no clamp (full ledger incl org-grain).
  *
  * Summary is split on purpose (delta_usd is SIGNED: untagged/over positive, walk_back
  * negative): untaggedUsd = disposition='untagged' only; walkBackUsd = abs(walk_back);
@@ -84,7 +84,7 @@ interface SummaryRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
   const query = await getValidated(event, Query)
 
   const statusClause = query.status === 'all' ? sql`` : sql`AND rr.status = ${query.status}`
@@ -97,7 +97,7 @@ export default defineEventHandler(async (event) => {
   const periodToClause = query.periodTo ? sql`AND rr.period_date <= ${query.periodTo}::date` : sql``
   const teammateClause = query.teammateId ? sql`AND rr.teammate_id = ${query.teammateId}::uuid` : sql``
   // Region clamp (sole gate — no RLS policy on this table). admin -> own region only,
-  // which excludes org-scope (region_id NULL) rows; global-finops -> full ledger.
+  // which excludes org-scope (region_id NULL) rows; platform-admin -> full ledger.
   const isRegionScoped = session.role === 'admin'
   const regionClause = isRegionScoped ? sql`AND rr.region_id = ${session.regionId}::uuid` : sql``
 
@@ -203,7 +203,7 @@ export default defineEventHandler(async (event) => {
     offset: query.offset,
     regionScoped: isRegionScoped,
     scopeNote: isRegionScoped
-      ? 'Region-scoped: teammate records in your region only. Org-grain (cross-region) records are visible to global-finops.'
+      ? 'Region-scoped: teammate records in your region only. Org-grain (cross-region) records are visible to platform-admin.'
       : null,
   }
 })

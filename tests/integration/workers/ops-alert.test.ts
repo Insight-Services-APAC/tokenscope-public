@@ -568,14 +568,17 @@ describe('the fleet predicate (A2.3)', () => {
 })
 
 describe('attribution stall (A2.2)', () => {
-  async function seedZeroWriteStreak(): Promise<void> {
+  // `coverage`: the ingest verdict on each run. 'rows-arrived' (default) = the
+  // DCR received rows the joiner did not land (the outage); 'no-rows' = idle.
+  async function seedZeroWriteStreak(coverage: 'rows-arrived' | 'no-rows' | 'unknown' = 'rows-arrived'): Promise<void> {
+    const cov = JSON.stringify({ status: coverage, rowsReceived: coverage === 'rows-arrived' ? 42 : coverage === 'no-rows' ? 0 : null })
     for (const agoMin of [5, 35, 65, 95]) {
       await t.client`
         INSERT INTO worker_run (worker_name, status, started_at, finished_at, rows_affected, result)
         VALUES ('azure-monitor-read', 'success',
                 ${new Date(NOW.getTime() - agoMin * MIN).toISOString()}::timestamptz,
                 ${new Date(NOW.getTime() - agoMin * MIN).toISOString()}::timestamptz,
-                0, '{"sessionsProcessed":5,"attributionRowsWritten":0,"errors":0}'::jsonb)
+                0, ${`{"sessionsProcessed":5,"attributionRowsWritten":0,"errors":0,"newEventsSeen":5,"sourceCoverage":${cov}}`}::jsonb)
       `
     }
   }
@@ -588,17 +591,17 @@ describe('attribution stall (A2.2)', () => {
     const res = await armAndPage({ notify: notify.fn })
     expect(res.conditions['attribution-stall']).toEqual({
       severity: 'critical',
-      reason: 'zero-write-streak',
+      reason: 'source-backlog',
       count: 4,
     })
     expect(notify.calls.length).toBe(1)
     expect(notify.calls[0]!.payload).toMatchObject({ severity: 'critical', condition: 'attribution-stall' })
   })
 
-  it('an IDLE estate is silent — same zero-writes, no recent bearer mint', async () => {
+  it('an IDLE estate is silent — same zero-writes, but nothing arrived at the DCR (coverage no-rows)', async () => {
     const notify = mkNotify()
     await seedFleetEmit(NOW.getTime() - 3 * HOUR)
-    await seedZeroWriteStreak()
+    await seedZeroWriteStreak('no-rows')
 
     const res = await run({ notify: notify.fn })
     expect(res.conditions['attribution-stall']).toBeUndefined()
@@ -912,7 +915,7 @@ describe('every raised severity carries a reason (D1)', () => {
         VALUES ('azure-monitor-read', 'success',
                 ${new Date(NOW.getTime() - agoMin * MIN).toISOString()}::timestamptz,
                 ${new Date(NOW.getTime() - agoMin * MIN).toISOString()}::timestamptz,
-                0, '{"sessionsProcessed":5,"attributionRowsWritten":0,"errors":0}'::jsonb)
+                0, '{"sessionsProcessed":5,"attributionRowsWritten":0,"errors":0,"newEventsSeen":5,"sourceCoverage":{"status":"rows-arrived","rowsReceived":42}}'::jsonb)
       `
     }
     const res = await run({
@@ -946,7 +949,7 @@ describe('every raised severity carries a reason (D1)', () => {
     // The per-condition mapping the design's table specifies.
     expect(res.conditions['telemetry-read']!.reason).toBe('driver-unreachable')
     expect(res.conditions['probe-network']!.reason).toBe('hosts-failing')
-    expect(res.conditions['attribution-stall']!.reason).toBe('zero-write-streak')
+    expect(res.conditions['attribution-stall']!.reason).toBe('source-backlog')
     expect(res.conditions['worker-fleet']!.reason).toBe('workers-failing')
     expect(res.conditions['worker:d1-a']!.reason).toBe('worker-failing')
     // channel-test is the deploy-time ping, not an evaluator verdict — but its
@@ -1011,7 +1014,7 @@ describe('an indeterminate lane freezes its keys (A3)', () => {
         VALUES ('azure-monitor-read', 'success',
                 ${new Date(NOW.getTime() - agoMin * MIN).toISOString()}::timestamptz,
                 ${new Date(NOW.getTime() - agoMin * MIN).toISOString()}::timestamptz,
-                0, '{"sessionsProcessed":5,"attributionRowsWritten":0,"errors":0}'::jsonb)
+                0, '{"sessionsProcessed":5,"attributionRowsWritten":0,"errors":0,"newEventsSeen":5,"sourceCoverage":{"status":"rows-arrived","rowsReceived":42}}'::jsonb)
       `
     }
 

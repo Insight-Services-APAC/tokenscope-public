@@ -85,7 +85,7 @@ function revokeEvent(targetId: string, session: Session) {
   injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], session)
   return e
 }
-const adminSession = (): Session => ({ teammateId, email: 'admin@x.test', displayName: 'A', role: 'global-finops', regionId, orgPath: 'e2.svc' })
+const adminSession = (): Session => ({ teammateId, email: 'admin@x.test', displayName: 'A', role: 'platform-admin', regionId, orgPath: 'e2.svc' })
 
 describe('E2 — /bearer revocation enforcement', () => {
   it('mints for an active (non-revoked) teammate', async () => {

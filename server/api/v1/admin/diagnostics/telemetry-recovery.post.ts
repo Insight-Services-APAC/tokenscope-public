@@ -23,7 +23,7 @@
  * exactly as reconciliation-backfill does for provider pulls. Nothing here runs
  * long, so nothing here can 504.
  *
- * RBAC: requireRole('global-finops') + assertSameOrigin, matching
+ * RBAC: requireRole('platform-admin') + assertSameOrigin, matching
  * /admin/workers/{name}/run rather than the region-scoped `admin` tier. Two
  * reasons: the recovery operates across instances irrespective of region (a
  * region-scoped admin passing another region's instance id would otherwise exceed
@@ -82,7 +82,7 @@ function badRequest(detail: string): never {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'global-finops')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

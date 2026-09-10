@@ -13,8 +13,10 @@
  *     (from the usage lane `v_teammate_usage_daily` copilot branch) — INFORMATIONAL,
  *     never a charge; the shares sum back to the paid overage.
  *
- * RBAC (owner-decisions D-Q5): `global-finops` + `platform-admin` ONLY. Both are
- * region-unbounded, so anti-IDOR here = a non-existent / non-cost-owning id is a 404
+ * RBAC (owner-decisions D-Q5): `requireReportScope(..., 'finance')` —
+ * `platform-admin` as the baseline role, PLUS any teammate holding an active
+ * `finance` report-access grant, whatever their role. It is region-unbounded, so
+ * anti-IDOR here = a non-existent / non-cost-owning id is a 404
  * (resolveFinanceCou), never a 500 or a silent empty.
  *
  * HOMING (D-Homing): current-org interim ("homed to current org structure").

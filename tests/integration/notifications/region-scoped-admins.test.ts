@@ -3,7 +3,7 @@
  *
  * Admin-routed ops categories (sync-conflict / structural-conflict /
  * connector-health) must reach a region's own `admin`s ONLY for that region's
- * alerts, while the cross-region roles (`platform-admin`, `global-finops`)
+ * alerts, while the cross-region roles (`platform-admin`)
  * receive every region's. When the alert's region can't be derived, it routes
  * to the cross-region roles ONLY — never a sibling region's admin (the inbox
  * read path is recipient-scoped, so a fail-open to all admins would be a real
@@ -25,7 +25,7 @@ let adminA = '' // role 'admin', region A — should get region-A alerts
 let adminB = '' // role 'admin', region B — should NOT get region-A alerts
 let inactiveAdminA = '' // role 'admin', region A, is_active=false — never alerted
 let platformAdmin = '' // role 'platform-admin' — cross-region, always alerted
-let globalFinops = '' // role 'global-finops' — cross-region, always alerted
+let orgWide = '' // role 'platform-admin' — cross-region, always alerted
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -57,7 +57,7 @@ beforeAll(async () => {
       { entraOid: 'oid-admin-b', email: 'admin-b@example.com', role: 'admin', regionId: regionB, orgUnitId: ouB },
       { entraOid: 'oid-admin-a-off', email: 'admin-a-off@example.com', role: 'admin', regionId: regionA, orgUnitId: ouA, isActive: false },
       { entraOid: 'oid-platform', email: 'platform@example.com', role: 'platform-admin', regionId: regionA, orgUnitId: ouA },
-      { entraOid: 'oid-finops', email: 'finops@example.com', role: 'global-finops', regionId: regionB, orgUnitId: ouB },
+      { entraOid: 'oid-finops', email: 'finops@example.com', role: 'platform-admin', regionId: regionB, orgUnitId: ouB },
       // negative control: a plain developer in region A must never be an admin recipient.
       { entraOid: 'oid-dev-a', email: 'dev-a@example.com', role: 'developer', regionId: regionA, orgUnitId: ouA },
     ])
@@ -67,7 +67,7 @@ beforeAll(async () => {
   adminB = byEmail('admin-b@example.com')
   inactiveAdminA = byEmail('admin-a-off@example.com')
   platformAdmin = byEmail('platform@example.com')
-  globalFinops = byEmail('finops@example.com')
+  orgWide = byEmail('finops@example.com')
 
   const projs = await t.db
     .insert(schema.project)
@@ -90,7 +90,7 @@ function recipients(results: { recipientTeammateId: string }[]): Set<string> {
   return new Set(results.map((r) => r.recipientTeammateId))
 }
 
-const CROSS_REGION = (): string[] => [platformAdmin, globalFinops]
+const CROSS_REGION = (): string[] => [platformAdmin, orgWide]
 
 describe('region-scoped admin routing', () => {
   it("routes a region-A conflict to region-A's admin + cross-region roles, NOT region-B's admin", async () => {

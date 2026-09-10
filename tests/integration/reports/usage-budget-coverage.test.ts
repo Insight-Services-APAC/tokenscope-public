@@ -65,7 +65,7 @@ const evAll = (session: Session, query = '') =>
   ev(session, query ? `${query}&region=all` : 'region=all')
 
 const gfo = (): Session =>
-  ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role: 'global-finops', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
+  ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role: 'platform-admin', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
 /*
  * A SUBTREE-scoped caller. `role` and `orgPath` are the two inputs that decide the §A
  * clamp: withRequestRls copies orgPath into `app.user_org_path`, which is what

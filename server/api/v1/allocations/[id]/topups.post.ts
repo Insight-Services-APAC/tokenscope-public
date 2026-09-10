@@ -51,8 +51,7 @@ export default defineEventHandler(async (event) => {
   const hasOrgRole =
     isPlatformAdmin(session.role) ||
     session.role === 'manager' ||
-    session.role === 'admin' ||
-    session.role === 'global-finops'
+    session.role === 'admin'
 
   const id = requireUuidParam(event, 'id', 'allocation id')
 

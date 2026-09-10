@@ -185,7 +185,7 @@ async function main() {
       { email: 'demo-liam.osullivan@example.com', displayName: "Liam O'Sullivan (demo)", teamId: teamFoxtrot.id, role: 'developer' },
       { email: 'demo-aarti.shah@example.com', displayName: 'Aarti Shah (demo)', teamId: teamFoxtrot.id, role: 'developer' },
       { email: 'demo-lena.park@example.com', displayName: 'Lena Park (demo)', teamId: bu.id, role: 'admin' },
-      { email: 'demo-mara.holloway@example.com', displayName: 'Mara Holloway (demo)', teamId: bu.id, role: 'global-finops' },
+      { email: 'demo-mara.holloway@example.com', displayName: 'Mara Holloway (demo)', teamId: bu.id, role: 'developer' },
       // CC-owner persona (J1, mig 0048): org role is plain DEVELOPER — the
       // P&L visibility comes from cou_owner rows, proving ownership is a
       // relationship, not a role-enum entry.
@@ -450,12 +450,15 @@ async function main() {
     }
 
     // ── Report-access grants (mig 0129) ──────────────────────────────
-    // Roles no longer confer elevated report access on their own — Mara
-    // (global-finops, the ONLY seeded org-wide-role teammate; grep
-    // teammateSeeds above, no platform-admin demo row exists) needs BOTH
-    // permissions or her landing (/reporting?scope=finance) opens on a
-    // baseline 403 instead of real data. Lena (region admin) gets NOTHING —
-    // standard-mode parity: `admin` never held elevation, grant or no grant.
+    // Roles no longer confer elevated report access on their own, which is the
+    // whole reason `global-finops` could be retired. Mara is a plain DEVELOPER
+    // and needs BOTH permissions, or her landing (/reporting?scope=finance)
+    // opens on a baseline 403 instead of real data — she is the demo of exactly
+    // that: the company-wide finance lens delivered by grants, administering
+    // nothing. (She was briefly seeded as platform-admin when the role was
+    // retired, which turned the finance persona into the org-wide super-admin.)
+    // Lena (region admin) gets NOTHING — standard-mode parity: `admin` never
+    // held elevation, grant or no grant.
     const mara = teammateByEmail.get('demo-mara.holloway@example.com')
     if (mara) {
       await db.insert(schema.reportAccessGrant).values([

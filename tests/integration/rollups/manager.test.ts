@@ -4,7 +4,7 @@
  * via the OWNER connection (RLS is inert in prod too), so the in-query scopeClause is what's
  * exercised. Invoking the real handler also pins the CTE-chain SQL (the trailing-comma class of
  * regression that originally 500'd this page). Validates the finance-scope model:
- *   manager → own subtree; admin → own region (regionId ignored); global-finops → all regions or a
+ *   manager → own subtree; admin → own region (regionId ignored); platform-admin → all regions or a
  *   selected one. The cross-region leak guard uses a SECOND region with real teammates.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
@@ -112,22 +112,22 @@ describe('GET /api/v1/rollups/manager — region scope + selector', () => {
     expect(r.selected_region).toBe(regionA)
   })
 
-  it('global-finops sees ALL regions by default and gets the region picker', async () => {
-    const r = (await handler(ev(sess('global-finops', 'a.bu', regionA)))) as Resp
+  it('platform-admin sees ALL regions by default and gets the region picker', async () => {
+    const r = (await handler(ev(sess('platform-admin', 'a.bu', regionA)))) as Resp
     expect(emails(r)).toEqual(['alice@a.test', 'bob@b.test', 'dave@c.test']) // all three regions
     expect(r.selected_region).toBe('all')
     expect(r.region_options.map((o) => o.id).sort()).toEqual([regionA, regionB, regionC].sort())
   })
 
-  it('global-finops can narrow to a single selected region', async () => {
-    const r = (await handler(ev(sess('global-finops', 'a.bu', regionA), `regionId=${regionB}`))) as Resp
+  it('platform-admin can narrow to a single selected region', async () => {
+    const r = (await handler(ev(sess('platform-admin', 'a.bu', regionA), `regionId=${regionB}`))) as Resp
     expect(emails(r)).toEqual(['bob@b.test']) // only region B now
     expect(r.selected_region).toBe(regionB)
   })
 
   it('a well-formed but unknown selected region 404s (no silent fallback to all)', async () => {
     // A valid v4 uuid that doesn't exist (malformed ids are a 400 at the zod layer, tested implicitly).
-    await expect(handler(ev(sess('global-finops', 'a.bu', regionA), 'regionId=11111111-1111-4111-8111-111111111111')))
+    await expect(handler(ev(sess('platform-admin', 'a.bu', regionA), 'regionId=11111111-1111-4111-8111-111111111111')))
       .rejects.toMatchObject({ statusCode: 404 })
   })
 })

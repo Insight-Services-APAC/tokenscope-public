@@ -5,7 +5,7 @@
  * Lists the GLOBAL standard vocabulary (region_id IS NULL) PLUS the given
  * region's own additions (region_id = the region). A region `admin` is pinned
  * to their home region (requireRegionScope rejects another region); org-wide
- * roles (global-finops / platform-admin) may pass any region_id and default to
+ * roles (platform-admin) may pass any region_id and default to
  * their own when none is supplied.
  *
  * Each row carries a derived `scope` ('global' | 'region') so the UI can render
@@ -38,7 +38,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   const query = await getValidated(event, Query)
 
   // A region admin can only ever look at their own region; org-wide roles pick a

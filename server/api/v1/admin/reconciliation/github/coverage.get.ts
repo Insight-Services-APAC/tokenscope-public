@@ -14,7 +14,7 @@
  * reads available:false / state:'coverage-unknown' regardless of what was last
  * observed) — this route is a thin pass-through of that guarantee, never re-derives it.
  *
- * RBAC: requireRole(admin, global-finops) — same guard as the enterprises/health
+ * RBAC: requireRole(admin) — same guard as the enterprises/health
  * readers. Database access still uses request-scoped RLS context consistently.
  */
 import { defineEventHandler, createError } from 'h3'
@@ -32,7 +32,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const Query = z.object({ enterpriseId: z.string().regex(UUID_RE).optional() })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const query = await getValidated(event, Query)
 
   return withRequestRls(event, async (db) => {

@@ -31,7 +31,7 @@
  * the month was closed, its snapshot is unchanged and the difference is reported
  * as a delta. This route still never reopens or restates a period itself.
  *
- * RBAC: requireRole(global-finops) + assertSameOrigin. Audited
+ * RBAC: requireRole(platform-admin) + assertSameOrigin. Audited
  * (before the pull, and again with the outcome).
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
@@ -85,7 +85,7 @@ function assertMonthInBounds(month: string, now: Date): void {
 }
 
 export default defineEventHandler(async (event) => {
-  // `global-finops` ONLY — deliberately NOT 'admin'. `admin` is a REGION-scoped role
+  // `platform-admin` ONLY — deliberately NOT 'admin'. `admin` is a REGION-scoped role
   // (rbac.ts), but `provider_enterprise` carries no region column, so there is nothing
   // to clamp a region admin against: any admin could pass any enterprise id and cause
   // that enterprise's copilot_pool_bill month to be deleted and rewritten, plus its
@@ -101,7 +101,7 @@ export default defineEventHandler(async (event) => {
   // configuration is estate config, so drop 'admin' from that whole tree". This is one
   // route of that tree, tightened where a money-of-record write made it urgent; the
   // ruling for the other 22 handlers is still the owner's.
-  const caller = await requireRole(event, 'global-finops')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const providerEnterpriseId = requireUuidParam(event, 'id', 'provider-enterprise id')
   const body = await readValidated(event, Body)

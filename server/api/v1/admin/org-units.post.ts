@@ -16,7 +16,7 @@
  * (region_id, code) UNIQUE constraint. The path is written via raw sql
  * with a ::ltree cast (Drizzle's customType can't parameterise the cast).
  *
- * Scope: admin / global-finops only; a region admin is bound to their own
+ * Scope: admin / platform-admin only; a region admin is bound to their own
  * region (requireRegionScope), and a child unit's parent must live in the
  * same region.
  */
@@ -48,7 +48,7 @@ function deriveLabel(code: string): string {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
 

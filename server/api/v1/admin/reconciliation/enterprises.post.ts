@@ -11,7 +11,7 @@
  * credential_secret_name charset ^[a-z0-9-]{3,64}$. UNIQUE (provider,
  * lower(external_id)) → 409.
  *
- * RBAC: requireRole(admin, global-finops) + assertSameOrigin. Audited.
+ * RBAC: requireRole(admin) + assertSameOrigin. Audited.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { readValidated } from '../../../../utils/validated-body'
@@ -68,7 +68,7 @@ function badRequest(detail: string): never {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

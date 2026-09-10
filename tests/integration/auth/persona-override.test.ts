@@ -71,7 +71,7 @@ beforeAll(async () => {
       email: 'demo-mara.holloway@example.com',
       oid: 'oid-mara-wave-v',
       name: 'Mara Holloway',
-      role: 'global-finops',
+      role: 'platform-admin',
     },
   ]) {
     const [row] = await t.db
@@ -200,10 +200,10 @@ describe('evaluatePersonaGate — allowlist decisions', () => {
     expect(v).toEqual({ allowed: true, mode: 'override' })
   })
 
-  it('demo-capable, override flag on, global-finops session → allowed/override', () => {
+  it('demo-capable, override flag on, platform-admin session → allowed/override', () => {
     const v = evaluatePersonaGate(
       { devMode: false, allowOverride: true, demoCapable: true },
-      { role: 'global-finops', teammateId: 'x' },
+      { role: 'platform-admin', teammateId: 'x' },
     )
     expect(v).toEqual({ allowed: true, mode: 'override' })
   })
@@ -553,7 +553,7 @@ describe('persona override — audit + session impersonator stamp', () => {
     expect(audit.payload.personaRole).toBe('developer')
   })
 
-  it('override flag on, global-finops caller → /dev-login allowed; stop-impersonating restores global-finops (not admin)', async () => {
+  it('override flag on, platform-admin caller → /dev-login allowed; stop-impersonating restores platform-admin (not admin)', async () => {
     process.env.NUXT_ALLOW_PERSONA_OVERRIDE = 'true'
     const handler = await loadHandler()
     const MARA_OID = 'oid-mara-wave-v'
@@ -561,7 +561,7 @@ describe('persona override — audit + session impersonator stamp', () => {
       teammateId: '', // resolved below
       email: 'demo-mara.holloway@example.com',
       displayName: 'Mara Holloway',
-      role: 'global-finops',
+      role: 'platform-admin',
       regionId,
       orgPath: 'apac.svc',
     }
@@ -575,12 +575,12 @@ describe('persona override — audit + session impersonator stamp', () => {
     const result = (await handler(ev as never)) as { authenticated: boolean; role: string }
     expect(result).toMatchObject({ authenticated: true, role: 'developer' })
 
-    // The sidecar override cookie now carries the global-finops admin's
+    // The sidecar override cookie now carries the platform-admin admin's
     // impersonator stamp. R1 F6 (real-admin role inferred, not hardcoded
     // 'admin') is now enforced at the OIDC layer — when stop-impersonating
     // clears the sidecar, tryAuth() falls back to the OIDC identity, and
     // tryAuth resolves the admin's actual role from the teammate row.
-    // We verify (a) the audit row carries the global-finops stamp, and
+    // We verify (a) the audit row carries the platform-admin stamp, and
     // (b) the sidecar cookie was cleared (Set-Cookie Max-Age=0).
     const {
       readPersonaOverrideCookie,

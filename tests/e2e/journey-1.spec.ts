@@ -56,7 +56,7 @@ const PERSONAS = [
   },
   {
     key: 'finance',
-    // global-finops gets the Admin link in nav (cross-region governance).
+    // platform-admin gets the Admin link in nav (cross-region governance).
     expectedNav: ['Home', 'Reporting', 'Admin'],
     expectedLanding: '/finance',
     // Epic 14 (MVP-Final) — header per design-notes §Screen 6.

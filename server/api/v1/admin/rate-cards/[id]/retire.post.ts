@@ -9,7 +9,7 @@
  * candidate set for FUTURE events.
  *
  * Authority mirrors the create path: a region admin retires their own
- * region's cards; a GLOBAL card (region_id null) is global-finops /
+ * region's cards; a GLOBAL card (region_id null) is platform-admin /
  * platform-admin only. Already-retired → 409 (the operation is one-shot;
  * the 409 tells a concurrent admin somebody beat them to it).
  */
@@ -33,7 +33,7 @@ interface CardRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'rate-card id')
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
@@ -69,7 +69,7 @@ export default defineEventHandler(async (event) => {
     // Scope authority — same split as create: own region for region admins,
     // global cards only for the org-wide roles.
     if (card.region_id === null) {
-      if (!(isPlatformAdmin(caller.role) || caller.role === 'global-finops')) {
+      if (!(isPlatformAdmin(caller.role))) {
         throw createError({
           statusCode: 403,
           statusMessage: 'Forbidden',
@@ -77,7 +77,7 @@ export default defineEventHandler(async (event) => {
             type: 'https://tokenscope.example.com/errors/forbidden',
             title: 'Forbidden',
             status: 403,
-            detail: 'A global rate card can only be retired by platform-admin or global-finops.',
+            detail: 'A global rate card can only be retired by platform-admin.',
           },
         })
       }

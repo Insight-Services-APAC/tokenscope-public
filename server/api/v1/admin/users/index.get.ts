@@ -8,7 +8,7 @@
  * (role + last-sync chrome + role filter) so neither caller drifts the
  * other's response shape.
  *
- * Two-layer RBAC: requireRole(admin / global-finops) at the edge +
+ * Two-layer RBAC: requireRole(admin) at the edge +
  * withRequestRls so RLS denies anything the caller's region doesn't own.
  */
 import { defineEventHandler } from 'h3'
@@ -43,7 +43,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const query = await getValidated(event, Query)
   await requireRegionScope(event, query.region)
 
@@ -99,7 +99,7 @@ export default defineEventHandler(async (event) => {
     // Admin count surfaces the "last admin" indicator on the page.
     // Region-scoped on purpose: the last-admin protection in the PATCH
     // handler ALSO uses a region-scoped count, so the UI signal matches
-    // server-side enforcement. (A global-finops viewer sees the same
+    // server-side enforcement. (A platform-admin viewer sees the same
     // per-region badge; cross-region demotion isn't an MVP scenario.)
     const adminCountRows = await tx.execute<{ admin_count: string }>(sql`
       SELECT COUNT(*)::text AS admin_count

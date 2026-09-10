@@ -16,7 +16,7 @@
  *   - it is the home of any ACTIVE teammate (org_unit_id, is_active = true).
  * The 409 detail carries the counts so the admin knows what to clear first.
  *
- * Admin / global-finops only; a region admin is bound to the unit's own
+ * Admin / platform-admin only; a region admin is bound to the unit's own
  * region (load first, then requireRegionScope).
  */
 import { defineEventHandler, createError, getRouterParam, getRequestIP, getHeader } from 'h3'
@@ -29,7 +29,7 @@ import { recordAuditEvent } from '../../../../db/audit'
 import { activeProjectPredicate } from '../../../../db/project-predicates'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
 
   const idParse = z.string().uuid().safeParse(getRouterParam(event, 'id'))

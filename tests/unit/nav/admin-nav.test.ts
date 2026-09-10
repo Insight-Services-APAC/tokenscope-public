@@ -110,10 +110,10 @@ describe('roleMeetsAccess', () => {
       expect(roleMeetsAccess('platform-admin', a)).toBe(true)
     }
   })
-  it('global-finops satisfies admin + org-wide, not platform', () => {
-    expect(roleMeetsAccess('global-finops', 'admin')).toBe(true)
-    expect(roleMeetsAccess('global-finops', 'org-wide')).toBe(true)
-    expect(roleMeetsAccess('global-finops', 'platform')).toBe(false)
+  it('a retired role satisfies NO access level — org-wide is platform-admin alone', () => {
+    for (const a of ['admin', 'org-wide', 'platform'] as const) {
+      expect(roleMeetsAccess('global-finops', a)).toBe(false)
+    }
   })
   it('region admin satisfies only admin', () => {
     expect(roleMeetsAccess('admin', 'admin')).toBe(true)

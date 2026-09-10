@@ -30,7 +30,7 @@
  * product rule. It is returned alongside the counts so the client renders the
  * verdict the server reached rather than re-deciding it with a number of its own.
  *
- * RBAC: admin / global-finops, then requireRegionScope against the UNIT's region —
+ * RBAC: admin / platform-admin, then requireRegionScope against the UNIT's region —
  * the occupants are that region's teammates.
  */
 import { defineEventHandler, createError } from 'h3'
@@ -60,7 +60,7 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const orgUnitId = requireUuidParam(event, 'id')
   const query = await getValidated(event, Query)
 

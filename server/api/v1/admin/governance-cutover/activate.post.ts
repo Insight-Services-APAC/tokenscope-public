@@ -2,7 +2,7 @@
  * POST /api/v1/admin/governance-cutover/activate — flips ALL money paths to
  * read governance data authoritatively (ADR-0011 D1/D2), ignoring name/env
  * heuristics from this point on. Only succeeds from a verified preflight; a
- * defensive re-verify runs first (design §8.1). global-finops ONLY.
+ * defensive re-verify runs first (design §8.1). platform-admin ONLY.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { requireRole } from '../../../../auth/rbac'
@@ -18,7 +18,7 @@ const STATUS_BY_CODE: Record<CutoverError['code'], number> = {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'global-finops')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
   const ua = getHeader(event, 'user-agent') ?? null

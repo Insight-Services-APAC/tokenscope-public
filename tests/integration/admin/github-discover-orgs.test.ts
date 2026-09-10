@@ -103,7 +103,7 @@ function ev(opts: { session: Session; body?: unknown }) {
   injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], opts.session)
   return e as unknown as Parameters<typeof discoverOrgs>[0]
 }
-const admin = (): Session => ({ teammateId: adminId, email: 'a@x.test', displayName: 'A', role: 'global-finops', regionId, orgPath: 'd.svc' })
+const admin = (): Session => ({ teammateId: adminId, email: 'a@x.test', displayName: 'A', role: 'platform-admin', regionId, orgPath: 'd.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'd@x.test', displayName: 'D', role: 'developer', regionId, orgPath: 'd.svc' })
 
 async function orgRows() {
@@ -119,7 +119,7 @@ beforeAll(async () => {
   regionId = r!.id
   const [o] = await t.db.insert(schema.orgUnit).values({ regionId, path: 'd.svc', code: 'd-svc', displayName: 'Svc', unitType: 'bu' }).returning()
   ouId = o!.id
-  const [a] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-d-a', email: 'a@x.test', role: 'global-finops', regionId, orgUnitId: ouId }).returning()
+  const [a] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-d-a', email: 'a@x.test', role: 'platform-admin', regionId, orgUnitId: ouId }).returning()
   adminId = a!.id
   const [d] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-d-d', email: 'd@x.test', role: 'developer', regionId, orgUnitId: ouId }).returning()
   devId = d!.id

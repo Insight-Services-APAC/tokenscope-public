@@ -420,11 +420,19 @@ describe('run — S1 fix 3: the ingest endpoint is validated BEFORE any network 
         {
           OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=inst-1,tool=claude-code',
           OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'http://127.0.0.1:14318/v1/logs',
-          CLAUDE_PLUGIN_ROOT: join(root, 'no-such-plugin-root'),
         },
         NOW,
       ),
-    ).rejects.toThrow(/otel-headers-helper\.sh not found/)
+    ).rejects.toThrow(/emission auth|bearer/i)
+    /*
+     * The point is that the LOOPBACK endpoint passed validation and the run
+     * proceeded to the next gate. It used to prove that by pointing
+     * CLAUDE_PLUGIN_ROOT at a missing directory and asserting "helper not found"
+     * — but backfill no longer reads that variable (it is attacker-supplied and
+     * chose which binary mintBearer executes), so the mechanism is gone. The
+     * next gate is now the real auth step, which is what this asserts. Assert
+     * the INTENT, not the incidental downstream error.
+     */
   })
 })
 

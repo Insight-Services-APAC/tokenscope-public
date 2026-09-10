@@ -195,7 +195,25 @@ describe('otel-headers-helper — S1 fix 4: the shared device credential store f
   }
 
   it('TOKENSCOPE_OAUTH_REFRESH_TOKEN unset + a 0600 ${STATE_DIR}/config.json present → mints a bearer from the stored value', () => {
-    writeFileSync(join(stateDir, 'config.json'), JSON.stringify({ oauth_refresh_token: 'rt-from-device-store' }))
+    /*
+     * The stored ENDPOINT is part of this fixture now. The helper refuses to
+     * pair a stored credential with an environment-supplied destination (a
+     * hostile repo contributes to that environment, and the durable token does
+     * not rotate), so a store holding only the token is the legacy shape the
+     * SessionStart hook migrates via migrateStoredEndpoints. This case is the
+     * post-migration one: both come from the device.
+     */
+    writeFileSync(
+      join(stateDir, 'config.json'),
+      JSON.stringify({
+        oauth_refresh_token: 'rt-from-device-store',
+        // BOTH destinations: the helper will not use a stored credential unless
+        // both come from the store, because pairing one with an env-supplied
+        // destination is the hole this guards.
+        oauth_token_endpoint: 'https://stub.local/api/v1/oauth/token',
+        bearer_endpoint: 'https://stub.local/api/v1/instances/x/bearer',
+      }),
+    )
     chmodSync(join(stateDir, 'config.json'), 0o600)
     const argvLog = join(tmp, 'argv.log')
     const r = runHelperNoRefreshTokenEnv({ STUB_BEARER_MODE: 'ok', STUB_ARGV: argvLog })

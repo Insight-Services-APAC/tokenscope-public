@@ -4,7 +4,7 @@
  *
  * Scope mirrors the governance-settings list: a region admin sees the GLOBAL
  * cards (what their region inherits) plus their OWN region's cards;
- * global-finops / platform-admin see every card. `in_use` is the COST-7
+ * platform-admin see every card. `in_use` is the COST-7
  * pin signal — EXISTS attribution_record referencing the card — surfaced so
  * the UI can explain why cards are retired, never deleted or edited.
  */
@@ -31,8 +31,8 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
-  const regionUnbounded = isPlatformAdmin(caller.role) || caller.role === 'global-finops'
+  const caller = await requireRole(event, 'admin')
+  const regionUnbounded = isPlatformAdmin(caller.role)
 
   const rows = await withRequestRls(event, async (tx) => {
     // Region admins are clamped to global + own-region app-side (RLS is inert

@@ -12,7 +12,7 @@
  * SAFETY: listUnresolvedCopilotLogins never returns/logs a PAT, App key, PEM, installation
  * token, or a raw provider body — only logins + numeric context. A credential/roster/upstream
  * failure surfaces as a clean, FIXED-reason status (never a partial list read as "none left").
- * RBAC: requireRole(admin, global-finops) — same guard as the github health route. GET (read-
+ * RBAC: requireRole(admin) — same guard as the github health route. GET (read-
  * only probe) → no assertSameOrigin, matching health.get.ts.
  *
  * NO RLS LANE, tracked as an explicit residue in scripts/check-handler-rls-context.mjs, for
@@ -48,7 +48,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const query = await getValidatedQuery(event, (data) => {
     const parsed = Query.safeParse(data)
     if (!parsed.success) {

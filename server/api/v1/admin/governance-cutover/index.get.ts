@@ -1,6 +1,6 @@
 /*
  * GET /api/v1/admin/governance-cutover — current cutover state (status,
- * preflight snapshot, timestamps). global-finops ONLY (mirrors the
+ * preflight snapshot, timestamps). platform-admin ONLY (mirrors the
  * ab-decomposition diagnostics precedent — this is estate-wide, irreversible-
  * adjacent state, not a region-scoped admin concern).
  */
@@ -10,7 +10,7 @@ import { withRequestRls } from '../../../../db/request-rls'
 import { getCutoverState } from '../../../../governance/cutover'
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'global-finops')
+  await requireRole(event, 'platform-admin')
   return withRequestRls(event, async (tx) => {
     const state = await getCutoverState(tx)
     return {

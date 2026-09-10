@@ -6,7 +6,7 @@
  * Persona contract under test:
  *  - region admin: no scope picker; sees platform value + own-region override
  *    + effective (override wins); Save PUTs region scope for their region.
- *  - org-wide (platform-admin / global-finops): scope picker; platform scope
+ *  - org-wide (platform-admin): scope picker; platform scope
  *    PUTs without region_id; switching scope to a region surfaces that
  *    region's override.
  *  - served validation errors surface via the err toast; no `saved` emit.

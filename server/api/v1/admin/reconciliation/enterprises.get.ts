@@ -8,7 +8,7 @@
  * (readSecret(provider, credential_secret_name) != null). The KEY IS NEVER
  * returned — only the presence boolean.
  *
- * RBAC: requireRole(admin, global-finops). `provider_enterprise` is a config
+ * RBAC: requireRole(admin). `provider_enterprise` is a config
  * table with no RLS policy, but the read still runs in the request lane
  * (docs/design/rls-enforcement.md §2): the lane is decided by who is asking,
  * not by which table the query names. `readSecret` / `readGithubAppKey` are
@@ -38,7 +38,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
 
   const rows = await withRequestRls(event, (tx) =>
     tx.execute<Row>(sql`

@@ -9,7 +9,7 @@
  * revoke endpoint.
  *
  * Region scope: region-scoped admins stay in their home region; org-wide
- * roles (global-finops / platform-admin) get a region-view picker, mirroring
+ * role (platform-admin) gets a region-view picker, mirroring
  * admin/users.vue. The server re-checks requireRegionScope on both the read
  * and the revoke, so the picker is a convenience, not the gate.
  *
@@ -41,11 +41,11 @@ const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+  return r === 'admin' || r === 'platform-admin'
 })
 const isOrgWide = computed(() => {
   const r = session.value?.role
-  return r === 'global-finops' || r === 'platform-admin'
+  return r === 'platform-admin'
 })
 const regionId = computed(() => session.value?.regionId ?? '')
 

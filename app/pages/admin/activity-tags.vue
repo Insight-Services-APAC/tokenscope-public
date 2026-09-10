@@ -11,7 +11,7 @@
  * FK and could still be aggregating past tagged spend — soft-delete is safe).
  *
  * Region scope mirrors Admin → Instances / Projects: org-wide roles
- * (global-finops / platform-admin) get a region-view picker (defaults to their
+ * (platform-admin) gets a region-view picker (defaults to their
  * own region) and may edit the global set; region admins are pinned to their
  * region and see the global rows read-only. The server re-checks scope on every
  * write (requireRole + requireActivityScope), so the UI guards are convenience.
@@ -39,11 +39,11 @@ const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+  return r === 'admin' || r === 'platform-admin'
 })
 const isOrgWide = computed(() => {
   const r = session.value?.role
-  return r === 'global-finops' || r === 'platform-admin'
+  return r === 'platform-admin'
 })
 const regionId = computed(() => session.value?.regionId ?? '')
 
@@ -379,7 +379,7 @@ function asRow(row: Record<string, unknown>): TagRow {
             <span
               v-else
               class="text-[11px] text-carbon-3 italic cursor-help"
-              title="Global standard tags can only be managed by a platform-admin or global-finops."
+              title="Global standard tags can only be managed by a platform-admin."
               :data-testid="`activity-tag-readonly-${asRow(row).id}`"
             >
               read-only

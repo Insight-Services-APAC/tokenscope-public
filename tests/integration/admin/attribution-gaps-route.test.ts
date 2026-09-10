@@ -61,7 +61,7 @@ function ev(opts: { session: Session; query?: Record<string, string> }) {
 }
 
 const admin = (): Session => ({ teammateId: adminId, email: 'ag-admin@x.test', displayName: 'Admin', role: 'admin', regionId, orgPath: 'ag.svc' })
-const finops = (): Session => ({ teammateId: finopsId, email: 'ag-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'ag.svc' })
+const finops = (): Session => ({ teammateId: finopsId, email: 'ag-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId, orgPath: 'ag.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'ag-dev@x.test', displayName: 'Dev', role: 'developer', regionId, orgPath: 'ag.svc' })
 
 beforeAll(async () => {
@@ -81,7 +81,7 @@ beforeAll(async () => {
   adminId = a!.id
   const [f] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'oid-ag-fin', email: 'ag-fin@x.test', role: 'global-finops', regionId, orgUnitId: ouId })
+    .values({ entraOid: 'oid-ag-fin', email: 'ag-fin@x.test', role: 'platform-admin', regionId, orgUnitId: ouId })
     .returning()
   finopsId = f!.id
   const [d] = await t.db
@@ -160,7 +160,7 @@ describe('GET /admin/diagnostics/attribution-gaps — RBAC', () => {
     expect(res.reachable).toBe(true)
   })
 
-  it('allows global-finops', async () => {
+  it('allows platform-admin', async () => {
     const res = (await handler(ev({ session: finops() }))) as { reachable: boolean }
     expect(res.reachable).toBe(true)
   })
@@ -214,7 +214,7 @@ describe('GET /admin/diagnostics/attribution-gaps — payload', () => {
 })
 
 describe('GET /admin/diagnostics/attribution-gaps — region clamp', () => {
-  it('a region-A admin never sees a region-B gap; global-finops sees both', async () => {
+  it('a region-A admin never sees a region-B gap; platform-admin sees both', async () => {
     const idA = await seedGap(19)
     const idB = await seedGapIn({ regionId: regionBId, ouId: ouBId, teammateId: devBId, teammateEmail: 'ag-dev-b@x.test', daysBehind: 19 })
 

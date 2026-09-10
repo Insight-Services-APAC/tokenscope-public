@@ -7,7 +7,7 @@
  * Tabs (URL `?tab=`): Business Units (default, slug stays `cost-centres`) / Teammates / Setup
  * checklist / Connectors.
  *
- * RBAC: admin / global-finops / platform-admin. Region scoping is
+ * RBAC: admin / platform-admin. Region scoping is
  * server-enforced; a region-bounded admin hitting another region's id
  * gets a 403 → the `regionError` state renders. Platform-admin can
  * additionally rename the region inline.
@@ -64,7 +64,7 @@ const { session } = useSession()
 
 const isAdmin = computed(() => {
   const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+  return r === 'admin' || r === 'platform-admin'
 })
 const isPlatformAdmin = computed(() => session.value?.role === 'platform-admin')
 

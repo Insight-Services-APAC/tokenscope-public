@@ -36,7 +36,7 @@ let priyaId: string // original recipient, region A
 let anilId: string // forward target, region A
 let priyaBId: string // original recipient, region B
 let anilBId: string // forward target, region B
-let finopsId: string // global-finops (region-unbounded)
+let finopsId: string // platform-admin (region-unbounded)
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -74,7 +74,7 @@ beforeAll(async () => {
   anilId = await mk('oid-fw-anil', 'fw-anil@x.test')
   priyaBId = await mk('oid-fw-priya-b', 'fw-priya-b@x.test', { regionId: regionBId, orgUnitId: ouBId })
   anilBId = await mk('oid-fw-anil-b', 'fw-anil-b@x.test', { regionId: regionBId, orgUnitId: ouBId })
-  finopsId = await mk('oid-fw-finops', 'fw-finops@x.test', { role: 'global-finops' })
+  finopsId = await mk('oid-fw-finops', 'fw-finops@x.test', { role: 'platform-admin' })
 }, 120_000)
 
 afterAll(async () => {
@@ -213,11 +213,11 @@ describe('inbox forward (API-2)', () => {
 // Lazy: finopsId/regionId are only populated once beforeAll has run, which is
 // guaranteed by the time any `it()` body calls this (a plain const object here
 // would capture undefined — evaluated at module load, before beforeAll runs).
-const finopsSession = (): Session => ({
+const orgWideSession = (): Session => ({
   teammateId: finopsId,
   email: 'fw-finops@x.test',
   displayName: 'Finops',
-  role: 'global-finops',
+  role: 'platform-admin',
   regionId,
   orgPath: 'fw.svc',
 })
@@ -247,10 +247,10 @@ describe('inbox forward — cross-region clamp (both ends)', () => {
     expect(source!.ack_state).toBe('unread')
   })
 
-  it('global-finops forwards a region-B item to a region-A target — succeeds (region-unbounded)', async () => {
+  it('platform-admin forwards a region-B item to a region-A target — succeeds (region-unbounded)', async () => {
     const sourceId = await seedItem(priyaBId)
     const res = (await routePost(
-      ev({ id: sourceId, body: { recipient_teammate_id: anilId }, session: finopsSession() }),
+      ev({ id: sourceId, body: { recipient_teammate_id: anilId }, session: orgWideSession() }),
     )) as { source_id: string; forwarded_id: string | null }
     expect(res.forwarded_id).toBeTruthy()
     const [source] = await t.db.execute<{ ack_state: string }>(sql`
@@ -259,10 +259,10 @@ describe('inbox forward — cross-region clamp (both ends)', () => {
     expect(source!.ack_state).toBe('resolved')
   })
 
-  it('global-finops forwards a region-A item to a region-B target — succeeds (region-unbounded)', async () => {
+  it('platform-admin forwards a region-A item to a region-B target — succeeds (region-unbounded)', async () => {
     const sourceId = await seedItem(priyaId)
     const res = (await routePost(
-      ev({ id: sourceId, body: { recipient_teammate_id: anilBId }, session: finopsSession() }),
+      ev({ id: sourceId, body: { recipient_teammate_id: anilBId }, session: orgWideSession() }),
     )) as { source_id: string; forwarded_id: string | null }
     expect(res.forwarded_id).toBeTruthy()
     const [source] = await t.db.execute<{ ack_state: string }>(sql`

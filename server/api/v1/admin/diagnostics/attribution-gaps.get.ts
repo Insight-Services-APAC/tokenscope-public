@@ -13,7 +13,7 @@
  * the alerting rule would be worse than no list, because an operator would trust
  * it to decide whether an alert is real.
  *
- * RBAC: admin / global-finops, matching the rest of diagnostics. Read-only.
+ * RBAC: admin / platform-admin, matching the rest of diagnostics. Read-only.
  */
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { z } from 'zod'
@@ -30,7 +30,7 @@ const querySchema = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
   const q = await getValidatedQuery(event, (v) => querySchema.parse(v))
 
   return withRequestRls(event, async (db) => {
@@ -38,7 +38,7 @@ export default defineEventHandler(async (event) => {
       const instances = await findAttributionGaps(db, {
         gapHours: q.gapHours,
         liveHours: q.liveHours,
-        // Region-scoped `admin` sees only their region's gaps; global-finops /
+        // Region-scoped `admin` sees only their region's gaps; platform-admin /
         // platform-admin keep the estate-wide list. MUST default to null (not
         // omitted) when the caller isn't region-scoped — the worker calls this
         // same function with no regionId at all, and narrowing it unconditionally

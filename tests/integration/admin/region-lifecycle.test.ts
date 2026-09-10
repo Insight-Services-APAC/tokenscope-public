@@ -7,7 +7,7 @@
  * passes, then handler(ev(...)) runs against withRequestRls).
  *
  * Coverage (per brief):
- *   1. Region create — platform-admin 200; region admin/global-finops 403;
+ *   1. Region create — platform-admin 200; region admin/platform-admin 403;
  *      duplicate code 409.
  *   2. Region delete — 409 when non-empty; 200 when empty; platform-admin only.
  *   3. Org-unit create — root path = label; child path = parent.label;
@@ -17,7 +17,7 @@
  *   5. Project edit — display_name 200; COU in other region / retired → 422;
  *      cross-region admin 403.
  *   6. Provision teammate — admin provisions mock oid 200; region admin
- *      granting global-finops 403; re-provision 409; unknown oid 404;
+ *      granting platform-admin 403; re-provision 409; unknown oid 404;
  *      cross-region admin 403.
  *   7. User org-unit placement — active in-region 200; retired/other-region 422.
  */
@@ -81,7 +81,7 @@ beforeAll(async () => {
   await t.db.insert(schema.teammate).values([
     { id: '00000000-0000-4000-8000-000000000001', entraOid: 'rlc-oid-pa', email: 'pa@example.com', displayName: 'PA', role: 'platform-admin', regionId: regionAId, orgUnitId: ouAId },
     { id: '00000000-0000-4000-8000-000000000002', entraOid: 'rlc-oid-admin-a', email: 'admin-a@example.com', displayName: 'Admin A', role: 'admin', regionId: regionAId, orgUnitId: ouAId },
-    { id: '00000000-0000-4000-8000-000000000003', entraOid: 'rlc-oid-gf', email: 'gf@example.com', displayName: 'GF', role: 'global-finops', regionId: regionAId, orgUnitId: ouAId },
+    { id: '00000000-0000-4000-8000-000000000003', entraOid: 'rlc-oid-gf', email: 'gf@example.com', displayName: 'GF', role: 'platform-admin', regionId: regionAId, orgUnitId: ouAId },
     { id: '00000000-0000-4000-8000-000000000009', entraOid: 'rlc-oid-admin-b', email: 'admin-b@example.com', displayName: 'Admin B', role: 'admin', regionId: regionBId, orgUnitId: ouBId },
   ])
 }, 60_000)
@@ -131,8 +131,6 @@ const platformAdmin = (): Session =>
   ({ teammateId: '00000000-0000-4000-8000-000000000001', email: 'pa@example.com', displayName: 'PA', role: 'platform-admin', regionId: regionAId, orgPath: 'a.svc' }) as Session
 const adminA = (): Session =>
   ({ teammateId: '00000000-0000-4000-8000-000000000002', email: 'admin-a@example.com', displayName: 'Admin A', role: 'admin', regionId: regionAId, orgPath: 'a.svc' }) as Session
-const globalFinops = (): Session =>
-  ({ teammateId: '00000000-0000-4000-8000-000000000003', email: 'gf@example.com', displayName: 'GF', role: 'global-finops', regionId: regionAId, orgPath: 'a.svc' }) as Session
 
 async function call<R = unknown>(h: unknown, e: unknown): Promise<R> {
   return (h as AnyHandler)(e) as Promise<R>
@@ -171,11 +169,6 @@ describe('1. region create', () => {
     ).rejects.toMatchObject({ statusCode: 403 })
   })
 
-  it('global-finops is refused (403 — platform-admin only)', async () => {
-    await expect(
-      call(regionsCreate, ev({ body: { code: 'rlc-y', display_name: 'Y' }, session: globalFinops() })),
-    ).rejects.toMatchObject({ statusCode: 403 })
-  })
 
   it('duplicate code → 409', async () => {
     await expect(
@@ -345,9 +338,9 @@ describe('6. provision teammate (POST /admin/teammates)', () => {
     expect(row.entra_oid).toBe('dir-oid-0001')
   })
 
-  it('region admin granting global-finops → 403 (canAssignRole)', async () => {
+  it('region admin granting platform-admin → 403 (canAssignRole)', async () => {
     await expect(
-      call(teammatesCreate, ev({ body: { oid: 'dir-oid-0002', region_id: regionAId, org_unit_id: ouAId, role: 'global-finops' }, session: adminA() })),
+      call(teammatesCreate, ev({ body: { oid: 'dir-oid-0002', region_id: regionAId, org_unit_id: ouAId, role: 'platform-admin' }, session: adminA() })),
     ).rejects.toMatchObject({ statusCode: 403 })
   })
 

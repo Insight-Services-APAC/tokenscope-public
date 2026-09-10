@@ -7,6 +7,42 @@
 		"ghcr.io/devcontainers/features/github-cli:1": {}
 	},
 
+	"containerEnv": {
+		// ── git: neutralise the host clone's fsmonitor, and own the ownership check ──
+		// The workspace is the HOST's clone, bind-mounted in. Its .git/config carries
+		// `core.fsmonitor = true` (set on the host — not by anything in this repo), and
+		// the builtin fsmonitor refuses a mounted filesystem ("remote repository ... is
+		// incompatible with fsmonitor") — but not cleanly: on 2026-09-01 a worktree with
+		// 287 deleted tracked files reported CLEAN under fsmonitor and correctly dirty
+		// with `-c core.fsmonitor=false`, and two `git worktree remove` calls hung.
+		// A repo-local `git config` would rewrite the host's file; the environment form
+		// (git-config(1) §ENVIRONMENT, same precedence as `-c`) beats every config file
+		// and reaches every process in the container, VS Code's git extension included.
+		// `safe.directory` rides along because "dubious ownership" appeared intermittently
+		// on the mount despite correct vscode:vscode ownership; the trailing `/*` (git
+		// >= 2.46) covers the agent worktrees under .claude/worktrees/ too.
+		"GIT_CONFIG_COUNT": "2",
+		"GIT_CONFIG_KEY_0": "core.fsmonitor",
+		"GIT_CONFIG_VALUE_0": "false",
+		"GIT_CONFIG_KEY_1": "safe.directory",
+		"GIT_CONFIG_VALUE_1": "/workspaces/*",
+
+		// ── integration tests without a container runtime ──
+		// There is no docker/podman socket in this container, so testcontainers cannot
+		// start its per-file postgres:16. tests/integration/helpers/db.ts takes this URL
+		// instead and provisions a throwaway database per test file on the local
+		// PostgreSQL 16 that post-create.sh installs (trust auth on loopback only).
+		// Two files that depend on a pristine CLUSTER (roles are cluster-global)
+		// skip on this path and run on CI's testcontainers — see their headers.
+		"TEST_PG_URL": "postgresql://postgres@127.0.0.1:5432/postgres"
+	},
+
+	// Installs + configures the local PostgreSQL 16 (idempotent); the start hook
+	// brings it back up on every container start, since services do not survive
+	// a container stop.
+	"postCreateCommand": "bash .devcontainer/post-create.sh",
+	"postStartCommand": "bash .devcontainer/post-start.sh",
+
 	"forwardPorts": [3450, 3451, 3452, 3453, 3454, 3455],
 	"portsAttributes": {
 		"3450": { "label": "TokenScope (Nuxt)" },

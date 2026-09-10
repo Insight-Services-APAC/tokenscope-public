@@ -31,7 +31,7 @@ const ANSWERING_SURFACE: Record<string, { route: string; shows: string }> = {
   },
   'attribution-stall': {
     route: 'server/api/v1/admin/diagnostics/index.get.ts',
-    shows: "the reader's rowsAffected and sessionsProcessed — zero rows with zero sessions is idle, zero rows WITH sessions is the fault",
+    shows: "the reader's sourceCoverage verdict (DCR ingest) + rowsAffected/newEventsSeen/sessionsProcessed — rows-arrived with zero written is the fault, no-rows is idle, unknown falls back to the bearer gate",
   },
   'probe-network': {
     route: 'server/api/v1/admin/diagnostics/network.get.ts',

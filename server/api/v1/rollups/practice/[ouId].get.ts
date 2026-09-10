@@ -38,12 +38,12 @@ const FLAG_MULT = 2
 const { claude: claudeUsd, copilot: copilotUsd, other: otherUsd } = vendorCostSql('ar.cost_usd')
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'developer', 'manager', 'admin', 'global-finops', 'platform-admin')
+  const caller = await requireRole(event, 'developer', 'manager', 'admin', 'platform-admin')
   // Only region-scoped roles get region-wide context (% of region / vs-region-avg). A manager or
   // developer is capped at their own SUBTREE (org-tree's orgWide set), so the region-WIDE
   // denominator spans BUs they can't see — pairing its recoverable ratio with usageUsd would leak
   // the region total. Owners likewise get null. (Gate by role, NOT by "subtree covers this practice".)
-  const inRegionScope = caller.role === 'admin' || caller.role === 'global-finops' || caller.role === 'platform-admin'
+  const inRegionScope = caller.role === 'admin' || caller.role === 'platform-admin'
   const ouId = z.string().uuid().parse(getRouterParam(event, 'ouId'))
 
   const monthStart = monthStartIso()

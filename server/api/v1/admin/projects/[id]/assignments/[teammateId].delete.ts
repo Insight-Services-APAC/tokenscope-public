@@ -14,7 +14,7 @@ import { recordAuditEvent } from '../../../../../../db/audit'
 import { requireUuidParam } from '../../../../../../utils/require-uuid-param'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'manager', 'admin', 'global-finops')
+  const caller = await requireRole(event, 'manager', 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'project id')
   const teammateId = requireUuidParam(event, 'teammateId', 'teammate id')

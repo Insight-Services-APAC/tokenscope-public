@@ -902,7 +902,7 @@ const finops = (): Session =>
     teammateId: '00000000-0000-0000-0000-000000000009',
     email: 'x@x.test',
     displayName: 'X',
-    role: 'global-finops',
+    role: 'platform-admin',
     regionId: regionA,
     orgPath: 'bua',
     issuedAt: new Date().toISOString(),

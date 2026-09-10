@@ -35,7 +35,7 @@ beforeAll(async () => {
   vi.resetModules()
 
   // Two regions, with admins in each + a developer in region A + a
-  // global-finops (no region home — sits in region A for convenience).
+  // platform-admin (no region home — sits in region A for convenience).
   const [regionA] = await t.db
     .insert(schema.region)
     .values({ code: 'wvi-a', displayName: 'Wave VI A' })
@@ -73,7 +73,7 @@ beforeAll(async () => {
     { email: 'admin-a2@wvi.test', oid: 'oid-admin-a2-wvi', role: 'admin', regionId: regionAId, orgUnitId: ouA!.id, var: 'adminA2' },
     { email: 'dev-a@wvi.test', oid: 'oid-dev-a-wvi', role: 'developer', regionId: regionAId, orgUnitId: ouA!.id, var: 'devA' },
     { email: 'admin-b@wvi.test', oid: 'oid-admin-b-wvi', role: 'admin', regionId: regionBId, orgUnitId: ouB!.id, var: 'adminB' },
-    { email: 'finops@wvi.test', oid: 'oid-finops-wvi', role: 'global-finops', regionId: regionAId, orgUnitId: ouA!.id, var: 'finops' },
+    { email: 'finops@wvi.test', oid: 'oid-finops-wvi', role: 'platform-admin', regionId: regionAId, orgUnitId: ouA!.id, var: 'finops' },
   ]) {
     const [row] = await t.db
       .insert(schema.teammate)
@@ -183,12 +183,12 @@ function adminASession(): Session {
   }
 }
 
-function finopsSession(): Session {
+function orgWideSession(): Session {
   return {
     teammateId: finopsId,
     email: 'finops@wvi.test',
     displayName: 'Finops',
-    role: 'global-finops',
+    role: 'platform-admin',
     regionId: regionAId,
     orgPath: 'wvi-a.svc',
   }
@@ -243,11 +243,11 @@ describe('GET /api/v1/admin/users', () => {
     await expect(handler(ev as never)).rejects.toMatchObject({ statusCode: 403 })
   })
 
-  it('global-finops reading region B → 200 (cross-region allowed)', async () => {
+  it('platform-admin reading region B → 200 (cross-region allowed)', async () => {
     const handler = await loadHandler()
     const ev = makeEvent({
       path: `/api/v1/admin/users?region=${regionBId}&limit=50`,
-      initialSession: finopsSession(),
+      initialSession: orgWideSession(),
     })
     const result = (await handler(ev as never)) as { users: unknown[]; total: number }
     expect(result.total).toBe(1)
@@ -302,7 +302,7 @@ describe('PATCH /api/v1/admin/users/:id — role change', () => {
     // Reset roles so each test starts from the same matrix.
     await t.db.execute(sql`UPDATE teammate SET role = 'admin' WHERE id IN (${sql.raw(`'${adminAId}'::uuid`)}, ${sql.raw(`'${adminA2Id}'::uuid`)}, ${sql.raw(`'${adminBId}'::uuid`)})`)
     await t.db.execute(sql`UPDATE teammate SET role = 'developer' WHERE id = ${devAId}::uuid`)
-    await t.db.execute(sql`UPDATE teammate SET role = 'global-finops' WHERE id = ${finopsId}::uuid`)
+    await t.db.execute(sql`UPDATE teammate SET role = 'platform-admin' WHERE id = ${finopsId}::uuid`)
     await t.db.execute(sql`TRUNCATE TABLE audit_event RESTART IDENTITY CASCADE`)
   })
 
@@ -337,6 +337,81 @@ describe('PATCH /api/v1/admin/users/:id — role change', () => {
     expect(audit[0]!.payload.targetEmail).toBe('dev-a@wvi.test')
   })
 
+  /*
+   * RETIRED ROLES, AT THE ROUTE. `canModifyHolderOf` / `canAssignRole` are proven
+   * as functions elsewhere, but rule 10 applies: only a route test sees the RBAC
+   * gate, the 403 translation, the row and the audit together. A retired role is
+   * `text` in the column and absent from `SELECTABLE_ROLES`, so nothing the
+   * compiler checks would catch a regression here.
+   */
+  it('region admin modifying a RETIRED-role holder → 403 + role unchanged + no audit', async () => {
+    await t.db.execute(sql`UPDATE teammate SET role = 'global-finops' WHERE id = ${devAId}::uuid`)
+    const handler = await loadHandler()
+    const ev = makeEvent({
+      method: 'PATCH',
+      path: `/api/v1/admin/users/${devAId}`,
+      body: { role: 'developer' },
+      routerParams: { id: devAId },
+      initialSession: adminASession(),
+    })
+    // The 403 must name the ACTUAL denial. This branch also fires for org-wide
+    // GRANTS, and a message mentioning only platform-admin tells a region admin
+    // the wrong reason when the target holds a retired role.
+    await expect(handler(ev as never)).rejects.toMatchObject({
+      statusCode: 403,
+      data: { detail: expect.stringContaining('global-finops') },
+    })
+
+    const rows = await t.client<{ role: string }[]>`SELECT role FROM teammate WHERE id = ${devAId}`
+    expect(rows[0]!.role, 'a region admin changed a retired-role holder').toBe('global-finops')
+    const audit = await t.client<{ n: string }[]>`SELECT count(*)::text AS n FROM audit_event WHERE event_type = 'teammate-role-changed'`
+    expect(audit[0]!.n).toBe('0')
+  })
+
+  it('platform-admin demoting a RETIRED-role holder → 200 + row moves + audit written', async () => {
+    // The other direction: retirement must not STRAND its holders. Somebody has
+    // to be able to move them off, or the role is unassignable AND permanent.
+    await t.db.execute(sql`UPDATE teammate SET role = 'global-finops' WHERE id = ${devAId}::uuid`)
+    const handler = await loadHandler()
+    const ev = makeEvent({
+      method: 'PATCH',
+      path: `/api/v1/admin/users/${devAId}`,
+      body: { role: 'developer' },
+      routerParams: { id: devAId },
+      initialSession: orgWideSession(),
+    })
+    const result = (await handler(ev as never)) as { ok: boolean; previousRole: string; newRole: string }
+    expect(result).toMatchObject({ ok: true, previousRole: 'global-finops', newRole: 'developer' })
+
+    const rows = await t.client<{ role: string }[]>`SELECT role FROM teammate WHERE id = ${devAId}`
+    expect(rows[0]!.role).toBe('developer')
+    const audit = await t.client<{ payload: { previousRole?: string } }[]>`SELECT payload FROM audit_event WHERE event_type = 'teammate-role-changed'`
+    expect(audit.length).toBe(1)
+    expect(audit[0]!.payload.previousRole).toBe('global-finops')
+  })
+
+  it('ASSIGNING a retired role is refused even for platform-admin', async () => {
+    // Retirement is one-way. The role stays in the enum only so historical rows
+    // render a label; nothing may move a teammate back onto it.
+    //
+    // 403, not 400: the value is still a member of ROLES, so it passes schema
+    // validation and is refused by canAssignRole. Retirement is an AUTHORIZATION
+    // rule here, not a vocabulary one — which is why dropping it from
+    // SELECTABLE_ROLES (a UI concern) could never have been the whole fix.
+    const handler = await loadHandler()
+    const ev = makeEvent({
+      method: 'PATCH',
+      path: `/api/v1/admin/users/${devAId}`,
+      body: { role: 'global-finops' },
+      routerParams: { id: devAId },
+      initialSession: orgWideSession(),
+    })
+    await expect(handler(ev as never)).rejects.toMatchObject({ statusCode: 403 })
+
+    const rows = await t.client<{ role: string }[]>`SELECT role FROM teammate WHERE id = ${devAId}`
+    expect(rows[0]!.role, 'a retired role was re-assigned').toBe('developer')
+  })
+
   it('admin self-demote → 400 self-role-change-blocked + role unchanged + no audit row', async () => {
     const handler = await loadHandler()
     const ev = makeEvent({
@@ -357,14 +432,14 @@ describe('PATCH /api/v1/admin/users/:id — role change', () => {
   })
 
   it('demoting the last admin in region B → 409 last-admin-protected + role unchanged', async () => {
-    // Region B has only adminB. global-finops attempts demotion.
+    // Region B has only adminB. platform-admin attempts demotion.
     const handler = await loadHandler()
     const ev = makeEvent({
       method: 'PATCH',
       path: `/api/v1/admin/users/${adminBId}`,
       body: { role: 'developer' },
       routerParams: { id: adminBId },
-      initialSession: finopsSession(),
+      initialSession: orgWideSession(),
     })
     await expect(handler(ev as never)).rejects.toMatchObject({
       statusCode: 409,
@@ -382,7 +457,7 @@ describe('PATCH /api/v1/admin/users/:id — role change', () => {
       path: `/api/v1/admin/users/${adminAId}`,
       body: { role: 'manager' },
       routerParams: { id: adminAId },
-      initialSession: finopsSession(),
+      initialSession: orgWideSession(),
     })
     const result = (await handler(ev as never)) as { ok: boolean }
     expect(result.ok).toBe(true)
@@ -469,12 +544,12 @@ describe('PATCH /api/v1/admin/users/:id — role change', () => {
   })
 
   // ── Privilege-escalation guard (adversarial R1 HIGH) ──────────────
-  it('region admin promoting a developer → global-finops → 403 role-grant + role unchanged', async () => {
+  it('region admin promoting a developer → platform-admin → 403 role-grant + role unchanged', async () => {
     const handler = await loadHandler()
     const ev = makeEvent({
       method: 'PATCH',
       path: `/api/v1/admin/users/${devAId}`,
-      body: { role: 'global-finops' },
+      body: { role: 'platform-admin' },
       routerParams: { id: devAId },
       initialSession: adminASession(),
     })
@@ -496,20 +571,20 @@ describe('PATCH /api/v1/admin/users/:id — role change', () => {
     })
     await expect(handler(ev as never)).rejects.toMatchObject({ statusCode: 403 })
     const rows = await t.client<{ role: string }[]>`SELECT role FROM teammate WHERE id = ${finopsId}`
-    expect(rows[0]!.role).toBe('global-finops') // unchanged
+    expect(rows[0]!.role).toBe('platform-admin') // unchanged
   })
 
-  it('global-finops (org-wide) CAN promote a developer → global-finops', async () => {
+  it('platform-admin (org-wide) CAN promote a developer → platform-admin', async () => {
     const handler = await loadHandler()
     const ev = makeEvent({
       method: 'PATCH',
       path: `/api/v1/admin/users/${devAId}`,
-      body: { role: 'global-finops' },
+      body: { role: 'platform-admin' },
       routerParams: { id: devAId },
-      initialSession: finopsSession(),
+      initialSession: orgWideSession(),
     })
     const result = (await handler(ev as never)) as { ok: boolean; newRole: string }
-    expect(result).toMatchObject({ ok: true, newRole: 'global-finops' })
+    expect(result).toMatchObject({ ok: true, newRole: 'platform-admin' })
   })
 })
 
@@ -530,7 +605,7 @@ describe('GET /api/v1/admin/audit', () => {
     await t.db.execute(sql`TRUNCATE TABLE audit_event RESTART IDENTITY CASCADE`)
   })
 
-  it('admin sees their region`s audit footprint; global-finops sees all', async () => {
+  it('admin sees their region`s audit footprint; platform-admin sees all', async () => {
     // Generate two role-change events: one in region A (admin A2 demoting dev A)
     // and one in region B (finops demoting admin B → manager — region B has
     // only one admin so that would fail; promote dev → admin won't work either
@@ -542,7 +617,7 @@ describe('GET /api/v1/admin/audit', () => {
       path: `/api/v1/admin/users/${devAId}`,
       body: { role: 'manager' },
       routerParams: { id: devAId },
-      initialSession: finopsSession(),
+      initialSession: orgWideSession(),
     })
     await patch(ev as never)
 
@@ -564,10 +639,10 @@ describe('GET /api/v1/admin/audit', () => {
     expect(aSubjects).toContain(devAId) // region-A subject visible
     expect(aSubjects).not.toContain(adminBId) // region-B subject filtered out
 
-    // global-finops sees both.
+    // platform-admin sees both.
     const evF = makeEvent({
       path: `/api/v1/admin/audit?limit=200`,
-      initialSession: finopsSession(),
+      initialSession: orgWideSession(),
     })
     const resultF = (await handler(evF as never)) as { events: { subjectId: string | null }[] }
     const fSubjects = resultF.events.map((e) => e.subjectId)
@@ -595,7 +670,7 @@ describe('GET /api/v1/admin/audit', () => {
     const handler = await loadHandler()
     const ev = makeEvent({
       path: `/api/v1/admin/audit?eventType=alpha&limit=50`,
-      initialSession: finopsSession(),
+      initialSession: orgWideSession(),
     })
     const result = (await handler(ev as never)) as { events: { eventType: string }[]; total: number }
     expect(result.events.every((e) => e.eventType === 'alpha')).toBe(true)

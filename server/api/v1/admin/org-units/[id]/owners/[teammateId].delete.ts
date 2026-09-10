@@ -2,7 +2,7 @@
  * DELETE /api/v1/admin/org-units/{id}/owners/{teammateId} — revoke a
  * cost-centre ownership (J4, mig 0048). Soft-revoke: the row keeps its
  * history (revoked_at/revoked_by); re-assignment later is a new row.
- * admin (region-scoped) / global-finops.
+ * admin (region-scoped) / platform-admin.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -13,7 +13,7 @@ import { recordAuditEvent } from '../../../../../../db/audit'
 import { requireUuidParam } from '../../../../../../utils/require-uuid-param'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'org unit id')
   const teammateId = requireUuidParam(event, 'teammateId', 'teammate id')

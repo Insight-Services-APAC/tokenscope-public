@@ -5,7 +5,7 @@
  * VERY NEXT tick — no deploy, no infra change. Every toggle is attributed
  * (updated_by/at) and audited.
  *
- * RBAC: requireRole(global-finops). NOT region-scoped `admin`, for the same reason
+ * RBAC: requireRole(platform-admin). NOT region-scoped `admin`, for the same reason
  * the RUN twin gives at [name]/run.post.ts:29-33 — `worker_enablement` has no region
  * column (mig 0090), and every worker it governs operates GLOBALLY, so a toggle
  * exceeds a region admin's scope. Disabling is the stronger case of the two: forcing
@@ -36,7 +36,7 @@ export default defineEventHandler(async (event) => {
   // CSRF: this control can stop attribution / budget alerting / spoof detection
   // fleet-wide, so a logged-in admin must not be cross-site-forced into it.
   assertSameOrigin(event)
-  const session = await requireRole(event, 'global-finops')
+  const session = await requireRole(event, 'platform-admin')
   const body = await readValidatedBody(event, (b) => bodySchema.parse(b))
 
   // Only real registry workers — a typo would otherwise create a dead row that

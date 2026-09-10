@@ -2,7 +2,7 @@
  * GET /api/v1/admin/governance-settings — the governance dials (mig 0049) as
  * the admin editor sees them: every platform baseline plus the region
  * overrides. A region admin sees only their OWN region's overrides (the
- * platform baseline is what they'd override); global-finops / platform-admin
+ * platform baseline is what they'd override); platform-admin
  * see every region's.
  */
 import { defineEventHandler } from 'h3'
@@ -26,8 +26,8 @@ interface OverrideRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
-  const regionUnbounded = isPlatformAdmin(caller.role) || caller.role === 'global-finops'
+  const caller = await requireRole(event, 'admin')
+  const regionUnbounded = isPlatformAdmin(caller.role)
 
   return await withRequestRls(event, async (tx) => {
     const platform = await tx.execute<PlatformRow>(sql`

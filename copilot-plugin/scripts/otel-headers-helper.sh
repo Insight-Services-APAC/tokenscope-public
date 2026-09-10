@@ -56,14 +56,27 @@ set -eu
 # DIR below and docs/security-sprint/repo-env-inheritance-capture.md), so without
 # this line a repository chooses the `curl` that the refresh token is handed to.
 #
-# PREPEND rather than replace. Replacing outright would break hosts whose `curl`
-# lives somewhere else entirely (Homebrew on Apple silicon, Nix, a locked-down
-# image with tools under /opt) and the failure mode there is silent zero
-# telemetry, which is worse than the threat. Prepending means a system tool wins
-# wherever one exists, and an unusual host still resolves through the inherited
-# PATH. Also the reason the shebang is `#!/bin/sh` and not `/usr/bin/env sh`:
-# `env` would resolve the INTERPRETER through the untrusted PATH, before this
-# line ever runs.
+# REPLACE, not prepend — and this paragraph used to say the opposite, which is
+# worse than saying nothing: it told an operator the inherited PATH was still a
+# fallback after the code had stopped honouring it.
+#
+# Prepending looks safer and is not. A prepended trusted PATH only wins for
+# tools that EXIST in it; anything absent still resolves through the inherited
+# tail. `getent` is the live case — it does not exist on macOS, so passwd_home()
+# would have found a repo-supplied one, on the code path that decides where a
+# durable credential lives.
+#
+# THE COMPATIBILITY COST IS REAL AND IS ACCEPTED. A host whose `curl` lives
+# outside the trusted list (Homebrew on Apple silicon, Nix, tools under /opt)
+# now fails to emit rather than resolving it from the inherited PATH. That
+# failure is LOUD — the sentinel records it and `/tokenscope:status` reports it
+# — which is what makes it the better trade than silently handing the refresh
+# token to a repository's `curl`. Add the directory to TRUSTED_PATH below if a
+# supported host needs it.
+#
+# Also the reason the shebang is `#!/bin/sh` and not `/usr/bin/env sh`: `env`
+# would resolve the INTERPRETER through the untrusted PATH, before this line
+# ever runs.
 #
 # NOT a complete sandbox — see the residual in
 # docs/security-sprint/owner-decisions.md §0. `curl` still inherits proxy and CA
@@ -71,6 +84,13 @@ set -eu
 # untrusted environment; `-q` on every invocation neutralises `.curlrc`/`CURL_HOME`
 # but those variables are legitimate on corporate hosts and cannot be dropped here
 # without breaking them.
+#
+# THIS BOUNDS WHAT ENDPOINT PINNING BUYS, so do not read the trusted-store
+# endpoints below as a complete control: a repo that sets HTTPS_PROXY and
+# CURL_CA_BUNDLE can still intercept a credential-bearing POST whose URL is
+# entirely trusted. Pinning removes the attacker's ability to CHOOSE the
+# destination; it does not remove their ability to sit in front of it. Closing
+# that needs a decision about corporate proxies, not a code change here.
 # `--tool-dir <abs path>` prepends one more directory AHEAD of the trusted ones.
 # It exists for the test suite, which drives this script against stub `curl` /
 # `id` binaries, and for local debugging. It is safe for the same reason
@@ -78,7 +98,13 @@ set -eu
 # to, so reaching it already requires executing code on this machine. Parsed
 # below with the other arguments; applied here as an ordinary PATH prefix.
 TRUSTED_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-PATH="${TRUSTED_PATH}:$PATH"
+# REPLACE, do not prepend. Prepending left every inherited directory reachable as
+# a FALLBACK: a tool absent from the trusted list still resolved through the
+# repo-supplied tail. `getent` is the live example — it does not exist on macOS,
+# so `passwd_home()` would have found a repo-provided one. The trusted list holds
+# every tool this script uses; `--tool-dir` remains the one way to prepend, and
+# it comes from argv, which a settings merge cannot contribute to.
+PATH="${TRUSTED_PATH}"
 export PATH
 
 # ── THE STATE DIR: an ARGUMENT, never an environment variable ────────────────
@@ -244,6 +270,53 @@ json_num() {
     | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" \
     | head -n1
 }
+
+# ── Trusted device store ───────────────────────────────────────────────────────
+# Loaded ONCE, here, because the endpoint overrides below must land before the
+# bearer/OAuth checks further down read those variables.
+DEVICE_CFG=''
+if [ -f "${STATE_DIR}/config.json" ]; then
+  DEVICE_CFG="$(cat "${STATE_DIR}/config.json" 2>/dev/null || echo '')"
+fi
+
+# THE DESTINATIONS COME FROM THE DEVICE, NOT THE ENVIRONMENT (MDASH F120/F119/F309).
+#
+# Claude Code invokes this helper itself, roughly every 29 minutes, with its own
+# repo-merged environment — which is precisely why the state dir was moved out of
+# the environment and onto argv. The endpoints were left behind. A hostile repo
+# setting TOKENSCOPE_OAUTH_TOKEN_ENDPOINT therefore received the durable emit
+# refresh token (non-rotating; revocation is the only control, ADR-0005), and
+# TOKENSCOPE_BEARER_ENDPOINT is the same defect one credential down — the access
+# token in an Authorization header. It did not need the credential, only the
+# destination: assert_safe_endpoint validates the SCHEME only, so every https
+# host was accepted, unpinned.
+#
+# ${STATE_DIR}/config.json is the device's own 0700 store, written by redeem on
+# both lanes and already the trusted source for the refresh TOKEN. When it names
+# an endpoint, that value WINS over the environment.
+#
+# When it does NOT, what happens depends on whether the store holds a credential,
+# and the two outcomes are opposite — so do not read this block as "the
+# environment is the fallback":
+#   - no store at all: the environment is used and emission continues.
+#   - a store WITH a refresh token but missing either endpoint: the refusal below
+#     EXITS. A legacy token-only store stops emission until migration or
+#     re-provisioning completes, because pairing the durable credential with an
+#     environment-supplied destination is the thing this exists to prevent.
+ENDPOINTS_FROM_STORE=0
+BEARER_FROM_STORE=0
+if [ -n "$DEVICE_CFG" ]; then
+  _cfg_token_ep="$(json_str "$DEVICE_CFG" oauth_token_endpoint)"
+  if [ -n "$_cfg_token_ep" ]; then
+    TOKENSCOPE_OAUTH_TOKEN_ENDPOINT="$_cfg_token_ep"
+    ENDPOINTS_FROM_STORE=1
+  fi
+  _cfg_bearer_ep="$(json_str "$DEVICE_CFG" bearer_endpoint)"
+  if [ -n "$_cfg_bearer_ep" ]; then
+    TOKENSCOPE_BEARER_ENDPOINT="$_cfg_bearer_ep"
+    BEARER_FROM_STORE=1
+  fi
+fi
 
 now_epoch() { date -u +%s 2>/dev/null || echo 0; }
 
@@ -525,10 +598,33 @@ assert_safe_endpoint "$TOKENSCOPE_BEARER_ENDPOINT" "TOKENSCOPE_BEARER_ENDPOINT"
 # field name, so a tagged repo's session still finds the refresh token (from
 # the device store, never from the repo) and removing it from the repo tag
 # cannot brick emission.
-if [ -z "${TOKENSCOPE_OAUTH_REFRESH_TOKEN:-}" ] && [ -f "${STATE_DIR}/config.json" ]; then
-  _cfg="$(cat "${STATE_DIR}/config.json" 2>/dev/null || echo '')"
-  _cfg_refresh="$(json_str "$_cfg" oauth_refresh_token)"
+if [ -n "$DEVICE_CFG" ]; then
+  _cfg_refresh="$(json_str "$DEVICE_CFG" oauth_refresh_token)"
   if [ -n "$_cfg_refresh" ]; then
+    # NEVER PAIR A TRUSTED CREDENTIAL WITH AN UNTRUSTED DESTINATION.
+    #
+    # A device enrolled before the endpoints were persisted has a refresh token
+    # in the store but no endpoint, so the environment still named where it went
+    # — and the environment is what a hostile repo contributes to. Taking the
+    # DURABLE credential from the trusted store and POSTing it to a repo-chosen
+    # host is strictly worse than not emitting: the token does not rotate, and
+    # revocation is the only control (ADR-0005). Fail closed and say how to fix
+    # it. A fully-legacy device, with NO stored credential, is unchanged — that
+    # is the pre-existing state, not a new pairing.
+    #
+    # THE STORE IS CONSULTED EVEN WHEN THE ENVIRONMENT ALREADY HAS A TOKEN.
+    # Gating this on an empty ${TOKENSCOPE_OAUTH_REFRESH_TOKEN} skipped the whole
+    # check for the NORMAL configuration: redeem writes the real credential into
+    # global settings, Claude Code merges that into the environment, and a
+    # hostile repo contributes only the endpoint keys. A token-only store (a
+    # legacy device, or a migration that failed) then sent the real durable
+    # credential to a repo-chosen host with no refusal. "The environment holds a
+    # token" says nothing about WHERE that token came from; the store does.
+    if [ "$ENDPOINTS_FROM_STORE" -ne 1 ] || [ "$BEARER_FROM_STORE" -ne 1 ]; then
+      echo "TokenScope: emission auth REFUSED — this device stores a durable credential but not BOTH destinations, so one of them would come from the session environment. Re-run the tokenscope-setup MCP prompt to re-provision. Telemetry will not emit." >&2
+      write_sentinel 0 "stored credential without both stored endpoints"
+      exit 1
+    fi
     TOKENSCOPE_OAUTH_REFRESH_TOKEN="$_cfg_refresh"
   fi
 fi

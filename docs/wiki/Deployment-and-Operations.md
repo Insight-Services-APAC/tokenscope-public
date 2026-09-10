@@ -214,7 +214,7 @@ state).
   executions — these fire from inside Azure even when the app, AMPLS or the
   worker itself is down.
 - **Parity**: every externally-notified condition also upserts one admin inbox
-  item (platform-admin + global-finops) and writes
+  item (platform-admin) and writes
   `ops-alert-{delivered,failed,reminded,recovered}` audit events.
 - **User surface**: while the stall condition holds, Home and My usage show a
   degradation banner ("recent spend may be missing"), and the freshness dot

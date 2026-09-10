@@ -5,13 +5,13 @@
  *
  * The vocabulary has two scopes:
  *   - GLOBAL  (region_id IS NULL) — the seeded standard set. Only the org-wide
- *     roles (global-finops / platform-admin) may mutate it. A region `admin` is
+ *     roles (platform-admin) may mutate it. A region `admin` is
  *     bounded to their own region and must NOT edit the global vocabulary.
  *   - REGION  (region_id = a uuid) — a region's own additions. A region `admin`
  *     may mutate ONLY their own region (requireRegionScope); org-wide roles may
  *     act on any region.
  *
- * requireRole(event, 'admin', 'global-finops') must already have run upstream so
+ * requireRole(event, 'admin') must already have run upstream so
  * the caller is a known admin-class Session (platform-admin satisfies it via
  * isPlatformAdmin). This helper adds the scope gate on top.
  *
@@ -32,7 +32,7 @@ export async function requireActivityScope(
 ): Promise<void> {
   if (regionId === null) {
     // GLOBAL scope — region admins are excluded. Only org-wide roles
-    // (global-finops / platform-admin) may touch the standard vocabulary.
+    // (platform-admin) may touch the standard vocabulary.
     if (caller.role === 'admin') {
       throw createError({
         statusCode: 403,
@@ -43,7 +43,7 @@ export async function requireActivityScope(
           status: 403,
           detail:
             'Region admins cannot manage the global (standard) activity vocabulary. ' +
-            'A platform-admin or global-finops must do so.',
+            'A platform-admin must do so.',
         },
       })
     }

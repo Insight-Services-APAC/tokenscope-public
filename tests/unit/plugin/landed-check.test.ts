@@ -14,7 +14,7 @@
  * All state is in a temp dir; fetch is stubbed (no network).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -93,22 +93,49 @@ describe('refreshLanded (Claude) — S1 fixes 2+3: state dir + endpoint safety',
     expect(spy).not.toHaveBeenCalled()
   })
 
-  it('resolves the state dir through stateDir(), NOT a repo-supplied process.env.TOKENSCOPE_STATE_DIR', async () => {
-    // No explicit `stateDir` param passed — refreshLanded must resolve via the
-    // shared stateDir() helper (env-passed override, else process env, else
-    // the passwd home), never a second, independent process.env read that a
-    // repo-tagged process.env could poison. Simulate exactly that: a
-    // PROCESS-level override (the legitimate deployment-pin use of
-    // TOKENSCOPE_STATE_DIR) must still be honoured — proving the read really
-    // does go through stateDir()'s resolution order, not skip it.
+  it('IGNORES an ambient process.env.TOKENSCOPE_STATE_DIR for the delivery cache', async () => {
+    /*
+     * CONTRACT CHANGE, deliberate. This case used to assert that a process-level
+     * TOKENSCOPE_STATE_DIR was honoured, on the reasoning that it is the
+     * legitimate deployment pin and only a repo-TAGGED env is hostile. The
+     * ambient environment cannot tell those apart: Claude Code merges a cloned
+     * repo's .claude/settings.json env block into the processes it spawns, and
+     * the status line is one of them.
+     *
+     * That matters here because last-landed.json is not just displayed — it
+     * feeds landedRefreshDue(). A repo that picks this directory can pre-seed a
+     * fresh, healthy cache, so the status line reports delivery that is not
+     * happening AND skips the refresh that would discover it.
+     *
+     * The pin itself is not lost, it moved to a channel a repo cannot write —
+     * see the case below.
+     */
+    /*
+     * NO explicit stateDir — the DEFAULT path is the whole point, and passing one
+     * makes this vacuous (an explicit dir wins whether or not the ambient env is
+     * consulted, so the assertion holds either way; the first version of this
+     * test did exactly that and survived its own mutation).
+     *
+     * Falling through to the passwd home is safe here because refreshLanded
+     * refuses to write the real device store under a vitest worker. That refusal
+     * is what this asserts: reaching it proves the ambient value was NOT used,
+     * because a consulted ambient value is not the passwd home and would have
+     * written happily.
+     */
+    const poisoned = join(dir, 'repo-chosen')
+    mkdirSync(poisoned, { recursive: true })
     const saved = process.env.TOKENSCOPE_STATE_DIR
-    process.env.TOKENSCOPE_STATE_DIR = dir
+    process.env.TOKENSCOPE_STATE_DIR = poisoned
     try {
       writeAccess()
       mockFetch(() => ({ ok: true, json: async () => ({ last_emission: null, silent: true, revoked: false }) }))
-      const r = await refreshLanded({ env }) // no `stateDir` override — must resolve via process.env
-      expect(r.ok).toBe(true)
-      expect(existsSync(join(dir, 'last-landed.json'))).toBe(true)
+      const r = await refreshLanded({ env })
+      expect(
+        existsSync(join(poisoned, 'last-landed.json')),
+        'the ambient env chose where the delivery cache was written',
+      ).toBe(false)
+      expect(r.ok).toBe(false)
+      expect(String(r.reason)).toMatch(/refusing to write the real device store/i)
     } finally {
       if (saved === undefined) delete process.env.TOKENSCOPE_STATE_DIR
       else process.env.TOKENSCOPE_STATE_DIR = saved

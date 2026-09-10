@@ -3,13 +3,13 @@
  * region-scoped. Design doc §Grant lifecycle (F3.3, F3.4).
  *
  * Two-layer RBAC:
- *   - requireRole(admin, global-finops) at the edge.
+ *   - requireRole(admin) at the edge.
  *   - assertSameOrigin — admin actions run on the dashboard cookie session, so
  *     they carry the CSRF Origin check (same as the admin instance DELETE).
  *   - Region scope (F3.3): `oauth_token` has NO region, so we join the grant to
  *     its owning teammate, read teammate.region_id, and run
  *     requireRegionScope(event, region_id). A region admin revoking a
- *     peer-region teammate's grant gets the 403 (platform-admin / global-finops
+ *     peer-region teammate's grant gets the 403 (platform-admin
  *     are region-unbounded). RLS is inert under the owner connection, so this is
  *     the live gate. A missing grant 404s (no existence oracle leaked by scope).
  *
@@ -29,7 +29,7 @@ import { requireUuidParam } from '../../../../../utils/require-uuid-param'
 
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
   const id = requireUuidParam(event, 'id', 'grant id')
 
   // ONE transaction carrying the caller's RLS identity: join → region gate →

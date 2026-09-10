@@ -2,7 +2,7 @@
  * GET /api/v1/admin/projects/{id}/assignments — list a project's CURRENT
  * members (open assignments, `upper_inf(effective)`).
  *
- * Same scope as the POST/DELETE on this path: manager / admin / global-finops,
+ * Same scope as the POST/DELETE on this path: manager / admin / platform-admin,
  * bound to the project (admin → region, manager → org subtree). Powers the
  * "Manage members" panel on Admin → Region → Projects so assignment isn't
  * buried in the allocation editor.
@@ -25,7 +25,7 @@ interface MemberRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'manager', 'admin', 'global-finops')
+  await requireRole(event, 'manager', 'admin')
   const id = getRouterParam(event, 'id')
   if (!id || !z.string().uuid().safeParse(id).success) {
     throw createError({ statusCode: 400, statusMessage: 'Invalid project id' })

@@ -135,8 +135,8 @@ beforeAll(async () => {
   await mkOrg('partner-demo', couA) // exempt-by-name → never written
   // Login 'gamma' but a DISTINCT display name — the MEDIUM-2 display-name-match fixture.
   orgGamma = await mkOrg('gamma', couB, 'Gamma Display')
-  // A global-finops recipient so the unsettled alert has somewhere to route.
-  await mkTeammate(couA, 'global-finops')
+  // A platform-admin recipient so the unsettled alert has somewhere to route.
+  await mkTeammate(couA, 'platform-admin')
 }, 180_000)
 
 afterAll(async () => {

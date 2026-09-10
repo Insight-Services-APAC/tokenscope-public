@@ -85,7 +85,7 @@ interface NodeRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const query = await getValidated(event, Query)
   await requireRegionScope(event, query.region)
 

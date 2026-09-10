@@ -66,7 +66,7 @@ function ev(opts: { session: Session; body?: unknown; method?: string }) {
 }
 
 const finops = (): Session =>
-  ({ teammateId: FINOPS_ID, email: 'fx@x.test', displayName: 'Fx', role: 'global-finops', regionId, orgPath: 'de' } as Session)
+  ({ teammateId: FINOPS_ID, email: 'fx@x.test', displayName: 'Fx', role: 'platform-admin', regionId, orgPath: 'de' } as Session)
 
 const regionAdmin = (): Session =>
   ({ teammateId: REGION_ADMIN_ID, email: 'ra@x.test', displayName: 'Ra', role: 'admin', regionId, orgPath: 'de' } as Session)
@@ -78,7 +78,7 @@ beforeAll(async () => {
   regionId = r!.id
   const [u] = await t.client<{ id: string }[]>`INSERT INTO org_unit (region_id, parent_id, path, code, display_name, unit_type) VALUES (${regionId}::uuid, NULL, 'de'::ltree, 'default', 'DE', 'bu') RETURNING id::text AS id`
   unitId = u!.id
-  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role) VALUES (${FINOPS_ID}::uuid, 'oid-fx', 'fx@x.test', 'Fx', ${regionId}::uuid, ${unitId}::uuid, 'global-finops')`
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role) VALUES (${FINOPS_ID}::uuid, 'oid-fx', 'fx@x.test', 'Fx', ${regionId}::uuid, ${unitId}::uuid, 'platform-admin')`
   await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role) VALUES (${REGION_ADMIN_ID}::uuid, 'oid-ra', 'ra@x.test', 'Ra', ${regionId}::uuid, ${unitId}::uuid, 'admin')`
 }, 180_000)
 
@@ -167,7 +167,7 @@ describe('admin worker-enablement PUT — tier', () => {
     expect(rows.length, 'a refused toggle must leave no row behind').toBe(0)
   })
 
-  it('still admits global-finops', async () => {
+  it('still admits platform-admin', async () => {
     await putHandler(ev({ session: finops(), method: 'PUT', body: { workerName: 'budget-alert', enabled: false, reason: 'mine to throw' } }))
     const rows = await t.client<{ enabled: boolean }[]>`SELECT enabled FROM worker_enablement WHERE worker_name = 'budget-alert'`
     expect(rows[0]!.enabled).toBe(false)

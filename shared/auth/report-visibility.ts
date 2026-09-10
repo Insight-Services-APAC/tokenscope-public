@@ -12,7 +12,7 @@
  * 'finance' (the whole-company finance pack); plus ONE deny,
  * {@link REPORT_ACCESS_REVOKE} (mig 0130). {@link baselineGrants} is what every
  * caller holds with NO row at all — role + cost-centre ownership; the ORG-WIDE
- * roles (global-finops / platform-admin) hold the whole company there, every
+ * role (platform-admin) holds the whole company there, every
  * other role is region-bound.
  * {@link effectiveReportGrants} widens the baseline by whichever positive
  * permissions the caller's ACTIVE grants
@@ -234,7 +234,7 @@ function withDrillGrants(
  * from "grant" is that a role which never held elevation keeps exactly what
  * it had.
  *
- * global-finops / platform-admin see the WHOLE COMPANY at this floor —
+ * platform-admin sees the WHOLE COMPANY at this floor —
  * all-regions, every Business Unit, and the finance pack (PO decision
  * 2026-08-13). These roles answer for no single region, so tying their report
  * access to a per-person grant made the access fragile: a platform-admin whose
@@ -269,6 +269,7 @@ export function baselineGrants(role: Role, ownsCostCentre: boolean): ReportScope
   switch (role) {
     case 'developer':
     case 'finance': // zombie enum member — never minted; developer-tier keeps it benign.
+    case 'global-finops': // RETIRED 2026-09-05 — same treatment: no capability, benign tier.
       return devTier
     case 'manager':
     case 'admin':
@@ -285,7 +286,6 @@ export function baselineGrants(role: Role, ownsCostCentre: boolean): ReportScope
         costCentre: 'owned-or-subtree',
         finance: false,
       })
-    case 'global-finops':
     case 'platform-admin':
       // ORG-WIDE roles see the whole company BY DEFAULT (PO decision 2026-08-13,
       // reversing #251 for these roles). They answer for no single region, so an
@@ -538,7 +538,10 @@ export function grantsToScopes(g: ReportScopeGrants): string[] {
 }
 
 /**
- * The six personas the WHO-SEES-WHAT matrix (and the RBAC-matrix tests) enumerate.
+ * The five personas the WHO-SEES-WHAT matrix (and the RBAC-matrix tests)
+ * enumerate. It was six until `global-finops` was retired; the retired role's
+ * reach is asserted separately in tests/unit/server/retired-roles.test.ts rather
+ * than as a persona row, because a row here is a CAPABILITY claim.
  * `cost-centre-owner` is a plain developer WITH an active cou_owner row — ownership is
  * a relationship, not a role (mig 0048).
  */
@@ -547,7 +550,6 @@ export const REPORT_VISIBILITY_PERSONAS = [
   { key: 'manager', label: 'Manager', role: 'manager', ownsCostCentre: false },
   { key: 'admin', label: 'Region admin', role: 'admin', ownsCostCentre: false },
   { key: 'cost-centre-owner', label: 'Cost-centre owner', role: 'developer', ownsCostCentre: true },
-  { key: 'global-finops', label: 'Global finance', role: 'global-finops', ownsCostCentre: false },
   { key: 'platform-admin', label: 'Platform admin', role: 'platform-admin', ownsCostCentre: false },
 ] as const satisfies readonly { key: string; label: string; role: Role; ownsCostCentre: boolean }[]
 
@@ -576,10 +578,9 @@ export const WHO_SEES_WHAT_BASELINE: Record<ReportVisibilityPersonaKey, ReportSc
   manager: { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
   admin: { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
   'cost-centre-owner': { across: false, regional: 'own-region', costCentre: 'owned-or-subtree', finance: false, teammate: 'people-scope', project: 'member-in-scope' },
-  // Org-wide roles: full access AT BASELINE (PO decision 2026-08-13). For these
-  // two roles baseline == elevated — an additive permission on an already-full
+  // Org-wide role: full access AT BASELINE (PO decision 2026-08-13). For this
+  // role baseline == elevated — an additive permission on an already-full
   // floor is idempotent — so both tables state the same shape by construction.
-  'global-finops': { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
   'platform-admin': { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
 }
 
@@ -588,7 +589,6 @@ export const WHO_SEES_WHAT_ELEVATED: Record<ReportVisibilityPersonaKey, ReportSc
   manager: { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
   admin: { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
   'cost-centre-owner': { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
-  'global-finops': { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
   'platform-admin': { across: true, regional: 'all-regions', costCentre: 'all', finance: true, teammate: 'people-scope', project: 'region-wide' },
 }
 
@@ -606,7 +606,7 @@ export const WHO_SEES_WHAT_ELEVATED: Record<ReportVisibilityPersonaKey, ReportSc
  * no landing at all.
  *
  * Region-BOUND personas land on the same baseline row (own-region, no
- * cross-region option); the two ORG-WIDE personas (global-finops /
+ * cross-region option); the ORG-WIDE persona (
  * platform-admin) land on all-regions AT BASELINE, matching their full-access
  * floor above — for them baseline == elevated here too.
  */
@@ -615,7 +615,6 @@ export const WHO_SEES_WHAT_REGION_BASELINE: Record<ReportVisibilityPersonaKey, R
   manager: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
   admin: { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
   'cost-centre-owner': { tab: true, allRegions: false, crossRegion: false, ownRegion: true, landing: 'own-region' },
-  'global-finops': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
   'platform-admin': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
 }
 
@@ -624,7 +623,6 @@ export const WHO_SEES_WHAT_REGION_ELEVATED: Record<ReportVisibilityPersonaKey, R
   manager: { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
   admin: { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
   'cost-centre-owner': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
-  'global-finops': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
   'platform-admin': { tab: true, allRegions: true, crossRegion: true, ownRegion: true, landing: 'all-regions' },
 }
 

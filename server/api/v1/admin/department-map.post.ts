@@ -1,6 +1,6 @@
 /*
  * POST /api/v1/admin/department-map — set (upsert) a department → region
- * mapping (region derivation, mig 0068). admin / global-finops.
+ * mapping (region derivation, mig 0068). admin / platform-admin.
  *
  * The primary region-derivation signal: an unplaced user's Entra
  * `department` homes them in their real region. The map is org-wide curated
@@ -37,7 +37,7 @@ const Body = z.object({
 export default defineEventHandler(async (event) => {
   // Org-wide cross-region placement config → GLOBAL roles only (per design). A
   // region-admin must not route another region's unplaced spend via the dept map.
-  const caller = await requireRole(event, 'global-finops', 'platform-admin')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
   const departmentLower = body.department.trim().toLowerCase()

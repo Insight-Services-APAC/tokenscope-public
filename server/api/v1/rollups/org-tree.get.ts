@@ -5,7 +5,7 @@
  *
  * ROOT SELECTION
  *   - developer / manager (no ouId)         → their own org node (region-clamped).
- *   - admin / global-finops / platform-admin
+ *   - admin / platform-admin
  *     (no ouId)                             → a SYNTHETIC region root over their WHOLE region
  *                                             (regions are a forest of top-level BUs, so there
  *                                             is no single real root to anchor on). This is the
@@ -25,7 +25,7 @@
  * excluded from the tree and surfaced as the separate region-scoped "unplaced" line so the
  * all-up stays honest. Complete-usage lane (API truth), not the billed P&L.
  *
- * SCOPING NOTE: this endpoint is per-region. global-finops / platform-admin default to their
+ * SCOPING NOTE: this endpoint is per-region. platform-admin default to their
  * OWN region and pick any other via ?regionId= (the response carries `regionOptions` +
  * `selectedRegionId` for the UI selector); a region admin is hard-bound to its own region and
  * the param is ignored. The cross-region all-up lives in the finance rollup, not here.
@@ -43,7 +43,7 @@ import { UNASSIGNED_REGION_CODE, HOLDING_UNIT_TYPE } from '../../../../shared/pl
 
 const Query = z.object({
   ouId: z.string().uuid().optional(),
-  // Region selector — honoured only for global-finops / platform-admin (cross-region roles);
+  // Region selector — honoured only for platform-admin (cross-region roles);
   // a region admin is hard-bound to their own region and the param is ignored (org-subtree-scope
   // contract). Ignored when ouId is set (the drilled node already fixes the region).
   regionId: z.string().uuid().optional(),
@@ -53,11 +53,11 @@ const Query = z.object({
 const SYNTHETIC_ROOT_ID = '00000000-0000-0000-0000-000000000000'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'developer', 'manager', 'admin', 'global-finops', 'platform-admin')
+  const caller = await requireRole(event, 'developer', 'manager', 'admin', 'platform-admin')
   const { ouId, regionId: requestedRegionId } = Query.parse(getQuery(event))
-  const orgWide = caller.role === 'admin' || caller.role === 'global-finops' || caller.role === 'platform-admin'
+  const orgWide = caller.role === 'admin' || caller.role === 'platform-admin'
   // Only the cross-region roles may pick a region; admin is locked to its own (org-subtree-scope).
-  const crossRegion = caller.role === 'global-finops' || caller.role === 'platform-admin'
+  const crossRegion = caller.role === 'platform-admin'
 
   const monthStart = monthStartIso()
 
@@ -86,7 +86,7 @@ export default defineEventHandler(async (event) => {
       if (!r) throw createError({ statusCode: 403, statusMessage: 'org unit not in your scope' })
       scope = { kind: 'node', rootId: r.id, rootPath: r.path, regionId: r.region_id }
     } else if (orgWide) {
-      // Region-wide synthetic root. Cross-region roles (global-finops / platform-admin) may target
+      // Region-wide synthetic root. Cross-region roles (platform-admin) may target
       // any region via ?regionId= and get the picker; admin is hard-bound to its own region.
       if (crossRegion) {
         const rgRows = await tx.execute<{ id: string; code: string; display_name: string }>(sql`

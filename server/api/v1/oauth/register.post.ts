@@ -14,7 +14,7 @@
  * the FIRST call of the OAuth flow — it runs before any consent, so no teammate
  * exists to scope by, and `oauth_client` (which it writes) has no RLS at all.
  * The audit row it writes is `audit_event`, which DOES have RLS enabled and whose
- * policy admits only global-finops/platform-admin — so this write is possible
+ * policy admits only platform-admin — so this write is possible
  * solely because `audit_event` is in server/db/rls-bootstrap.ts::RLS_BOOTSTRAP_TABLES and is DISABLEd before the role switch.
  * Deferring its FORCE phase would not have helped: ENABLE alone filters a
  * non-owner, and this insert would have failed the moment the role changed.

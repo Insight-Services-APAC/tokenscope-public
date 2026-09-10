@@ -34,7 +34,7 @@ import { completeProjectSpendRanked } from '../../../usage/complete-spend'
 import { managerScopePredicate } from '../../../auth/org-subtree-scope'
 import { UNASSIGNED_REGION_CODE } from '../../../../shared/placement/holding-nodes'
 
-// Region selector — honoured only for the cross-region roles (global-finops / platform-admin);
+// Region selector — honoured only for the cross-region roles (platform-admin);
 // a region admin is hard-bound to its own region and the param is ignored (org-subtree-scope contract).
 const Query = z.object({ regionId: z.string().uuid().optional() })
 
@@ -70,10 +70,10 @@ interface WowRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'manager', 'admin', 'global-finops')
+  const caller = await requireRole(event, 'manager', 'admin')
   const { regionId: requestedRegionId } = Query.parse(getQuery(event))
   // Cross-region roles may pick a region (or see all); admin is locked to its own.
-  const crossRegion = caller.role === 'global-finops' || isPlatformAdmin(caller.role)
+  const crossRegion = isPlatformAdmin(caller.role)
   // MONTH TO DATE — `[month start, now)`. The upper bound is `now`, not the
   // month end: a row dated later this month has not been spent yet, and a
   // manager's MTD column that counts it is not month-to-date (period.ts).
@@ -84,7 +84,7 @@ export default defineEventHandler(async (event) => {
   return await withRequestRls(event, async (tx) => {
     // Spike-threshold dial (mig 0049): one snapshot per request, applied
     // per TEAMMATE region in the row mapping below (R2 F3). manager/admin are
-    // single-region, but global-finops/platform-admin can span regions (all, or
+    // single-region, but platform-admin can span regions (all, or
     // a selected one) — a uniform caller-region threshold would flag out-of-region
     // teammates against the wrong dial, diverging from velocity-watch's per-region
     // inbox verdicts, so the threshold stays per-teammate-region.
@@ -93,7 +93,7 @@ export default defineEventHandler(async (event) => {
     // Region scope (org-subtree-scope model, RLS inert at runtime so it lives in-query):
     //   manager                          → their org subtree (region-clamped against path collision)
     //   admin                            → their OWN region, never another
-    //   global-finops / platform-admin   → ALL regions, or a single one picked via ?regionId=
+    //   platform-admin   → ALL regions, or a single one picked via ?regionId=
     // The cross-region roles also get the region list back for the UI selector; an unknown
     // requested region 404s. scopeClause() is applied to EVERY scoped query so they cannot diverge.
     let regionOptions: { id: string; code: string; display_name: string }[] = []

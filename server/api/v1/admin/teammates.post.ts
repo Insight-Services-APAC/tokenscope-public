@@ -9,7 +9,7 @@
  * resolver's fast path matches the oid — no pending-claim step.
  *
  * Gates:
- *   - requireRole admin / global-finops (platform-admin passes)
+ *   - requireRole admin / platform-admin (platform-admin passes)
  *   - canAssignRole: a region admin cannot mint an org-wide role
  *   - requireRegionScope: a region admin can only place into their own region
  *   - org_unit must be an ACTIVE unit in the target region
@@ -58,12 +58,12 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
 
   // Privilege-escalation guard before any region work — a region admin must
-  // not be able to mint global-finops / platform-admin.
+  // not be able to mint platform-admin.
   if (!canAssignRole(caller.role, body.role)) {
     throw createError({
       statusCode: 403,
@@ -72,7 +72,7 @@ export default defineEventHandler(async (event) => {
         type: 'https://tokenscope.example.com/errors/role-grant',
         title: 'Role grant not permitted',
         status: 403,
-        detail: `Role '${caller.role}' cannot grant '${body.role}'. Org-wide roles require global-finops or platform-admin.`,
+        detail: `Role '${caller.role}' cannot grant '${body.role}'. Org-wide roles require platform-admin.`,
       },
     })
   }

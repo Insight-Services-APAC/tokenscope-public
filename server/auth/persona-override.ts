@@ -13,7 +13,7 @@
  *
  *   FIRST: env not demo-capable                               → 404 (structural floor)
  *   (a) NUXT_OIDC_AUTH_DEV_MODE=true (demo-capable only)       → allowed, mode=dev
- *   (b) NUXT_ALLOW_PERSONA_OVERRIDE=true AND admin/global-finops/platform-admin
+ *   (b) NUXT_ALLOW_PERSONA_OVERRIDE=true AND admin/platform-admin
  *                                                              → allowed, mode=override
  *   else → refuse:
  *       - override-flag off                                    → 404
@@ -63,12 +63,12 @@ export function evaluatePersonaGate(
     return { allowed: false, status: 404, reason: 'override-disabled' }
   }
 
-  // Override gate is on. Caller must be authenticated + admin / global-finops
+  // Override gate is on. Caller must be authenticated + admin / platform-admin
   // / platform-admin (the super-admin can act-as any demo persona too).
   if (!caller) {
     return { allowed: false, status: 401, reason: 'unauthenticated' }
   }
-  if (caller.role !== 'admin' && caller.role !== 'global-finops' && caller.role !== 'platform-admin') {
+  if (caller.role !== 'admin' && caller.role !== 'platform-admin') {
     return { allowed: false, status: 403, reason: 'role-not-admin' }
   }
 

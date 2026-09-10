@@ -29,7 +29,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'manager', 'admin', 'global-finops')
+  await requireRole(event, 'manager', 'admin')
   const query = await getValidatedQuery(event, (data) => Query.parse(data))
 
   // Rows + COUNT in ONE RLS transaction so they can't disagree mid-flight

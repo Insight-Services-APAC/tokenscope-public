@@ -21,7 +21,7 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const regionId = requireUuidParam(event, 'id', 'region id')
   const body = await readValidated(event, Body)
@@ -30,7 +30,7 @@ export default defineEventHandler(async (event) => {
 
   return await withRequestRls(event, async (tx) => {
     await requireRegionScope(event, regionId)
-    // Existence check (API-9): without it a global-finops PUT against any
+    // Existence check (API-9): without it a platform-admin PUT against any
     // UUID hits the scope_id FK → 23503 → raw 500 instead of this 404.
     const regionRows = await tx.execute<{ id: string }>(sql`
       SELECT id::text AS id FROM region WHERE id = ${regionId}::uuid LIMIT 1

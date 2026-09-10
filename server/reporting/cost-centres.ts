@@ -59,7 +59,7 @@ import {
   teammateDrillDims,
   NO_TEAMMATE_DRILL_FACTS,
 } from './teammate-drill-facts'
-import { csvEscape } from '../utils/csv-escape'
+import { csvEscape, csvMetaLine } from '../utils/csv-escape'
 import { laneListSql, toolToVendor, VENDOR_LANES, VENDOR_LABELS, type Vendor } from '../../shared/usage/vendor'
 import { GITHUB_CHARGEABLE_LANES } from '../../shared/usage/github-surface'
 import { modelDriverLabel, modelDriverKey } from '../../shared/reports/model-attribution'
@@ -1360,7 +1360,9 @@ export function cardsToCsv(
   meta: { month: string; asOfDate: string | null },
 ): string {
   const lines = [
-    `# tokenscope cost-centres · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'}`,
+    csvMetaLine(
+      `# tokenscope cost-centres · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'}`
+    ),
     // `charge_usd` (§B chargeback, the bill lane) sits beside `burn_usd` (§A usage) and is
     // ALWAYS present regardless of the on-screen lane, so the export is complete in both.
     'cost_centre,region,burn_usd,charge_usd,allocation_usd,utilisation_pct,exhaustion_date,projected_month_end_usd',
@@ -1406,11 +1408,13 @@ export function overSoftCapToCsv(
   },
 ): string {
   const lines = [
-    `# tokenscope cost-centre over-soft-cap · cc=${meta.ccLabel} · month=${meta.month}` +
+    csvMetaLine(
+      `# tokenscope cost-centre over-soft-cap · cc=${meta.ccLabel} · month=${meta.month}` +
       ` · soft_cap_usd=${usd(data.softCapUsd)} · roster=${data.rosterCount}` +
       ` · roster_usd=${usd(data.rosterUsd)}` +
       ` · within_allowance=${data.withinAllowance.teammates}` +
-      ` · within_allowance_unallocated_usd=${usd(data.withinAllowance.unallocatedUsd)}`,
+      ` · within_allowance_unallocated_usd=${usd(data.withinAllowance.unallocatedUsd)}`
+    ),
     'teammate,unallocated_usd,cap_multiple,tagged_rate_pct,projects,group',
     ...data.over.map((r) =>
       [
@@ -1435,7 +1439,9 @@ export function driversToCsv(
   meta: { month: string; asOfDate: string | null; axis: string; ccLabel: string },
 ): string {
   const lines = [
-    `# tokenscope cost-centre drivers · cc=${meta.ccLabel} · axis=${meta.axis} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'}`,
+    csvMetaLine(
+      `# tokenscope cost-centre drivers · cc=${meta.ccLabel} · axis=${meta.axis} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'}`
+    ),
     'driver,spend_usd,share_pct,spend_class,otel_emitted_usd,api_reconciled_usd,provider_usage_usd,surface_mix',
     ...rows.map(
       (r) =>

@@ -45,12 +45,12 @@
  * oid ladder in POST /map, which cannot create a duplicate whatever this endpoint offers.
  *
  * The admin/teammates list is region-scoped (requireRegionScope), but mapping a Copilot login
- * is a global-finops/admin action — a REGION admin still may not know the teammate's org unit a
+ * is a platform-admin/admin action — a REGION admin still may not know the teammate's org unit a
  * priori, so this stays a name/email search rather than the org-tree browse. It returns only
  * ACTIVE, NON-PROVISIONAL teammates (the only valid attribution targets — the map POST rejects a
  * provisional shadow) with id + email + display name. No secrets, capped result set.
  *
- * REGION CLAMP: a region-scoped `admin` sees only teammates in their own region — global-finops /
+ * REGION CLAMP: a region-scoped `admin` sees only teammates in their own region — platform-admin /
  * platform-admin see the whole estate. The `directory` fall-through is NOT region-clamped: Entra
  * is org-wide and carries no TokenScope region, so there is nothing to clamp ON — the same
  * reasoning as /api/v1/admin/directory/search, which also defers the clamp to provision time.
@@ -68,7 +68,7 @@
  * which is the invariant that must hold; the residual false-positive-pick case is a UX gap for
  * map.post's error response to disambiguate, not a security gap.
  *
- * RBAC: requireRole(admin, global-finops) — same guard as the sibling reconciliation routes.
+ * RBAC: requireRole(admin) — same guard as the sibling reconciliation routes.
  * GET (read-only) → no assertSameOrigin.
  *
  * LANES (docs/design/rls-enforcement.md §2): both DB reads — the teammate picker
@@ -101,14 +101,14 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
   const query = await getValidatedQuery(event, (data) => {
     const parsed = Query.safeParse(data)
     if (!parsed.success) throw createError({ statusCode: 400, statusMessage: 'invalid query parameter' })
     return parsed.data
   })
   const like = `%${escapeLikeLiteral(query.q)}%`
-  // Region-scoped `admin` only searches their own region; global-finops /
+  // Region-scoped `admin` only searches their own region; platform-admin /
   // platform-admin keep the estate-wide picker (RLS on `teammate` is not
   // relied on here — same reasoning as every other explicit clamp in this
   // sprint: the app connection bypasses it).

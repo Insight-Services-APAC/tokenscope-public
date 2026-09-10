@@ -28,6 +28,7 @@ import {
 import { decideAttributionStall } from '../../../server/usage/attribution-stall'
 import { WORKERS } from '../../../server/workers/registry'
 import type { ReaderRun } from '../../../server/workers/read-path-health'
+import type { SourceCoverageStatus } from '../../../server/azure/dcr-metrics'
 
 const MIN = 60_000
 const HOUR = 60 * MIN
@@ -158,90 +159,116 @@ describe('isWorkerFailing — the A2.3 per-worker predicate', () => {
   })
 })
 
-function readerRun(agoMs: number, rowsAffected: number | null, status = 'success'): ReaderRun {
-  return { status, startedAtMs: NOW - agoMs, rowsAffected, sessionsProcessed: 5, errors: 0 }
+/*
+ * A reader run at `agoMs` before NOW. `coverage` is the ingest-side verdict —
+ * default 'rows-arrived' (the incident shape: the DCR received rows the joiner
+ * did not land). Fixtures are PRODUCER-SHAPED (the #316 post-mortem rule): an
+ * idle laptop is sessionsProcessed 1 with coverage 'no-rows', NOT sessions 0.
+ */
+function readerRun(
+  agoMs: number,
+  rowsAffected: number | null,
+  status = 'success',
+  coverage: SourceCoverageStatus | null = 'rows-arrived',
+): ReaderRun {
+  return {
+    status,
+    startedAtMs: NOW - agoMs,
+    rowsAffected,
+    sessionsProcessed: 5,
+    errors: 0,
+    sourceCoverage: coverage,
+    newEventsSeen: 5,
+  }
 }
 
-describe('decideAttributionStall (A2.2, ar-H2 — the UNIFIED streak semantic)', () => {
+describe('decideAttributionStall (A2.2, ar-H2 — the UNIFIED streak semantic + ingest coverage)', () => {
   const STALL_MINUTES = 90
 
-  it('pages when the zero-write streak spans the window while the fleet still emits', () => {
+  it('pages (source-backlog) when the streak spans the window and the DCR received rows', () => {
     const runs = [readerRun(5 * MIN, 0), readerRun(35 * MIN, 0), readerRun(65 * MIN, 0), readerRun(95 * MIN, 0)]
     const v = decideAttributionStall({ runs, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES })
-    expect(v).toEqual({ since: new Date(NOW - 95 * MIN).toISOString(), zeroRuns: 4 })
+    expect(v).toEqual({ since: new Date(NOW - 95 * MIN).toISOString(), zeroRuns: 4, basis: 'source-backlog' })
   })
 
-  it('a LAPTOP LEFT ON is silent — bearer fresh, but nothing was ever processed', () => {
+  it('a LAPTOP LEFT ON is silent — bearer fresh, session selected, coverage no-rows', () => {
     /*
      * The false positive this condition shipped with, and the reason it paged a
-     * phone at 03:00 on a Sunday.
-     *
-     * `last_bearer_at` is stamped by the /bearer mint, and Claude Code runs its
-     * otelHeadersHelper at startup and every ~29 minutes for the life of the
-     * process (claude-code-telemetry-contract.md) — a THIRD of the 90-minute
-     * window. So one editor left open holds "the fleet is emitting" true
-     * indefinitely while emitting nothing, the reader correctly writes zero
-     * rows every tick, and the streak grows until it pages at severity
-     * critical, which is ntfy priority 5 and overrides Do Not Disturb.
-     *
-     * The fix is work evidence: a streak in which no run ever LOOKED AT a
-     * session is an idle estate, not a stall.
+     * phone at 03:00 on a Sunday. THE FIXTURE IS PRODUCER-SHAPED: #307 modelled
+     * this as sessionsProcessed 0 and gated on it, but the reader records
+     * sessions.length — its SELECTION — so the real idle laptop is
+     * sessionsProcessed 1 and walked straight through. The signal that is
+     * actually empty on an idle laptop is the INGEST coverage: nothing arrived
+     * at the DCR → 'no-rows'. Do not "simplify" this back to sessions 0.
      */
     const idle = [
-      { status: 'success', startedAtMs: NOW - 5 * MIN, rowsAffected: 0, sessionsProcessed: 0, errors: 0 },
-      { status: 'success', startedAtMs: NOW - 35 * MIN, rowsAffected: 0, sessionsProcessed: 0, errors: 0 },
-      { status: 'success', startedAtMs: NOW - 95 * MIN, rowsAffected: 0, sessionsProcessed: 0, errors: 0 },
+      { status: 'success', startedAtMs: NOW - 5 * MIN, rowsAffected: 0, sessionsProcessed: 1, errors: 0, sourceCoverage: 'no-rows', newEventsSeen: 0 },
+      { status: 'success', startedAtMs: NOW - 35 * MIN, rowsAffected: 0, sessionsProcessed: 1, errors: 0, sourceCoverage: 'no-rows', newEventsSeen: 0 },
+      { status: 'success', startedAtMs: NOW - 95 * MIN, rowsAffected: 0, sessionsProcessed: 1, errors: 0, sourceCoverage: 'no-rows', newEventsSeen: 0 },
     ] as ReaderRun[]
     expect(
+      decideAttributionStall({ runs: idle, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES }),
+    ).toBeNull()
+  })
+
+  it('still pages when the DCR received rows the joiner did not land — one run in the streak is enough', () => {
+    const working = [
+      { status: 'success', startedAtMs: NOW - 5 * MIN, rowsAffected: 0, sessionsProcessed: 1, errors: 0, sourceCoverage: 'no-rows', newEventsSeen: 0 },
+      { status: 'success', startedAtMs: NOW - 35 * MIN, rowsAffected: 0, sessionsProcessed: 1, errors: 0, sourceCoverage: 'rows-arrived', newEventsSeen: 3 },
+      { status: 'success', startedAtMs: NOW - 95 * MIN, rowsAffected: 0, sessionsProcessed: 1, errors: 0, sourceCoverage: 'no-rows', newEventsSeen: 0 },
+    ] as ReaderRun[]
+    expect(
+      decideAttributionStall({ runs: working, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES }),
+    ).toEqual({ since: new Date(NOW - 95 * MIN).toISOString(), zeroRuns: 3, basis: 'source-backlog' })
+  })
+
+  it('coverage UNKNOWN + bearer fresh → bearer fallback (coverage-unknown-bearer-fresh)', () => {
+    const runs = [readerRun(5 * MIN, 0, 'success', 'unknown'), readerRun(35 * MIN, 0, 'success', 'unknown'), readerRun(95 * MIN, 0, 'success', 'unknown')]
+    expect(
+      decideAttributionStall({ runs, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES }),
+    ).toEqual({ since: new Date(NOW - 95 * MIN).toISOString(), zeroRuns: 3, basis: 'coverage-unknown-bearer-fresh' })
+  })
+
+  it('coverage UNKNOWN + bearer STALE → silent (the deploy-transition / probe-down + idle case)', () => {
+    const runs = [readerRun(5 * MIN, 0, 'success', 'unknown'), readerRun(35 * MIN, 0, 'success', 'unknown'), readerRun(95 * MIN, 0, 'success', 'unknown')]
+    expect(
+      decideAttributionStall({ runs, lastFleetEmitMs: NOW - 3 * HOUR, nowMs: NOW, stallMinutes: STALL_MINUTES }),
+    ).toBeNull()
+  })
+
+  it('coverage NO-ROWS fires nothing even with a fresh bearer (the closed false positive)', () => {
+    const runs = [readerRun(5 * MIN, 0, 'success', 'no-rows'), readerRun(35 * MIN, 0, 'success', 'no-rows'), readerRun(95 * MIN, 0, 'success', 'no-rows')]
+    expect(
+      decideAttributionStall({ runs, lastFleetEmitMs: NOW - 1 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES }),
+    ).toBeNull()
+  })
+
+  it('a real BACKLOG with a STALE bearer now pages (design §4.4: coverage is primary)', () => {
+    // A burst the reader never landed, then the editor closed (bearer stale).
+    // Today this was silent; coverage 'rows-arrived' makes it a real stall.
+    const runs = [readerRun(5 * MIN, 0, 'success', 'rows-arrived'), readerRun(35 * MIN, 0, 'success', 'rows-arrived'), readerRun(95 * MIN, 0, 'success', 'rows-arrived')]
+    expect(
+      decideAttributionStall({ runs, lastFleetEmitMs: NOW - 3 * HOUR, nowMs: NOW, stallMinutes: STALL_MINUTES }),
+    ).toEqual({ since: new Date(NOW - 95 * MIN).toISOString(), zeroRuns: 3, basis: 'source-backlog' })
+  })
+
+  it('a row-writing run breaks the streak; a streak narrower than the window withholds', () => {
+    expect(
       decideAttributionStall({
-        // Minted 10 minutes ago by a process that did no work — the keep-alive.
-        runs: idle,
+        runs: [readerRun(5 * MIN, 0), readerRun(20 * MIN, 42), readerRun(95 * MIN, 0)],
         lastFleetEmitMs: NOW - 10 * MIN,
         nowMs: NOW,
         stallMinutes: STALL_MINUTES,
       }),
     ).toBeNull()
-  })
-
-  it('still pages when the reader HAD work and wrote nothing', () => {
-    // The other side of the same boundary: work evidence must not make the
-    // condition unreachable. One processed session in the streak is enough.
-    const working = [
-      { status: 'success', startedAtMs: NOW - 5 * MIN, rowsAffected: 0, sessionsProcessed: 0, errors: 0 },
-      { status: 'success', startedAtMs: NOW - 35 * MIN, rowsAffected: 0, sessionsProcessed: 3, errors: 0 },
-      { status: 'success', startedAtMs: NOW - 95 * MIN, rowsAffected: 0, sessionsProcessed: 0, errors: 0 },
-    ] as ReaderRun[]
     expect(
       decideAttributionStall({
-        runs: working,
+        runs: [readerRun(5 * MIN, 0), readerRun(20 * MIN, 0)],
         lastFleetEmitMs: NOW - 10 * MIN,
         nowMs: NOW,
         stallMinutes: STALL_MINUTES,
       }),
-    ).toEqual({ since: new Date(NOW - 95 * MIN).toISOString(), zeroRuns: 3 })
-  })
-
-  it('an IDLE estate is silent — no bearer mint inside the window (A2.2)', () => {
-    const runs = [readerRun(5 * MIN, 0), readerRun(35 * MIN, 0), readerRun(95 * MIN, 0)]
-    const v = decideAttributionStall({ runs, lastFleetEmitMs: NOW - 3 * HOUR, nowMs: NOW, stallMinutes: STALL_MINUTES })
-    expect(v).toBeNull()
-  })
-
-  it('a row-writing run breaks the streak; a streak narrower than the window withholds', () => {
-    const broken = decideAttributionStall({
-      runs: [readerRun(5 * MIN, 0), readerRun(20 * MIN, 42), readerRun(95 * MIN, 0)],
-      lastFleetEmitMs: NOW - 10 * MIN,
-      nowMs: NOW,
-      stallMinutes: STALL_MINUTES,
-    })
-    expect(broken).toBeNull()
-    const narrow = decideAttributionStall({
-      runs: [readerRun(5 * MIN, 0), readerRun(20 * MIN, 0)],
-      lastFleetEmitMs: NOW - 10 * MIN,
-      nowMs: NOW,
-      stallMinutes: STALL_MINUTES,
-    })
-    expect(narrow).toBeNull()
+    ).toBeNull()
   })
 
   it('a FAILED zero-row run does NOT break the streak (unified semantic, A2.2)', () => {
@@ -251,7 +278,7 @@ describe('decideAttributionStall (A2.2, ar-H2 — the UNIFIED streak semantic)',
       nowMs: NOW,
       stallMinutes: STALL_MINUTES,
     })
-    expect(v).toEqual({ since: new Date(NOW - 95 * MIN).toISOString(), zeroRuns: 3 })
+    expect(v).toEqual({ since: new Date(NOW - 95 * MIN).toISOString(), zeroRuns: 3, basis: 'source-backlog' })
   })
 
   it('a PURE-FAILURE streak never fires — that is the worker-fleet lane, not a stall', () => {

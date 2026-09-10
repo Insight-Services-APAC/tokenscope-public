@@ -58,6 +58,7 @@ import { runGithubCoverageSweep } from './github-coverage-sweep'
 import { runProviderTransform } from './provider-transform'
 import { runOpsAlert } from './ops-alert'
 import { getTelemetryReader, emptyParseCounters } from '../azure/reader'
+import { readSourceCoverage, type SourceCoverage } from '../azure/dcr-metrics'
 import { UI_TRIGGERABLE_WORKER_NAMES } from '../../shared/workers/ui-triggerable'
 
 type Db = PostgresJsDatabase<typeof schema>
@@ -226,6 +227,25 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
       // report.
       const override = ctx?.opts?.sessionIds
       const scoped = Boolean(override && override.length > 0)
+      // INGEST-SIDE COVERAGE PROBE (PR #319). Runs BEFORE selection so it also
+      // measures the selection-dead-zone shape (fleet emitting, nothing
+      // selected). Fail-soft: readSourceCoverage never throws — every fault is a
+      // 'unknown' verdict — but a belt-and-braces catch keeps a probe fault from
+      // ever being the reason attribution stops. Only on the SCHEDULED path: a
+      // scoped recovery run is excluded from the stall streak, so its coverage is
+      // never read. See docs/design/read-path-attribution-coverage-signal.md.
+      let sourceCoverage: SourceCoverage | null = null
+      if (!scoped) {
+        try {
+          sourceCoverage = await readSourceCoverage({
+            dcrResourceId: process.env.NUXT_AZURE_DCR_RESOURCE_ID,
+            miClientId: process.env.NUXT_AZURE_MI_CLIENT_ID,
+          })
+        } catch (e) {
+          consola.error('[azure-monitor-read] source-coverage probe threw; attribution is unaffected', e)
+          sourceCoverage = null
+        }
+      }
       const { ids: sessionIds, capHit } =
         scoped ? { ids: override!, capHit: null } : await selectJoinableInstances(db)
       // Raise/clear the fleet-level signal for a truncated selection. ONLY on the
@@ -259,6 +279,13 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
         return {
           sessionsProcessed: 0,
           attributionRowsWritten: 0,
+          // No reader ran, so nothing was fetched or seen past a watermark.
+          usageRowsFetched: 0,
+          newEventsSeen: 0,
+          // The ingest-side probe DID run (before selection), so an empty tick
+          // still carries a real coverage measurement — this is the row-11
+          // (selection-dead-zone) case the stall alerts must still page on.
+          sourceCoverage,
           // Nothing was read, so no dismissal could be handed back.
           staleDismissalsReturned: 0,
           spansSkippedNoRateCard: 0,
@@ -295,6 +322,8 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
         sessionIds,
         deepRescan,
         selectionCapHit: capHit,
+        // The pre-selection ingest coverage verdict, echoed into JoinResult.
+        sourceCoverage,
         // lookbackDaysApplied is read back from the reader inside runReadJoiner —
         // recomputing it here would let the reported and applied windows diverge.
         // Same `scoped` the cap-signal gate above reads, for the same reason.

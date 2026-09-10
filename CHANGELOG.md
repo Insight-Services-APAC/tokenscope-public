@@ -7,6 +7,40 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-09-10 (snapshot c5ba50b4)
+
+- The "Global finance" role has been withdrawn. It was described as a
+  reporting role but in practice granted the whole cross-region admin surface —
+  including changing people's roles and granting report access. Nobody held it,
+  and nothing is lost: company-wide report access is granted per person on the
+  Report access screen and needs no role, while org-wide administration stays
+  with Platform admin. It is also no longer offered when setting someone's role.
+
+- The Claude and Copilot plugins are hardened against a hostile repository you
+  merely open. A cloned repo could previously supply its own `PATH` and get its
+  own `git` run on your machine at session start; point the plugin at a fake home
+  and choose where your emit credential was sent; or ship a `.gitignore` symlink
+  that corrupted your Claude settings and silently switched telemetry off. None
+  of these needed you to run anything — opening the repo was enough. Update to
+  plugin 0.1.36 (Claude) / 0.1.14 (Copilot) to pick the fixes up.
+
+- The two "attribution has stalled" alerts now tell a real outage from an idle
+  estate using an independent ingest-side signal — the count of rows the Azure
+  Monitor pipeline physically received (a platform metric read straight from the
+  data-collection rule, not a query over the stored data). An editor left open
+  overnight no longer pages: nothing arrived, so nothing is stuck. A reader that
+  quietly stops landing usage while rows keep arriving still pages, even if it
+  returns "success", and no longer auto-resolves mid-outage while rows are still
+  arriving. When the metric cannot be read the alerts fall back to the previous
+  behaviour,
+  which errs toward paging. Admin's diagnostics show the coverage verdict and the
+  received/dropped counts next to each run. (Needs a Monitoring Reader role grant
+  on the data-collection rule, shipped in infra; until it is applied the fallback
+  keeps the alerts working.)
+- Contributors: opening the repo in its devcontainer now gives you a working
+  integration-test run out of the box — a local Postgres is installed and wired
+  up, so `npm run test:integration` no longer needs Docker there.
+
 ## 2026-09-02 (snapshot 39578d5f)
 
 - Re-running setup in a repo tagged for a project no longer leaves that session

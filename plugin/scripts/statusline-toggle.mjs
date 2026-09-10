@@ -21,14 +21,17 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { installStatusLine, removeStatusLine } from './env-builder.mjs'
+import { resolveScriptsDir } from './plugin-runtime.mjs'
 
 const arg = (process.argv[2] || '').trim().toLowerCase()
 const settingsPath = join(homedir(), '.claude', 'settings.json')
-const scriptsDir = process.env.CLAUDE_PLUGIN_ROOT
-  ? join(process.env.CLAUDE_PLUGIN_ROOT, 'scripts')
-  : dirname(fileURLToPath(import.meta.url))
+// CONFINED (MDASH follow-up): this path is WRITTEN INTO ~/.claude/settings.json
+// as a statusLine command, which Claude Code then executes on every render — so
+// an unconfined CLAUDE_PLUGIN_ROOT here persists repo-chosen code, outliving the
+// session that planted it. The review that found the other three consumers
+// missed this one; it is the worst of them.
+const scriptsDir = resolveScriptsDir()
 const statuslinePath = join(scriptsDir, 'statusline.mjs')
 
 let settings = {}

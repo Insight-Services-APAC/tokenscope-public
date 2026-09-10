@@ -4,7 +4,7 @@
  * Soft-revoke: the row keeps its history (revoked_at/revoked_by), like
  * cou_owner (mig 0048) — a re-grant later is a new row.
  *
- * ORG-WIDE ONLY (A4): requireRole(event, 'global-finops').
+ * ORG-WIDE ONLY (A4): requireRole(event, 'platform-admin').
  *
  * SELF-CLEAR GUARD (mig 0130): a `revoke-all` row is the "administer, no data"
  * denial. The revoked person KEEPS their org-wide admin role (a revoke removes
@@ -24,7 +24,7 @@ import { requireUuidParam } from '../../../../utils/require-uuid-param'
 import { REPORT_ACCESS_REVOKE } from '../../../../../shared/auth/report-visibility'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'global-finops')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'report-access grant id')
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

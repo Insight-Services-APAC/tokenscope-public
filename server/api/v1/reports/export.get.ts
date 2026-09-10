@@ -6,7 +6,7 @@
  * the screen endpoints, then serialises. It never re-derives figures, so the CSV
  * cannot drift from what the user sees. RBAC is DELEGATED per scope: Regional
  * uses resolveRegionalScope (incl. the `ou` anti-IDOR); Across-Regions is
- * whole-company (global-finops / platform-admin only); Cost-Centre delegates to
+ * whole-company (platform-admin, or an equivalent report-access grant); Cost-Centre delegates to
  * the CC ownership/region gate (fetchVisibleCostCentres / resolveCostCentreDrill).
  * CSVs stamp `asOfDate` (owner gate fold-in). Lane firewall: §7(7).
  *
@@ -293,7 +293,6 @@ async function exportOneRegion(event: H3Event, query: ExportQuery): Promise<stri
     'developer',
     'manager',
     'admin',
-    'global-finops',
     'platform-admin',
   )
   // Month OR custom from/to window — the SAME window the screen endpoints use
@@ -649,8 +648,9 @@ async function costCentreExport(event: H3Event): Promise<string> {
 
 /**
  * Finance ledger CSV export (Wave 5, owner D-Q8). Grain cost-centre × provider ×
- * month. DELEGATES to the finance gate — `global-finops` + `platform-admin` ONLY
- * (D-Q5); the zombie `finance` enum 403s. Reuses the SAME per-CoU query fn as the
+ * month. DELEGATES to the finance gate (D-Q5), so it is reachable by
+ * `platform-admin` AND by any grant holder — a developer with an active finance
+ * report-access grant can export this ledger. A role alone still 403s. Reuses the SAME per-CoU query fn as the
  * screen (byte-identical) + the Σ=bill check for the header stamp. Default month =
  * the last complete month. asOf-stamped via the ledger header.
  */

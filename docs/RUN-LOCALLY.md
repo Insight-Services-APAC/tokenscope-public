@@ -73,7 +73,11 @@ npm run lint
 Integration tests need a container runtime for the throwaway Postgres. If your
 environment has no Docker socket, point `TEST_PG_URL` at any Postgres 16 server
 (with `ltree`, `pgcrypto`, `btree_gist` available) and the suites provision a
-per-run throwaway database there.
+per-file throwaway database there. The repo's devcontainer (`.devcontainer/`)
+does this for you: it installs a local Postgres 16 and sets `TEST_PG_URL`, so
+`npm run test:integration` works there with no Docker at all. Two files that
+need a pristine cluster (Postgres roles are cluster-wide, and a shared server
+keeps them between runs) skip under `TEST_PG_URL` and run on CI.
 
 ## Next
 

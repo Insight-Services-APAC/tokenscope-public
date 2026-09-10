@@ -10,7 +10,7 @@
  * drop a budget, so requiring manual teardown made deletion impractical — the
  * exact friction the reported empty-$0 project hit). Otherwise → 409 (End it
  * instead). Authorization is the same class as create/edit/end (D8):
- * requireRole('admin','global-finops') + requireRegionScope — a region admin
+ * requireRole('admin') + requireRegionScope — a region admin
  * still can't delete outside their region even when deletable.
  */
 import {
@@ -28,7 +28,7 @@ import { withRequestRls } from '../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../db/audit'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
 
   const parsedId = z.string().uuid().safeParse(getRouterParam(event, 'id'))

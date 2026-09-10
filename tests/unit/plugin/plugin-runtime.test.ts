@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir, userInfo } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import {
   resolveScriptsDir,
   resolveHelperPath,
@@ -30,10 +30,12 @@ afterEach(() => {
 })
 
 describe('resolveScriptsDir / resolveHelperPath', () => {
-  it('uses CLAUDE_PLUGIN_ROOT/scripts when set', () => {
+  it('REFUSES a CLAUDE_PLUGIN_ROOT outside our own install', () => {
     process.env.CLAUDE_PLUGIN_ROOT = '/opt/plugin'
-    expect(resolveScriptsDir()).toBe('/opt/plugin/scripts')
-    expect(resolveHelperPath()).toBe('/opt/plugin/scripts/otel-headers-helper.sh')
+    // Confined: a CLAUDE_PLUGIN_ROOT outside our own install is refused and we
+    // fall back to the bundle this module was loaded from (MDASH §2.6 follow-up).
+    expect(resolveScriptsDir()).toBe(resolve(__dirname, '../../../plugin/scripts'))
+    expect(resolveHelperPath()).toBe(resolve(__dirname, '../../../plugin/scripts/otel-headers-helper.sh'))
   })
 })
 
@@ -113,42 +115,70 @@ describe('readEmitSentinel', () => {
   it('returns null when no sentinel', () => {
     expect(readEmitSentinel({})).toBeNull()
   })
+
+  it('an EXPLICIT dir wins over the ambient TOKENSCOPE_STATE_DIR', () => {
+    /*
+     * The sentinel answers "is emission healthy", and its ABSENCE reads as
+     * healthy. So a caller that lets the ambient environment choose which
+     * directory is searched lets a repository point it at an empty one and
+     * report health it did not verify — masking a real, current failure.
+     *
+     * The status line was that caller. It now passes trustedStateDir()
+     * explicitly, and this is the primitive that makes it work: a real sentinel
+     * in the explicit dir is found even while the ambient value names a decoy
+     * that has none.
+     */
+    const trusted = join(tmp, 'trusted-state')
+    const decoy = join(tmp, 'repo-decoy')
+    mkdirSync(trusted, { recursive: true })
+    mkdirSync(decoy, { recursive: true })
+    writeFileSync(join(trusted, 'emit-failure.json'), JSON.stringify({ http_status: 401, message: 'real' }))
+    process.env.TOKENSCOPE_STATE_DIR = decoy
+
+    expect(
+      readEmitSentinel(process.env, trusted),
+      'the ambient state dir masked a live emit failure',
+    ).toEqual({ http_status: 401, message: 'real' })
+  })
 })
 
 describe('runEmitHelper', () => {
   function stubHelper(body: string) {
     const dir = join(tmp, 'scripts')
     mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, 'otel-headers-helper.sh'), body)
-    process.env.CLAUDE_PLUGIN_ROOT = tmp
+    const path = join(dir, 'otel-headers-helper.sh')
+    writeFileSync(path, body)
+    // NOT via CLAUDE_PLUGIN_ROOT: resolveScriptsDir confines that to our own
+    // install now, so steering it here would exercise the attacker's channel
+    // rather than the caller's. runEmitHelper takes an explicit helperPath.
+    return path
   }
 
   it('ran=true, status 0, hasAuth when the helper prints an Authorization bearer', () => {
-    stubHelper('echo \'{"Authorization":"Bearer SECRET"}\'\nexit 0\n')
-    const r = runEmitHelper()
+    const helperPath = stubHelper('echo \'{"Authorization":"Bearer SECRET"}\'\nexit 0\n')
+    const r = runEmitHelper({ helperPath })
     expect(r.ran).toBe(true)
     expect(r.status).toBe(0)
     expect(r.hasAuth).toBe(true)
   })
 
   it('hasAuth=false on a non-zero exit (auth failure)', () => {
-    stubHelper('echo "boom" >&2\nexit 1\n')
-    const r = runEmitHelper()
+    const helperPath = stubHelper('echo "boom" >&2\nexit 1\n')
+    const r = runEmitHelper({ helperPath })
     expect(r.ran).toBe(true)
     expect(r.status).toBe(1)
     expect(r.hasAuth).toBe(false)
   })
 
   it('hasAuth=false when stdout is exit-0 but not a bearer object', () => {
-    stubHelper('echo "not json"\nexit 0\n')
-    const r = runEmitHelper()
+    const helperPath = stubHelper('echo "not json"\nexit 0\n')
+    const r = runEmitHelper({ helperPath })
     expect(r.status).toBe(0)
     expect(r.hasAuth).toBe(false)
   })
 
   it('ran=false when the helper is missing', () => {
-    process.env.CLAUDE_PLUGIN_ROOT = join(tmp, 'empty')
-    const r = runEmitHelper()
+    const r = runEmitHelper({ helperPath: join(tmp, 'empty', 'otel-headers-helper.sh') })
     expect(r.ran).toBe(false)
   })
 })

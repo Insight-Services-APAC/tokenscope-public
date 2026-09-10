@@ -28,6 +28,7 @@ import regionHandler from '../../../server/api/v1/reports/region/index.get'
 import driversHandler from '../../../server/api/v1/reports/region/drivers.get'
 import ccDrillHandler from '../../../server/api/v1/reports/cost-centres/[ccId].get'
 import {
+  withReportCache,
   reportCacheStats,
   resetReportCache,
 } from '../../../server/reporting/report-cache'
@@ -87,7 +88,7 @@ const sess = (teammateId: string): Session =>
     teammateId,
     email: 'x@x.test',
     displayName: 'X',
-    role: 'global-finops',
+    role: 'platform-admin',
     regionId,
     orgPath: 'rcx',
     issuedAt: new Date().toISOString(),
@@ -118,7 +119,7 @@ beforeAll(async () => {
   tmTwo = await mkTeammate('two@rcx.test', ccB)
   /*
    * mig 0129: `sess()` here takes teammateId as a PARAMETER (always with the
-   * hardcoded role 'global-finops') and every caller in this file passes
+   * hardcoded role 'platform-admin') and every caller in this file passes
    * either tmOne or tmTwo — two REAL, dedicated per-persona rows, never a
    * shared sentinel and never reused for a role expected to stay unelevated.
    * This file is about cache-key/coalescing behaviour, not RBAC narrowness, so
@@ -176,7 +177,20 @@ describe('T3 — the key is the security boundary', () => {
 })
 
 describe('T4 — identical concurrent requests share one computation', () => {
-  it('two concurrent composite calls: one miss, one join, equal bodies', async () => {
+  it('two concurrent composite calls: ONE computation, equal bodies', async () => {
+    /*
+     * The invariant is ONE COMPUTATION, and that is what is asserted. Which
+     * sharing mechanism serves the second request — `join` (the first is still
+     * in flight) or `hit` (it had already landed) — is decided by scheduling,
+     * and pinning `responseJoins === 1` pinned the outcome of a race: on a
+     * loaded CI runner the first computation can finish before the second
+     * registers, and the run goes red having demonstrated nothing wrong. Both
+     * outcomes mean the same thing here, because `miss` is the ONLY branch that
+     * calls compute().
+     *
+     * The join path itself is covered deterministically below, with a compute
+     * this test controls, rather than by hoping two handlers overlap.
+     */
     const q = 'region=all&month=2026-07'
     const [a, b] = await Promise.all([
       regionHandler(ev(sess(tmOne), q).event),
@@ -184,8 +198,45 @@ describe('T4 — identical concurrent requests share one computation', () => {
     ])
     expect(b).toEqual(a)
     const s = reportCacheStats()
-    expect(s.responseMisses).toBe(1)
-    expect(s.responseJoins).toBe(1)
+    expect(s.responseMisses, 'the body was computed more than once').toBe(1)
+    expect(
+      s.responseJoins + s.responseHits,
+      'the second request neither joined nor hit — it recomputed',
+    ).toBe(1)
+  })
+
+  it('the JOIN path: a second caller arriving mid-flight never calls compute again', async () => {
+    /*
+     * Deterministic by construction. The first compute parks on a promise this
+     * test resolves, so the second caller is GUARANTEED to arrive while the
+     * entry is in flight — the exact window the handler test above cannot pin.
+     * computes === 1 is the assertion that matters; responseJoins proves it was
+     * the in-flight branch and not a cache hit that delivered it.
+     */
+    let computes = 0
+    let release!: () => void
+    const parked = new Promise<void>((r) => {
+      release = r
+    })
+    const key = ['t4-join-probe']
+    const compute = async () => {
+      computes++
+      await parked
+      return { v: 'once' }
+    }
+
+    const first = withReportCache(ev(sess(tmOne)).event, key, compute)
+    // Yield until the first call has registered as in flight. It cannot finish
+    // in the meantime: compute() is parked until this test says otherwise.
+    while (reportCacheStats().responseMisses === 0) await new Promise((r) => setImmediate(r))
+
+    const second = withReportCache(ev(sess(tmOne)).event, key, compute)
+    release()
+    const [a, b] = await Promise.all([first, second])
+
+    expect(computes, 'the second caller ran its own computation').toBe(1)
+    expect(a).toEqual(b)
+    expect(reportCacheStats().responseJoins).toBe(1)
   })
 })
 

@@ -55,6 +55,7 @@ import fs from 'node:fs'
 import https from 'node:https'
 import http from 'node:http'
 import { execFileSync } from 'node:child_process'
+import { trustedGitPath } from './trusted-git.mjs'
 import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -376,7 +377,9 @@ function isGitRepo(cwd = process.cwd()) {
  */
 export function gitRemoteOrgUrl(cwd = process.cwd()) {
   try {
-    const out = execFileSync('git', ['config', '--get', 'remote.origin.url'], {
+    const git = trustedGitPath()
+    if (!git) return null // no trusted git — degrade, never fall back to a name lookup
+    const out = execFileSync(git, ['config', '--get', 'remote.origin.url'], {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -595,7 +598,9 @@ export function isForeignOwned(st) {
  */
 export function isGitTracked(filePath) {
   try {
-    execFileSync('git', ['ls-files', '--error-unmatch', filePath], {
+    const git = trustedGitPath()
+    if (!git) return false // no trusted git — treat as untracked, never name-lookup
+    execFileSync(git, ['ls-files', '--error-unmatch', filePath], {
       cwd: dirname(filePath),
       stdio: ['ignore', 'ignore', 'ignore'],
     })
@@ -819,6 +824,21 @@ export function ensureGitignored(
   const bare = entry.endsWith('/') ? entry.slice(0, -1) : null
   const gitignorePath = join(cwd, '.gitignore')
   try {
+    /*
+     * VALIDATE BEFORE READING, not only before writing.
+     *
+     * The no-follow open below protects the APPEND, but this read ran first and
+     * followed the link anyway: a committed `.gitignore` pointing at a FIFO or a
+     * character device blocks or exhausts the plugin the moment the repo is
+     * opened, which needs no write at all. lstat first and refuse anything that
+     * is not a regular file; absent is fine, the open creates it.
+     */
+    try {
+      const st = fs.lstatSync(gitignorePath)
+      if (!st.isFile()) return false
+    } catch {
+      /* absent → the open below creates it */
+    }
     let content = ''
     try {
       content = fs.readFileSync(gitignorePath, 'utf8')
@@ -833,7 +853,43 @@ export function ensureGitignored(
     })
     if (already) return false
     const prefix = content === '' ? '' : content.endsWith('\n') ? '' : '\n'
-    fs.appendFileSync(gitignorePath, `${prefix}${comment}\n${entry}\n`, { encoding: 'utf8' })
+    /*
+     * REFUSE TO FOLLOW A LINK (MDASH F299). Git stores a symlink as mode 120000
+     * and checkout recreates it, so a hostile repo can ship a `.gitignore` that
+     * is a symlink and redirect this append to any file the developer can write.
+     * The content appended is fixed, so it is not code execution — but pointed
+     * at ~/.claude/settings.json it makes that file unparseable, and every
+     * reader fails closed: a silent, durable, device-wide de-enrolment. Both
+     * lanes reach here (the Claude lane on every tagged repo at session start).
+     *
+     * O_NOFOLLOW fails with ELOOP when the FINAL component is a symlink, so the
+     * check and the write are one atomic operation — an lstat beforehand would
+     * leave a window between the two. Where the flag is unavailable (Windows),
+     * fall back to an lstat guard, which closes the class if not the race.
+     */
+    const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0
+    if (NOFOLLOW === 0) {
+      try {
+        if (!fs.lstatSync(gitignorePath).isFile()) return false
+      } catch {
+        /* absent — the open below creates it */
+      }
+    }
+    let fd
+    try {
+      fd = fs.openSync(
+        gitignorePath,
+        fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | NOFOLLOW,
+        0o644,
+      )
+    } catch {
+      return false // ELOOP (a symlink), or not ours to write — refuse, quietly
+    }
+    try {
+      fs.writeSync(fd, `${prefix}${comment}\n${entry}\n`)
+    } finally {
+      fs.closeSync(fd)
+    }
     return true
   } catch {
     return false // best-effort: never fail the caller over .gitignore hygiene

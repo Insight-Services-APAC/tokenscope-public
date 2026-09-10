@@ -43,7 +43,7 @@ beforeAll(async () => {
   ouId = ou!.id
   const [f] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'oid-gc-fin', email: 'gc-fin@x.test', role: 'global-finops', regionId, orgUnitId: ouId })
+    .values({ entraOid: 'oid-gc-fin', email: 'gc-fin@x.test', role: 'platform-admin', regionId, orgUnitId: ouId })
     .returning()
   finopsId = f!.id
   const [d] = await t.db
@@ -119,7 +119,7 @@ function ev(opts: {
   return e as unknown as Parameters<typeof statusGet>[0]
 }
 
-const finops = (): Session => ({ teammateId: finopsId, email: 'gc-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'gc.svc' })
+const finops = (): Session => ({ teammateId: finopsId, email: 'gc-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId, orgPath: 'gc.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'gc-dev@x.test', displayName: 'Dev', role: 'developer', regionId, orgPath: 'gc.svc' })
 
 async function auditCount(eventType: string, since: Date): Promise<number> {
@@ -155,7 +155,7 @@ async function seedGithubEnterprise(opts: SeedEnterpriseOpts): Promise<{ enterpr
 }
 
 describe('RBAC', () => {
-  it('a non-global-finops (developer) is 403 on every cutover route', async () => {
+  it('a non-platform-admin (developer) is 403 on every cutover route', async () => {
     await expect(statusGet(ev({ method: 'GET', session: dev() }))).rejects.toMatchObject({ statusCode: 403 })
     await expect(preflightPost(ev({ method: 'POST', session: dev(), body: {} }))).rejects.toMatchObject({ statusCode: 403 })
     await expect(activatePost(ev({ method: 'POST', session: dev(), body: {} }))).rejects.toMatchObject({ statusCode: 403 })

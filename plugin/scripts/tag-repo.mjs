@@ -16,13 +16,14 @@ import {
   chmodSync,
   renameSync,
   unlinkSync,
+  lstatSync,
 } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { execFileSync } from 'node:child_process'
 import { parseTokenscope } from './tokenscope-reader.mjs'
 import { buildRepoResourceAttrs, mergeClaudeSettings, readDeviceEnrolment } from './env-builder.mjs'
+import { withinOwnInstall } from './plugin-runtime.mjs'
 // The single .gitignore-hygiene helper, shared with the Copilot forwarder.
 // Import is side-effect-free (that module main()-guards) and tag-repo.mjs is not
 // vendored into the standalone Copilot distribution — see ensureRepoTagGitignored.
@@ -139,12 +140,29 @@ export function readGlobalEnrolment() {
  * CLAUDE_PLUGIN_ROOT is unset OR its helper is missing — e.g. a partial install),
  * then to this module's own dir, so every context still resolves to a real helper.
  */
+/*
+ * CONFINEMENT. CLAUDE_PLUGIN_ROOT chooses which otel-headers-helper.sh we
+ * persist, and Claude Code executes it every ~29 minutes with a live emit
+ * credential. Accept it ONLY when it resolves inside our own install; a newer
+ * sibling version stays acceptable (that is the deliberate upgrade follow),
+ * anything else falls back to the pinned enrolment path and then to this
+ * module's own directory.
+ *
+ * Claude Code appears to protect this variable already, but that guarantee is
+ * ITS to change, so do not depend on it here.
+ * See docs/security-sprint/epic-mdash-remediation.md (Wave 1, §2.6).
+ */
 function resolveHelperPath(enrolment) {
   const active = process.env.CLAUDE_PLUGIN_ROOT
     ? join(process.env.CLAUDE_PLUGIN_ROOT, 'scripts', 'otel-headers-helper.sh')
     : null
-  if (active && existsSync(active)) return active
-  if (enrolment?.helperPath) return enrolment.helperPath
+  if (active && existsSync(active) && withinOwnInstall(active)) return active
+  // The pinned enrolment path gets the SAME confinement. It comes from the
+  // global settings file, which a repo-moved HOME (or a poisoned settings file)
+  // can choose — so accepting it unchecked was a bypass sitting one line below
+  // the check it bypassed.
+  const pinned = enrolment?.helperPath
+  if (pinned && existsSync(pinned) && withinOwnInstall(pinned)) return pinned
   return join(dirname(fileURLToPath(import.meta.url)), 'otel-headers-helper.sh')
 }
 
@@ -171,16 +189,15 @@ function resolveHelperPath(enrolment) {
  * tagger never writes, or miss the one it does.
  */
 export function resolveRepoRoot(cwd) {
-  try {
-    const out = execFileSync('git', ['rev-parse', '--show-toplevel'], {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
-    if (out) return out
-  } catch {
-    /* git unavailable / not inside a work tree — fall through to the ancestor walk */
-  }
+  /*
+   * NO SUBPROCESS. This is reached from `neutraliseRepoHome`, which runs BEFORE
+   * the repair that strips a repo-set PATH, so any spawn here resolves through
+   * the repo's environment. Callers realpath both ends themselves, so the walk
+   * preserves the physical-path property; `.git` is matched by existence, so a
+   * linked worktree still resolves; a repo-set GIT_DIR is deliberately not
+   * honoured. Do not add an exec here.
+   * See epic-mdash-remediation.md (F34) for the measured exploit.
+   */
   let dir = resolve(cwd)
   const fsRoot = resolve('/')
   while (true) {
@@ -283,11 +300,55 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   ensureRepoTagGitignored(root)
   const helperPath = resolveHelperPath(enrolment)
   const claudeDir = join(root, '.claude')
+  /*
+   * REFUSE A SYMLINKED `.claude` (MDASH r3).
+   *
+   * Git stores a symlink as mode 120000 and checkout recreates it, so a hostile
+   * repo can ship `.claude` as a link to any directory the developer can write.
+   * `mkdirSync(..., { recursive: true })` SUCCEEDS on an existing link target,
+   * and every write below then lands there — including settings.local.json,
+   * which carries emit credentials. That is the same class as the `.gitignore`
+   * finding one function over, with a far more valuable payload: fixed text
+   * versus a credential.
+   *
+   * The file write itself is tmp+rename, which replaces the LINK rather than
+   * following it, so the directory is the exposure.
+   */
+  try {
+    const st = lstatSync(claudeDir)
+    if (!st.isDirectory()) {
+      // A link, a file, a socket — anything but a real directory here is a
+      // redirect. Refuse the whole tag rather than write somewhere we did not
+      // choose; the caller already treats a null settingsPath as "not tagged".
+      return { settingsPath: null, changed: false, healed: false, instanceDrifted: false }
+    }
+  } catch {
+    /* absent — mkdirSync below creates it, and creation cannot follow a link */
+  }
   mkdirSync(claudeDir, { recursive: true })
   const settingsPath = join(claudeDir, 'settings.local.json')
 
+  /*
+   * THE FILE, not only the directory.
+   *
+   * Guarding `.claude` stops the write landing outside the repo, and the
+   * tmp+rename replaces a link rather than following it — but the READ below
+   * still followed one. A committed `settings.local.json` symlink whose target
+   * is valid JSON gets its unrelated fields merged into the new repo file, and a
+   * target that is a FIFO or a device blocks the hook outright. Same class as
+   * the `.gitignore` finding, one file over.
+   */
   let existing = {}
   let existingRaw = null
+  try {
+    // Absent is fine — the write below creates it. Anything present that is not
+    // a REGULAR file is a redirect and the whole tag is refused.
+    if (!lstatSync(settingsPath).isFile()) {
+      return { settingsPath: null, changed: false, healed: false, instanceDrifted: false }
+    }
+  } catch {
+    /* absent */
+  }
   if (existsSync(settingsPath)) {
     try {
       existingRaw = readFileSync(settingsPath, 'utf8')

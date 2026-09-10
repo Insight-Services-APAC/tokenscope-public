@@ -36,7 +36,7 @@
  * is "the PAT needs manage_billing" or "the App needs Enterprise organization
  * installations: read") and the caller must not have to assume one.
  *
- * RBAC: requireRole(admin, global-finops) + assertSameOrigin. Audited (per created/linked org).
+ * RBAC: requireRole(admin) + assertSameOrigin. Audited (per created/linked org).
  */
 import { defineEventHandler, createError, readValidatedBody, getRequestIP, getHeader, setResponseStatus } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -82,7 +82,7 @@ function classifyGithubError(err: unknown): string {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidatedBody(event, (d) => Body.parse(d))
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

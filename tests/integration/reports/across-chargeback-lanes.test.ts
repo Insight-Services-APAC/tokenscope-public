@@ -53,7 +53,7 @@ const evAll = (session: Session, query = '') =>
   ev(session, query ? `${query}&region=all` : 'region=all')
 
 const gfo = (): Session =>
-  ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role: 'global-finops', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
+  ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role: 'platform-admin', regionId: regionA, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
 
 const cents = (n: number) => Math.round(n * 100)
 
@@ -77,9 +77,9 @@ beforeAll(async () => {
   // persona in this file (grepped: only `gfo()` builds a session here), so a
   // real backing row + a direct grant is safe. Needed for `evAll(gfo(), …)` —
   // the whole-company region=all width — to keep passing (an ungranted
-  // global-finops is now clamped to its own region, not the unclamped scope).
+  // platform-admin is now clamped to its own region, not the unclamped scope).
   await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
-    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-gfo', 'x@x.test', 'X', ${regionA}::uuid, ${unitA}::uuid, 'global-finops', true)`
+    VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-gfo', 'x@x.test', 'X', ${regionA}::uuid, ${unitA}::uuid, 'platform-admin', true)`
   await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   // Anthropic bill lane (actual_spend → v_finance_bill_chargeback): cent-odd

@@ -137,7 +137,6 @@ export async function resolveRegionRequest(
     'developer',
     'manager',
     'admin',
-    'global-finops',
     'platform-admin',
   )
   // Gate the TAB before resolving: a caller with `regional: false` holds no single

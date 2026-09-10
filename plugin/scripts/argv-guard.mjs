@@ -27,7 +27,7 @@
  * from the packaged default, or from loopback. A model relaying a value through
  * the conversation cannot add to that set.
  */
-import { lstatSync, realpathSync } from 'node:fs'
+import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { assertSafeEndpoint, isLoopbackHostname, unsafeEndpointError } from './endpoint-guard.mjs'
 import { realHome } from './real-home.mjs'
@@ -190,7 +190,47 @@ function existsAsEntry(p) {
  * @param {{ flag: string, roots?: string[], allowedBasenames?: string[] }} opts
  * @returns {string} the resolved, symlink-free, confined path
  */
-export function assertConfinedPath(value, { flag, roots = [realHome()], allowedBasenames } = {}) {
+/*
+ * Is `startDir`, or any directory between it and `stopAt`, a git working tree?
+ *
+ * Home containment is not enough for a CREDENTIAL destination. A cloned
+ * repository normally lives under the account's own home, so "inside your home
+ * directory" happily accepts `~/projects/<hostile-repo>/exfil` — and a file
+ * written there is committed and pushed by the repo that chose it. That is
+ * exfiltration through the ordinary use of git, needing no second bug.
+ *
+ * `stopAt` is EXCLUSIVE so a developer who version-controls their dotfiles (a
+ * `.git` at `~` itself) does not have every confined path refused; only
+ * directories strictly below the confinement root are considered. A submodule
+ * or linked worktree stores `.git` as a FILE, so this tests existence, not type.
+ */
+function insideGitWorkTree(startDir, stopAt) {
+  // CANONICALISE THE STOP ROOT TOO. The candidate arrives already realpath'd, so
+  // comparing it against a merely-lexical root fails the moment the account home
+  // is itself reached through a symlink (/home/x -> /mnt/home/x): the prefix test
+  // is false immediately, the loop never runs, and a destination inside a git
+  // repository is accepted. The `inside` check above resolves its roots for the
+  // same reason; this one must match it.
+  let stop
+  try {
+    stop = realpathSync(resolve(stopAt))
+  } catch {
+    stop = resolve(stopAt)
+  }
+  let cur = resolve(startDir)
+  while (cur.startsWith(stop + sep)) {
+    if (existsSync(join(cur, '.git'))) return true
+    const parent = dirname(cur)
+    if (parent === cur) break
+    cur = parent
+  }
+  return false
+}
+
+export function assertConfinedPath(
+  value,
+  { flag, roots = [realHome()], allowedBasenames, refuseInsideRepo = false } = {},
+) {
   const resolved = resolve(value)
   let real
   try {
@@ -230,6 +270,17 @@ export function assertConfinedPath(value, { flag, roots = [realHome()], allowedB
       `${safeToken(flag)} must name one of: ${allowedBasenames.join(', ')}`,
       'unexpected-filename',
     )
+  }
+  if (refuseInsideRepo) {
+    const startDir = allowedBasenames ? dirname(real) : real
+    for (const root of roots.filter((r) => typeof r === 'string' && r)) {
+      if (insideGitWorkTree(startDir, root)) {
+        throw argvError(
+          `${safeToken(flag)} must not name a path inside a git repository — it receives a durable credential, and a repository publishes what is written into it`,
+          'inside-repository',
+        )
+      }
+    }
   }
   return real
 }

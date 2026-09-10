@@ -13,7 +13,7 @@
  * reject. Nullable fields use an explicit-null convention: omit a key to leave it
  * unchanged, pass null to clear it.
  *
- * RBAC: requireRole(admin, global-finops) + assertSameOrigin. Audited.
+ * RBAC: requireRole(admin) + assertSameOrigin. Audited.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { readValidated } from '../../../../../utils/validated-body'
@@ -89,7 +89,7 @@ interface CurrentRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'provider-org id')
   const body = await readValidated(event, Body)

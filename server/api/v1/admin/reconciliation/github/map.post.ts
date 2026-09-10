@@ -50,14 +50,14 @@
  * REGION: the seat's license org gives the natural home (ADR-0010 D4, GitHub org → region)
  * in SEAT mode. In APP mode there is no license org at all (the daily-credits probe has no org
  * dimension, github-unresolved.ts:184 sets it null), so the caller's own region is not an edge
- * case there but the ONLY outcome — an unbounded caller (platform-admin / global-finops) homes
+ * case there but the ONLY outcome — an unbounded caller (platform-admin) homes
  * every pick into whatever region their session carries. That is survivable because the row
  * lands on `__UNPLACED__` and an admin places it, and because attribution (this route's goal)
  * does not depend on the region; it is NOT a claim that the region is correct.
  *
  * but `licenseOrg` arrives from the client, so it may not be taken on trust. It is used only
  * to CHOOSE a candidate region, which then passes `requireRegionScope` like any other region a
- * caller names. A region admin naming another region's org is refused; global-finops and
+ * caller names. A region admin naming another region's org is refused; platform-admin and
  * platform-admin pass through, as everywhere else. An unmapped or absent org falls back to the
  * caller's own region rather than a global bucket.
  *
@@ -73,12 +73,12 @@
  *     that row is the NULL lane (a different COALESCE('') key). A genuine constraint race
  *     (e.g. the teammate deleted mid-write) is translated to a clean 409/404, never a 500.
  *
- * RBAC: requireRole(admin, global-finops) + assertSameOrigin. INSERT + audit in ONE tx (SYS-3),
+ * RBAC: requireRole(admin) + assertSameOrigin. INSERT + audit in ONE tx (SYS-3),
  * so a map never lands unaudited. Mirrors orgs.post.ts / me/identities.post.ts idioms.
  *
  * Region-scope: RLS is inert at runtime (owner connection, no FORCE), so requireRole alone is
  * not a region gate. This is a MONEY-PATH rebind, so BOTH ends are clamped to the caller's
- * region (platform-admin / global-finops pass through, rbac.ts:55):
+ * region (platform-admin pass through, rbac.ts:55):
  *   - the TARGET teammate being mapped TO (tm.region_id) — stops routing a login's spend INTO
  *     another region.
  *   - the teammate CURRENTLY bound to this login (if any), resolved on the same widened key the
@@ -141,7 +141,7 @@ function badRequest(detail: string): never {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

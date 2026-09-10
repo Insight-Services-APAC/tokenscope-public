@@ -87,7 +87,7 @@ beforeAll(async () => {
   }).returning()
   adminAId = adm!.id
   const [fin] = await t.db.insert(schema.teammate).values({
-    entraOid: 'oid-pr-finops', email: 'pr-finops@x.test', role: 'global-finops',
+    entraOid: 'oid-pr-finops', email: 'pr-finops@x.test', role: 'platform-admin',
     regionId: regionAId, orgUnitId: couAId,
   }).returning()
   finopsId = fin!.id
@@ -125,7 +125,7 @@ const adminA = (): Session => ({
 })
 const finops = (): Session => ({
   teammateId: finopsId, email: 'pr-finops@x.test', displayName: 'Fin',
-  role: 'global-finops', regionId: regionAId, orgPath: 'pra.core',
+  role: 'platform-admin', regionId: regionAId, orgPath: 'pra.core',
 })
 
 function ev(opts: {
@@ -212,7 +212,7 @@ describe('C4 — bulk place: authorisation', () => {
     expect(await homeOf(unplacedA[0]!)).toBe(holdingAId)
   })
 
-  it('even global-finops cannot place ACROSS regions — the unit must be in the teammate\'s own region', async () => {
+  it('even platform-admin cannot place ACROSS regions — the unit must be in the teammate\'s own region', async () => {
     // finops passes both region-scope checks (region-unbounded), so the ONLY
     // thing standing between this call and a silent cross-region move is the
     // containment rule inside placeTeammate.

@@ -40,12 +40,14 @@ WAF, so that env is unset and the middleware is inert — the VNet perimeter is 
 edge control.
 
 **RBAC roles** (`shared/auth/roles.ts`):
-`developer | manager | admin | global-finops | platform-admin` (plus `finance`,
-retired/unassignable — excluded from `SELECTABLE_ROLES`, kept in the enum for
-historical rows). `platform-admin` is the cross-region super-admin and satisfies
-every `requireRole` gate; `admin` (label "Region admin") is the region-scoped
-admin (bounded by `requireRegionScope`); `global-finops` (label "Global finance")
-is the org-wide finance/super-finance role.
+`developer | manager | admin | platform-admin` (plus TWO retired, unassignable
+members — `finance` and `global-finops` — excluded from `SELECTABLE_ROLES` and
+kept in the enum only so historical rows still render a label). `platform-admin` (label "Platform admin") is the cross-region super-admin, the
+ONLY org-wide role, and it satisfies every `requireRole` gate; `admin` (label
+"Region admin") is the region-scoped admin, bounded by `requireRegionScope`.
+"Global finance" is the label of the RETIRED `global-finops`, not of the live
+super-admin — a company-wide reporting reach is now a per-teammate
+`report_access_grant` and needs no role at all.
 
 ## Errors
 
@@ -147,7 +149,7 @@ only list that did.
 | DELETE | `/api/v1/me/identities/{id}` | cookie/OIDC + CSRF | Unlink one of the caller's own identity rows (the primary email is not a map row and cannot be removed here). |
 | GET | `/api/v1/me/inbox` | cookie/OIDC | List the caller's inbox items (filters: `ack_state` incl. open/closed shorthand, `category`, `severity`, `limit`). |
 | PATCH | `/api/v1/me/inbox/{id}` | cookie/OIDC + CSRF | Change `ack_state` (read/acknowledged/dismissed/resolved) on one's own item; audited. |
-| POST | `/api/v1/me/inbox/{id}/route` | `admin`/`global-finops` + CSRF | Forward an inbox item to another (active) recipient and resolve the source; audited. |
+| POST | `/api/v1/me/inbox/{id}/route` | `admin`/`platform-admin` + CSRF | Forward an inbox item to another (active) recipient and resolve the source; audited. |
 | GET | `/api/v1/me/usage` | cookie/OIDC | The caller's own usage-detail view — the **My usage** page (teammate-scoped). Renamed from `/api/v1/me/consumption`; there is no redirect. The dashboard payload moved the other way and is now `/api/v1/me/home`. Accepts the report window vocabulary (`month=YYYY-MM` XOR `from`/`to`, resolved via `resolveReportWindow`) beside the trend card's own `window=30\|90`; `lane=usage\|chargeback` selects the lens. Payload: `headline`/`disclosure` (ADR 0012), `hero_tiles` (the four window-scoped KPI tiles with same-elapsed MoM deltas and named delta-empty reasons — the page's only hero since the §I3 basis-group `hero` leg retired with its card), `context_residency` (spend by provider-reported context-window band + reason-typed un-banded remainder), `session_economics` (OTel-arm conversation distribution: median/p90/top-3 share), `model_mix` (reason-typed Top-models rows + the mix's own denominator), `where_it_went` (per-project contribution rows with the PROJECT's window total + allocation, plus one untagged remainder), `engagement` (`claude` and `copilot` columns, each in its own vocabulary; `null` = empty state). `hero_tiles.window` echoes the resolved window and carries `spark_partial` — whether the tiles' sparks END on a still-filling day (the axis runs to `min(to, today)`). It is stated by the server because nothing else on the echo can distinguish a finished month from the current month's last day, and a client that guessed from the frame would draw the "still accruing" mark on completed days. The former `cache`, `aux` and `hero` legs are removed with their cards (`hero` fed "What kind of AI work drove this", retired 2026-08-05; `disclosure` stays — Home reads it too, and /usage now renders it behind the lane toggle's (i) rather than as a card). Tagged-activity chips on the page open the activity drill-down. `page_freshness.settled_source` names which lane served the SETTLED days, **per basis** — `{ page, month_to_date, previous_period }`, each `rollup` (from `usage_rollup_daily`, with today always from the live view) or `view` (the gate declined, so everything came from `v_complete_usage`); `previous_period` is `null` when no comparison period was read. Three keys because the gate is resolved per basis and only the window's START decides the horizon check, so a page inside the 40-day sweep can be served from the rollup while a month-to-date or comparison window reaching behind it cannot. The gate declines on a stalled rollup worker, an incomplete backfill, a window past the horizon, or a settled day the rollup has not yet caught up with. Both values are correct: the gate opens only where the two bases agree as far as recorded write timestamps can show, and declines otherwise, so a `rollup` answer is never a stale one that anything could have detected. (The one case it cannot see is a source transaction that opens before a rollup rebuild and commits after it — the commit-order limit set out in `docs/design/usage-rollup-lane.md`.) The field exists so a fallback is visible rather than silent. Beside `page_freshness` the payload carries `attribution_stall` (`{ since } \| null`, same shared decision as `/me/home`) — the page's degradation banner operand. |
 | GET | `/api/v1/me/cost-centres` | cookie/OIDC | Cost centres the caller belongs to (self-scoped). |
 | GET | `/api/v1/me/activity-types` | cookie/OIDC | Activity types visible to the caller (for self-tagging). |
@@ -160,22 +162,22 @@ only list that did.
 
 ## Allocations (governance)
 
-CRUD for project budget pools. All gated `requireRole('manager','admin','global-finops')`,
+CRUD for project budget pools. All gated `requireRole('manager','admin','platform-admin')`,
 with project/region/org-subtree scoping; write methods add CSRF and emit audit
 events. The scope is the same on both sides of that split: an `admin` is bound to
 the project's region, a `manager` needs the project to be **in their own region
-AND** its cost-owning unit inside their org subtree, and `global-finops` is
+AND** its cost-owning unit inside their org subtree, and `platform-admin` is
 unbounded. A project that fails either half returns the same `403` — the refusal
 does not say which.
 
 | Method | Path | Auth gate | Purpose |
 |---|---|---|---|
-| GET | `/api/v1/allocations` | `manager`/`admin`/`global-finops` | List allocations in the caller's scope. |
-| POST | `/api/v1/allocations` | `manager`/`admin`/`global-finops` + CSRF | Create the baseline budget pool (first allocation flips the project `is_onboarded`); overlapping baseline period returns a clean 409. |
-| GET | `/api/v1/allocations/{id}` | `manager`/`admin`/`global-finops` | Focused row plus siblings, project metadata, assigned devs, top-up history, and last-5 audit trail. |
-| PATCH | `/api/v1/allocations/{id}` | `manager`/`admin`/`global-finops` + CSRF | Edit the allocation row (writes row plus audit event). |
-| POST | `/api/v1/allocations/{id}/split` | `manager`/`admin`/`global-finops` + CSRF | Set allocation mode and per-developer caps. |
-| POST | `/api/v1/allocations/{id}/topups` | `manager`/`admin`/`global-finops` + CSRF | Append a top-up row to the allocation. |
+| GET | `/api/v1/allocations` | `manager`/`admin`/`platform-admin` | List allocations in the caller's scope. |
+| POST | `/api/v1/allocations` | `manager`/`admin`/`platform-admin` + CSRF | Create the baseline budget pool (first allocation flips the project `is_onboarded`); overlapping baseline period returns a clean 409. |
+| GET | `/api/v1/allocations/{id}` | `manager`/`admin`/`platform-admin` | Focused row plus siblings, project metadata, assigned devs, top-up history, and last-5 audit trail. |
+| PATCH | `/api/v1/allocations/{id}` | `manager`/`admin`/`platform-admin` + CSRF | Edit the allocation row (writes row plus audit event). |
+| POST | `/api/v1/allocations/{id}/split` | `manager`/`admin`/`platform-admin` + CSRF | Set allocation mode and per-developer caps. |
+| POST | `/api/v1/allocations/{id}/topups` | `manager`/`admin`/`platform-admin` + CSRF | Append a top-up row to the allocation. |
 
 ## Rollups & project reads
 
@@ -191,11 +193,11 @@ as `/api/v1/reports/finance`.)
 
 | Method | Path | Auth gate | Purpose |
 |---|---|---|---|
-| GET | `/api/v1/rollups/manager` | `manager`/`admin`/`global-finops` | Per-teammate and per-project rollups for the manager's org scope. |
-| GET | `/api/v1/rollups/practice/{ouId}/velocity` | `manager`/`admin`/`global-finops` | Velocity baseline signal feeding the manager rollup's Signal column. |
+| GET | `/api/v1/rollups/manager` | `manager`/`admin`/`platform-admin` | Per-teammate and per-project rollups for the manager's org scope. |
+| GET | `/api/v1/rollups/practice/{ouId}/velocity` | `manager`/`admin`/`platform-admin` | Velocity baseline signal feeding the manager rollup's Signal column. |
 | GET | `/api/v1/rollups/org-tree` | any role (`developer`…`platform-admin`) | Org-unit tree rollup, scoped to the caller's own subtree. |
 | GET | `/api/v1/rollups/practice/{ouId}` | any role (`developer`…`platform-admin`) | Practice/org-unit rollup for one org-unit id (scope-clamped). |
-| GET | `/api/v1/projects/{id}/consumption` | `manager`/`admin`/`global-finops` | MTD consumption for a project regardless of caller assignment (org-subtree clamped; out-of-scope id returns 0). |
+| GET | `/api/v1/projects/{id}/consumption` | `manager`/`admin`/`platform-admin` | MTD consumption for a project regardless of caller assignment (org-subtree clamped; out-of-scope id returns 0). |
 
 ## Reports (the reporting shell)
 
@@ -220,7 +222,7 @@ no raw `actual_spend`.
 | Method | Path | Auth gate | Purpose |
 |---|---|---|---|
 | GET | `/api/v1/reports/meta` | `requireAuth` | Bootstrap: granted scopes (policy-derived), best-default scope, region default, month floors, provider settling states, copilot mode, and `drill` — the two grant columns (`teammate`, `project`) the client needs to decide link-or-plain-text on every reports row. |
-| GET | `/api/v1/reports/region` (+ `/trend`, `/active-trend`, `/drivers`, `/seasonality`, `/behaviour`) | `requireAuth` + region scope (see above) | ONE route, two widths. `?region=all` is the whole-company view (`standard`: `global-finops`/`platform-admin` only; loosened modes admit region admins / cost-centre owners); any other region is that region's view (cross-region roles, and admins under a loosened mode, may pass `?region=`). The retired `/reports/regional` and `/reports/across-regions` routes folded in here. `/drivers` takes `?axis` (width-specific enums) and `?lane=usage\|chargeback`. The response `meta` carries `settledThrough` — the last SETTLED UTC day (`today − 1`) the payload's day series were cut on — so a consumer can tell whether a series' last point is a finished day or the still-filling one without opening a second `/api/v1/clock` request with its own instant. |
+| GET | `/api/v1/reports/region` (+ `/trend`, `/active-trend`, `/drivers`, `/seasonality`, `/behaviour`) | `requireAuth` + region scope (see above) | ONE route, two widths. `?region=all` is the whole-company view (`standard`: `platform-admin` only; loosened modes admit region admins / cost-centre owners); any other region is that region's view (cross-region roles, and admins under a loosened mode, may pass `?region=`). The retired `/reports/regional` and `/reports/across-regions` routes folded in here. `/drivers` takes `?axis` (width-specific enums) and `?lane=usage\|chargeback`. The response `meta` carries `settledThrough` — the last SETTLED UTC day (`today − 1`) the payload's day series were cut on — so a consumer can tell whether a series' last point is a finished day or the still-filling one without opening a second `/api/v1/clock` request with its own instant. |
 | GET | `/api/v1/reports/cost-centres` · `/{ccId}` | `requireAuth` + cost-centre scope | Cost-centre list + drill (owned-or-subtree under `standard`; all cost centres under a loosened `unbounded` grant). Both carry the centre's two lanes: `burnUsd` (§A usage, homed by emit-time `cost_owning_unit_id`) and `chargeUsd` (§B chargeable), from one shared fetcher so the list and the drill cannot disagree. Never summed. `copilotChargebackPartialMonth` is `true` when the pooled Copilot charge — billed monthly, so unsliceable — is excluded because the window is not month-aligned; it is a property of the WINDOW and does not assert that a given centre has a pool row. The drill's `vendor` split covers every surface a vendor ships, not its flagship tool. |
 | GET | `/api/v1/reports/finance` · `/{couId}` | `requireAuth` + `requireReportScope('finance')` | Per-CoU finance/chargeback (all-regions grant required; region admins denied under `standard`, admitted under loosened modes). |
 | GET | `/api/v1/reports/teammate/{id}` (+ `/export`) | `requireAuth` + `teammateDrillAdmission` | The per-teammate **contribution view** (reports depth only). Requires `?src=` — the entry scope frame (`cc:{id}` / `region:{id}` / `across` / `finance`); a request with no frame is a `400` and a frame the caller does not hold is a `403`. Every subject figure is computed over the frame's predicate; the TokenSheet's "share of project" and budget state are whole-project figures over ALL members. Writes a `report-teammate-viewed` audit row on every request (the export writes `report-teammate-export`); both responses are `Cache-Control: no-store`. Withholds its figures behind `refusal: { reason: 'coverage-stale', … }` when the stalest provider feeding the subject's in-scope rows is past the freshness threshold. |
@@ -255,68 +257,68 @@ states.
 
 ## Admin
 
-The administrative surface, gated `requireRole('admin','global-finops')`
+The administrative surface, gated `requireRole('admin','platform-admin')`
 (with `platform-admin` passing via the super-admin bypass); region-scoped
 admins are clamped by `requireRegionScope` where noted. Write methods add CSRF
 and emit audit events.
 
 | Method | Path | Auth gate | Purpose |
 |---|---|---|---|
-| GET | `/api/v1/admin/audit` | `admin`/`global-finops` | Paginated `audit_event` reader. |
-| GET | `/api/v1/admin/diagnostics` | `admin`/`global-finops` | Read-only operational health snapshot, DB-only: `postgres` (reachability, latency, active migration, plus a classified `error` + `errorCorrelationId` when the probe fails), `redis`/`queues` placeholders, `lastSync`, `pipeline` freshness, `workers` execution health — each row carrying `rowsAffected` and `sessionsProcessed` from its latest run, which are the evidence behind the `attribution-stall` alert (zero rows with zero sessions is an idle estate; zero rows WITH sessions processed is the fault) — `dispatchBudgetMs`, `reads`, `nodeEnv`, `containerInfo`. **Four transactions, one per read** (the Postgres probe, `lastSync`, `pipeline`, `workers`), each with its own catch: a failed statement aborts the transaction it runs in, so reads that must survive each other cannot share one. A caught failure keeps that read's empty/unknown shape — and declares itself in `reads`, one `{ available }` entry per read carrying a classified `error` + `errorCorrelationId` when false, because an empty `workers` list from a failed query is otherwise the same bytes as an empty table. (`postgres` has no `reads` entry; it already reports `reachable: false` + `error`.) The network probes and the costing aggregates it used to carry are the two endpoints below. |
-| GET | `/api/v1/admin/diagnostics/probes` | `admin`/`global-finops` | The network-bound probes: `services` (TCP reachability of each provisioned private endpoint, the boot pre-flight's probe) and `telemetryRead` (a bounded read through the configured telemetry reader). Both run concurrently, each raced against a 5 s budget; a probe that overruns reports its unreachable/errored shape (`errorClass: 'timeout'` / a classified `error` + `correlationId`) rather than failing the request. The handler itself reads no table — only the session/role gate touches the database. |
-| GET | `/api/v1/admin/diagnostics/costing` | `admin`/`global-finops` | The 7-day costing aggregates: `costDrift` (rate-card estimate vs provider figure, `v_cost_drift` — org-wide for every caller, as the view projects no region column: `owner-decisions.md` §9) and `costingRungs` (which precedence-ladder rung priced real Claude Code spend, from `attribution_record.cost_basis`; region-scoped for `admin`). **Two transactions, one per query**, issued serially rather than concurrently: `costDrift` fails on its own on a pre-0045 database, and a failed statement aborts its transaction, so sharing one would blank the rungs card — the card the rate-card-fallback alert lives on — with a success-shaped zero. Each failure keeps its read's zero shape and declares itself in `reads.costDrift` / `reads.costingRungs` (`{ available: false, error, errorCorrelationId }`). |
-| GET | `/api/v1/admin/grants` | `admin`/`global-finops` | OAuth grants in the caller's region scope (`oauth_token` joined to `teammate` for region clamping). |
-| POST | `/api/v1/admin/grants/{id}/revoke` | `admin`/`global-finops` + CSRF + region scope | Revoke a teammate's grant (region-scoped via the teammate join; emit grants also end their instance). Audited. |
-| GET | `/api/v1/admin/org-units` | `admin`/`global-finops` | LTREE org-unit tree (region-scoped). |
-| GET | `/api/v1/admin/projects` | `admin`/`global-finops` | Region-scoped projects list. |
-| POST | `/api/v1/admin/projects` | `admin`/`global-finops` + CSRF | Register a project (region-clamped; CoU must be same-region). |
-| POST | `/api/v1/admin/projects/{id}/assignments` | `manager`/`admin`/`global-finops` + CSRF | Assign a teammate to a project (missing teammate returns 422 "add this teammate first"). |
-| DELETE | `/api/v1/admin/projects/{id}/assignments/{teammateId}` | `manager`/`admin`/`global-finops` + CSRF | End an assignment (closes the effective range, preserving history). |
-| GET | `/api/v1/admin/region/{regionId}` | `admin`/`global-finops` | Region-scoped admin landing payload. |
-| GET | `/api/v1/admin/regions` | `admin`/`global-finops` | Region list for admin pickers. |
-| GET | `/api/v1/admin/report-access` | `global-finops` | List report-access grants (active + expired-but-not-revoked, each carrying holder, permission, granted-by, and expiry). Org-wide only — no region-admin read, unlike the retired policy dial. |
-| POST | `/api/v1/admin/report-access` | `global-finops` + CSRF | Write one report-access row for one active, non-provisional teammate, with an optional future `expires_at`: a positive grant (`operational`/`finance`) that WIDENS, or `revoke-all` that REMOVES all report access (deny-wins over role default and any grant — the "administer, no data" case). `409` on a live duplicate for the same (teammate, permission); an expired-but-unrevoked blocker is superseded automatically first (its own audited revoke). |
-| DELETE | `/api/v1/admin/report-access/{id}` | `global-finops` + CSRF | Soft-revoke a report-access row (history preserved; a later re-grant is a new row). `404` if no active row matches the id. `403` if the row is a `revoke-all` targeting the **caller themselves** — lifting your own revoke needs a different admin. |
-| GET | `/api/v1/admin/report-access/teammate-search` | `global-finops` | Company-wide typeahead over active, non-provisional teammates (`?q=` min 2 chars, `?limit=` max 25) for the grant dialog — the region-scoped `/admin/users` list cannot serve an org-wide picker. |
-| GET | `/api/v1/admin/repos` | `admin`/`global-finops` | Region-scoped repo-to-project mappings. |
-| GET | `/api/v1/admin/settings` | `admin`/`global-finops` | Read-only config summary (intentionally narrow). |
-| GET | `/api/v1/admin/teammates` | `admin`/`global-finops` | Region-scoped teammates grid (`region`, `limit`, `offset`). |
-| GET | `/api/v1/admin/users` | `admin`/`global-finops` | Users sub-page list (role plus last-sync). |
-| PATCH | `/api/v1/admin/users/{id}` | `admin`/`global-finops` + CSRF | Change a teammate's role (region-clamped; last-admin guard). |
-| PATCH | `/api/v1/admin/users/{id}/region` | `global-finops` + CSRF | Move a teammate to another region (org-wide op; region `admin` may not do it). |
-| POST | `/api/v1/admin/users/{id}/revoke-sessions` | `admin`/`global-finops` + CSRF | Force-sign-out a teammate (region-clamped, audited). |
-| PATCH | `/api/v1/admin/users/{id}/org-unit` | `admin`/`global-finops` + CSRF + region scope | Move a teammate to another org-unit (clamped to the caller's region). Optional `rehome` moves their recorded usage with them — see **Correcting a placement** below. |
-| POST | `/api/v1/admin/users/{id}/placement-span` | `admin`/`global-finops` + CSRF + region scope | Read-only: what a placement correction would move, and how many Business Units it spans. |
-| POST | `/api/v1/admin/teammates` | `admin`/`global-finops` + CSRF + region scope | Create/place a teammate (region admin bounded to their own region). |
-| GET | `/api/v1/admin/instances` | `admin`/`global-finops` + region scope | Region-scoped instances/devices grid. Carries `last_bearer_at` — stamped by every `/bearer` mint, which Claude Code issues at startup and every ~29 minutes for the life of the process, so a fresh value means "a client is running", NOT "a client is emitting". It is the other half of the `attribution-stall` evidence. |
-| GET | `/api/v1/admin/activity-types` · POST · PATCH `/{id}` | `admin`/`global-finops` (+ CSRF on writes) + region scope | Region-scoped activity-type catalogue: list, create, and edit (`is_standard` org-wide entries are global-only). |
-| GET | `/api/v1/admin/directory-exclusions` · POST · DELETE `/{id}` | `admin`/`global-finops` (+ CSRF on writes) | Directory-sync exclusion list: read, add, remove. |
-| GET | `/api/v1/admin/directory/search` | `manager`/`admin`/`global-finops` | Typeahead directory search (for placing/looking up teammates). |
-| GET | `/api/v1/admin/directory-region-rules` · POST · DELETE `/{id}` | `global-finops`/`platform-admin` (+ CSRF on writes) | Directory-attribute → region placement rules: list, upsert, and hard-delete. GLOBAL roles only (cross-region placement config); writes audited. |
-| GET | `/api/v1/admin/directory/field-distribution` | `global-finops`/`platform-admin` | K-anonymity directory diagnostic (`?sample=`): per region-attribute coverage plus top distinct values as value/count only, suppressed below a k-anon floor of 5 (`MIN_CELL`). Powers the Region-rules Discover panel; GLOBAL roles only. |
-| GET | `/api/v1/admin/governance-settings` · PUT | `admin`/`global-finops` (+ CSRF on write) + region scope | Read/set the governance settings for the caller's region. |
-| GET | `/api/v1/admin/settings/project-lifecycle` · PUT | GET `admin`/`global-finops`; PUT `global-finops` + CSRF | Org-wide project-lifecycle settings (the org-wide write is narrowed to `global-finops`). |
-| POST | `/api/v1/admin/org-units` · DELETE/PATCH `/{id}` · POST `/{id}/move` · POST `/{id}/owners` · DELETE `/{id}/owners/{teammateId}` | `admin`/`global-finops` + CSRF | Org-unit tree writes: create, edit, delete, re-parent (`move`), and owner add/remove. (The read is `GET /api/v1/admin/org-units` above.) |
-| DELETE/PATCH | `/api/v1/admin/projects/{id}` | `admin`/`global-finops` + CSRF | Delete or edit a project (region-clamped). PATCH also accepts `migrate_spend` — see **Migrate** below. |
-| POST | `/api/v1/admin/projects/{id}/migrate-preview` | `admin`/`global-finops` + CSRF | Read-only: what a Migrate would move. See **Migrate** below. |
-| GET | `/api/v1/admin/reporting-snapshots/{month}` | `admin`/`global-finops` | What the month read when it was recorded, plus what it reads now and the movement. `null` = never recorded. |
-| POST | `/api/v1/admin/reporting-snapshots/{month}/close` | `admin`/`global-finops` + CSRF | Record the month. Refused if it has already been recorded. |
-| GET | `/api/v1/admin/projects/{id}/assignments` | `manager`/`admin`/`global-finops` | List a project's teammate assignments (writes are the `assignments` POST/DELETE/PATCH rows above). All four share `assertProjectScope`: `admin` bound to the project's region, `manager` needs the project in their **own region and** its cost-owning unit in their org subtree, `global-finops` unbounded. |
-| GET | `/api/v1/admin/rate-cards` · POST · POST `/{id}/retire` | `admin`/`global-finops` (+ CSRF on writes) | Rate-card registry: list, create-card-with-lines (atomic; region admins bounded to own region, a global card is `global-finops`/`platform-admin`), and retire. No line-mutation endpoint by design — pricing changes mint a new card. (Distinct from the still-unbuilt bare `/api/v1/rate-cards`.) |
+| GET | `/api/v1/admin/audit` | `admin`/`platform-admin` | Paginated `audit_event` reader. |
+| GET | `/api/v1/admin/diagnostics` | `admin`/`platform-admin` | Read-only operational health snapshot, DB-only: `postgres` (reachability, latency, active migration, plus a classified `error` + `errorCorrelationId` when the probe fails), `redis`/`queues` placeholders, `lastSync`, `pipeline` freshness, `workers` execution health — each row carrying `rowsAffected`, `sessionsProcessed`, `newEventsSeen` and `sourceCoverage` (+ `sourceRowsReceived`/`sourceRowsDropped`) from its latest run — the evidence behind the `attribution-stall` / `read-path-stale` alerts: `sourceCoverage` is what they gate on (the DCR ingest verdict — `rows-arrived` = the pipeline received rows the joiner did not land = the fault; `no-rows` = idle; `unknown` = the metric could not be read → the bearer fallback), `newEventsSeen` is the reader-side middle term (usage past the instance watermark), `sessionsProcessed` is the reader's selection size (an open editor keeps it at 1), and `null` means the run recorded no such figure (a pre-deploy run), not zero — `dispatchBudgetMs`, `reads`, `nodeEnv`, `containerInfo`. **Four transactions, one per read** (the Postgres probe, `lastSync`, `pipeline`, `workers`), each with its own catch: a failed statement aborts the transaction it runs in, so reads that must survive each other cannot share one. A caught failure keeps that read's empty/unknown shape — and declares itself in `reads`, one `{ available }` entry per read carrying a classified `error` + `errorCorrelationId` when false, because an empty `workers` list from a failed query is otherwise the same bytes as an empty table. (`postgres` has no `reads` entry; it already reports `reachable: false` + `error`.) The network probes and the costing aggregates it used to carry are the two endpoints below. |
+| GET | `/api/v1/admin/diagnostics/probes` | `admin`/`platform-admin` | The network-bound probes: `services` (TCP reachability of each provisioned private endpoint, the boot pre-flight's probe) and `telemetryRead` (a bounded read through the configured telemetry reader). Both run concurrently, each raced against a 5 s budget; a probe that overruns reports its unreachable/errored shape (`errorClass: 'timeout'` / a classified `error` + `correlationId`) rather than failing the request. The handler itself reads no table — only the session/role gate touches the database. |
+| GET | `/api/v1/admin/diagnostics/costing` | `admin`/`platform-admin` | The 7-day costing aggregates: `costDrift` (rate-card estimate vs provider figure, `v_cost_drift` — org-wide for every caller, as the view projects no region column: `owner-decisions.md` §9) and `costingRungs` (which precedence-ladder rung priced real Claude Code spend, from `attribution_record.cost_basis`; region-scoped for `admin`). **Two transactions, one per query**, issued serially rather than concurrently: `costDrift` fails on its own on a pre-0045 database, and a failed statement aborts its transaction, so sharing one would blank the rungs card — the card the rate-card-fallback alert lives on — with a success-shaped zero. Each failure keeps its read's zero shape and declares itself in `reads.costDrift` / `reads.costingRungs` (`{ available: false, error, errorCorrelationId }`). |
+| GET | `/api/v1/admin/grants` | `admin`/`platform-admin` | OAuth grants in the caller's region scope (`oauth_token` joined to `teammate` for region clamping). |
+| POST | `/api/v1/admin/grants/{id}/revoke` | `admin`/`platform-admin` + CSRF + region scope | Revoke a teammate's grant (region-scoped via the teammate join; emit grants also end their instance). Audited. |
+| GET | `/api/v1/admin/org-units` | `admin`/`platform-admin` | LTREE org-unit tree (region-scoped). |
+| GET | `/api/v1/admin/projects` | `admin`/`platform-admin` | Region-scoped projects list. |
+| POST | `/api/v1/admin/projects` | `admin`/`platform-admin` + CSRF | Register a project (region-clamped; CoU must be same-region). |
+| POST | `/api/v1/admin/projects/{id}/assignments` | `manager`/`admin`/`platform-admin` + CSRF | Assign a teammate to a project (missing teammate returns 422 "add this teammate first"). |
+| DELETE | `/api/v1/admin/projects/{id}/assignments/{teammateId}` | `manager`/`admin`/`platform-admin` + CSRF | End an assignment (closes the effective range, preserving history). |
+| GET | `/api/v1/admin/region/{regionId}` | `admin`/`platform-admin` | Region-scoped admin landing payload. |
+| GET | `/api/v1/admin/regions` | `admin`/`platform-admin` | Region list for admin pickers. |
+| GET | `/api/v1/admin/report-access` | `platform-admin` | List report-access grants (active + expired-but-not-revoked, each carrying holder, permission, granted-by, and expiry). Org-wide only — no region-admin read, unlike the retired policy dial. |
+| POST | `/api/v1/admin/report-access` | `platform-admin` + CSRF | Write one report-access row for one active, non-provisional teammate, with an optional future `expires_at`: a positive grant (`operational`/`finance`) that WIDENS, or `revoke-all` that REMOVES all report access (deny-wins over role default and any grant — the "administer, no data" case). `409` on a live duplicate for the same (teammate, permission); an expired-but-unrevoked blocker is superseded automatically first (its own audited revoke). |
+| DELETE | `/api/v1/admin/report-access/{id}` | `platform-admin` + CSRF | Soft-revoke a report-access row (history preserved; a later re-grant is a new row). `404` if no active row matches the id. `403` if the row is a `revoke-all` targeting the **caller themselves** — lifting your own revoke needs a different admin. |
+| GET | `/api/v1/admin/report-access/teammate-search` | `platform-admin` | Company-wide typeahead over active, non-provisional teammates (`?q=` min 2 chars, `?limit=` max 25) for the grant dialog — the region-scoped `/admin/users` list cannot serve an org-wide picker. |
+| GET | `/api/v1/admin/repos` | `admin`/`platform-admin` | Region-scoped repo-to-project mappings. |
+| GET | `/api/v1/admin/settings` | `admin`/`platform-admin` | Read-only config summary (intentionally narrow). |
+| GET | `/api/v1/admin/teammates` | `admin`/`platform-admin` | Region-scoped teammates grid (`region`, `limit`, `offset`). |
+| GET | `/api/v1/admin/users` | `admin`/`platform-admin` | Users sub-page list (role plus last-sync). |
+| PATCH | `/api/v1/admin/users/{id}` | `admin`/`platform-admin` + CSRF | Change a teammate's role (region-clamped; last-admin guard). |
+| PATCH | `/api/v1/admin/users/{id}/region` | `platform-admin` + CSRF | Move a teammate to another region (org-wide op; region `admin` may not do it). |
+| POST | `/api/v1/admin/users/{id}/revoke-sessions` | `admin`/`platform-admin` + CSRF | Force-sign-out a teammate (region-clamped, audited). |
+| PATCH | `/api/v1/admin/users/{id}/org-unit` | `admin`/`platform-admin` + CSRF + region scope | Move a teammate to another org-unit (clamped to the caller's region). Optional `rehome` moves their recorded usage with them — see **Correcting a placement** below. |
+| POST | `/api/v1/admin/users/{id}/placement-span` | `admin`/`platform-admin` + CSRF + region scope | Read-only: what a placement correction would move, and how many Business Units it spans. |
+| POST | `/api/v1/admin/teammates` | `admin`/`platform-admin` + CSRF + region scope | Create/place a teammate (region admin bounded to their own region). |
+| GET | `/api/v1/admin/instances` | `admin`/`platform-admin` + region scope | Region-scoped instances/devices grid. Carries `last_bearer_at` — stamped by every `/bearer` mint, which Claude Code issues at startup and every ~29 minutes for the life of the process, so a fresh value means "a client is running", NOT "a client is emitting". It is the other half of the `attribution-stall` evidence. |
+| GET | `/api/v1/admin/activity-types` · POST · PATCH `/{id}` | `admin`/`platform-admin` (+ CSRF on writes) + region scope | Region-scoped activity-type catalogue: list, create, and edit (`is_standard` org-wide entries are global-only). |
+| GET | `/api/v1/admin/directory-exclusions` · POST · DELETE `/{id}` | `admin`/`platform-admin` (+ CSRF on writes) | Directory-sync exclusion list: read, add, remove. |
+| GET | `/api/v1/admin/directory/search` | `manager`/`admin`/`platform-admin` | Typeahead directory search (for placing/looking up teammates). |
+| GET | `/api/v1/admin/directory-region-rules` · POST · DELETE `/{id}` | `platform-admin` (+ CSRF on writes) | Directory-attribute → region placement rules: list, upsert, and hard-delete. GLOBAL roles only (cross-region placement config); writes audited. |
+| GET | `/api/v1/admin/directory/field-distribution` | `platform-admin` | K-anonymity directory diagnostic (`?sample=`): per region-attribute coverage plus top distinct values as value/count only, suppressed below a k-anon floor of 5 (`MIN_CELL`). Powers the Region-rules Discover panel; GLOBAL roles only. |
+| GET | `/api/v1/admin/governance-settings` · PUT | `admin`/`platform-admin` (+ CSRF on write) + region scope | Read/set the governance settings for the caller's region. |
+| GET | `/api/v1/admin/settings/project-lifecycle` · PUT | GET `admin`/`platform-admin`; PUT `platform-admin` + CSRF | Org-wide project-lifecycle settings (the org-wide write is narrowed to `platform-admin`). |
+| POST | `/api/v1/admin/org-units` · DELETE/PATCH `/{id}` · POST `/{id}/move` · POST `/{id}/owners` · DELETE `/{id}/owners/{teammateId}` | `admin`/`platform-admin` + CSRF | Org-unit tree writes: create, edit, delete, re-parent (`move`), and owner add/remove. (The read is `GET /api/v1/admin/org-units` above.) |
+| DELETE/PATCH | `/api/v1/admin/projects/{id}` | `admin`/`platform-admin` + CSRF | Delete or edit a project (region-clamped). PATCH also accepts `migrate_spend` — see **Migrate** below. |
+| POST | `/api/v1/admin/projects/{id}/migrate-preview` | `admin`/`platform-admin` + CSRF | Read-only: what a Migrate would move. See **Migrate** below. |
+| GET | `/api/v1/admin/reporting-snapshots/{month}` | `admin`/`platform-admin` | What the month read when it was recorded, plus what it reads now and the movement. `null` = never recorded. |
+| POST | `/api/v1/admin/reporting-snapshots/{month}/close` | `admin`/`platform-admin` + CSRF | Record the month. Refused if it has already been recorded. |
+| GET | `/api/v1/admin/projects/{id}/assignments` | `manager`/`admin`/`platform-admin` | List a project's teammate assignments (writes are the `assignments` POST/DELETE/PATCH rows above). All four share `assertProjectScope`: `admin` bound to the project's region, `manager` needs the project in their **own region and** its cost-owning unit in their org subtree, `global-finops` unbounded. |
+| GET | `/api/v1/admin/rate-cards` · POST · POST `/{id}/retire` | `admin`/`platform-admin` (+ CSRF on writes) | Rate-card registry: list, create-card-with-lines (atomic; region admins bounded to own region, a global card is `platform-admin`), and retire. No line-mutation endpoint by design — pricing changes mint a new card. (Distinct from the still-unbuilt bare `/api/v1/rate-cards`.) |
 | POST | `/api/v1/admin/regions` · DELETE/PATCH `/{id}` | `platform-admin` + CSRF | Region create / edit / delete — cross-region acts reserved for the super-admin. (The list `GET /api/v1/admin/regions` is above.) |
-| GET | `/api/v1/admin/regions/{id}/leaders` · POST · DELETE `/{leaderId}` | `admin`/`global-finops` (+ CSRF on writes) | Region leaders: list, add, remove. |
-| GET/PUT/DELETE | `/api/v1/admin/regions/{id}/project-lifecycle` | `admin`/`global-finops` (+ CSRF on writes) | Per-region project-lifecycle override: read, set, clear. |
-| GET | `/api/v1/admin/reconciliation/**` | `admin`/`global-finops` (+ CSRF on writes) | Provider-reconciliation admin subtree: `anthropic/{discover,health}`, `github/{discover-orgs,health,map,teammate-search,unresolved}`, `enterprises` (+ `/{id}` PATCH/DELETE), `orgs` (+ `/{id}` PATCH/DELETE), `backfill` (GET/POST), and `records` (GET). Configures and inspects the billing-reconciliation connectors. |
-| GET | `/api/v1/admin/diagnostics/network` | `platform-admin` | Network-reachability diagnostic snapshot: per provisioned private-link FQDN, DNS resolution + public/private classification + TCP reachability, plus a copy-paste IT report. Gated at `platform-admin` because it returns private IPs and internal host:port pairs (the handler's own gate; this row previously said `admin`/`global-finops`). |
-| GET | `/api/v1/admin/diagnostics/multi-bu-owners` | `admin`/`global-finops` | Teammates who actively own more than one Business Unit. Returns `{ clean, violations[] }`; region-scoped unless global. |
+| GET | `/api/v1/admin/regions/{id}/leaders` · POST · DELETE `/{leaderId}` | `admin`/`platform-admin` (+ CSRF on writes) | Region leaders: list, add, remove. |
+| GET/PUT/DELETE | `/api/v1/admin/regions/{id}/project-lifecycle` | `admin`/`platform-admin` (+ CSRF on writes) | Per-region project-lifecycle override: read, set, clear. |
+| GET | `/api/v1/admin/reconciliation/**` | `admin`/`platform-admin` (+ CSRF on writes) | Provider-reconciliation admin subtree: `anthropic/{discover,health}`, `github/{discover-orgs,health,map,teammate-search,unresolved}`, `enterprises` (+ `/{id}` PATCH/DELETE), `orgs` (+ `/{id}` PATCH/DELETE), `backfill` (GET/POST), and `records` (GET). Configures and inspects the billing-reconciliation connectors. |
+| GET | `/api/v1/admin/diagnostics/network` | `platform-admin` | Network-reachability diagnostic snapshot: per provisioned private-link FQDN, DNS resolution + public/private classification + TCP reachability, plus a copy-paste IT report. Gated at `platform-admin` because it returns private IPs and internal host:port pairs (the handler's own gate; this row previously said `admin`/`platform-admin`). |
+| GET | `/api/v1/admin/diagnostics/multi-bu-owners` | `admin`/`platform-admin` | Teammates who actively own more than one Business Unit. Returns `{ clean, violations[] }`; region-scoped unless global. |
 | GET | `/api/v1/admin/diagnostics/otel-logs` | `platform-admin` | Recent OTel log-ingest diagnostic (super-admin only). |
 | GET | `/api/v1/admin/diagnostics/rls-posture` | `platform-admin` | Row-level-security posture and capability probe (super-admin only). Reports the connection in use, whether it can provision the non-owner app role (`rolsuper`, `rolcreaterole`, `azure_pg_admin` membership), whether that role exists with its grants, and per-table `relrowsecurity` / `relforcerowsecurity` / policy count / whether the policies actually filter the caller. Read-only — it provisions nothing. |
 | GET | `/api/v1/admin/diagnostics/db-performance` | `platform-admin` | The database's own statistics views, read on the request lane so the connection measured is the one requests use. Sections: `statements` (pg_stat_statements top-N by total exec time, plus an `extension` block reporting `preloaded` / `installed` separately — the two are different failures with different fixes, and neither absence fails the probe), `sequentialScans` (with ANALYZE freshness per table — `lastAnalyzed`, `neverAnalyzed`, `rowsChangedSinceAnalyze`, so a scan the planner chose for want of statistics is distinguishable from one it chose correctly; a major-version upgrade leaves a server with none until ANALYZE runs. `lastAnalyzed` is WORST-CASE: for a partitioned table it is the least-recently-analysed partition, not the newest, since the table plans only as well as its stalest member), `cache`, `unusedIndexes`, `sizes`, `settings` (which include `pg_stat_statements.track` and `pg_stat_statements.track_utility` when the library is loaded — `track = 'none'` means the extension is installed and recording NOTHING, and `track_utility = 'on'` makes it store utility statements verbatim, which is why the bicep pins it off). Every section rolls partitions up to their partition ROOT (a partitioned parent reports zero bytes on its own). `statsWindow` names how far back the `pg_stat_user_*` counters reach — the last database-WIDE reset, with `available` distinguishing a failed read from a database that has never been reset. It is a floor, not an exact per-row window: a single table or index can be reset without moving it, and it does NOT describe the `statements` section, which has its own reset domain. `unusedIndexes` excludes unique, primary-key and exclusion-constraint indexes; extension readiness requires `pg_stat_statements.track` to be a collecting value, since `none` yields a readable view that records nothing. Optional `?top=` (zod, 1..50, default 10) is the only parameter — no caller-supplied SQL, no EXPLAIN, no counter reset. **Six transactions, one per section**, each with a transaction-local `statement_timeout` and a client-side race above it, and each declaring itself in `reads` (`{ available: false, error, errorCorrelationId }` when it failed) so an empty section and a failed one are distinguishable. Launched from a button on Admin → Diagnostics, never on page load. |
-| GET | `/api/v1/admin/worker-runs` · `/{id}` | `admin`/`global-finops` | Background-worker run history (list + one run's detail); `?summary=24h` returns per-worker duty-cycle aggregates instead (runs/p50/max/busy over terminal runs started in the window — see Performance-Observability); admin-global, no region clamp. |
-| POST | `/api/v1/admin/workers/{name}/run` | `global-finops` + CSRF | Trigger a named worker from the admin UI (RBAC/cookie path). **Distinct from** the HMAC machine-to-machine `POST /api/v1/internal/run-worker/{name}` below — same worker registry, different auth (cookie+RBAC here vs. HMAC there). |
-| GET | `/api/v1/admin/workers/enablement` | `admin`/`global-finops` | The kill-switch state of the whole registry — every worker, its description, its live cron (null when it has no scheduled job), and whether it is enabled. An absent row means enabled, so the read returns the full fleet rather than a list of exceptions. |
-| PUT | `/api/v1/admin/workers/enablement` | `global-finops` + CSRF | Turn one scheduled worker on or off; takes effect on that worker's next tick. A disable requires a `reason`. `400` for an unknown worker name or one with no scheduled job. Attributed (`updated_by`/`at`) and audited as `worker-enabled` / `worker-disabled`. **Write is global-only, unlike the read**: `worker_enablement` has no region column and every worker it governs runs globally, so a toggle reaches past a region admin's scope — the admin card renders for a region `admin` but offers no toggle. |
+| GET | `/api/v1/admin/worker-runs` · `/{id}` | `admin`/`platform-admin` | Background-worker run history (list + one run's detail); `?summary=24h` returns per-worker duty-cycle aggregates instead (runs/p50/max/busy over terminal runs started in the window — see Performance-Observability); admin-global, no region clamp. |
+| POST | `/api/v1/admin/workers/{name}/run` | `platform-admin` + CSRF | Trigger a named worker from the admin UI (RBAC/cookie path). **Distinct from** the HMAC machine-to-machine `POST /api/v1/internal/run-worker/{name}` below — same worker registry, different auth (cookie+RBAC here vs. HMAC there). |
+| GET | `/api/v1/admin/workers/enablement` | `admin`/`platform-admin` | The kill-switch state of the whole registry — every worker, its description, its live cron (null when it has no scheduled job), and whether it is enabled. An absent row means enabled, so the read returns the full fleet rather than a list of exceptions. |
+| PUT | `/api/v1/admin/workers/enablement` | `platform-admin` + CSRF | Turn one scheduled worker on or off; takes effect on that worker's next tick. A disable requires a `reason`. `400` for an unknown worker name or one with no scheduled job. Attributed (`updated_by`/`at`) and audited as `worker-enabled` / `worker-disabled`. **Write is global-only, unlike the read**: `worker_enablement` has no region column and every worker it governs runs globally, so a toggle reaches past a region admin's scope — the admin card renders for a region `admin` but offers no toggle. |
 
 ## Internal (machine-to-machine)
 
@@ -352,7 +354,7 @@ nav entry, and where does it point". The nav renders it and does not re-derive
 it.
 
 - `visible` — true when the caller holds a reporting role (`manager`, `admin`,
-  `global-finops`, `platform-admin`), **or** an active `cou_owner` row on a
+  `platform-admin`), **or** an active `cou_owner` row on a
   non-retired Business Unit, **or** at least one active report-access grant.
 - An active `revoke-all` grant removes the caller's report access, but within
   **this nav expression** it zeroes only the grant term: a revoked caller who is
@@ -416,7 +418,7 @@ the module, and a test asserts both halves of that.
 
 ### `GET /api/v1/admin/reporting-snapshots/{month}`
 
-`admin`/`global-finops`. Returns `null` when the month was never recorded —
+`admin`/`platform-admin`. Returns `null` when the month was never recorded —
 distinct from recorded-and-unchanged, which comes back with
 `chargeableUnchanged: true`.
 
@@ -437,7 +439,7 @@ it measures.
 
 ### `POST /api/v1/admin/users/{id}/placement-span`
 
-`admin`/`global-finops` + CSRF + region scope. Writes nothing.
+`admin`/`platform-admin` + CSRF + region scope. Writes nothing.
 
 ```jsonc
 { "range": { "from": "all" } }        // or { "from": "2026-06-01" }

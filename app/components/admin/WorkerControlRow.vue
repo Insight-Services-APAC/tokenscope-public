@@ -63,7 +63,7 @@ withDefaults(
      */
     runsOpen?: boolean
     /**
-     * Whether THIS viewer may toggle. The write endpoint is global-finops only
+     * Whether THIS viewer may toggle. The write endpoint is platform-admin only
      * (enablement.put.ts) while the read side stays open to `admin`, so a region
      * admin can legitimately see this card and must not be offered a button that
      * would 403 — same rule as the unscheduled case below. Defaults true so the

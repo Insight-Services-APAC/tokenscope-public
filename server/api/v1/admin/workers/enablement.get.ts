@@ -6,7 +6,7 @@
  * see the whole fleet and its state, not a list of exceptions they have to invert
  * in their head.
  *
- * RBAC: admin / global-finops, matching the rest of the admin surface.
+ * RBAC: admin / platform-admin, matching the rest of the admin surface.
  */
 import { defineEventHandler } from 'h3'
 import { requireRole } from '../../../../auth/rbac'
@@ -16,7 +16,7 @@ import { listWorkerEnablement } from '../../../../workers/enablement'
 import { unscheduledReason } from '../../../../../shared/workers/unscheduled'
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
 
   return withRequestRls(event, async (db) => {
     const explicit = new Map((await listWorkerEnablement(db)).map((r) => [r.workerName, r]))

@@ -17,7 +17,7 @@
  * (current_setting('app.user_org_path')), so passing an ancestor/root
  * ouId cannot widen the result beyond the caller's authority — a manager
  * who supplies the org root still only sees their own subtree. Admin /
- * global-finops are unbounded. (RLS would enforce the same once the
+ * platform-admin are unbounded. (RLS would enforce the same once the
  * non-owner DB role lands; until then this app-level clamp is the live
  * gate — see server/auth/allocation-scope.ts for the same rationale.)
  */
@@ -45,7 +45,7 @@ interface VelocityRow extends Record<string, unknown> {
 const ROLLING_WEEKS = 4
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'manager', 'admin', 'global-finops')
+  await requireRole(event, 'manager', 'admin')
   const ouId = requireUuidParam(event, 'ouId')
 
   // Spike-threshold dial (mig 0049): resolved for the PRACTICE's region
@@ -56,10 +56,10 @@ export default defineEventHandler(async (event) => {
   const { rows, flagThreshold } = await withRequestRls(event, async (tx) => {
     // Authorize the FOCUS ou itself (anti-IDOR, sg-H3 leak fix): a region admin passing
     // a foreign-region ouId must 403, NOT silently read that region. The old clause
-    // unbounded admins by role only (`role IN ('admin','global-finops')`), but org paths
+    // unbounded admins by role only (`role IN ('admin','platform-admin')`), but org paths
     // are unique only per-region — so a foreign ouId leaked another region's per-teammate
     // spend. orgSubtreeScopePredicate region-clamps admins exactly like its siblings
-    // (practice/[ouId].get.ts / managerScopePredicate); global-finops/platform-admin stay
+    // (practice/[ouId].get.ts / managerScopePredicate); platform-admin stay
     // unbounded. A non-existent OR out-of-scope ouId does not resolve → 403.
     const focusRows = await tx.execute<{ region_id: string }>(sql`
       SELECT region_id::text AS region_id FROM org_unit

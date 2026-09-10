@@ -68,7 +68,7 @@ beforeAll(async () => {
   ouId = o!.id
   const [f] = await t.db
     .insert(schema.teammate)
-    .values({ entraOid: 'oid-rp-fin', email: 'rp-fin@x.test', role: 'global-finops', regionId, orgUnitId: ouId })
+    .values({ entraOid: 'oid-rp-fin', email: 'rp-fin@x.test', role: 'platform-admin', regionId, orgUnitId: ouId })
     .returning()
   finopsId = f!.id
   const [d] = await t.db
@@ -157,7 +157,7 @@ function ev(opts: {
   return e as unknown as Parameters<typeof orgsPost>[0]
 }
 
-const finops = (): Session => ({ teammateId: finopsId, email: 'rp-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'rp.svc' })
+const finops = (): Session => ({ teammateId: finopsId, email: 'rp-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId, orgPath: 'rp.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'rp-dev@x.test', displayName: 'Dev', role: 'developer', regionId, orgPath: 'rp.svc' })
 const adminA = (): Session => ({ teammateId: adminAId, email: 'rp-admin-a@x.test', displayName: 'Admin A', role: 'admin', regionId, orgPath: 'rp.svc' })
 const adminB = (): Session => ({ teammateId: adminBId, email: 'rp-admin-b@x.test', displayName: 'Admin B', role: 'admin', regionId: regionBId, orgPath: 'rpb.svc' })
@@ -736,7 +736,7 @@ describe('provider_org cross-region clamp — create/patch (idor:0004 / T3-xregi
     ).rejects.toMatchObject({ statusCode: 422 })
   })
 
-  it('global-finops creates/patches across regions without restriction', async () => {
+  it('platform-admin creates/patches across regions without restriction', async () => {
     const res = (await orgsPost(ev({
       method: 'POST', session: finops(),
       body: { provider: 'github', externalOrgId: 'xr-finops-b', displayName: 'Finops B', reconciliationMode: 'indicative', regionId: regionBId },
@@ -808,7 +808,7 @@ describe('provider_org DELETE cross-region clamp + rollback', () => {
     expect(JSON.stringify(errA?.data)).toBe(JSON.stringify(errB?.data))
   })
 
-  it('global-finops deletes a region-B org → 200', async () => {
+  it('platform-admin deletes a region-B org → 200', async () => {
     const b2 = (await orgsPost(ev({ method: 'POST', session: finops(), body: { provider: 'github', externalOrgId: 'del-b2', displayName: 'Del B2', reconciliationMode: 'indicative', regionId: regionBId } }))) as { id: string }
     const res = (await orgDelete(ev({ method: 'DELETE', session: finops(), params: { id: b2.id } }))) as { deleted: boolean }
     expect(res.deleted).toBe(true)
@@ -838,7 +838,7 @@ describe('provider_org LIST region clamp (orgs.get / report:theme-5-map-post)', 
     expect(ids).not.toContain(orgBId)
   })
 
-  it('global-finops sees every region', async () => {
+  it('platform-admin sees every region', async () => {
     const got = (await orgsGet(ev({ method: 'GET', session: finops() }))) as { orgs: { id: string }[] }
     const ids = got.orgs.map((o) => o.id)
     expect(ids).toContain(orgAId)

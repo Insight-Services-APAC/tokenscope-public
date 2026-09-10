@@ -20,3 +20,20 @@ export function csvEscape(v: string): string {
   }
   return value
 }
+
+/**
+ * A `#` metadata header line, escaped as ONE cell.
+ *
+ * Escaping only the interpolated LABEL does not work, and that was the first
+ * attempt at this: `# tokenscope … scope="APAC,=cmd…"` does not START the field
+ * with a quote, so a CSV parser treats the comma as a delimiter anyway and the
+ * next cell begins with `=`. The quote has to open the field, which means the
+ * whole line is the cell.
+ *
+ * The line always begins with `#`, so it can never itself be read as a formula;
+ * what this contains is the label's commas, quotes and newlines, any of which
+ * would otherwise manufacture extra cells or extra ROWS in someone's Excel.
+ */
+export function csvMetaLine(line: string): string {
+  return csvEscape(line)
+}

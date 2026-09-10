@@ -17,7 +17,7 @@
  * BU instead, which is the dumping ground admin flags as "N of M do not belong
  * here". A rule about ownership is quietly a rule about placement.
  *
- * Read-only, admin/global-finops, region-scoped like every other admin read.
+ * Read-only, admin/platform-admin, region-scoped like every other admin read.
  */
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -26,8 +26,8 @@ import { withRequestRls } from '../../../../db/request-rls'
 import { orgSubtreeScopePredicate } from '../../../../auth/org-subtree-scope'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
-  const unbounded = caller.role === 'global-finops' || caller.role === 'platform-admin'
+  const caller = await requireRole(event, 'admin')
+  const unbounded = caller.role === 'platform-admin'
 
   return await withRequestRls(event, async (tx) => {
     const rows = [

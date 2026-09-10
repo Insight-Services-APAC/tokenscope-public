@@ -18,7 +18,7 @@
  * whose row the PATCH locks `FOR UPDATE`; the worst drift is a few dollars of
  * newer usage moving too, which is the intended outcome either way.
  *
- * Same authorisation as the PATCH it precedes: admin/global-finops, bounded to
+ * Same authorisation as the PATCH it precedes: admin/platform-admin, bounded to
  * the teammate's own region. A span that leaked another region's usage totals
  * would be an information-disclosure bug wearing a dry-run's clothes.
  */
@@ -47,7 +47,7 @@ const Body = z.object({
 
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
 
   const parsedId = z.string().uuid().safeParse(getRouterParam(event, 'id'))
   if (!parsedId.success) {

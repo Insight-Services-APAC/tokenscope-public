@@ -6,7 +6,7 @@
  * server/api/v1/admin/reconciliation/github/teammate-search.get.ts's
  * query/response conventions rather than reusing that endpoint's shape.
  *
- * ORG-WIDE ONLY (A4): requireRole(event, 'global-finops'). Returns only
+ * ORG-WIDE ONLY (A4): requireRole(event, 'platform-admin'). Returns only
  * ACTIVE, NON-PROVISIONAL teammates — report-access grants require the same
  * (see index.post.ts) — with id + email + display name + role + region. No
  * secrets, capped result set.
@@ -33,7 +33,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'global-finops')
+  await requireRole(event, 'platform-admin')
   // getValidated (not h3's getValidatedQuery): the 400 names the failing
   // field and rule per the repo's RFC-9457 convention.
   const query = await getValidated(event, Query)

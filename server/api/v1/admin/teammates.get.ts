@@ -115,7 +115,7 @@ function placementClause(placement: PlacementFilter): SQL {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const query = await getValidated(event, Query)
   await requireRegionScope(event, query.region)
 

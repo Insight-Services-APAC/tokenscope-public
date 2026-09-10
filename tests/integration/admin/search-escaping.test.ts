@@ -16,7 +16,7 @@
  * The teammate-search route ALSO gets its own region-clamp case here: unlike
  * the other two (which already had requireRegionScope), it used to be
  * deliberately global — this pins that a region-scoped admin now sees only
- * their own region, while global-finops keeps the estate-wide picker.
+ * their own region, while platform-admin keeps the estate-wide picker.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
@@ -63,8 +63,8 @@ function ev(opts: { session: Session; query: Record<string, string>; path: strin
 
 const regionAAdmin = (): Session =>
   ({ teammateId: '00000000-0000-0000-0000-0000000000a1', email: 'se-admin-a@x.test', displayName: 'Admin A', role: 'admin', regionId: regionAId, orgPath: 'se-a' }) as Session
-const globalFinops = (): Session =>
-  ({ teammateId: '00000000-0000-0000-0000-0000000000f1', email: 'se-finops@x.test', displayName: 'Finops', role: 'global-finops', regionId: regionAId, orgPath: 'se-a' }) as Session
+const orgWide = (): Session =>
+  ({ teammateId: '00000000-0000-0000-0000-0000000000f1', email: 'se-finops@x.test', displayName: 'Finops', role: 'platform-admin', regionId: regionAId, orgPath: 'se-a' }) as Session
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -112,7 +112,7 @@ describe('ILIKE escaping — a literal wildcard character in q matches nothing, 
 
     it(`GET /admin/reconciliation/github/teammate-search?q=${q} — returns no rows (roster contains neither character)`, async () => {
       const res = (await teammateSearchHandler(
-        ev({ session: globalFinops(), path: '/api/v1/admin/reconciliation/github/teammate-search', query: { q } }),
+        ev({ session: orgWide(), path: '/api/v1/admin/reconciliation/github/teammate-search', query: { q } }),
       )) as { teammates: unknown[] }
       expect(res.teammates).toEqual([])
     })
@@ -130,7 +130,7 @@ describe('ILIKE escaping — a literal wildcard character in q matches nothing, 
     expect(t2.users.map((r) => r.email)).toContain('alice.anders@example.com')
 
     const t3 = (await teammateSearchHandler(
-      ev({ session: globalFinops(), path: '/api/v1/admin/reconciliation/github/teammate-search', query: { q: 'alice' } }),
+      ev({ session: orgWide(), path: '/api/v1/admin/reconciliation/github/teammate-search', query: { q: 'alice' } }),
     )) as { teammates: Array<{ email: string }> }
     expect(t3.teammates.map((r) => r.email)).toContain('alice.anders@example.com')
   })
@@ -148,12 +148,12 @@ describe('teammate-search — region clamp', () => {
     expect(res.teammates.every((r) => r.regionCode === 'se-a')).toBe(true)
   })
 
-  it('global-finops sees the whole estate — same population the map.post clamp must accept for global-finops too', async () => {
+  it('platform-admin sees the whole estate — same population the map.post clamp must accept for platform-admin too', async () => {
     const res = (await teammateSearchHandler(
-      ev({ session: globalFinops(), path: '/api/v1/admin/reconciliation/github/teammate-search', query: { q: '@example.com' } }),
+      ev({ session: orgWide(), path: '/api/v1/admin/reconciliation/github/teammate-search', query: { q: '@example.com' } }),
     )) as { teammates: Array<{ email: string }> }
     const emails = res.teammates.map((r) => r.email)
     expect(emails).toContain('alice.anders@example.com')
-    expect(emails).toContain('carol.chen@example.com') // region B — visible to global-finops
+    expect(emails).toContain('carol.chen@example.com') // region B — visible to platform-admin
   })
 })

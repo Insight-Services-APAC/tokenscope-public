@@ -47,6 +47,7 @@ import {
   rmSync,
   existsSync,
   symlinkSync,
+  cpSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -58,7 +59,32 @@ import {
 } from '../../../plugin/hooks/session-start.mjs'
 import { realHome } from '../../../plugin/scripts/plugin-runtime.mjs'
 
-const HOOK = resolve(__dirname, '../../../plugin/hooks/session-start.mjs')
+const BUNDLE_SRC = resolve(__dirname, '../../../plugin')
+
+/*
+ * A REALISTIC INSTALL LAYOUT, materialised per test.
+ *
+ * CLAUDE_PLUGIN_ROOT is now confined to the running bundle's own install
+ * (plugin-runtime.mjs `withinOwnInstall`), because an unconfined value chose
+ * which helper we EXECUTE and which command we PERSIST. These tests used to
+ * point it at a bare temp directory, which production never looks like and the
+ * confinement correctly refuses.
+ *
+ * So the sandbox now mirrors the real cache: `<versions>/<version>/{hooks,scripts}`,
+ * with the stub helper installed as a SIBLING VERSION under the same parent —
+ * exactly the upgrade auto-follow case the confinement is designed to allow.
+ * The tests get their stub, and they exercise the shipped resolution path
+ * instead of the attacker's channel.
+ */
+let versionsDir: string
+let installedHook: string
+
+function materialiseInstall(): void {
+  versionsDir = join(home, 'versions')
+  const installed = join(versionsDir, '0.1.0')
+  cpSync(BUNDLE_SRC, installed, { recursive: true })
+  installedHook = join(installed, 'hooks', 'session-start.mjs')
+}
 const DEFAULT_STATE_DIR = join(realHome(), '.tokenscope')
 
 /** An enrolment-shaped global env: enough for the hook to run the emit probe. */
@@ -95,6 +121,7 @@ let saved: Record<string, string | undefined>
 beforeEach(() => {
   saved = Object.fromEntries(TOUCHED.map((k) => [k, process.env[k]]))
   home = mkdtempSync(join(tmpdir(), 'ts-sd-home-'))
+  materialiseInstall()
   fakeHome = mkdtempSync(join(tmpdir(), 'ts-sd-fakehome-'))
   repo = mkdtempSync(join(tmpdir(), 'ts-sd-repo-'))
   mkdirSync(join(repo, '.git'), { recursive: true })
@@ -403,7 +430,9 @@ describe('repoSettingsDirs — the walk is bounded', () => {
  * never reads a sentinel). Returns the CLAUDE_PLUGIN_ROOT to point the hook at.
  */
 function stubHelper(recordPath: string): string {
-  const root = join(home, 'plugin-root')
+  // A SIBLING VERSION under the same parent as the installed bundle — what a
+  // freshly-installed upgrade looks like, and what the confinement admits.
+  const root = join(versionsDir, '0.1.1')
   mkdirSync(join(root, 'scripts'), { recursive: true })
   writeFileSync(
     join(root, 'scripts', 'otel-headers-helper.sh'),
@@ -429,7 +458,7 @@ function runHook(mergedEnv: Record<string, string>, pluginRoot: string, cwd: str
   }
   delete env.CLAUDE_CODE_EXECPATH // keep the shim policy dormant (as the sibling harness does)
   delete env.AI_AGENT
-  execFileSync(process.execPath, [HOOK], { cwd, env, encoding: 'utf8' })
+  execFileSync(process.execPath, [installedHook], { cwd, env, encoding: 'utf8' })
 }
 
 describe('the emit helper never runs under a repo-chosen state dir', () => {
@@ -554,7 +583,7 @@ describe('a repo claiming BOTH HOME and TOKENSCOPE_STATE_DIR steers nothing', ()
     const harness = join(home, 'probe-harness.mjs')
     writeFileSync(
       harness,
-      `import { hookStateDir, emissionHealthWarning } from ${JSON.stringify(HOOK)}\n` +
+      `import { hookStateDir, emissionHealthWarning } from ${JSON.stringify(installedHook)}\n` +
         `const stateDir = hookStateDir(process.cwd())\n` +
         `emissionHealthWarning()\n` +
         `process.stdout.write(JSON.stringify({ stateDir, home: process.env.HOME }))\n`,

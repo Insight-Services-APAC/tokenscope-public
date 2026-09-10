@@ -8,3 +8,5 @@ theme: jekyll-theme-cayman
 # index.html is the bespoke landing; the Markdown docs render with the theme.
 exclude:
   - "*.bicepparam"
+  # Client engagement plans and estimates — internal, never on the public site.
+  - "delivery/"

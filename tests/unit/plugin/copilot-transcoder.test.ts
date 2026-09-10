@@ -264,6 +264,27 @@ describe('transcodeChatSpans — re-forward idempotency (MERGE BLOCKER)', () => 
     expect(BigInt(records[0].timeUnixNano)).toBe(BigInt('1780825244874165071'))
   })
 
+  it('an absurdly long timestamp attribute falls back instead of becoming a timestamp', () => {
+    /*
+     * Two separate bounds, and this covers what each is for. The RAW length is
+     * checked before trim/Date.parse/regex touch the value, so the scans cannot
+     * be driven by an emitter-chosen string. The DIGIT cap is semantic: a real
+     * nanosecond instant is 19 digits, so a 50-digit value is not a timestamp
+     * and must not be written as a far-future one.
+     */
+    // '9'.repeat(25) is the case the digit cap ALONE lets through: 25 digits is
+    // under the 40-digit limit but far above 2^64-1, and timeUnixNano is encoded
+    // with writeBigUInt64LE, which THROWS there — losing the whole batch rather
+    // than one field.
+    for (const bogus of ['9'.repeat(25), '9'.repeat(50), '9'.repeat(5000)]) {
+      const chatSpan = { ...WIRE_SHAPE_SPANS[0], endTimeUnixNano: bogus }
+      const records = transcodeChatSpans([chatSpan], { instanceId: TEST_INSTANCE_ID })
+      expect(records[0].timeUnixNano).not.toBe(bogus)
+      // Fell back to "now", so it is a plausible recent instant, not 10^49 ns.
+      expect(BigInt(records[0].timeUnixNano)).toBeLessThan(BigInt(Date.now() + 60_000) * 1000000n)
+    }
+  })
+
   it('resource attributes carry the server-attested instanceId, NOT the span value', () => {
     const ATTESTED = 'ffff0000-0000-0000-0000-000000000001'
     const records = transcodeChatSpans(FILE_EXPORTER_FIXTURE, { instanceId: ATTESTED })

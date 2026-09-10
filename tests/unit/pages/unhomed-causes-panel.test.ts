@@ -328,7 +328,7 @@ describe('unhomed cause-split panel', () => {
       expect(actions, `role label re-typed in UNHOMED_ACTIONS: ${label}`).not.toContain(label)
     }
     expect(actions).toContain('REGION_ADMIN_LABEL')
-    expect(actions).toContain('GLOBAL_FINANCE_LABEL')
+    expect(actions).toContain('ORG_WIDE_LABEL')
     // …and the handover paragraph goes through the same constant.
     expect(PANEL).not.toContain('<strong>Region admin</strong>')
     expect(PANEL).toContain('REGION_ADMIN_LABEL')

@@ -44,7 +44,7 @@
 import { sql } from 'drizzle-orm'
 import { createError } from 'h3'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
-import { csvEscape } from '../utils/csv-escape'
+import { csvEscape, csvMetaLine } from '../utils/csv-escape'
 import { monthKeyUtc } from '../utils/period'
 import {
   VENDOR_LANES,
@@ -282,7 +282,7 @@ export interface FinanceCouRow {
 /**
  * Per-CoU chargeback for the month from `v_finance_chargeback_month`. The NULL-CoU
  * bucket is retained as an explicit "Unallocated" row (never dropped). `region`
- * filters the TABLE only (a convenience view for global-finops — never a gate
+ * filters the TABLE only (a convenience view for platform-admin — never a gate
  * relaxation; the caller is already whole-company). `copilotChargeback` decides
  * whether the Copilot pooled net folds into `chargeableUsd` or is held back pending
  * (build-design §6).
@@ -452,7 +452,7 @@ export interface FinanceCouRef {
 
 /**
  * Resolve a CoU for the drill (build-design §2 — resource-anchored). Only
- * region-unbounded roles (global-finops / platform-admin) reach this endpoint, so
+ * region-unbounded roles (platform-admin) reach this endpoint, so
  * there is no cross-region 403 to enforce — anti-IDOR here means a non-existent /
  * non-cost-owning id is a 404 (never a 500, never a silent empty). The id is a real
  * cost-owning unit or nothing.
@@ -905,7 +905,7 @@ export function financeLedgerToCsv(
   },
 ): string {
   const lines: string[] = [
-    `# tokenscope finance ledger · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · reconciliation=${meta.check.matched ? 'matched' : 'UNSETTLED'} · chargeback=${usd(meta.check.chargebackUsd)} · bill=${usd(meta.check.billUsd)}`,
+    csvMetaLine(`# tokenscope finance ledger · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'} · reconciliation=${meta.check.matched ? 'matched' : 'UNSETTLED'} · chargeback=${usd(meta.check.chargebackUsd)} · bill=${usd(meta.check.billUsd)}`),
     'cost_centre,region,provider,month,charge_usd,chargeback_pending,settling_state,lane',
   ]
   for (const c of cous) {

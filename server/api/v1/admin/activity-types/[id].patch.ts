@@ -37,7 +37,7 @@ const Body = z
   })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
 
   const parsedId = z.string().uuid().safeParse(getRouterParam(event, 'id'))

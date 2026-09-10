@@ -17,7 +17,7 @@
  * wrong has a conversation, not a button. Making it revocable here would also
  * make it silently revocable, which is the failure this route exists to fix.
  *
- * RBAC: global-finops ONLY, mirroring the sibling governance-cutover route.
+ * RBAC: platform-admin ONLY, mirroring the sibling governance-cutover route.
  * This is estate-wide governance state and it names individual teammates
  * alongside their spend, so a region admin is the wrong scope twice over.
  */
@@ -84,7 +84,7 @@ export interface PersonalSubscriptionRow {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'global-finops')
+  await requireRole(event, 'platform-admin')
   const q = await getValidated(event, querySchema)
   const month = q.month ?? currentMonthUtc()
   const { startIso, endIso } = monthBounds(month)

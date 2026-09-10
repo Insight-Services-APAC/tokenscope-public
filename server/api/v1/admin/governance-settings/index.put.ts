@@ -3,7 +3,7 @@
  * (mig 0049) at platform or region scope.
  *
  * Authority mirrors the project-lifecycle policy endpoints: the PLATFORM
- * baseline is global-finops / platform-admin only; a REGION override is
+ * baseline is platform-admin only; a REGION override is
  * requireRegionScope (region admin → own region; org-wide admins → any).
  * Keys are allowlisted and values bounds-checked app-side (the DB stores any
  * NUMERIC). Audited with before/after.
@@ -50,7 +50,7 @@ function badRequest(detail: string): never {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
@@ -74,7 +74,7 @@ export default defineEventHandler(async (event) => {
     if (body.region_id !== undefined) {
       badRequest('region_id must be omitted for platform scope.')
     }
-    if (!(isPlatformAdmin(caller.role) || caller.role === 'global-finops')) {
+    if (!(isPlatformAdmin(caller.role))) {
       throw createError({
         statusCode: 403,
         statusMessage: 'Forbidden',
@@ -82,7 +82,7 @@ export default defineEventHandler(async (event) => {
           type: 'https://tokenscope.example.com/errors/forbidden',
           title: 'Forbidden',
           status: 403,
-          detail: 'The platform default requires platform-admin or global-finops.',
+          detail: 'The platform default requires platform-admin.',
         },
       })
     }

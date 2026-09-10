@@ -1,7 +1,7 @@
 /*
  * PATCH /api/v1/admin/users/:id/region — move a teammate to another region.
  * Direct handler invocation against a mocked h3 event, real DB via testcontainers.
- * Verifies: org-wide gate (global-finops/platform-admin only; region 'admin'
+ * Verifies: org-wide gate (platform-admin only; region 'admin'
  * is 403), the move (region_id + home org_unit updated, sessions revoked,
  * audited), and the validation paths (unknown region, org_unit-not-in-region).
  */
@@ -36,7 +36,7 @@ beforeAll(async () => {
   ouAId = oA!.id
   ouBId = oB!.id
   const [dev] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-rr-dev', email: 'rr-dev@x.test', role: 'developer', regionId: regionAId, orgUnitId: ouAId }).returning()
-  const [fin] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-rr-fin', email: 'rr-fin@x.test', role: 'global-finops', regionId: regionAId, orgUnitId: ouAId }).returning()
+  const [fin] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-rr-fin', email: 'rr-fin@x.test', role: 'platform-admin', regionId: regionAId, orgUnitId: ouAId }).returning()
   const [adm] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-rr-adm', email: 'rr-adm@x.test', role: 'admin', regionId: regionAId, orgUnitId: ouAId }).returning()
   devAId = dev!.id
   finopsId = fin!.id
@@ -79,7 +79,7 @@ function makeEvent(opts: { body?: unknown; routerParams?: Record<string, string>
   return ev as unknown as Parameters<typeof regionHandler>[0]
 }
 
-const finopsSession = (): Session => ({ teammateId: finopsId, email: 'rr-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId: regionAId, orgPath: 'rr-a.svc' })
+const orgWideSession = (): Session => ({ teammateId: finopsId, email: 'rr-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId: regionAId, orgPath: 'rr-a.svc' })
 const adminSession = (): Session => ({ teammateId: adminAId, email: 'rr-adm@x.test', displayName: 'Adm', role: 'admin', regionId: regionAId, orgPath: 'rr-a.svc' })
 
 async function unplacedIdFor(rid: string): Promise<string> {
@@ -89,11 +89,11 @@ async function unplacedIdFor(rid: string): Promise<string> {
 }
 
 describe('PATCH users/:id/region', () => {
-  it('global-finops moves a teammate to another region (re-homes org_unit, revokes, audits, clears chain provenance)', async () => {
+  it('platform-admin moves a teammate to another region (re-homes org_unit, revokes, audits, clears chain provenance)', async () => {
     // Pre-stamp manager-chain provenance so we can assert the admin move clears it (so
     // region-reenrichment treats the admin placement as authoritative, not re-derivable).
     await t.client`UPDATE teammate SET metadata = jsonb_build_object('placedVia','manager-chain','placedOwnerOid','o','keep','x') WHERE id = ${devAId}::uuid`
-    await regionHandler(makeEvent({ body: { region_id: regionBId }, routerParams: { id: devAId }, initialSession: finopsSession() }))
+    await regionHandler(makeEvent({ body: { region_id: regionBId }, routerParams: { id: devAId }, initialSession: orgWideSession() }))
     const rows = await t.client<{ region_id: string; org_unit_id: string; revoked: boolean; via: string | null; keep: string | null }[]>`
       SELECT region_id::text AS region_id, org_unit_id::text AS org_unit_id, (revoked_at IS NOT NULL) AS revoked,
              metadata->>'placedVia' AS via, metadata->>'keep' AS keep
@@ -122,13 +122,13 @@ describe('PATCH users/:id/region', () => {
 
   it('422 on an unknown region', async () => {
     await expect(
-      regionHandler(makeEvent({ body: { region_id: '11111111-1111-4111-8111-111111111111' }, routerParams: { id: devAId }, initialSession: finopsSession() })),
+      regionHandler(makeEvent({ body: { region_id: '11111111-1111-4111-8111-111111111111' }, routerParams: { id: devAId }, initialSession: orgWideSession() })),
     ).rejects.toMatchObject({ statusCode: 422 })
   })
 
   it('422 when the explicit org_unit is not in the target region', async () => {
     await expect(
-      regionHandler(makeEvent({ body: { region_id: regionAId, org_unit_id: ouBId }, routerParams: { id: devAId }, initialSession: finopsSession() })),
+      regionHandler(makeEvent({ body: { region_id: regionAId, org_unit_id: ouBId }, routerParams: { id: devAId }, initialSession: orgWideSession() })),
     ).rejects.toMatchObject({ statusCode: 422 })
   })
 })

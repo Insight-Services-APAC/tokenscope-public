@@ -17,7 +17,7 @@
  * db accessor in this comment: scripts/check-handler-rls-context.mjs scans
  * raw source, so a mention alone fails the guard.)
  *
- * RBAC: admin / global-finops (the gate of the snapshot this was cut from).
+ * RBAC: admin / platform-admin (the gate of the snapshot this was cut from).
  */
 import { defineEventHandler } from 'h3'
 import { requireRole } from '../../../../auth/rbac'
@@ -97,7 +97,7 @@ function servicesUnanswered(errorClass: 'timeout' | 'other', error: string): Ser
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
 
   const [servicesOutcome, telemetryOutcome] = await Promise.all([
     boundedCall(() => probeServices(process.env, TCP_PROBE_TIMEOUT_MS, TCP_PROBE_TIMEOUT_MS), PROBE_BUDGET_MS),

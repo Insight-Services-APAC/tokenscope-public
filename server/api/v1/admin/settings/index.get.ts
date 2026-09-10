@@ -2,7 +2,7 @@
  * GET /api/v1/admin/settings — read-only configuration summary for the
  * Wave-VI Admin → Settings sub-page.
  *
- * RBAC: admin / global-finops only. RLS-aware on the region read so
+ * RBAC: admin / platform-admin only. RLS-aware on the region read so
  * RLS denial → no region surfaced (rather than leaking another region).
  *
  * The response is INTENTIONALLY narrow: only public configuration
@@ -30,7 +30,7 @@ interface RegionRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
 
   // Region lookup is RLS-scoped — RLS-denial would mean the caller's
   // session.regionId doesn't match any visible row (edge case: stale

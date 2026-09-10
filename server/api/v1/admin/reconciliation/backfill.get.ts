@@ -1,6 +1,6 @@
 /*
  * GET /api/v1/admin/reconciliation/backfill — recent backfill requests + status, for the admin
- * Reconciliation UI to poll. Newest first, capped. RBAC: requireRole('admin','global-finops').
+ * Reconciliation UI to poll. Newest first, capped. RBAC: requireRole('admin').
  */
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -23,7 +23,7 @@ interface RequestRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const rows = await withRequestRls(event, (tx) =>
     tx.execute<RequestRow>(sql`
       SELECT id::text AS id, provider, target_kind, external_ref, display_name,

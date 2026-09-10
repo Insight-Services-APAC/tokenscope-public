@@ -47,7 +47,7 @@ function fixture(): ReportAccessData {
         teammate_id: '9a1e0000-0000-4000-8000-000000000012',
         display_name: 'Mara Holloway',
         email: 'mara.holloway@example.com',
-        role: 'global-finops',
+        role: 'platform-admin',
         permission: 'finance',
         granted_by: '9a1e0000-0000-4000-8000-000000000099',
         granted_by_name: 'Lena Park',

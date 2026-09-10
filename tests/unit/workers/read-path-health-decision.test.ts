@@ -1,38 +1,63 @@
 /*
  * decideReadPathAlert — the PURE trigger-decision logic for the read-path-health
- * worker, tested independent of the DB (mirrors the pure-unit style of
- * analytics-poll-window.test.ts).
+ * worker, tested independent of the DB (mirrors analytics-poll-window.test.ts).
  *
  * The worker turns a SILENT OTel read-path outage (the azure-monitor-read
  * gatherer dead while clients still emit — the 5.5-day incident) into an admin
- * inbox alert. This file pins WHEN it fires and WHICH reason, given the
- * already-persisted worker_run rows + last-seen FLEET-EMIT freshness + a clock.
+ * inbox alert. This file pins WHEN it fires and WHICH reason.
  *
- * CRITICAL invariant (the HIGH this alert exists to catch): the "is the fleet
- * still emitting?" gate is measured with an INDEPENDENT write/emit-auth signal
- * (MAX instance_attestation.last_bearer_at — bearer mints), NOT the read path's
- * own output. So a SUSTAINED silent-zero-write outage keeps firing STALL for its
- * whole duration and never falsely auto-resolves. See the "HIGH regression" test.
+ * THE STALL GATE IS THE INGEST-SIDE COVERAGE VERDICT (PR #319), not the reader's
+ * own output. Fixtures are PRODUCER-SHAPED: an idle open editor is the DCR
+ * coverage 'no-rows' (nothing arrived) with a FRESH bearer and a selected
+ * session — NOT a zero-session tick. A real outage is coverage 'rows-arrived'
+ * (the pipeline received rows the joiner did not land). A probe that could not
+ * measure is 'unknown' → the bearer fallback. This is what closes both the false
+ * positive (#307/idle-laptop) and the false negative (#316/reader-derived gate).
  *
- * Reasons (precedence: all-fault > stall > no-success):
- *   - all-fault:  the LATEST run errored on >= 2 sessions it processed.
- *   - stall:      the last N runs ALL wrote 0 rows while the fleet is still emitting.
- *   - no-success: no successful run in the recent window (covers a throwing reader).
+ * CRITICAL invariant: a SUSTAINED outage keeps firing (coverage stays
+ * 'rows-arrived' as rows keep arriving) and never falsely auto-resolves — and the
+ * streak is the FULL consecutive zero-write run, not a top-3 slice, so evidence
+ * cannot age out of one window (external review of #316, findings 7/10).
+ *
+ * Reasons (precedence: all-fault > stall > no-success).
  */
 import { describe, it, expect } from 'vitest'
 import {
   decideReadPathAlert,
+  hasWorkEvidenceCoverage,
+  zeroWriteStreak,
+  streakSourceCoverage,
   type ReaderRun,
   type DecideInput,
 } from '../../../server/workers/read-path-health'
+import type { SourceCoverageStatus } from '../../../server/azure/dcr-metrics'
 
 const NOW = new Date('2026-06-20T12:00:00Z').getTime()
 const MIN = 60 * 1000
 const HOUR = 60 * MIN
 
-// A successful run that wrote `rows` rows, `agoMs` before NOW.
-function successRun(rows: number, agoMs: number, sessionsProcessed = 5, errors = 0): ReaderRun {
-  return { status: 'success', startedAtMs: NOW - agoMs, rowsAffected: rows, sessionsProcessed, errors }
+/*
+ * A successful run that wrote `rows` rows, `agoMs` before NOW. `coverage` is the
+ * ingest-side verdict for that tick — default 'rows-arrived' (the outage shape:
+ * the DCR received rows the joiner did not land). Pass 'no-rows' for an idle
+ * estate, 'unknown' for a run whose probe could not measure, null for a run
+ * recorded before the probe shipped. newEventsSeen is a diagnostic (not gated on).
+ */
+function run(
+  rows: number | null,
+  agoMs: number,
+  coverage: SourceCoverageStatus | null = 'rows-arrived',
+  opts: { status?: string; sessionsProcessed?: number | null; errors?: number | null; newEventsSeen?: number | null } = {},
+): ReaderRun {
+  return {
+    status: opts.status ?? 'success',
+    startedAtMs: NOW - agoMs,
+    rowsAffected: rows,
+    sessionsProcessed: opts.sessionsProcessed ?? 5,
+    errors: opts.errors ?? 0,
+    sourceCoverage: coverage,
+    newEventsSeen: opts.newEventsSeen ?? 5,
+  }
 }
 
 function base(overrides: Partial<DecideInput>): DecideInput {
@@ -44,190 +69,195 @@ function base(overrides: Partial<DecideInput>): DecideInput {
   }
 }
 
+describe('zeroWriteStreak / streakSourceCoverage — the shared streak + coverage helpers', () => {
+  it('zeroWriteStreak takes the consecutive top zero-write runs; a >0 or null ends it', () => {
+    expect(zeroWriteStreak([run(0, MIN), run(0, 2 * MIN), run(7, 3 * MIN)]).length).toBe(2)
+    expect(zeroWriteStreak([run(null, MIN), run(0, 2 * MIN)]).length).toBe(0)
+    expect(zeroWriteStreak([run(0, MIN), run(0, 2 * MIN), run(0, 3 * MIN)]).length).toBe(3)
+  })
+
+  it('streakSourceCoverage: rows-arrived wins over no-rows wins over unknown', () => {
+    expect(streakSourceCoverage([run(0, MIN, 'no-rows'), run(0, 2 * MIN, 'rows-arrived')])).toBe('rows-arrived')
+    expect(streakSourceCoverage([run(0, MIN, 'no-rows'), run(0, 2 * MIN, null)])).toBe('no-rows')
+    expect(streakSourceCoverage([run(0, MIN, null), run(0, 2 * MIN, null)])).toBe('unknown')
+    expect(streakSourceCoverage([])).toBe('unknown')
+  })
+
+  it('hasWorkEvidenceCoverage is true only for a rows-arrived streak', () => {
+    expect(hasWorkEvidenceCoverage([run(0, MIN, 'rows-arrived')])).toBe(true)
+    expect(hasWorkEvidenceCoverage([run(0, MIN, 'no-rows')])).toBe(false)
+    expect(hasWorkEvidenceCoverage([run(0, MIN, null)])).toBe(false)
+  })
+})
+
 describe('decideReadPathAlert — healthy', () => {
   it('does NOT fire when recent runs are writing rows', () => {
-    const runs = [successRun(12, 2 * MIN), successRun(8, 17 * MIN), successRun(20, 32 * MIN)]
+    const runs = [run(12, 2 * MIN), run(8, 17 * MIN), run(20, 32 * MIN)]
     expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
   })
 
-  it('does NOT fire on an empty ledger (fresh deploy, no runs yet) — unknown, not outage', () => {
+  it('does NOT fire on an empty ledger (fresh deploy, no runs yet)', () => {
     expect(decideReadPathAlert(base({ runs: [] }))).toEqual({ fire: false, reason: null })
   })
+})
 
-  it('does NOT fire on a clean 0-session tick (nothing to do, no error)', () => {
-    // A genuinely IDLE fleet: no bearer mints in 6h → fleet not emitting → zero-write
-    // successes are correct (nothing to land), not a stall.
-    const runs = [successRun(0, 2 * MIN, 0, 0), successRun(0, 17 * MIN, 0, 0), successRun(0, 32 * MIN, 0, 0)]
-    const input = base({ runs, lastFleetEmitMs: NOW - 6 * HOUR })
-    expect(decideReadPathAlert(input)).toEqual({ fire: false, reason: null })
+describe('decideReadPathAlert — STALL', () => {
+  it('fires stall: a zero-write streak WHILE the DCR received rows (coverage rows-arrived)', () => {
+    // The exact incident shape — the pipeline received rows every tick, none landed.
+    const runs = [run(0, 2 * MIN, 'rows-arrived'), run(0, 17 * MIN, 'rows-arrived'), run(0, 32 * MIN, 'rows-arrived')]
+    expect(decideReadPathAlert(base({ runs }))).toEqual({
+      fire: true,
+      reason: 'stall',
+      coverageBasis: 'source-backlog',
+    })
+  })
+
+  it('REGRESSION (case A): idle open editor — bearer FRESH, session selected, coverage no-rows — does NOT fire', () => {
+    /*
+     * The false positive #307/#316 could not close. The editor is open (bearer
+     * minted 5 min ago, a session selected → sessionsProcessed 1) but NOTHING
+     * arrived at the DCR — coverage 'no-rows'. read-path-stale fired 7×/24h on
+     * exactly this. Fires only if the coverage gate is removed (mutation proof).
+     */
+    const idle = [
+      run(0, 2 * MIN, 'no-rows', { sessionsProcessed: 1, newEventsSeen: 0 }),
+      run(0, 17 * MIN, 'no-rows', { sessionsProcessed: 1, newEventsSeen: 0 }),
+      run(0, 32 * MIN, 'no-rows', { sessionsProcessed: 1, newEventsSeen: 0 }),
+    ]
+    expect(decideReadPathAlert(base({ runs: idle }))).toEqual({ fire: false, reason: null })
+  })
+
+  it('a STUCK reader — same laptop, but one run in the streak saw rows arrive — fires', () => {
+    // Coverage over the streak is rows-arrived (one tick received rows), so the
+    // whole streak is a backlog even though later probes read empty.
+    const stuck = [
+      run(0, 2 * MIN, 'no-rows', { sessionsProcessed: 1, newEventsSeen: 0 }),
+      run(0, 17 * MIN, 'rows-arrived', { sessionsProcessed: 1 }),
+      run(0, 32 * MIN, 'no-rows', { sessionsProcessed: 1, newEventsSeen: 0 }),
+    ]
+    expect(decideReadPathAlert(base({ runs: stuck }))).toEqual({
+      fire: true,
+      reason: 'stall',
+      coverageBasis: 'source-backlog',
+    })
+  })
+
+  it('coverage UNKNOWN + bearer FRESH → fires on the bearer FALLBACK (fails toward paging)', () => {
+    // The probe could not measure (403 / pre-deploy / probe fault). We fall back
+    // to today's bearer gate: fresh mints → page, named so the operator sees why.
+    const runs = [run(0, 2 * MIN, 'unknown'), run(0, 17 * MIN, 'unknown'), run(0, 32 * MIN, 'unknown')]
+    expect(decideReadPathAlert(base({ runs, lastFleetEmitMs: NOW - 10 * MIN }))).toEqual({
+      fire: true,
+      reason: 'stall',
+      coverageBasis: 'coverage-unknown-bearer-fresh',
+    })
+  })
+
+  it('coverage UNKNOWN + bearer STALE → does NOT fire (nothing says there is work)', () => {
+    const runs = [run(0, 2 * MIN, 'unknown'), run(0, 17 * MIN, 'unknown'), run(0, 32 * MIN, 'unknown')]
+    expect(decideReadPathAlert(base({ runs, lastFleetEmitMs: NOW - 3 * HOUR }))).toEqual({
+      fire: false,
+      reason: null,
+    })
+  })
+
+  it('coverage NO-ROWS never fires, even with a fresh bearer', () => {
+    const runs = [run(0, 2 * MIN, 'no-rows'), run(0, 17 * MIN, 'no-rows'), run(0, 32 * MIN, 'no-rows')]
+    expect(decideReadPathAlert(base({ runs, lastFleetEmitMs: NOW - 1 * MIN }))).toEqual({
+      fire: false,
+      reason: null,
+    })
+  })
+
+  it('DEPLOY TRANSITION: a streak of pre-probe runs (coverage null) + bearer fresh → bearer fallback fires', () => {
+    // Before the probe ships, every run's coverage is null → unknown → the
+    // decision is exactly main's: bearer fresh + zero-write streak → page.
+    const preDeploy = [run(0, 2 * MIN, null), run(0, 17 * MIN, null), run(0, 32 * MIN, null)]
+    expect(decideReadPathAlert(base({ runs: preDeploy, lastFleetEmitMs: NOW - 10 * MIN }))).toEqual({
+      fire: true,
+      reason: 'stall',
+      coverageBasis: 'coverage-unknown-bearer-fresh',
+    })
+    // Once one new-probe run enters the streak with rows-arrived, basis upgrades.
+    const mixed = [run(0, 2 * MIN, 'rows-arrived'), run(0, 17 * MIN, null), run(0, 32 * MIN, null)]
+    expect(decideReadPathAlert(base({ runs: mixed }))).toEqual({
+      fire: true,
+      reason: 'stall',
+      coverageBasis: 'source-backlog',
+    })
+  })
+
+  it('HIGH regression: a SUSTAINED outage keeps firing (does NOT auto-resolve mid-outage)', () => {
+    // The FULL streak is evaluated, not a top-3 slice: even a run 3h deep in the
+    // streak that saw rows arrive keeps STALL armed. Rows keep arriving during a
+    // real outage, so coverage stays rows-arrived and the alert never auto-resolves.
+    const runs = [
+      run(0, 5 * MIN, 'no-rows', { newEventsSeen: 0 }), // recent probes read empty
+      run(0, 20 * MIN, 'no-rows', { newEventsSeen: 0 }),
+      run(0, 35 * MIN, 'no-rows', { newEventsSeen: 0 }),
+      run(0, 3 * HOUR, 'rows-arrived'), // the burst that started the outage, deep in the streak
+    ]
+    expect(decideReadPathAlert(base({ runs, lastFleetEmitMs: NOW - 3 * HOUR }))).toEqual({
+      fire: true,
+      reason: 'stall',
+      coverageBasis: 'source-backlog',
+    })
+  })
+
+  it('recovery: the alert stops ONLY when rows actually start landing again', () => {
+    // The freshest run wrote rows → the zero-write streak breaks → healthy.
+    const runs = [run(17, 2 * MIN, 'rows-arrived'), run(0, 20 * MIN, 'rows-arrived'), run(0, 35 * MIN, 'rows-arrived')]
+    expect(decideReadPathAlert(base({ runs, lastFleetEmitMs: NOW - 10 * MIN }))).toEqual({ fire: false, reason: null })
+  })
+
+  it('does NOT fire with only 2 zero-write runs (needs >=3), even coverage rows-arrived', () => {
+    const runs = [run(0, 2 * MIN, 'rows-arrived'), run(0, 17 * MIN, 'rows-arrived'), run(7, 32 * MIN)]
+    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
+  })
+
+  it('a null rows_affected at the top breaks the zero-streak (unknown != zero)', () => {
+    const runs = [run(null, 2 * MIN, 'rows-arrived'), run(0, 17 * MIN, 'rows-arrived'), run(0, 32 * MIN, 'rows-arrived')]
+    // streak length 0 → no stall; a recent success exists → no no-success.
+    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
   })
 })
 
-describe('decideReadPathAlert — STALL (reader dead but fleet still emitting)', () => {
-  it('fires stall: last 3 runs all wrote 0 rows WHILE the fleet is still minting bearers', () => {
-    // The exact incident shape: sessions ARE being scanned (5 each) but 0 rows land.
-    const runs = [
-      successRun(0, 2 * MIN, 5, 0),
-      successRun(0, 17 * MIN, 5, 0),
-      successRun(0, 32 * MIN, 5, 0),
-    ]
-    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: true, reason: 'stall' })
-  })
-
-  it('HIGH regression: a SUSTAINED zero-write outage keeps firing (does NOT auto-resolve mid-outage)', () => {
-    // The bug the ts_event gate had: after ~2h of silent zero-write SUCCESS runs,
-    // reader-written usage aged out → gate dropped → fire:false → false recovery.
-    // With the bearer-mint gate the fleet is STILL minting (bearers are a ~29-min
-    // heartbeat), so even though the OLDEST successful run is >2h old and the
-    // ledger has been all-zero for hours, STALL stays ARMED.
-    const runs = [
-      successRun(0, 5 * MIN, 5, 0),
-      successRun(0, 20 * MIN, 5, 0),
-      successRun(0, 35 * MIN, 5, 0),
-      successRun(0, 3 * HOUR, 5, 0), // outage has been running for hours
-    ]
-    // Fleet still emitting (bearer 10 min ago) — reader output is irrelevant here.
-    const input = base({ runs, lastFleetEmitMs: NOW - 10 * MIN })
-    expect(decideReadPathAlert(input)).toEqual({ fire: true, reason: 'stall' })
-  })
-
-  it('recovery: the alert stops (fire:false) ONLY when rows actually start landing again', () => {
-    // Same sustained outage, but the freshest run finally wrote rows → the
-    // zero-write streak breaks → healthy → runReadPathHealth will auto-resolve.
-    const runs = [
-      successRun(17, 2 * MIN, 5, 0), // rows landing again
-      successRun(0, 20 * MIN, 5, 0),
-      successRun(0, 35 * MIN, 5, 0),
-    ]
-    const input = base({ runs, lastFleetEmitMs: NOW - 10 * MIN })
-    expect(decideReadPathAlert(input)).toEqual({ fire: false, reason: null })
-  })
-
-  it('does NOT fire stall when the fleet is genuinely IDLE (no bearer mints in >2h)', () => {
-    const runs = [successRun(0, 2 * MIN, 5), successRun(0, 17 * MIN, 5), successRun(0, 32 * MIN, 5)]
-    const input = base({ runs, lastFleetEmitMs: NOW - 3 * HOUR })
-    expect(decideReadPathAlert(input)).toEqual({ fire: false, reason: null })
-  })
-
-  it('does NOT fire stall when the fleet has NEVER minted (lastFleetEmitMs null)', () => {
-    const runs = [successRun(0, 2 * MIN, 5), successRun(0, 17 * MIN, 5), successRun(0, 32 * MIN, 5)]
-    const input = base({ runs, lastFleetEmitMs: null })
-    expect(decideReadPathAlert(input)).toEqual({ fire: false, reason: null })
-  })
-
-  it('does NOT fire stall with only 2 zero-write runs (needs >=3)', () => {
-    const runs = [successRun(0, 2 * MIN, 5), successRun(0, 17 * MIN, 5), successRun(7, 32 * MIN, 5)]
-    // Latest two are zero, third wrote rows → streak broken at 3 → no stall.
-    // (No no-success trigger: there IS a recent success within 30 min.)
-    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
-  })
-
-  it('does NOT fire stall when the freshest of the 3 wrote rows (recovered)', () => {
-    const runs = [successRun(9, 2 * MIN, 5), successRun(0, 17 * MIN, 5), successRun(0, 32 * MIN, 5)]
-    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
-  })
-
-  it('a null rows_affected in the top-3 breaks the zero-streak (unknown != zero)', () => {
-    const runs: ReaderRun[] = [
-      { status: 'success', startedAtMs: NOW - 2 * MIN, rowsAffected: null, sessionsProcessed: 5, errors: 0 },
-      successRun(0, 17 * MIN, 5),
-      successRun(0, 32 * MIN, 5),
-    ]
-    // top-3 not ALL zero (one is null) → no stall. Recent success exists → no no-success.
-    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
-  })
-
-  it('fleet-emit freshness is inclusive at exactly the 2h boundary', () => {
-    const runs = [successRun(0, 2 * MIN, 5), successRun(0, 17 * MIN, 5), successRun(0, 32 * MIN, 5)]
-    const input = base({ runs, lastFleetEmitMs: NOW - 2 * HOUR }) // exactly 2h → still fresh (<=)
-    expect(decideReadPathAlert(input)).toEqual({ fire: true, reason: 'stall' })
-  })
-})
-
-describe('decideReadPathAlert — ALL-FAULT (latest run errored on every session)', () => {
+describe('decideReadPathAlert — ALL-FAULT (unchanged: covers the errored-every-session run)', () => {
   it('fires all-fault: errors == sessionsProcessed (>= floor) on the latest run', () => {
-    const runs: ReaderRun[] = [
-      { status: 'success', startedAtMs: NOW - 2 * MIN, rowsAffected: 0, sessionsProcessed: 4, errors: 4 },
-      successRun(10, 17 * MIN, 5),
-    ]
+    const runs = [run(0, 2 * MIN, 'rows-arrived', { sessionsProcessed: 4, errors: 4 }), run(10, 17 * MIN)]
     expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: true, reason: 'all-fault' })
   })
 
-  it('fires all-fault: errors > sessionsProcessed (defensive >=) on the latest run', () => {
-    const runs: ReaderRun[] = [
-      { status: 'success', startedAtMs: NOW - 2 * MIN, rowsAffected: 0, sessionsProcessed: 3, errors: 5 },
-    ]
-    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: true, reason: 'all-fault' })
-  })
-
-  it('LOW: does NOT fire all-fault on a single flaky session (sessionsProcessed 1, errors 1)', () => {
-    // One transient ING-6-isolated session must NOT page platform-admins urgent.
-    // The freshest run wrote rows so no stall; a recent success so no no-success.
-    const runs: ReaderRun[] = [
-      { status: 'success', startedAtMs: NOW - 2 * MIN, rowsAffected: 3, sessionsProcessed: 1, errors: 1 },
-    ]
-    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
-  })
-
-  it('fires all-fault at the floor exactly (sessionsProcessed 2, errors 2)', () => {
-    const runs: ReaderRun[] = [
-      { status: 'success', startedAtMs: NOW - 2 * MIN, rowsAffected: 0, sessionsProcessed: 2, errors: 2 },
-    ]
-    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: true, reason: 'all-fault' })
-  })
-
-  it('does NOT fire all-fault when sessionsProcessed is 0 (clean idle tick)', () => {
-    const runs: ReaderRun[] = [
-      { status: 'success', startedAtMs: NOW - 2 * MIN, rowsAffected: 0, sessionsProcessed: 0, errors: 0 },
-      successRun(9, 17 * MIN, 5),
-    ]
-    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
-  })
-
-  it('does NOT fire all-fault on PARTIAL errors (errors < sessionsProcessed)', () => {
-    const runs: ReaderRun[] = [
-      { status: 'success', startedAtMs: NOW - 2 * MIN, rowsAffected: 3, sessionsProcessed: 5, errors: 2 },
-    ]
+  it('LOW: does NOT fire all-fault on a single flaky session', () => {
+    const runs = [run(3, 2 * MIN, 'rows-arrived', { sessionsProcessed: 1, errors: 1 })]
     expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
   })
 
   it('all-fault takes precedence over stall when both would trip', () => {
-    // Latest run: all sessions errored (all-fault) AND the top-3 all wrote 0 (stall).
-    const runs: ReaderRun[] = [
-      { status: 'success', startedAtMs: NOW - 2 * MIN, rowsAffected: 0, sessionsProcessed: 5, errors: 5 },
-      successRun(0, 17 * MIN, 5),
-      successRun(0, 32 * MIN, 5),
+    const runs = [
+      run(0, 2 * MIN, 'rows-arrived', { sessionsProcessed: 5, errors: 5 }),
+      run(0, 17 * MIN, 'rows-arrived'),
+      run(0, 32 * MIN, 'rows-arrived'),
     ]
     expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: true, reason: 'all-fault' })
   })
 })
 
-describe('decideReadPathAlert — NO-SUCCESS (no recent successful run; covers a throwing reader)', () => {
-  it('fires no-success: newest success is older than 30 min and no stall/all-fault applies', () => {
-    // Two THROWN failures on top (status=failure, rows null → no stall; result absent
-    // → sessionsProcessed/errors null → no all-fault). Last success 40 min ago.
-    // This is exactly the throwing-reader case NO-SUCCESS is meant to cover.
+describe('decideReadPathAlert — NO-SUCCESS (unchanged: covers a throwing reader)', () => {
+  it('fires no-success: newest success older than 30 min, thrown failures on top', () => {
     const runs: ReaderRun[] = [
-      { status: 'failure', startedAtMs: NOW - 2 * MIN, rowsAffected: null, sessionsProcessed: null, errors: null },
-      { status: 'failure', startedAtMs: NOW - 17 * MIN, rowsAffected: null, sessionsProcessed: null, errors: null },
-      successRun(10, 40 * MIN, 5),
+      { status: 'failure', startedAtMs: NOW - 2 * MIN, rowsAffected: null, sessionsProcessed: null, errors: null, sourceCoverage: null, newEventsSeen: null },
+      { status: 'failure', startedAtMs: NOW - 17 * MIN, rowsAffected: null, sessionsProcessed: null, errors: null, sourceCoverage: null, newEventsSeen: null },
+      run(10, 40 * MIN),
     ]
     expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: true, reason: 'no-success' })
   })
 
   it('does NOT fire no-success when a success is within 30 min', () => {
     const runs: ReaderRun[] = [
-      { status: 'failure', startedAtMs: NOW - 2 * MIN, rowsAffected: null, sessionsProcessed: null, errors: null },
-      successRun(10, 20 * MIN, 5),
+      { status: 'failure', startedAtMs: NOW - 2 * MIN, rowsAffected: null, sessionsProcessed: null, errors: null, sourceCoverage: null, newEventsSeen: null },
+      run(10, 20 * MIN),
     ]
     expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
-  })
-
-  it('fires no-success when EVERY run in the ledger is a (thrown) failure', () => {
-    const runs: ReaderRun[] = [
-      { status: 'failure', startedAtMs: NOW - 2 * MIN, rowsAffected: null, sessionsProcessed: null, errors: null },
-      { status: 'failure', startedAtMs: NOW - 17 * MIN, rowsAffected: null, sessionsProcessed: null, errors: null },
-    ]
-    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: true, reason: 'no-success' })
   })
 })

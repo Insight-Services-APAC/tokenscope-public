@@ -69,7 +69,7 @@ function ev(opts: { method: string; body?: unknown; session: Session; query?: Re
   return e as unknown as Parameters<typeof recoveryPost>[0]
 }
 
-const finops = (): Session => ({ teammateId: finopsId, email: 'tr-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'tr.svc' })
+const finops = (): Session => ({ teammateId: finopsId, email: 'tr-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId, orgPath: 'tr.svc' })
 const admin = (): Session => ({ teammateId: adminId, email: 'tr-admin@x.test', displayName: 'Admin', role: 'admin', regionId, orgPath: 'tr.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'tr-dev@x.test', displayName: 'Dev', role: 'developer', regionId, orgPath: 'tr.svc' })
 
@@ -120,7 +120,7 @@ beforeAll(async () => {
     .values({ regionId, path: 'tr.svc', code: 'tr-svc', displayName: 'Svc', unitType: 'bu', isCostOwningUnit: true })
     .returning()
   ouId = o!.id
-  const [f] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-tr-fin', email: 'tr-fin@x.test', role: 'global-finops', regionId, orgUnitId: ouId }).returning()
+  const [f] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-tr-fin', email: 'tr-fin@x.test', role: 'platform-admin', regionId, orgUnitId: ouId }).returning()
   finopsId = f!.id
   const [a] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-tr-admin', email: 'tr-admin@x.test', role: 'admin', regionId, orgUnitId: ouId }).returning()
   adminId = a!.id
@@ -138,7 +138,7 @@ beforeEach(async () => {
 })
 
 describe('enqueue endpoint — RBAC and validation', () => {
-  it('global-finops enqueues a scoped, widened recovery', async () => {
+  it('platform-admin enqueues a scoped, widened recovery', async () => {
     const id = await enrol()
     const res = (await recoveryPost(
       ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 60, reason: 'dead-zone backlog' } }),

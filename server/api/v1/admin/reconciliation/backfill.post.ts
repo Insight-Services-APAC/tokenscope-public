@@ -11,7 +11,7 @@
  *   - startDate within the last 90 days and not in the future; endDate = today (UTC).
  *   - one in-flight (pending|running) request per scope (409 otherwise — no queue spam).
  *
- * RBAC: requireRole('admin','global-finops') + assertSameOrigin. Audited. Provider scopes are
+ * RBAC: requireRole('admin') + assertSameOrigin. Audited. Provider scopes are
  * GLOBAL (not region-partitioned) — no reconciliation admin endpoint applies requireRegionScope —
  * so a region-scoped admin may backfill any reconciled scope, by design (matches orgs/enterprises).
  */
@@ -54,7 +54,7 @@ function utcMidnight(d: Date): Date {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

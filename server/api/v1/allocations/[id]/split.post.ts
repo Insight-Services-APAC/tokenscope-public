@@ -15,7 +15,7 @@
  * "Split evenly" is a client helper that submits equal caps; the server
  * only validates the explicit amounts.
  *
- * manager / admin / global-finops, scoped to the project.
+ * manager / admin / platform-admin, scoped to the project.
  */
 import {
   defineEventHandler,
@@ -51,7 +51,7 @@ const Body = z.discriminatedUnion('mode', [
 const cents = (s: string) => Math.round(Number(s) * 100)
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'manager', 'admin', 'global-finops')
+  await requireRole(event, 'manager', 'admin')
   assertSameOrigin(event)
   const session = await requireAuth(event)
   const id = requireUuidParam(event, 'id', 'allocation id')

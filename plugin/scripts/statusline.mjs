@@ -65,7 +65,7 @@ import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
-import { readEmitSentinel, globalSettingsEnv, stateDir } from './plugin-runtime.mjs'
+import { readEmitSentinel, trustedGlobalSettingsEnv, trustedStateDir } from './plugin-runtime.mjs'
 
 const C = {
   green: '\x1b[32m',
@@ -345,6 +345,12 @@ function isConfigured(env) {
  * MCP authed = Claude's credential store has an `.mcpOAuth` entry for the
  * TokenScope plugin MCP server (key `plugin:tokenscope:tokenscope` or
  * `plugin:tokenscope:tokenscope|<url>`). Cheap local read; fail-defensive → false.
+ *
+ * homedir(), NOT realHome(), and deliberately so — the one read in this file
+ * that is not on the trusted store. This mirrors a file CLAUDE CODE itself
+ * reads, and Claude Code resolves it through the same HOME; following realHome
+ * here would answer about a different file than the one actually in use. See
+ * real-home.mjs, which documents this as the case that belongs on homedir().
  */
 function isMcpAuthed() {
   let creds
@@ -373,7 +379,7 @@ function instanceIdOf(env) {
  */
 function readLandedCache() {
   try {
-    return JSON.parse(readFileSync(join(stateDir(), 'last-landed.json'), 'utf8'))
+    return JSON.parse(readFileSync(join(trustedStateDir(), 'last-landed.json'), 'utf8'))
   } catch {
     return null
   }
@@ -392,7 +398,7 @@ export const POLL_INTERVAL_MS = 5 * 60 * 1000
 /** The last spawn-attempt timestamp from the poll stamp file (or null). */
 function readPollStamp() {
   try {
-    return JSON.parse(readFileSync(join(stateDir(), 'landed-poll.stamp'), 'utf8'))?.at ?? null
+    return JSON.parse(readFileSync(join(trustedStateDir(), 'landed-poll.stamp'), 'utf8'))?.at ?? null
   } catch {
     return null
   }
@@ -421,7 +427,16 @@ export function landedRefreshDue(cache, now = Date.now(), stampAt = readPollStam
 function maybeSpawnLandedRefresh(env, cache) {
   try {
     if (!landedRefreshDue(cache)) return
-    const dir = stateDir()
+    /*
+     * trustedStateDir() everywhere in this file, reads included. stateDir()
+     * honours TOKENSCOPE_STATE_DIR, which a repository's settings env can set —
+     * so a repo could choose where this stamp is written AND pre-seed the
+     * delivery cache that landedRefreshDue() consults, making the status line
+     * report healthy delivery while suppressing the refresh that would discover
+     * otherwise. landed-check.mjs defaults to the same trusted directory, so
+     * reader and writer stay on one store.
+     */
+    const dir = trustedStateDir()
     try {
       mkdirSync(dir, { recursive: true })
       writeFileSync(
@@ -454,7 +469,9 @@ function main() {
   let out = ''
   try {
     const input = readStdinJson()
-    const env = globalSettingsEnv()
+    // TRUSTED read (F313): this env supplies TOKENSCOPE_BEARER_ENDPOINT, and
+    // maybeSpawnLandedRefresh below posts the real access token to it.
+    const env = trustedGlobalSettingsEnv()
     const configured = isConfigured(env)
     let landing = 'unknown'
     if (configured) {
@@ -467,7 +484,11 @@ function main() {
     out = formatStatusLine({
       configured,
       // Emitting = configured AND no live failure sentinel (no sentinel = healthy).
-      emitting: configured && !readEmitSentinel(),
+      // trustedStateDir(): this call used the ambient process.env, so a repo-set
+      // TOKENSCOPE_STATE_DIR chose which directory was searched for the failure
+      // sentinel — point it at an empty one and "no sentinel" reads as healthy
+      // emission. Same forgery as the delivery cache above, on the other input.
+      emitting: configured && !readEmitSentinel(process.env, trustedStateDir()),
       mcpAuthed: isMcpAuthed(),
       // Landing = the delivery-confirmation state derived from the cached /health.
       landing,

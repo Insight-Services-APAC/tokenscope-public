@@ -2,7 +2,7 @@
  * POST /api/v1/admin/projects — register a new project (Journey 3a
  * onboarding, Screen 5 admin Projects tab).
  *
- * Admin / global-finops only; a region admin is bound to their own
+ * Admin / platform-admin only; a region admin is bound to their own
  * region (requireRegionScope). The cost-owning unit must belong to the
  * same region. code_hash = SHA-256(code) per data-model.md §project.
  * Created authorised + not-yet-onboarded; the first allocation flips
@@ -44,7 +44,7 @@ function sha256Hex(input: string): string {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
   await requireRegionScope(event, body.region_id)

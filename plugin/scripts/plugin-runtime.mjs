@@ -18,9 +18,9 @@
  * whether a bearer was minted (never the token) — the right contract for a health
  * probe, the wrong one for a re-emitter.
  */
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, realpathSync, writeFileSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join, dirname, sep, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import https from 'node:https'
@@ -110,11 +110,77 @@ export function httpsPostJson(urlStr, body, { timeoutMs = 30_000, allowLoopback 
   })
 }
 
-/** The bundled plugin scripts dir (CLAUDE_PLUGIN_ROOT/scripts, else this file's dir). */
+/*
+ * CLAUDE_PLUGIN_ROOT CONFINEMENT — one implementation, every consumer.
+ *
+ * This variable chooses which scripts we execute and which paths we PERSIST into
+ * settings for Claude Code to execute later. It arrives in the environment a
+ * repo's settings `env` block is merged into, and it is absent from Claude
+ * Code's published list of variables settings may not override — so the
+ * precedence that protects us today is borrowed behaviour, not a guarantee.
+ *
+ * Accept it only when it resolves INSIDE our own install. The directory this
+ * module was loaded from is, by construction, the installed bundle; sibling
+ * VERSIONS under the same parent stay acceptable, because following a
+ * freshly-installed version is deliberate (see tag-repo.mjs's resolveHelperPath).
+ * `realpathSync` on both sides defeats `..` and symlink escapes.
+ *
+ * ONE implementation for every consumer: runEmitHelper, backfill's mintBearer,
+ * statusline-toggle (which PERSISTS a command Claude Code later runs) and
+ * tag-repo all resolve through here. See epic-mdash-remediation.md (§2.6).
+ */
+export function ownBundleParent() {
+  // <bundle>/scripts/plugin-runtime.mjs -> <bundle> -> <versions dir>
+  return dirname(dirname(dirname(fileURLToPath(import.meta.url))))
+}
+
+/** `0.1.36` -> [0,1,36]; null for anything that is not a version segment. */
+function versionTuple(segment) {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(segment)
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+}
+
+function notOlderThanOurs(candidateReal, rootReal) {
+  const ours = versionTuple(basename(dirname(dirname(fileURLToPath(import.meta.url)))))
+  const rel = candidateReal.slice(rootReal.length + 1).split(sep)[0]
+  const theirs = versionTuple(rel)
+  // Not a version-shaped layout (a dev checkout, an unexpected cache): fall back
+  // to the containment test alone rather than refusing a legitimate install.
+  if (!ours || !theirs) return true
+  for (let i = 0; i < 3; i++) {
+    if (theirs[i] > ours[i]) return true
+    if (theirs[i] < ours[i]) return false
+  }
+  return true // same version
+}
+
+export function withinOwnInstall(candidate) {
+  try {
+    const root = realpathSync(ownBundleParent())
+    const real = realpathSync(candidate)
+    const contained = real === root || real.startsWith(root + sep)
+    if (!contained) return false
+    /*
+     * NO DOWNGRADES. Containment alone admits every cached sibling version, so a
+     * repo-set CLAUDE_PLUGIN_ROOT could select an OLDER release that still has
+     * the bugs this one fixes. Newer siblings stay allowed — that is the
+     * intended upgrade auto-follow.
+     * See docs/security-sprint/epic-mdash-remediation.md (Wave 1).
+     */
+    return notOlderThanOurs(real, root)
+  } catch {
+    return false // unresolvable -> refuse
+  }
+}
+
+/** The bundled plugin scripts dir. CLAUDE_PLUGIN_ROOT only when confined. */
 export function resolveScriptsDir() {
-  return process.env.CLAUDE_PLUGIN_ROOT
+  const own = dirname(fileURLToPath(import.meta.url))
+  const claimed = process.env.CLAUDE_PLUGIN_ROOT
     ? join(process.env.CLAUDE_PLUGIN_ROOT, 'scripts')
-    : dirname(fileURLToPath(import.meta.url))
+    : null
+  if (claimed && existsSync(claimed) && withinOwnInstall(claimed)) return claimed
+  return own
 }
 
 /** Absolute path to the bundled otel-headers-helper.sh (the real emit path). */
@@ -171,6 +237,52 @@ export function trustedStateDir() {
   return join(realHome(), '.tokenscope')
 }
 
+/*
+ * SELF-HEAL: copy the emit ENDPOINTS into the device store when only the
+ * credential is there. Without it the helper's refusal is an outage for every
+ * device enrolled before endpoints were persisted.
+ *
+ * Endpoints MUST come from `trustedGlobalSettingsEnv()`, never the ambient
+ * environment — the ambient one is the channel this refusal exists to distrust.
+ * Best-effort and idempotent: on failure the refusal stands, which is the safe
+ * direction. See docs/security-sprint/epic-mdash-remediation.md (Wave 1).
+ */
+export function migrateStoredEndpoints(dir = trustedStateDir(), settingsEnv = null) {
+  try {
+    const configPath = join(dir, 'config.json')
+    if (!existsSync(configPath)) return false
+    const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return false
+    if (!cfg.oauth_refresh_token) return false // nothing stored to protect
+    // BOTH destinations, backfilled INDEPENDENTLY. Returning early on a present
+    // token endpoint left a token-only store permanently missing its bearer
+    // endpoint — and the helper needs both from the store before it will use a
+    // stored credential, so a partial migration is a permanent refusal.
+    if (cfg.oauth_token_endpoint && cfg.bearer_endpoint) return false
+    const global = settingsEnv ?? trustedGlobalSettingsEnv()
+    const next = { ...cfg }
+    let changed = false
+    for (const [field, key] of [
+      ['oauth_token_endpoint', 'TOKENSCOPE_OAUTH_TOKEN_ENDPOINT'],
+      ['bearer_endpoint', 'TOKENSCOPE_BEARER_ENDPOINT'],
+    ]) {
+      if (next[field]) continue
+      const value = (global[key] ?? '').trim()
+      if (!value) continue
+      assertSafeEndpoint(value, { allowLoopback: true })
+      next[field] = value
+      changed = true
+    }
+    if (!changed) return false
+    const tmp = `${configPath}.tmp.${process.pid}`
+    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+    renameSync(tmp, configPath)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Read a settings.json's `env` block (or {} on any failure). */
 export function readSettingsEnv(path) {
   try {
@@ -181,9 +293,37 @@ export function readSettingsEnv(path) {
   }
 }
 
-/** The GLOBAL ~/.claude/settings.json `env` block. */
+/**
+ * The GLOBAL ~/.claude/settings.json `env` block, resolved the way CLAUDE CODE
+ * resolves it — through `homedir()`, which honours `HOME`.
+ *
+ * Correct for "what will Claude Code read?", and safe inside the SessionStart
+ * hook, where `neutraliseRepoHome` has already replaced a repo-CLAIMED `HOME`
+ * (and deliberately kept a legitimate one — a container, CI). It is NOT safe
+ * anywhere that has not done that repair: see the trusted sibling below.
+ */
 export function globalSettingsEnv() {
   return readSettingsEnv(join(homedir(), '.claude', 'settings.json'))
+}
+
+/**
+ * The same block on the PASSWD home, immune to a moved `HOME`.
+ *
+ * For callers where this file DECIDES WHERE A CREDENTIAL GOES. `realHome`'s own
+ * header draws the line: reading a file to learn what Claude Code will read
+ * belongs on `homedir()`; choosing the host a secret is posted to does not.
+ * Every plugin CLI is on the wrong side of that line, because
+ * `neutraliseRepoHome` runs only inside the hook — so a repo that sets `HOME`
+ * and commits its own `<repo>/fakehome/.claude/settings.json` was supplying the
+ * "global" configuration for `statusline`, `landed-check` and `status`
+ * (MDASH F313/F312/F116). The endpoint in that file receives the device's real
+ * cached access token as a Bearer.
+ *
+ * Mirrors `stateDir()` / `trustedStateDir()` above — same split, same reason:
+ * one honours the environment, one refuses to.
+ */
+export function trustedGlobalSettingsEnv() {
+  return readSettingsEnv(join(realHome(), '.claude', 'settings.json'))
 }
 
 /**
@@ -279,17 +419,29 @@ export function safeProcessEnv(env = process.env) {
   for (const k of REPO_UNTRUSTED_ENV_KEYS) delete out[k]
   for (const k of REPO_UNTRUSTED_ENV_KEYS_NO_RESTORE) delete out[k]
   // The device's OWN global config may legitimately supply the restorable keys.
-  const global = globalSettingsEnv()
+  // TRUSTED read: this function's entire purpose is producing an env safe to
+  // hand a child process, so it must not restore those keys from a settings
+  // file a repo-moved HOME chose.
+  const global = trustedGlobalSettingsEnv()
   for (const k of REPO_UNTRUSTED_ENV_KEYS) {
     if (typeof global[k] === 'string') out[k] = global[k]
   }
   return out
 }
 
-/** Read the helper's emit-failure sentinel for `env`'s state dir (or null). */
-export function readEmitSentinel(env = process.env) {
+/**
+ * Read the helper's emit-failure sentinel (or null).
+ *
+ * `dir` is explicit for the same reason `runEmitHelper` takes one: the sentinel
+ * says whether emission is HEALTHY, so a caller that resolves its directory from
+ * an environment a repository can steer lets that repository decide what the
+ * health indicator reports. Callers holding a sanitised env (safeProcessEnv
+ * drops TOKENSCOPE_STATE_DIR) or a dir they resolved themselves are already
+ * safe; a caller reading ambient process.env must pass trustedStateDir().
+ */
+export function readEmitSentinel(env = process.env, dir = stateDir(env)) {
   try {
-    return JSON.parse(readFileSync(join(stateDir(env), 'emit-failure.json'), 'utf8'))
+    return JSON.parse(readFileSync(join(dir, 'emit-failure.json'), 'utf8'))
   } catch {
     return null
   }
@@ -327,8 +479,16 @@ export function readEmitSentinel(env = process.env) {
  *
  * @param {{env?: Record<string,string>, timeoutMs?: number, stateDir?: string}} [opts]
  */
-export function runEmitHelper({ env = process.env, timeoutMs, stateDir: dir } = {}) {
-  const helper = resolveHelperPath()
+/*
+ * `helperPath` is an explicit ARGUMENT, never an environment override. The tests
+ * need to reach a stub helper, and before the confinement above they got there by
+ * setting CLAUDE_PLUGIN_ROOT — i.e. the suite was exercising the very channel the
+ * attacker uses, which is why the hole survived a test suite this size. A
+ * function argument is safe for the same reason `--state-dir` is: anyone able to
+ * pass one is already executing our code.
+ */
+export function runEmitHelper({ env = process.env, timeoutMs, stateDir: dir, helperPath } = {}) {
+  const helper = helperPath ?? resolveHelperPath()
   if (!existsSync(helper)) return { ran: false, status: null, hasAuth: false }
   const res = spawnSync('/bin/sh', [helper, '--state-dir', dir ?? trustedStateDir()], {
     encoding: 'utf8',

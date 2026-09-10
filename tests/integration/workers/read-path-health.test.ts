@@ -73,12 +73,19 @@ async function insertReaderRun(opts: {
   sessionsProcessed?: number
   errors?: number
   scoped?: boolean
+  // Ingest-side coverage verdict (JoinResult.sourceCoverage.status). Defaults to
+  // 'rows-arrived' — the outage shape (the DCR received rows the joiner did not
+  // land). Pass 'no-rows' for an idle estate, null to omit (a pre-probe run).
+  sourceCoverage?: 'rows-arrived' | 'no-rows' | 'unknown' | null
 }): Promise<void> {
   const started = new Date(opts.startedAtMs).toISOString()
+  const coverage = opts.sourceCoverage === undefined ? 'rows-arrived' : opts.sourceCoverage
   const result = JSON.stringify({
     sessionsProcessed: opts.sessionsProcessed ?? 5,
     attributionRowsWritten: opts.rowsAffected ?? 0,
     errors: opts.errors ?? 0,
+    newEventsSeen: 5,
+    ...(coverage === null ? {} : { sourceCoverage: { status: coverage, rowsReceived: coverage === 'rows-arrived' ? 42 : coverage === 'no-rows' ? 0 : null } }),
     ...(opts.scoped === undefined ? {} : { scoped: opts.scoped }),
   })
   await t.client`

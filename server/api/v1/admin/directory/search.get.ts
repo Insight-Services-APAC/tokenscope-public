@@ -13,7 +13,7 @@
  * whether they're ALREADY a teammate (so the UI can disable "add" and show
  * their current placement) — joined by entra_oid.
  *
- * manager / admin / global-finops / platform-admin. `manager` (a PM) is
+ * manager / admin / platform-admin. `manager` (a PM) is
  * included so the project-member dialog can pick ANY directory person to add
  * to a project they scope (POST assignments already allows manager). This is an
  * org-wide people-picker READ — it returns per-person directory hints
@@ -39,7 +39,7 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'manager', 'admin', 'global-finops')
+  await requireRole(event, 'manager', 'admin')
   const { q, limit } = await getValidated(event, Query)
 
   // Over-fetch a little so dropping admin-excluded (privileged/service) accounts

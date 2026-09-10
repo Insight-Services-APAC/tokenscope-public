@@ -9,7 +9,7 @@
  *    (their override + the platform default it shadows); Save writes their
  *    region's override. The server clamps scope authority — a refused write
  *    surfaces as a toast, we don't pre-hide the controls.
- *  - platform-admin / global-finops: a scope picker (platform + per-region
+ *  - platform-admin: a scope picker (platform + per-region
  *    overrides); Save writes the selected scope.
  *
  * There is NO DELETE on the API — overrides can only be re-valued, never
@@ -49,7 +49,7 @@ const props = defineProps<{
   data: GovernanceDialsData | null
   /** Region list for the org-wide scope picker (unused for region admins). */
   regions: GovernanceRegionOption[]
-  /** platform-admin / global-finops — gets the scope picker + platform writes. */
+  /** platform-admin — gets the scope picker + platform writes. */
   orgWide: boolean
   /** Caller's home region — the region admin's write target. */
   regionId: string | null

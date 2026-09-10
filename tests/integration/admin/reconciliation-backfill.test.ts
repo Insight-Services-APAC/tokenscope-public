@@ -68,14 +68,14 @@ function ev(opts: { method: string; body?: unknown; session: Session; params?: R
   injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], opts.session)
   return e as unknown as Parameters<typeof backfillPost>[0]
 }
-const finops = (): Session => ({ teammateId: finopsId, email: 'bf-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'bf.svc' })
+const finops = (): Session => ({ teammateId: finopsId, email: 'bf-fin@x.test', displayName: 'Fin', role: 'platform-admin', regionId, orgPath: 'bf.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'bf-dev@x.test', displayName: 'Dev', role: 'developer', regionId, orgPath: 'bf.svc' })
 
 beforeAll(async () => {
   t = await startTestDb(); process.env.DATABASE_URL = t.url
   const [r] = await t.db.insert(schema.region).values({ code: 'bf-r', displayName: 'BF' }).returning(); regionId = r!.id
   const [o] = await t.db.insert(schema.orgUnit).values({ regionId, path: 'bf.svc', code: 'bf-svc', displayName: 'Svc', unitType: 'bu', isCostOwningUnit: true }).returning(); ouId = o!.id
-  const [f] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-bf-fin', email: 'bf-fin@x.test', role: 'global-finops', regionId, orgUnitId: ouId }).returning(); finopsId = f!.id
+  const [f] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-bf-fin', email: 'bf-fin@x.test', role: 'platform-admin', regionId, orgUnitId: ouId }).returning(); finopsId = f!.id
   const [d] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-bf-dev', email: 'bf-dev@x.test', role: 'developer', regionId, orgUnitId: ouId }).returning(); devId = d!.id
   const [tm] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-bf-tgt', email: 'bf-tgt@x.test', regionId, orgUnitId: ouId }).returning(); targetTeammateId = tm!.id
   instanceId = '11111111-1111-1111-1111-111111111111'
@@ -93,7 +93,7 @@ beforeEach(async () => {
 })
 
 describe('backfill endpoint (POST/GET)', () => {
-  it('global-finops enqueues a valid backfill (github enterprise, 30 days back)', async () => {
+  it('platform-admin enqueues a valid backfill (github enterprise, 30 days back)', async () => {
     const res = (await backfillPost(ev({ method: 'POST', session: finops(), body: { targetKind: 'enterprise', targetId: entReconciledId, startDate: daysAgo(30) } }))) as { status: string; provider: string; externalRef: string }
     expect(res.status).toBe('pending')
     expect(res.provider).toBe('github')

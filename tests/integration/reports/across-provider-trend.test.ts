@@ -25,7 +25,7 @@ let unitA = ''
 let alice = ''
 let dave = ''
 /*
- * mig 0129: a DEDICATED teammate for this file's 'global-finops' session —
+ * mig 0129: a DEDICATED teammate for this file's 'platform-admin' session —
  * NEVER the shared sess() default sentinel ('00000000-0000-0000-0000-
  * 000000000009'), which the admin/manager/developer 403 loop below ALSO
  * resolves to. See regional.test.ts / across-regions.test.ts for the same fix.
@@ -58,7 +58,7 @@ const evAll = (session: Session, query = '') =>
 
 const sess = (role: string, regionId: string, teammateId = '00000000-0000-0000-0000-000000000009'): Session =>
   ({ teammateId, email: 'x@x.test', displayName: 'X', role, regionId, orgPath: 'a', issuedAt: new Date().toISOString() } as unknown as Session)
-const gfo = () => sess('global-finops', regionA, trendElevatedId)
+const gfo = () => sess('platform-admin', regionA, trendElevatedId)
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -82,11 +82,11 @@ beforeAll(async () => {
   alice = await mkTeammate('alice@a.test')
   dave = await mkTeammate('dave@a.test')
 
-  // A SEPARATE, DEDICATED teammate for this file's 'global-finops' session
+  // A SEPARATE, DEDICATED teammate for this file's 'platform-admin' session
   // (mig 0129) — see the `trendElevatedId` declaration above. Granted BOTH
   // permissions so gfo() keeps its pre-mig-0129 (unconditional org-wide) reach.
   await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
-    VALUES ('oid-finops-elevated', 'finops-elevated@a.test', 'Finops Elevated', ${regionA}::uuid, ${unitA}::uuid, 'global-finops', true)`
+    VALUES ('oid-finops-elevated', 'finops-elevated@a.test', 'Finops Elevated', ${regionA}::uuid, ${unitA}::uuid, 'platform-admin', true)`
   ;[{ id: trendElevatedId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='finops-elevated@a.test'`
   await grantReportAccess(t.client, trendElevatedId)
 
@@ -169,7 +169,7 @@ describe('GET /reports/region/trend (region=all) — RBAC + day-grain vendor-sta
     })
   }
 
-  it('global-finops sees one point per (day, vendor) with positive cost; values sum to genuine', async () => {
+  it('platform-admin sees one point per (day, vendor) with positive cost; values sum to genuine', async () => {
     const r = (await trendHandler(evAll(gfo(), 'month=2026-07'))) as unknown as TrendResp
     expect(r.window).toEqual({ from: '2026-07-01', to: '2026-07-31' })
     // 2026-07-02 (claude 20 + copilot 5), 2026-07-05 (claude 10), 2026-07-10 (copilot 30) → 4 points.

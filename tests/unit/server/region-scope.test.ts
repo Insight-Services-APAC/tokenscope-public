@@ -15,14 +15,14 @@ import { createError } from 'h3'
 // copy aligned with server/auth/rbac.ts; if either drifts the test
 // surfaces the divergence. CORE-3 (robustness-review-2026-06-09): the
 // policy is an explicit allowlist with a fail-closed default — only
-// admin (own region) / global-finops / platform-admin have region
+// admin (own region) / platform-admin have region
 // scope; every other role is DENIED.
 function checkRegionScopePolicy(opts: {
   role: string
   sessionRegionId: string
   targetRegionId: string
 }): { ok: true } | { ok: false; status: 403 } {
-  if (opts.role === 'global-finops' || opts.role === 'platform-admin') {
+  if (opts.role === 'platform-admin') {
     return { ok: true }
   }
   if (opts.role === 'admin') {
@@ -54,9 +54,9 @@ describe('requireRegionScope policy', () => {
     expect(result.status).toBe(403)
   })
 
-  it('global-finops sees any region (bypasses the admin scope check)', () => {
+  it('platform-admin sees any region (bypasses the admin scope check)', () => {
     const result = checkRegionScopePolicy({
-      role: 'global-finops',
+      role: 'platform-admin',
       sessionRegionId: 'apac',
       targetRegionId: 'emea',
     })

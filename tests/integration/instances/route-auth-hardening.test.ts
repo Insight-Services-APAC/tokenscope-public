@@ -111,7 +111,7 @@ async function openBearerFailures(instanceId: string): Promise<number> {
 }
 
 const adminSession = (): Session =>
-  ({ teammateId: ownerId, email: 'rh-admin@x.test', displayName: 'A', role: 'global-finops', regionId, orgPath: 'rh.svc' }) as Session
+  ({ teammateId: ownerId, email: 'rh-admin@x.test', displayName: 'A', role: 'platform-admin', regionId, orgPath: 'rh.svc' }) as Session
 
 describe('AUTH-7 — malformed instanceId → 400, not 500', () => {
   it('bearer.get', async () => {

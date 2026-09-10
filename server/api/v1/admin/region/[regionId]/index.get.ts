@@ -4,7 +4,7 @@
  * scopes to the requested region. Used by the Epic 13 6-tab admin
  * page.
  *
- * Region access: caller must either be a global-finops / admin with
+ * Region access: caller must either be a platform-admin / admin with
  * matching region OR be assigned to the region (RLS enforced
  * downstream). The same-region constraint is enforced here so an
  * APAC admin querying region=EMEA gets a 403, not empty rows.
@@ -28,7 +28,7 @@ interface RegionRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const regionId = requireUuidParam(event, 'regionId')
   await requireRegionScope(event, regionId)
 

@@ -77,14 +77,20 @@ vs forwarded OTel paths) are in [PROVIDERS.md](PROVIDERS.md).
 
 ## Roles & reporting scopes
 
-Roles (`shared/auth/roles.ts`): `developer`, `manager`, `admin`,
-`global-finops`, `platform-admin` — plus `finance`, retired and unassignable
-(kept in the enum for historical data, excluded from role assignment; still
-present as a demo persona). Region-scoped `admin` up to cross-region
-`platform-admin`; `global-finops` ("Global finance") is the live cross-region
-finance super-role; row-level security scopes data by region/org path. Reporting
-scopes map to personas: developer "my usage", manager regional budget-burn,
-Global-finance chargeback, cost-centre-owner P&L.
+Roles (`shared/auth/roles.ts`): four assignable — `developer`, `manager`,
+`admin`, `platform-admin` — plus TWO retired, unassignable enum members,
+`finance` and `global-finops`, kept only so historical rows still render a label
+(both excluded from `SELECTABLE_ROLES`). Region-scoped `admin` up to cross-region
+`platform-admin`, which is the only org-wide role. Scoping by region/org path is
+enforced IN THE APPLICATION, by the scope predicates on each query — not by
+row-level security, whose policies do not execute under the owner connection the
+app uses (ADR-0013; `docs/wiki/Security-Overview.md`). RLS is defence in depth
+that is currently dormant, so reading it as the boundary would credit a control
+that is not running. Reporting reach is no longer a role: the company-wide finance
+lens is a per-teammate `report_access_grant`, which is what allowed
+`global-finops` to be retired. Reporting scopes map to personas: developer "my
+usage", manager regional budget-burn, granted-finance chargeback,
+cost-centre-owner P&L.
 
 ## Deploy topology
 

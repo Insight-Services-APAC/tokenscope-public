@@ -18,7 +18,7 @@
  *
  * Authority: region admins create cards for their OWN region only; a GLOBAL
  * card (region_id null) — which would reprice every region without an own-
- * region card — is global-finops / platform-admin only. The CoU tier is not
+ * region card — is platform-admin only. The CoU tier is not
  * creatable via the API yet (resolveRateCard excludes it — documented TODO).
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
@@ -105,7 +105,7 @@ function badRequest(detail: string): never {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
@@ -129,7 +129,7 @@ export default defineEventHandler(async (event) => {
   // Scope authority: a global card reprices every region without an own-region
   // card — not a region admin's to create.
   if (regionId === null) {
-    if (!(isPlatformAdmin(caller.role) || caller.role === 'global-finops')) {
+    if (!(isPlatformAdmin(caller.role))) {
       throw createError({
         statusCode: 403,
         statusMessage: 'Forbidden',
@@ -137,7 +137,7 @@ export default defineEventHandler(async (event) => {
           type: 'https://tokenscope.example.com/errors/forbidden',
           title: 'Forbidden',
           status: 403,
-          detail: 'A global rate card requires platform-admin or global-finops.',
+          detail: 'A global rate card requires platform-admin.',
         },
       })
     }

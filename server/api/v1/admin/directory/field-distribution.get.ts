@@ -21,7 +21,7 @@ const Query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'global-finops', 'platform-admin')
+  await requireRole(event, 'platform-admin')
 
   const { sample } = await getValidatedQuery(event, Query.parse)
 

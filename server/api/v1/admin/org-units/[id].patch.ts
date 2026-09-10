@@ -9,7 +9,7 @@
  * which does the LTREE subtree re-path in one statement (within-region).
  * code/path renames remain out of scope (code is a stable key).
  *
- * Admin / global-finops only; a region admin is bound to the unit's own
+ * Admin / platform-admin only; a region admin is bound to the unit's own
  * region (we load the unit first, then requireRegionScope to it).
  */
 import { defineEventHandler, createError, getRouterParam, getRequestIP, getHeader } from 'h3'
@@ -34,7 +34,7 @@ const Body = z
   )
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
 
   const idParse = z.string().uuid().safeParse(getRouterParam(event, 'id'))

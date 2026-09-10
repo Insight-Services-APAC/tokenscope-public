@@ -23,7 +23,7 @@ import { PROBE_ERROR_REASONS, type ProbeErrorReason } from '../observability/pro
 export const OPS_ALERT_CONDITION = {
   /** A2.1 — the reader probe: a bounded read of the joiner's real table failed (ar-H1). */
   telemetryRead: 'telemetry-read',
-  /** A2.2 — joiner writing nothing while the fleet still emits (time-integrated). */
+  /** A2.2 — joiner writing nothing while the DCR ingest pipeline received rows it did not land (time-integrated). */
   attributionStall: 'attribution-stall',
   /** A2.3 — ≥ OPS_ALERT_FLEET_THRESHOLD workers independently failing (ar-M11). */
   workerFleet: 'worker-fleet',
@@ -90,8 +90,25 @@ const OPS_ALERT_OWN_REASONS = [
   'probe-unhealthy',
   /** probe-network: expectPrivate hosts failing DNS/TCP (+count = how many). */
   'hosts-failing',
-  /** attribution-stall: the joiner's consecutive zero-write runs (+count). */
+  /**
+   * attribution-stall: the joiner's consecutive zero-write runs (+count).
+   * SUPERSEDED as the emitted reason by the two coverage-basis reasons below
+   * (PR #319); retained in the vocabulary for historical persisted records.
+   */
   'zero-write-streak',
+  /**
+   * attribution-stall: the DCR ingest pipeline received rows the joiner did not
+   * land (RowsReceived_Count > 0, zero attributed) — the ingest-side backlog
+   * (+count = zero-write runs). The primary stall reason.
+   */
+  'source-backlog',
+  /**
+   * attribution-stall: the ingest-coverage probe could not measure (no DCR
+   * config, a 403 while Monitoring Reader is unassigned, a probe fault), so the
+   * stall fell back to the bearer gate and the fleet is minting (+count). Names
+   * WHY an idle-looking estate paged; A2.1 telemetry-read pages for the same.
+   */
+  'coverage-unknown-bearer-fresh',
   /** worker-fleet: ≥ threshold workers independently failing (+count). */
   'workers-failing',
   /** worker:<name>: one worker's consecutive-failure streak (+count). */

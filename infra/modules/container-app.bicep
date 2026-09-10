@@ -73,6 +73,9 @@ param logAnalyticsName string = ''
 @description('Full Azure Monitor OTLP logs ingest URL (DCE logs endpoint + DCR immutable id + Microsoft-OTLP-Logs stream), composed in main.bicep. Empty = phase-1 bring-up before the DCE/DCR exist → the telemetry reader env is omitted and the read joiner stays off.')
 param azureMonitorLogsEndpoint string = ''
 
+@description('DCR ARM resource id for the read-path ingest-coverage metrics probe (NUXT_AZURE_DCR_RESOURCE_ID). Empty = the probe reads unknown and the stall alerts fall back to the bearer gate.')
+param dcrResourceId string = ''
+
 // ── Optional secret-presence flags ──────────────────────────────────
 // These flags mirror the if-guards in keyvault-secrets.bicep. The
 // container app must NOT reference a KV secret that doesn't exist —
@@ -593,6 +596,9 @@ var telemetryReaderEnvVars = !empty(azureMonitorLogsEndpoint) ? [
   { name: 'NUXT_AZURE_MI_CLIENT_ID', value: identityClientId }
   { name: 'NUXT_AZURE_MONITOR_AUTH', value: 'mi' }
   { name: 'NUXT_AZURE_MONITOR_LOGS_ENDPOINT', value: azureMonitorLogsEndpoint }
+  // The ingest-coverage metrics probe (PR #319). Empty until the DCR id is
+  // threaded through → probe reads unknown → stall alerts on the bearer gate.
+  { name: 'NUXT_AZURE_DCR_RESOURCE_ID', value: dcrResourceId }
 ] : []
 
 // ── Container App ──────────────────────────────────────────────────

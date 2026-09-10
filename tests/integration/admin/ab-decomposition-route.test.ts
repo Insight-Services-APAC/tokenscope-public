@@ -92,7 +92,7 @@ afterAll(async () => {
 describe('GET /admin/diagnostics/ab-decomposition', () => {
   it('returns every named term, a zero residual, and the computed dominance verdict', async () => {
     const res = (await handler(
-      ev({ session: sess('global-finops', adminId), query: { from: '2026-05' } }),
+      ev({ session: sess('platform-admin', adminId), query: { from: '2026-05' } }),
     )) as {
       reachable: boolean
       delta: string
@@ -164,7 +164,7 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
    */
   it('carries the unhomed cause split, reconciled against the figure the card renders', async () => {
     const res = (await handler(
-      ev({ session: sess('global-finops', adminId), query: { from: '2026-05' } }),
+      ev({ session: sess('platform-admin', adminId), query: { from: '2026-05' } }),
     )) as {
       diagnostics: { unhomedChargeUsd: string }
       unhomed: {
@@ -224,7 +224,7 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
    */
   it('anchors the trend on the LAST month of a range, not the first', async () => {
     const res = (await handler(
-      ev({ session: sess('global-finops', adminId), query: { from: '2026-02', to: '2026-05' } }),
+      ev({ session: sess('platform-admin', adminId), query: { from: '2026-02', to: '2026-05' } }),
     )) as { unhomed: { history: { month: string; selected: boolean }[] } | null }
 
     expect(res.unhomed).not.toBeNull()
@@ -263,7 +263,7 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
     }
     try {
       res = (await handler(
-        ev({ session: sess('global-finops', adminId), query: { from: '2026-05' } }),
+        ev({ session: sess('platform-admin', adminId), query: { from: '2026-05' } }),
       )) as typeof res
     } finally {
       await t.client.unsafe('ALTER TABLE provider_org_hidden RENAME TO provider_org')
@@ -292,7 +292,7 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
     // Guard the guard: the rename was undone, so no later assertion is measuring
     // a mutated schema.
     const healed = (await handler(
-      ev({ session: sess('global-finops', adminId), query: { from: '2026-05' } }),
+      ev({ session: sess('platform-admin', adminId), query: { from: '2026-05' } }),
     )) as { unhomed: unknown; unhomedError: string | null }
     expect(healed.unhomedError).toBeNull()
     expect(healed.unhomed).not.toBeNull()
@@ -316,7 +316,7 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
       }
     }
     const res = (await handler(
-      ev({ session: sess('global-finops', adminId), query: { from: '2026-05' } }),
+      ev({ session: sess('platform-admin', adminId), query: { from: '2026-05' } }),
     )) as VisRes
 
     expect(res.visibility.personas.map((p) => p.key)).toEqual(
@@ -329,14 +329,14 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
       expect(p.scopes).toEqual(grantsToScopes(baselineGrants(def.role, def.ownsCostCentre)))
     }
     // BASELINE — no grant needed. A cost-centre owner sees only what they own;
-    // the two ORG-WIDE roles (global-finops / platform-admin) see the WHOLE
+    // the two ORG-WIDE roles (platform-admin) see the WHOLE
     // COMPANY by role (PO decision 2026-08-13, reversing #251 for these roles —
     // their `own-region` floor was degenerate and stranded admins on an empty
     // report shell).
     expect(res.visibility.personas.find((p) => p.key === 'cost-centre-owner')!.scopes).not.toContain(
       'Cost centres (all)',
     )
-    const gfoScopes = res.visibility.personas.find((p) => p.key === 'global-finops')!.scopes
+    const gfoScopes = res.visibility.personas.find((p) => p.key === 'platform-admin')!.scopes
     expect(gfoScopes).toContain('Region (all regions + every region)')
     expect(gfoScopes).toContain('Cost centres (all)')
     expect(gfoScopes).toContain('Finance (whole company)')
@@ -350,7 +350,7 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
       VALUES (${adminId}::uuid, 'operational', NULL), (${adminId}::uuid, 'finance', NULL)`
     try {
       const res = (await handler(
-        ev({ session: sess('global-finops', adminId), query: { from: '2026-05' } }),
+        ev({ session: sess('platform-admin', adminId), query: { from: '2026-05' } }),
       )) as { visibility: { elevated: { teammates: number; operational: number; finance: number } } }
       expect(res.visibility.elevated).toEqual({ teammates: 1, operational: 1, finance: 1 })
     } finally {
@@ -360,7 +360,7 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
 
   it('rolls a from..to range up to the exclusive end of the LAST month', async () => {
     const res = (await handler(
-      ev({ session: sess('global-finops', adminId), query: { from: '2026-05', to: '2026-06' } }),
+      ev({ session: sess('platform-admin', adminId), query: { from: '2026-05', to: '2026-06' } }),
     )) as { window: { startIso: string; endIso: string }; residual: string }
 
     expect(res.window.startIso).toBe('2026-05-01T00:00:00.000Z')
@@ -375,14 +375,14 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
   // also puts the year rollover under test, which the future-dated version never did.
   it('rolls December to the following January, not month 13', async () => {
     const res = (await handler(
-      ev({ session: sess('global-finops', adminId), query: { from: '2025-12' } }),
+      ev({ session: sess('platform-admin', adminId), query: { from: '2025-12' } }),
     )) as { window: { endIso: string } }
     expect(res.window.endIso).toBe('2026-01-01T00:00:00.000Z')
   })
 
-  it('allows global-finops', async () => {
+  it('allows platform-admin', async () => {
     const res = (await handler(
-      ev({ session: sess('global-finops', adminId), query: { from: '2026-05' } }),
+      ev({ session: sess('platform-admin', adminId), query: { from: '2026-05' } }),
     )) as { reachable: boolean }
     expect(res.reachable).toBe(true)
   })
@@ -415,19 +415,19 @@ describe('GET /admin/diagnostics/ab-decomposition', () => {
     // month counts a whole month of §B against part of §A. A confidently wrong
     // residual is worse than a 400.
     await expect(
-      handler(ev({ session: sess('global-finops', adminId), query: { from: '2026-05-15' } })),
+      handler(ev({ session: sess('platform-admin', adminId), query: { from: '2026-05-15' } })),
     ).rejects.toMatchObject({ statusCode: 400 })
   })
 
   it('rejects an inverted range', async () => {
     await expect(
-      handler(ev({ session: sess('global-finops', adminId), query: { from: '2026-06', to: '2026-05' } })),
+      handler(ev({ session: sess('platform-admin', adminId), query: { from: '2026-06', to: '2026-05' } })),
     ).rejects.toMatchObject({ statusCode: 400 })
   })
 
   it('requires the from parameter', async () => {
     await expect(
-      handler(ev({ session: sess('global-finops', adminId) })),
+      handler(ev({ session: sess('platform-admin', adminId) })),
     ).rejects.toMatchObject({ statusCode: 400 })
   })
 })

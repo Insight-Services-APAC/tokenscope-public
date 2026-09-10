@@ -9,7 +9,7 @@
  *     order with all-zero lanes elided;
  *   - conservation: Σ non-copilot lanes == anthropicUsd (both fold from the
  *     SAME (CoU × tool) rows) and Σ == the provider bill for the month;
- *   - RBAC unchanged (global-finops/platform-admin only) and a malformed
+ *   - RBAC unchanged (platform-admin only) and a malformed
  *     month still 400s — the lane split is additive, not a regression.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
@@ -23,7 +23,7 @@ let t: TestDb
 let regionA = ''
 let ccA = ''
 /*
- * mig 0129: a DEDICATED teammate for this file's 'global-finops' session —
+ * mig 0129: a DEDICATED teammate for this file's 'platform-admin' session —
  * NEVER the shared sess() default sentinel, which the 'developer' 403 case
  * below ALSO resolves to.
  */
@@ -101,10 +101,10 @@ beforeAll(async () => {
   await asp('claude-ai', 12)
   await asp('claude-chrome', 6)
 
-  // A SEPARATE, DEDICATED teammate for this file's 'global-finops' session
+  // A SEPARATE, DEDICATED teammate for this file's 'platform-admin' session
   // (mig 0129) — see the `lanesElevatedId` declaration above.
   await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
-    VALUES ('oid-rl-gfo', 'gfo@rl.test', 'GFO', ${regionA}::uuid, ${ccA}::uuid, 'global-finops', true)`
+    VALUES ('oid-rl-gfo', 'gfo@rl.test', 'GFO', ${regionA}::uuid, ${ccA}::uuid, 'platform-admin', true)`
   ;[{ id: lanesElevatedId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='gfo@rl.test'`
   await grantReportAccess(t.client, lanesElevatedId)
 }, 180_000)
@@ -115,7 +115,7 @@ afterAll(async () => {
 
 describe('/reports/finance — per-CoU surface lanes (#142)', () => {
   it('each CoU row carries ordered, zero-elided lanes; Σ non-copilot lanes == anthropicUsd == the bill', async () => {
-    const res = await indexHandler(ev(sess('global-finops', lanesElevatedId), 'month=2026-05'))
+    const res = await indexHandler(ev(sess('platform-admin', lanesElevatedId), 'month=2026-05'))
 
     const cou = res.cous.find((c) => c.code === 'rl-cc')
     expect(cou).toBeDefined()
@@ -140,7 +140,7 @@ describe('/reports/finance — per-CoU surface lanes (#142)', () => {
   })
 
   it('400s a malformed month (validation unchanged)', async () => {
-    await expect(indexHandler(ev(sess('global-finops'), 'month=bad'))).rejects.toMatchObject({
+    await expect(indexHandler(ev(sess('platform-admin'), 'month=bad'))).rejects.toMatchObject({
       statusCode: 400,
     })
   })

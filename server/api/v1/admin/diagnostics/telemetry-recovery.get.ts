@@ -11,15 +11,15 @@
  * request can be 100% processed and have written zero rows, which is a real and
  * important result — it means the backlog was not where the operator thought.
  *
- * RBAC: admin / global-finops. Read-only, and the same tier as the attribution-gap
+ * RBAC: admin / platform-admin. Read-only, and the same tier as the attribution-gap
  * list it is used beside; enqueueing (the side that spends query budget) is
- * global-finops-only on the POST.
+ * platform-admin-only on the POST.
  *
  * REGION CLAMP: telemetry_recovery_request has no region column of its own — a
  * request's `instance_ids` can span regions (an operator recovering telemetry
  * estate-wide). A region-scoped `admin` sees only requests that touch AT LEAST
  * ONE instance in their own region (an EXISTS membership check against
- * instance_attestation); global-finops / platform-admin keep the estate-wide
+ * instance_attestation); platform-admin keep the estate-wide
  * queue, matching the pattern used by attribution-gaps and instance-telemetry.
  */
 import { defineEventHandler } from 'h3'
@@ -51,10 +51,10 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
   const { limit } = await getValidated(event, Query)
 
-  // No-op for global-finops/platform-admin; for a region-scoped admin, only
+  // No-op for platform-admin; for a region-scoped admin, only
   // requests touching their region — mirrors attribution-gaps.get.ts /
   // instance-telemetry.get.ts's admin-only clamp.
   const regionClause =

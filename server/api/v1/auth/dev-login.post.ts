@@ -12,7 +12,7 @@
  *   a) NUXT_OIDC_AUTH_DEV_MODE=true (local-dev fallback — no Entra session) → dev
  *      OR
  *   b) NUXT_ALLOW_PERSONA_OVERRIDE=true AND the caller is a valid Entra-backed
- *      admin / global-finops / platform-admin → override
+ *      admin / platform-admin → override
  *
  *   Anything else → 404 (hard refuse; no signal-leak to a probing client).
  *
@@ -90,7 +90,7 @@ export default defineEventHandler(async (event) => {
           type: 'https://tokenscope.example.com/errors/forbidden',
           title: 'Forbidden',
           status: 403,
-          detail: 'Persona override is restricted to admin / global-finops roles.',
+          detail: 'Persona override is restricted to admin / platform-admin roles.',
         },
       })
     }

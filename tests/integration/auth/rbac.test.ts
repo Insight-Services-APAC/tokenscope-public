@@ -109,9 +109,15 @@ describe('requireRegionScope — explicit allowlist, 403 default (CORE-3)', () =
     await expect(regionScope(ADMIN, TARGET_REGION)).rejects.toMatchObject({ statusCode: 403 })
   })
 
-  it('global-finops and platform-admin are region-unbounded', async () => {
-    await expect(regionScope({ ...DEV, role: 'global-finops' }, TARGET_REGION)).resolves.toBeTruthy()
+  it('platform-admin is region-unbounded — and the RETIRED role is not', async () => {
     await expect(regionScope({ ...DEV, role: 'platform-admin' }, TARGET_REGION)).resolves.toBeTruthy()
+    // The second assertion here used to be a duplicate of the first: the rename
+    // turned `global-finops` into `platform-admin` and the case silently stopped
+    // testing the retirement boundary it was written for. A stale session still
+    // carrying the retired role must NOT be region-unbounded.
+    await expect(
+      regionScope({ ...DEV, role: 'global-finops' } as Session, TARGET_REGION),
+    ).rejects.toMatchObject({ statusCode: 403 })
   })
 
   it('UNLISTED roles are denied — developer, manager, finance (403 default branch)', async () => {
@@ -137,9 +143,9 @@ describe('assertProjectScope — explicit allowlist, 403 default (CORE-3)', () =
     return assertProjectScope(ev as unknown as Parameters<typeof assertProjectScope>[0], project)
   }
 
-  it('manager within the subtree passes; global-finops/platform-admin pass', async () => {
+  it('manager within the subtree passes; platform-admin pass', async () => {
     await expect(projectScope({ ...DEV, role: 'manager' })).resolves.toBeUndefined()
-    await expect(projectScope({ ...DEV, role: 'global-finops' })).resolves.toBeUndefined()
+    await expect(projectScope({ ...DEV, role: 'platform-admin' })).resolves.toBeUndefined()
     await expect(projectScope({ ...DEV, role: 'platform-admin' })).resolves.toBeUndefined()
   })
 

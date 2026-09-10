@@ -8,7 +8,7 @@
  * first re-link or delete the child orgs). With no linked orgs the delete is safe —
  * it only de-registers the credential-custody unit; historical records are untouched.
  *
- * RBAC: requireRole(admin, global-finops) + assertSameOrigin. Audited. Unknown id
+ * RBAC: requireRole(admin) + assertSameOrigin. Audited. Unknown id
  * → 404; malformed id → 400 (requireUuidParam).
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
@@ -28,7 +28,7 @@ interface CurrentRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'provider-enterprise id')
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

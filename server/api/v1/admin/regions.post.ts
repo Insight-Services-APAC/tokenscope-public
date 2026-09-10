@@ -2,9 +2,9 @@
  * POST /api/v1/admin/regions — create a region (admin-region-lifecycle).
  *
  * platform-admin ONLY. Regions are the top of the org hierarchy and the
- * unit that scopes every admin/global-finops query, so creating one is a
+ * unit that scopes every admin/platform-admin query, so creating one is a
  * cross-region act reserved for the super-admin. requireRole(event,
- * 'platform-admin') correctly 403s a region admin AND global-finops — only
+ * 'platform-admin') correctly 403s a region admin AND platform-admin — only
  * platform-admin passes (via the super-admin bypass in requireRole).
  *
  * `code` is the stable region key (region-scoped queries hardcode codes

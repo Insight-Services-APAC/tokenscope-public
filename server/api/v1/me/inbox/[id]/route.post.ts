@@ -41,12 +41,12 @@ export default defineEventHandler(async (event) => {
   // nonetheless carries the caller's RLS identity, so the day `inbox_item` gets
   // FORCE (design §Rollout, phase 2) the policy composes with these checks rather than
   // meeting a context-less connection. See the phase-2 note on the forward.
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
   const sourceId = requireUuidParam(event, 'id', 'inbox item id')
   const body = await readValidatedBody(event, (data) => InboxRouteBody.parse(data))
 
   // Read the source inside the RLS context. `inbox_item_self` admits it via the
-  // per-recipient arm for one's own item, or the role arm (global-finops /
+  // per-recipient arm for one's own item, or the role arm (platform-admin /
   // platform-admin post-0098) for someone else's.
   const sources = await withRequestRls(event, async (tx) =>
     tx.execute<SourceRow>(sql`
@@ -87,7 +87,7 @@ export default defineEventHandler(async (event) => {
   // `IN ('global-finops','platform-admin')`, and `FOR ALL` with no WITH CHECK
   // means that USING expression also gates INSERT. So once `inbox_item` enters
   // the FORCE set (design §Rollout, phase 2) a REGION `admin` — whom requireRole above
-  // still admits — will be refused by the policy, while global-finops /
+  // still admits — will be refused by the policy, while platform-admin /
   // platform-admin succeed. That is a policy question for phase 2, not
   // something a handler can paper over: reaching for the context-less pool to
   // dodge it is exactly the leak this change removes.

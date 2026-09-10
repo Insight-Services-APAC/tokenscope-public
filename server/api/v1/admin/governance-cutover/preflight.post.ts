@@ -2,7 +2,7 @@
  * POST /api/v1/admin/governance-cutover/preflight — compute (or re-verify) the
  * governance cutover preflight: old-verdict snapshot, mixed-enterprise
  * detection, write-both-sides, verify equivalence. Transactional + idempotent
- * (design §8.1). global-finops ONLY — this decides real money's fate estate-
+ * (design §8.1). platform-admin ONLY — this decides real money's fate estate-
  * wide, deliberately narrower than a region admin's scope.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
@@ -19,7 +19,7 @@ const STATUS_BY_CODE: Record<CutoverError['code'], number> = {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'global-finops')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
   const ua = getHeader(event, 'user-agent') ?? null

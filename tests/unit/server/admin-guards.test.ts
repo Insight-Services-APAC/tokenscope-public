@@ -26,8 +26,8 @@ vi.mock('../../../server/azure/network-check', () => ({
 }))
 
 const CALLER_ADMIN = { role: 'admin' as const, teammateId: 'admin-1' }
-const CALLER_FINOPS = { role: 'global-finops' as const, teammateId: 'finops-1' }
-const TARGET = (id: string, role: 'admin' | 'developer' | 'manager' | 'finance' | 'global-finops' = 'developer') => ({ id, role })
+const CALLER_FINOPS = { role: 'platform-admin' as const, teammateId: 'finops-1' }
+const TARGET = (id: string, role: 'admin' | 'developer' | 'manager' | 'finance' | 'platform-admin' = 'developer') => ({ id, role })
 
 describe('evaluateRoleChange — pure verdicts', () => {
   it('admin promoting a developer to manager → allowed', () => {
@@ -35,7 +35,7 @@ describe('evaluateRoleChange — pure verdicts', () => {
     expect(v).toEqual({ allowed: true })
   })
 
-  it('global-finops promoting a developer to admin → allowed (admin count goes to 2)', () => {
+  it('platform-admin promoting a developer to admin → allowed (admin count goes to 2)', () => {
     const v = evaluateRoleChange(CALLER_FINOPS, TARGET('tm-2', 'developer'), 'admin', 1)
     expect(v).toEqual({ allowed: true })
   })
@@ -66,12 +66,12 @@ describe('evaluateRoleChange — pure verdicts', () => {
     }
   })
 
-  it('global-finops self-demote IS blocked (R1 F3 — both privileged roles get self-protection)', () => {
+  it('platform-admin self-demote IS blocked (R1 F3 — both privileged roles get self-protection)', () => {
     // Earlier scope blocked only admin self-demote; that left global-
     // finops with the same lock-out vector. The brief was "Both checks
     // (Recommended)" — interpret strictly: any self-role-change by a
     // privileged caller is refused; a peer must perform it.
-    const v = evaluateRoleChange(CALLER_FINOPS, TARGET('finops-1', 'global-finops'), 'developer', 1)
+    const v = evaluateRoleChange(CALLER_FINOPS, TARGET('finops-1', 'platform-admin'), 'developer', 1)
     expect(v.allowed).toBe(false)
     if (!v.allowed) {
       expect(v.status).toBe(400)
@@ -79,10 +79,10 @@ describe('evaluateRoleChange — pure verdicts', () => {
     }
   })
 
-  it('admin self-promoting (admin → global-finops) is also blocked — same-id changes require a peer', () => {
+  it('admin self-promoting (admin → platform-admin) is also blocked — same-id changes require a peer', () => {
     // R1 F3: self-promote is a privilege-escalation foot-gun. A peer
     // mutator should grant it, not the caller themselves.
-    const v = evaluateRoleChange(CALLER_ADMIN, TARGET('admin-1', 'admin'), 'global-finops', 3)
+    const v = evaluateRoleChange(CALLER_ADMIN, TARGET('admin-1', 'admin'), 'platform-admin', 3)
     expect(v.allowed).toBe(false)
     if (!v.allowed) {
       expect(v.reason).toBe('self-role-change-blocked')
@@ -165,7 +165,7 @@ describe('evaluateRevokeSessions — pure verdicts (Wave VII)', () => {
     expect(v).toEqual({ allowed: true })
   })
 
-  it('global-finops revoking any teammate → allowed', () => {
+  it('platform-admin revoking any teammate → allowed', () => {
     const v = evaluateRevokeSessions(CALLER_FINOPS, TARGET_R('tm-2', 'region-b'))
     expect(v).toEqual({ allowed: true })
   })
@@ -183,7 +183,7 @@ describe('evaluateRevokeSessions — pure verdicts (Wave VII)', () => {
     expect(v).toEqual({ allowed: true })
   })
 
-  it('global-finops revoking themselves → allowed (mirror of admin self-revoke)', () => {
+  it('platform-admin revoking themselves → allowed (mirror of admin self-revoke)', () => {
     const v = evaluateRevokeSessions(CALLER_FINOPS, TARGET_R('finops-1', 'region-a'))
     expect(v).toEqual({ allowed: true })
   })
@@ -191,7 +191,7 @@ describe('evaluateRevokeSessions — pure verdicts (Wave VII)', () => {
 
 // ── GET /api/v1/admin/diagnostics/network — tier matrix ────────────────────
 //
-// This route used to accept admin/global-finops; it now matches
+// This route used to accept admin/platform-admin; it now matches
 // otel-logs.get.ts's platform-admin-only tier (it exposes the same class of
 // infrastructure-topology detail: private IPs, internal host:port pairs).
 // injectTestSession is DB-free (it pre-populates tryAuth's per-event cache
@@ -208,8 +208,6 @@ const platformAdminSession = (): Session =>
   ({ teammateId: 'pa-1', email: 'pa@x.test', displayName: 'PA', role: 'platform-admin', regionId: REGION_ID, orgPath: 'x' }) as Session
 const adminSession = (): Session =>
   ({ teammateId: 'ad-1', email: 'ad@x.test', displayName: 'Admin', role: 'admin', regionId: REGION_ID, orgPath: 'x' }) as Session
-const globalFinopsSession = (): Session =>
-  ({ teammateId: 'gf-1', email: 'gf@x.test', displayName: 'GF', role: 'global-finops', regionId: REGION_ID, orgPath: 'x' }) as Session
 
 describe('GET /api/v1/admin/diagnostics/network — tier matrix', () => {
   it('a region-scoped admin is REJECTED (403) — network topology is platform-admin only now', async () => {
@@ -217,10 +215,6 @@ describe('GET /api/v1/admin/diagnostics/network — tier matrix', () => {
     await expect(handler(fakeEvent(adminSession()) as never)).rejects.toMatchObject({ statusCode: 403 })
   })
 
-  it('global-finops is ALSO rejected (403) — this tier is narrower than the rest of diagnostics', async () => {
-    const handler = (await import('../../../server/api/v1/admin/diagnostics/network.get')).default
-    await expect(handler(fakeEvent(globalFinopsSession()) as never)).rejects.toMatchObject({ statusCode: 403 })
-  })
 
   it('platform-admin is allowed (200-shaped response)', async () => {
     const handler = (await import('../../../server/api/v1/admin/diagnostics/network.get')).default

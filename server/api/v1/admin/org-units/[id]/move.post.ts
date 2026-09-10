@@ -13,7 +13,7 @@
  *   - cross-region moves are 400 (a separate, heavier operation — re-homes region/spend dims);
  *   - no cycle: the new parent must not be the unit itself or any of its descendants.
  *
- * Admin / global-finops; a region admin is bound to the unit's region (requireRegionScope).
+ * Admin / platform-admin; a region admin is bound to the unit's region (requireRegionScope).
  */
 import { defineEventHandler, createError, getRouterParam, getRequestIP, getHeader } from 'h3'
 import { readValidated } from '../../../../../utils/validated-body'
@@ -34,7 +34,7 @@ function label(code: string): string {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
 
   const idParse = z.string().uuid().safeParse(getRouterParam(event, 'id'))

@@ -23,10 +23,14 @@ export default defineConfig({
      * it had not yet stopped leaked (see tests/integration/helpers/db.ts).
      *
      * Cap it. Override with VITEST_MAX_FORKS on a machine with room to spare.
+     *
+     * TOP-LEVEL `maxWorkers`, NOT `poolOptions.forks.maxForks`. Vitest 4 removed
+     * `poolOptions` and the cap above silently stopped applying — every run
+     * printed a DEPRECATED line nobody read, and on 2026-09-01 the integration
+     * suite ran 11 forks wide on a 6-core devcontainer against one shared
+     * Postgres, which is how a 5-second timing assertion measured 32 minutes.
      */
-    poolOptions: {
-      forks: { maxForks: Number(process.env.VITEST_MAX_FORKS) || 4 },
-    },
+    maxWorkers: Number(process.env.VITEST_MAX_FORKS) || 4,
     // Each integration test file spins up its own testcontainers Postgres
     // (slow startup, ~5-10 s); allow plenty of room for the hook + tests.
     hookTimeout: 180_000,

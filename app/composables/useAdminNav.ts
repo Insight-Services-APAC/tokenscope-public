@@ -57,7 +57,7 @@ export function useAdminNav() {
       item.access === 'platform'
         ? 'platform-admin'
         : item.access === 'org-wide'
-          ? 'global-finops'
+          ? 'platform-admin'
           : 'admin'
     return `Requires: ${roleLabel(need)}`
   }

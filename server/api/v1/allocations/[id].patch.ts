@@ -30,7 +30,7 @@ const PatchBody = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'manager', 'admin', 'global-finops')
+  await requireRole(event, 'manager', 'admin')
   assertSameOrigin(event)
   const session = await requireAuth(event)
 

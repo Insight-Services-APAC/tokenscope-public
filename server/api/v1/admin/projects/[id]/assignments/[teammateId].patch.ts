@@ -4,7 +4,7 @@
  *
  * J2 (mig 0048): 'manager' = PM, may manage this project's budget
  * top-ups. Same scope as the sibling POST/DELETE: manager / admin /
- * global-finops, bound to the project (admin → region, manager → org
+ * platform-admin, bound to the project (admin → region, manager → org
  * subtree). PMs cannot promote/demote — role designation stays an
  * org-role action so a PM can't mint other PMs.
  */
@@ -24,7 +24,7 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'manager', 'admin', 'global-finops')
+  const caller = await requireRole(event, 'manager', 'admin')
   assertSameOrigin(event)
   const id = requireUuidParam(event, 'id', 'project id')
   const teammateId = requireUuidParam(event, 'teammateId', 'teammate id')

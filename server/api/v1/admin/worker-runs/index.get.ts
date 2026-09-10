@@ -1,7 +1,7 @@
 /*
  * GET /api/v1/admin/worker-runs — paginated worker-execution history.
  *
- * RBAC: requireRole(admin, global-finops). ADMIN-GLOBAL (no region clamp):
+ * RBAC: requireRole(admin). ADMIN-GLOBAL (no region clamp):
  * worker_run.region_id is never set by the dispatch path, so worker execution is an
  * operational/global signal (matches the Diagnostics panel), not region data.
  *
@@ -64,7 +64,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const query = await getValidated(event, Query)
 
   if (query.summary) {

@@ -62,7 +62,7 @@ const ev = (session: Session, query = '', params: Record<string, string> = {}) =
   return e as unknown as Parameters<typeof drillHandler>[0]
 }
 const gfo = (): Session =>
-  ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role: 'global-finops', regionId: region, orgPath: 'osc', issuedAt: new Date().toISOString() } as unknown as Session)
+  ({ teammateId: '00000000-0000-0000-0000-000000000009', email: 'x@x.test', displayName: 'X', role: 'platform-admin', regionId: region, orgPath: 'osc', issuedAt: new Date().toISOString() } as unknown as Session)
 
 const cents = (n: number) => Math.round(n * 100)
 

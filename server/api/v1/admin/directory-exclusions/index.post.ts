@@ -1,7 +1,7 @@
 /*
  * POST /api/v1/admin/directory-exclusions — add a directory-exclusion pattern
  * (mig 0083). Org-wide config (the directory is org-wide, not region-scoped),
- * so global-finops / platform-admin only, mirroring the platform-baseline
+ * so platform-admin only, mirroring the platform-baseline
  * governance dials. Validated against the match-all footgun, audited.
  *
  * Returns `matched_existing_count`: how many ACTIVE teammates the new pattern
@@ -29,9 +29,9 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   // Org-wide config — not a region admin's to set (mirrors the platform dial baseline).
-  if (!(isPlatformAdmin(caller.role) || caller.role === 'global-finops')) {
+  if (!(isPlatformAdmin(caller.role))) {
     throw createError({
       statusCode: 403,
       statusMessage: 'Forbidden',
@@ -39,7 +39,7 @@ export default defineEventHandler(async (event) => {
         type: 'https://tokenscope.example.com/errors/forbidden',
         title: 'Forbidden',
         status: 403,
-        detail: 'Directory-exclusion patterns are org-wide config; requires platform-admin or global-finops.',
+        detail: 'Directory-exclusion patterns are org-wide config; requires platform-admin.',
       },
     })
   }

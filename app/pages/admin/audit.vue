@@ -6,7 +6,7 @@
  * the full payload (JSON-formatted). Pagination via limit + offset.
  *
  * Region scoping is enforced server-side in the endpoint — admin only
- * sees their region's actor / subject footprint; global-finops sees
+ * sees their region's actor / subject footprint; platform-admin sees
  * everything.
  */
 
@@ -120,7 +120,7 @@ function prevPage() {
 
 const isAdmin = computed(() => {
   const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+  return r === 'admin' || r === 'platform-admin'
 })
 </script>
 

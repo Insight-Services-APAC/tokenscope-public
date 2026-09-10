@@ -85,7 +85,7 @@ export const RLS_BOOTSTRAP_TABLES: readonly RlsBootstrapTable[] = [
   {
     table: 'audit_event',
     reason:
-      'The pre-identity paths AUDIT themselves: /setup/enroll writes audit_event at :144 inside a transaction that never adopts an identity, and oauth/token, /register and /revoke do the same. Its only policy (audit_event_admin_only) admits global-finops/platform-admin and nothing else, so the INSERT is denied and the whole enrolment rolls back — a 500 for every new device. Found by the THIRD review of this list; the design doc had made the same ENABLE-vs-FORCE mistake in its §4 as it had in §5.',
+      'The pre-identity paths AUDIT themselves: /setup/enroll writes audit_event at :144 inside a transaction that never adopts an identity, and oauth/token, /register and /revoke do the same. Its only policy (audit_event_admin_only) admits platform-admin and nothing else, so the INSERT is denied and the whole enrolment rolls back — a 500 for every new device. Found by the THIRD review of this list; the design doc had made the same ENABLE-vs-FORCE mistake in its §4 as it had in §5.',
   },
 ] as const
 

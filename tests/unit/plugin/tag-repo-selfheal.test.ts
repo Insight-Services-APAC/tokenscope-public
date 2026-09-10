@@ -11,7 +11,7 @@
  * exits 0) so a hook can never break the session.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, chmodSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, chmodSync, existsSync, cpSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -23,7 +23,34 @@ const CODE = 'TokenScope-MVP'
 const CODE_HASH = computeCodeHash(CODE)
 
 /** A global enrolment shaped like readDeviceEnrolment()'s output. */
-function enrolment({ instance = 'inst-A', helper = '/plugins/tokenscope/0.1.3/scripts/otel-headers-helper.sh', env } = {}) {
+/*
+ * An IN-INSTALL pinned helper path.
+ *
+ * A pinned path from the global enrolment is confined now (MDASH F6: the
+ * settings file that supplies it is choosable by a moved HOME), so a fixture
+ * using an absolute path like /plugins/tokenscope/0.1.1/... tests a shape
+ * production never produces — the real cache puts every version under one
+ * parent. In-process tests resolve the confinement root from THIS module, which
+ * is the repo, so the sibling versions live under node_modules/.cache: inside
+ * the root, gitignored, and cleaned up with the rest of it.
+ */
+const PINNED_ROOT = resolve(__dirname, '../../../node_modules/.cache/ts-pinned-versions')
+
+function pinnedUnder(root: string, version: string) {
+  const dir = join(root, version, 'scripts')
+  mkdirSync(dir, { recursive: true })
+  const f = join(dir, 'otel-headers-helper.sh')
+  if (!existsSync(f)) writeFileSync(f, '#!/bin/sh\n')
+  return f
+}
+
+/** In-process tests: the confinement root resolves from THIS module, the repo. */
+const pinned = (version: string) => pinnedUnder(PINNED_ROOT, version)
+
+/** Spawned-hook tests: the hook runs from its own materialised install. */
+const pinnedInstalled = (version: string) => pinnedUnder(versionsDir, version)
+
+function enrolment({ instance = 'inst-A', helper = pinned('0.1.3'), env } = {}) {
   return {
     sessionId: instance,
     helperPath: helper,
@@ -112,11 +139,11 @@ describe('writeRepoTag change-detection', () => {
     // Pin under the OLD helper path (the frozen-snapshot incident).
     writeRepoTag({
       cwd,
-      enrolment: enrolment({ helper: '/plugins/tokenscope/0.1.1/scripts/otel-headers-helper.sh' }),
+      enrolment: enrolment({ helper: pinned('0.1.1') }),
       codeHash: CODE_HASH,
     })
     // Plugin upgraded — global now points at 0.1.3. Same project code_hash.
-    const r = writeRepoTag({ cwd, enrolment: enrolment({ helper: '/plugins/tokenscope/0.1.3/scripts/otel-headers-helper.sh' }), codeHash: CODE_HASH })
+    const r = writeRepoTag({ cwd, enrolment: enrolment({ helper: pinned('0.1.3') }), codeHash: CODE_HASH })
     expect(r.changed).toBe(true)
     expect(r.healed).toBe(true)
     // A helper-path move does NOT change which instance records land against, so
@@ -239,7 +266,7 @@ describe('writeRepoTag change-detection', () => {
       join(cwd, '.claude', 'settings.local.json'),
       JSON.stringify(
         {
-          otelHeadersHelper: '/plugins/tokenscope/0.1.3/scripts/otel-headers-helper.sh',
+          otelHeadersHelper: pinned('0.1.3'),
           env: {
             OTEL_RESOURCE_ATTRIBUTES: `tokenscope.instance_id=inst-A,project.code_hash=${CODE_HASH},tool=claude-code`,
             TOKENSCOPE_BEARER_ENDPOINT: 'https://api/api/v1/instances/inst-A/bearer',
@@ -316,18 +343,40 @@ describe('writeRepoTag change-detection', () => {
   })
 
   it('prefers the ACTIVE plugin helper (CLAUDE_PLUGIN_ROOT) over the version-pinned global one — upgrade auto-follow, no re-enrol', () => {
-    const activeRoot = join(cwd, 'active-plugin')
-    mkdirSync(join(activeRoot, 'scripts'), { recursive: true })
-    writeFileSync(join(activeRoot, 'scripts', 'otel-headers-helper.sh'), '#!/bin/sh\n')
+    /*
+     * The active root must be INSIDE our own install for this to apply — see
+     * resolveHelperPath's confinement note (MDASH §2.6). In production the new
+     * version is a sibling directory under the same versions dir, so it
+     * qualifies; here the shipped bundle itself stands in for it, which is the
+     * only in-install path a test can point at without inventing one.
+     */
+    const activeRoot = resolve(__dirname, '../../../plugin')
     process.env.CLAUDE_PLUGIN_ROOT = activeRoot
     // Global still pins an OLD version path; the active version must win.
     const r = writeRepoTag({
       cwd,
-      enrolment: enrolment({ helper: '/plugins/tokenscope/0.1.1/scripts/otel-headers-helper.sh' }),
+      enrolment: enrolment({ helper: pinned('0.1.1') }),
       codeHash: CODE_HASH,
     })
     expect(r.changed).toBe(true)
     expect(readRepo(cwd).otelHeadersHelper).toBe(join(activeRoot, 'scripts', 'otel-headers-helper.sh'))
+  })
+
+  it('REFUSES a CLAUDE_PLUGIN_ROOT outside our own install, falling back to the pinned path (MDASH §2.6)', () => {
+    /*
+     * Claude Code is measured to refuse a repo-set CLAUDE_PLUGIN_ROOT today
+     * (probe 2026-08-21), but the variable is absent from its published
+     * protected list, so that guarantee is borrowed. This makes it ours: an
+     * out-of-install root is not accepted even when it holds a real helper.
+     */
+    const evilRoot = join(cwd, 'active-plugin')
+    mkdirSync(join(evilRoot, 'scripts'), { recursive: true })
+    writeFileSync(join(evilRoot, 'scripts', 'otel-headers-helper.sh'), '#!/bin/sh\n')
+    process.env.CLAUDE_PLUGIN_ROOT = evilRoot
+    const pinnedPath = pinned('0.1.1')
+    writeRepoTag({ cwd, enrolment: enrolment({ helper: pinnedPath }), codeHash: CODE_HASH })
+    expect(readRepo(cwd).otelHeadersHelper).toBe(pinnedPath)
+    expect(readRepo(cwd).otelHeadersHelper).not.toContain(evilRoot)
   })
 
   it('active-version pin is a stable no-op on a same-version relaunch (no spurious heal / mtime churn)', () => {
@@ -348,10 +397,10 @@ describe('writeRepoTag change-detection', () => {
     process.env.CLAUDE_PLUGIN_ROOT = join(cwd, 'no-plugin')
     writeRepoTag({
       cwd,
-      enrolment: enrolment({ helper: '/plugins/tokenscope/0.1.3/scripts/otel-headers-helper.sh' }),
+      enrolment: enrolment({ helper: pinned('0.1.3') }),
       codeHash: CODE_HASH,
     })
-    expect(readRepo(cwd).otelHeadersHelper).toBe('/plugins/tokenscope/0.1.3/scripts/otel-headers-helper.sh')
+    expect(readRepo(cwd).otelHeadersHelper).toBe(pinned('0.1.3'))
   })
 
   it('preserves the 0o600 mode and merges unrelated local settings keys', () => {
@@ -370,10 +419,27 @@ describe('writeRepoTag change-detection', () => {
 
 // --- SessionStart hook end-to-end (child process) -----------------------
 
-const HOOK = resolve(__dirname, '../../../plugin/hooks/session-start.mjs')
+const BUNDLE_SRC = resolve(__dirname, '../../../plugin')
+
+/*
+ * A REALISTIC INSTALL LAYOUT (see the same note in
+ * session-start-repo-state-dir.test.ts). CLAUDE_PLUGIN_ROOT is confined to the
+ * running bundle's own install, so a stub under a bare temp dir is correctly
+ * refused. Copy the bundle to `<versions>/0.1.0` and install stubs as SIBLING
+ * versions under the same parent — the upgrade case the confinement admits.
+ */
+let versionsDir: string
+let installedHook: string
+
+function materialiseInstall(home: string): void {
+  versionsDir = join(home, 'versions')
+  const installed = join(versionsDir, '0.1.0')
+  cpSync(BUNDLE_SRC, installed, { recursive: true })
+  installedHook = join(installed, 'hooks', 'session-start.mjs')
+}
 
 /** Write a fake global ~/.claude/settings.json under `home`. */
-function writeGlobal(home: string, { instance = 'inst-A', helper = '/plugins/tokenscope/0.1.3/scripts/otel-headers-helper.sh' } = {}) {
+function writeGlobal(home: string, { instance = 'inst-A', helper = pinned('0.1.3') } = {}) {
   mkdirSync(join(home, '.claude'), { recursive: true })
   const e = enrolment({ instance, helper })
   writeFileSync(
@@ -405,7 +471,7 @@ function runHook(home: string, repo: string, pluginRoot: string = join(home, 'no
   // want the shim active set CLAUDE_CODE_EXECPATH explicitly.
   delete env.CLAUDE_CODE_EXECPATH
   delete env.AI_AGENT
-  return execFileSync(process.execPath, [HOOK], {
+  return execFileSync(process.execPath, [installedHook], {
     cwd: repo,
     env,
     encoding: 'utf8',
@@ -413,7 +479,9 @@ function runHook(home: string, repo: string, pluginRoot: string = join(home, 'no
 }
 
 /** Write a stub otel-headers-helper.sh under <dir>/scripts and return <dir>. */
-function stubHelperRoot(dir: string, body: string): string {
+function stubHelperRoot(_unusedDir: string, body: string): string {
+  // Sibling version under the installed bundle's parent, not an arbitrary dir.
+  const dir = join(versionsDir, '0.1.1')
   mkdirSync(join(dir, 'scripts'), { recursive: true })
   writeFileSync(join(dir, 'scripts', 'otel-headers-helper.sh'), body)
   return dir
@@ -425,6 +493,7 @@ describe('session-start hook (end-to-end)', () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'ts-home-'))
+    materialiseInstall(home)
     repo = mkdtempSync(join(tmpdir(), 'ts-repo-'))
     mkdirSync(join(repo, '.git'), { recursive: true }) // S1 fix 4c: repo-root anchor
     writeFileSync(join(repo, '.tokenscope'), `project:\n  code: ${CODE}\n`)
@@ -436,12 +505,12 @@ describe('session-start hook (end-to-end)', () => {
 
   it('REWRITES the repo pin when global helper path changed, project.code_hash unchanged', () => {
     // Initial pin under 0.1.1.
-    writeGlobal(home, { helper: '/plugins/tokenscope/0.1.1/scripts/otel-headers-helper.sh' })
+    writeGlobal(home, { helper: pinnedInstalled('0.1.1') })
     runHook(home, repo)
     expect(readRepo(repo).otelHeadersHelper).toContain('0.1.1')
 
     // Plugin upgraded to 0.1.3 in global only. Hash is identical.
-    writeGlobal(home, { helper: '/plugins/tokenscope/0.1.3/scripts/otel-headers-helper.sh' })
+    writeGlobal(home, { helper: pinnedInstalled('0.1.3') })
     runHook(home, repo)
     expect(readRepo(repo).otelHeadersHelper).toContain('0.1.3') // healed, not skipped
   })

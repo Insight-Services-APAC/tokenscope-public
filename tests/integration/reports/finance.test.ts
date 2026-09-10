@@ -4,7 +4,13 @@
  * `/reports/export?scope=finance`) exercised against a real testcontainers Postgres
  * via the OWNER connection (RLS inert in prod too, so the in-query scope clauses are
  * what's tested). Covers build-design §7 + owner-decisions D-Q5/D-Q6/D-Homing/D-Q8:
- *   - RBAC (ONLY global-finops + platform-admin; admin/manager/developer/finance → 403);
+ *   - RBAC: `requireReportScope(..., 'finance')` — platform-admin as the baseline
+ *     role, PLUS any teammate holding an active finance report-access grant
+ *     whatever their role (mig 0129, and the reason `global-finops` could be
+ *     retired rather than replaced). A role alone, without a grant, still 403s:
+ *     admin/manager/developer/finance. The old wording here said "ONLY
+ *     platform-admin + platform-admin" — a rename artefact that both duplicated
+ *     the role and denied the grant path this file now exercises;
  *   - the VISIBLE Σ=bill check row (matched GREEN; a seeded unsettled month RED);
  *   - exempt gap = indicative usage − chargeback (a seeded exempt org: visible
  *     indicative, zero chargeback);
@@ -34,7 +40,7 @@ let bob = ''
 let carol = ''
 let evan = '' // exempt Anthropic teammate (indicative usage, zero chargeback)
 /*
- * mig 0129: a DEDICATED teammate for every 'global-finops' / 'platform-admin'
+ * mig 0129: a DEDICATED teammate for every 'platform-admin' / 'platform-admin'
  * session in this file — NEVER the shared sess() default sentinel, which the
  * admin/manager/developer/finance 403 loop below ALSO resolves to.
  */
@@ -58,7 +64,7 @@ const ev = (session: Session, query = '', params: Record<string, string> = {}) =
 const sess = (role: string, orgPath: string, regionId: string, teammateId = '00000000-0000-0000-0000-000000000009'): Session =>
   ({ teammateId, email: 'x@x.test', displayName: 'X', role, regionId, orgPath, issuedAt: new Date().toISOString() } as unknown as Session)
 
-const gfo = () => sess('global-finops', 'a', regionA, financeElevatedId)
+const gfo = () => sess('platform-admin', 'a', regionA, financeElevatedId)
 
 beforeAll(async () => {
   t = await startTestDb()
@@ -95,12 +101,12 @@ beforeAll(async () => {
   evan = await mkTeammate(regionA, 'a.team', 'evan@a.test')
   const bianca = await mkTeammate(regionB, 'b', 'bianca@b.test')
 
-  // A SEPARATE, DEDICATED teammate for this file's 'global-finops'/'platform-admin'
+  // A SEPARATE, DEDICATED teammate for this file's 'platform-admin'/'platform-admin'
   // sessions (mig 0129) — see the `financeElevatedId` declaration above. Granted
   // BOTH permissions so gfo()/the platform-admin session keep their pre-mig-0129
   // (unconditional org-wide) reach.
   await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
-    VALUES ('oid-finops-elevated', 'finops-elevated@a.test', 'Finops Elevated', ${regionA}::uuid, ${ccA}::uuid, 'global-finops', true)`
+    VALUES ('oid-finops-elevated', 'finops-elevated@a.test', 'Finops Elevated', ${regionA}::uuid, ${ccA}::uuid, 'platform-admin', true)`
   ;[{ id: financeElevatedId }] = await t.client<{ id: string }[]>`SELECT id::text AS id FROM teammate WHERE email='finops-elevated@a.test'`
   await grantReportAccess(t.client, financeElevatedId)
 
@@ -212,17 +218,23 @@ interface DrillResp {
 
 const couOf = (r: IndexResp, code: string) => r.cous.find((c) => c.code === code)
 
-// ── RBAC (D-Q5: Finance is GLOBAL — global-finops + platform-admin ONLY) ───────
-describe('GET /reports/finance — RBAC (global finance only)', () => {
-  it('global-finops and platform-admin see the whole-company chargeback pack', async () => {
-    const gf = (await indexHandler(ev(gfo(), 'month=2026-05'))) as unknown as IndexResp
-    expect(gf.meta.scope).toBe('finance')
+// ── RBAC (D-Q5): finance is org-wide BY ROLE DEFAULT. A `finance`
+// report_access_grant authorises any role (report-access.test.ts), so these
+// cases pin the ungranted baseline, not an exclusive gate. ────────────────────
+describe('GET /reports/finance — RBAC (role default, no grants)', () => {
+  it('platform-admin sees the whole-company chargeback pack', async () => {
+    /*
+     * ONE request, not two. The rename that retired `global-finops` turned both
+     * callers here into the same platform-admin session, so this exercised one
+     * persona twice and quietly stopped covering the boundary it was written
+     * for. The retired role's denial is asserted in the loop below instead.
+     */
     const pa = (await indexHandler(ev(sess('platform-admin', 'a', regionA, financeElevatedId), 'month=2026-05'))) as unknown as IndexResp
     expect(pa.meta.scope).toBe('finance')
   })
 
-  for (const role of ['admin', 'manager', 'developer', 'finance'] as const) {
-    it(`a ${role} is FORBIDDEN (403) — Finance is global-only, the zombie 'finance' enum is not a gate`, async () => {
+  for (const role of ['admin', 'manager', 'developer', 'finance', 'global-finops'] as const) {
+    it(`a ${role} is FORBIDDEN (403) without a grant; neither retired enum member is a gate`, async () => {
       await expect(indexHandler(ev(sess(role, 'a', regionA), 'month=2026-05'))).rejects.toMatchObject({ statusCode: 403 })
       await expect(drillHandler(ev(sess(role, 'a', regionA), 'month=2026-05', { couId: ccA }))).rejects.toMatchObject({ statusCode: 403 })
       await expect(exportHandler(ev(sess(role, 'a', regionA), 'scope=finance&month=2026-05'))).rejects.toMatchObject({ statusCode: 403 })

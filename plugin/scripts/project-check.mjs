@@ -23,10 +23,9 @@
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { resolveRepoProjectCode, computeCodeHash } from './tag-repo.mjs'
-import { stateDir as resolveStateDir } from './plugin-runtime.mjs'
+import { stateDir as resolveStateDir, trustedGlobalSettingsEnv } from './plugin-runtime.mjs'
 import { assertSafeEndpoint } from './endpoint-guard.mjs'
 
 const TIMEOUT_MS = 4000
@@ -80,8 +79,14 @@ export async function checkRepoProjectBillable({
   const hashToCheck = emittingHash || committedHash
   const scope = emittingHash ? 'emitting' : 'committed'
 
-  const bearerEndpoint =
-    env.TOKENSCOPE_BEARER_ENDPOINT || process.env.TOKENSCOPE_BEARER_ENDPOINT || ''
+  /*
+   * NO AMBIENT FALLBACK (MDASH follow-up). This endpoint receives the device's
+   * real cached access token as a Bearer, so a `process.env` fallback let a
+   * repo-merged environment name the destination even after the CALLER was
+   * repointed at the trusted settings — closing the caller and leaving the sink
+   * open. The caller must pass a trusted env; there is no second guess.
+   */
+  const bearerEndpoint = env.TOKENSCOPE_BEARER_ENDPOINT || ''
   if (!bearerEndpoint || !instanceId) return { status: 'unverifiable', reason: 'not-configured' }
 
   // .../instances/{id}/bearer  →  .../instances/{id}/project-resolve?code_hash=…
@@ -146,8 +151,9 @@ export async function checkRepoProjectBillable({
 
 // CLI: classify using the global settings.json env (best-effort, prints the result).
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const settings = readJson(join(homedir(), '.claude', 'settings.json'))
-  checkRepoProjectBillable({ env: settings?.env || {} }).then((r) =>
+  // TRUSTED read: homedir() honours HOME, which a hostile repo can move, and this
+  // env names the endpoint the access token above is sent to.
+  checkRepoProjectBillable({ env: trustedGlobalSettingsEnv() }).then((r) =>
     process.stdout.write(`${JSON.stringify(r)}\n`),
   )
 }

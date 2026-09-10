@@ -82,7 +82,7 @@ const ev = (session: Session, query = '', params: Record<string, string> = {}) =
   return e as unknown as Parameters<typeof drillHandler>[0]
 }
 const gfo = (): Session =>
-  ({ teammateId: CALLER, email: 'caller@ccx.test', displayName: 'Caller', role: 'global-finops', regionId: region, orgPath: 'ccx', issuedAt: new Date().toISOString() } as unknown as Session)
+  ({ teammateId: CALLER, email: 'caller@ccx.test', displayName: 'Caller', role: 'platform-admin', regionId: region, orgPath: 'ccx', issuedAt: new Date().toISOString() } as unknown as Session)
 
 const exportCsv = async (query: string): Promise<string> =>
   (await exportHandler(ev(gfo(), query))) as unknown as string
@@ -127,10 +127,10 @@ beforeAll(async () => {
   // The caller is a real teammate: audit_event.actor_teammate_id REFERENCES teammate(id),
   // so a synthetic session id would make every audit write a FK violation.
   await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
-    VALUES (${CALLER}::uuid, 'oid-ccx-caller', 'caller@ccx.test', 'Caller', ${region}::uuid, ${root}::uuid, 'global-finops', true)`
+    VALUES (${CALLER}::uuid, 'oid-ccx-caller', 'caller@ccx.test', 'Caller', ${region}::uuid, ${root}::uuid, 'platform-admin', true)`
   // mig 0129: CALLER is the file's ONLY persona (grepped — `gfo()` is the sole
   // session builder), so a direct grant is safe. Needed for the drill gate
-  // (`resolveCostCentreDrill` + `costCentreScopeOpts`) — an ungranted global-finops
+  // (`resolveCostCentreDrill` + `costCentreScopeOpts`) — an ungranted platform-admin
   // holds no ownership on ccBig/ccSmall and would 403 on ownerOnly=false's own
   // subtree/ownership disjunction.
   await grantReportAccess(t.client, CALLER)

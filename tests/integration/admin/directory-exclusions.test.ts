@@ -1,7 +1,7 @@
 // @vitest-environment node
 /*
  * Admin directory-exclusion CRUD (mig 0083) + the search-filter it drives.
- * Org-wide config (global-finops / platform-admin); a region admin cannot edit.
+ * Org-wide config (platform-admin); a region admin cannot edit.
  * Covers the match-all footgun rejection, the matched_existing_count warning,
  * and that a configured pattern removes the account from the people-picker.
  */
@@ -34,7 +34,7 @@ function ev(opts: { session: Session; body?: unknown; params?: Record<string, st
   injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], opts.session)
   return e as never
 }
-const finops = (): Session => ({ teammateId: FINOPS_ID, email: 'fx@x.test', displayName: 'Fx', role: 'global-finops', regionId, orgPath: 'de' } as Session)
+const finops = (): Session => ({ teammateId: FINOPS_ID, email: 'fx@x.test', displayName: 'Fx', role: 'platform-admin', regionId, orgPath: 'de' } as Session)
 const regionAdmin = (): Session => ({ teammateId: FINOPS_ID, email: 'fx@x.test', displayName: 'Fx', role: 'admin', regionId, orgPath: 'de' } as Session)
 
 beforeAll(async () => {
@@ -44,7 +44,7 @@ beforeAll(async () => {
   regionId = r!.id
   const [u] = await t.client<{ id: string }[]>`INSERT INTO org_unit (region_id, parent_id, path, code, display_name, unit_type) VALUES (${regionId}::uuid, NULL, 'de'::ltree, 'default', 'DE', 'bu') RETURNING id::text AS id`
   unitId = u!.id
-  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role) VALUES (${FINOPS_ID}::uuid, 'oid-fx', 'fx@x.test', 'Fx', ${regionId}::uuid, ${unitId}::uuid, 'global-finops')`
+  await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role) VALUES (${FINOPS_ID}::uuid, 'oid-fx', 'fx@x.test', 'Fx', ${regionId}::uuid, ${unitId}::uuid, 'platform-admin')`
 }, 180_000)
 afterAll(async () => { if (t) await stopTestDb(t) }, 30_000)
 
@@ -54,7 +54,7 @@ beforeEach(async () => {
 })
 
 describe('admin directory-exclusions CRUD', () => {
-  it('adds, lists, and removes a pattern (global-finops)', async () => {
+  it('adds, lists, and removes a pattern (platform-admin)', async () => {
     const added = (await addHandler(ev({ session: finops(), body: { pattern: '*@contoso.onmicrosoft.com', note: 'CLD admins' } }))) as { id: string; pattern: string }
     expect(added.pattern).toBe('*@contoso.onmicrosoft.com')
     const listed = (await listHandler(ev({ session: finops(), method: 'GET' }))) as { patterns: { id: string; pattern: string }[] }

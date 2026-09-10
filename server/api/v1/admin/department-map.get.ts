@@ -1,6 +1,6 @@
 /*
  * GET /api/v1/admin/department-map — list the department → region map
- * (region derivation, mig 0068). admin / global-finops.
+ * (region derivation, mig 0068). admin / platform-admin.
  *
  * This is the PRIMARY region-derivation signal: an unplaced user's Entra
  * `department` is looked up (case-insensitively, keyed on department_lower)
@@ -16,7 +16,7 @@ import { withRequestRls } from '../../../db/request-rls'
 
 export default defineEventHandler(async (event) => {
   // Org-wide cross-region placement config → GLOBAL roles only (per design).
-  await requireRole(event, 'global-finops', 'platform-admin')
+  await requireRole(event, 'platform-admin')
 
   return await withRequestRls(event, async (tx) => {
     // Back-compat view over directory_region_rule (mig 0089): this legacy endpoint

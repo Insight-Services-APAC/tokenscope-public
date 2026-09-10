@@ -3,13 +3,13 @@
  * force-sign-out for a single teammate.
  *
  * Mutation contour:
- *   a) requireRole(admin, global-finops) — app-level gate, 403 on miss.
+ *   a) requireRole(admin) — app-level gate, 403 on miss.
  *   b) assertSameOrigin — block cross-origin POST CSRF.
  *   c) Validate path UUID + optional body.reason (z.string().max(200)).
  *   d) Inside ONE withRequestRls transaction:
  *      - SELECT target row (id, region_id, email) — 404 on miss.
  *      - requireRegionScope on the target row's region (admin caller is
- *        bounded to their home region; global-finops is unbounded).
+ *        bounded to their home region; platform-admin is unbounded).
  *      - evaluateRevokeSessions(caller, target) — pure decision (Wave VII
  *        currently always allows, but the gate point exists for future).
  *      - recordAuditEvent (eventType='teammate-sessions-revoked',
@@ -58,7 +58,7 @@ interface TargetRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   // CSRF check BEFORE any DB I/O — same pattern as [id].patch.ts.
   assertSameOrigin(event)
 
@@ -120,7 +120,7 @@ export default defineEventHandler(async (event) => {
     }
 
     // Region-scope check — admin caller cannot revoke a row outside
-    // their home region. (global-finops is unbounded.)
+    // their home region. (platform-admin is unbounded.)
     await requireRegionScope(event, target.region_id)
 
     const verdict = evaluateRevokeSessions(

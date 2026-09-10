@@ -17,7 +17,7 @@
  * joins it onto these rows (docs/design/admin-nav-responsiveness.md D5). A list
  * endpoint must not pay an outbound HTTPS probe per row.
  *
- * RBAC: requireRole(admin, global-finops). `provider_org` is a config table with
+ * RBAC: requireRole(admin). `provider_org` is a config table with
  * no RLS policy, but the read runs in the request lane anyway
  * (docs/design/rls-enforcement.md §2) — and it JOINS `org_unit`, which IS
  * RLS-enabled and is in the design's phase-2 FORCE set, so a context-less read
@@ -25,7 +25,7 @@
  *
  * Region-scope: a region `admin` sees mapped orgs in their OWN region PLUS
  * every unmapped (region_id IS NULL) org — narrowing unmapped rows would hide
- * exactly the onboarding surface an admin is there to map. `global-finops` /
+ * exactly the onboarding surface an admin is there to map. `platform-admin` /
  * `platform-admin` see every row. Matches diagnostics/index.get.ts's
  * `session.role === 'admin'` shape; RLS is inert at runtime (owner
  * connection, no FORCE) so this in-query clamp is the live gate.
@@ -67,7 +67,7 @@ function narrowApiKind(value: string | null): AnthropicApiKind {
 }
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
   // ADR-0011 D11 (Required outcome 4): once governance is activated,
   // provider_org.billing is meaningless for GitHub (the enterprise is
   // authoritative) — hidden from the API response rather than echoing a stale
@@ -76,7 +76,7 @@ export default defineEventHandler(async (event) => {
 
   // Region clamp (sole gate — provider_org has no RLS policy, and RLS is
   // inert at runtime regardless). admin -> own region OR unmapped;
-  // global-finops / platform-admin -> every row.
+  // platform-admin -> every row.
   const regionClause =
     session.role === 'admin'
       ? sql`WHERE po.region_id IS NULL OR po.region_id = ${session.regionId}::uuid`

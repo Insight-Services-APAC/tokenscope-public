@@ -28,7 +28,7 @@ export interface DirectoryExclusionRow {
 
 defineProps<{
   rows: DirectoryExclusionRow[]
-  /** platform-admin / global-finops — only they may edit (org-wide config). */
+  /** platform-admin — only they may edit (org-wide config). */
   orgWide: boolean
 }>()
 

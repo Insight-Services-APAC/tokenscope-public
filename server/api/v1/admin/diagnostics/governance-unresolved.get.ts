@@ -6,7 +6,7 @@
  * a state to resolve, never a permanent sink — remediation is "register/link
  * the org", recheck is the POST action below.
  *
- * RBAC: global-finops ONLY (mirrors ab-decomposition.get.ts — estate-wide,
+ * RBAC: platform-admin ONLY (mirrors ab-decomposition.get.ts — estate-wide,
  * money-adjacent diagnostics).
  */
 import { defineEventHandler } from 'h3'
@@ -22,7 +22,7 @@ interface UnresolvedSourceRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'global-finops')
+  await requireRole(event, 'platform-admin')
   return withRequestRls(event, async (tx) => {
     try {
       const [actualSpendPending, actualSpendUnresolved, reconRecordPending, reconRecordUnresolved, pendingPlacementUnresolved] =

@@ -1,6 +1,6 @@
 /*
  * PUT /api/v1/admin/settings/project-lifecycle — set the PLATFORM-default
- * project-lifecycle cadence (D9). Org-wide only: global-finops / platform-admin
+ * project-lifecycle cadence (D9). Org-wide only: platform-admin
  * (a region admin overrides only their own region, see
  * regions/[id]/project-lifecycle.put.ts). Audited.
  */
@@ -20,7 +20,7 @@ const Body = z.object({
 
 export default defineEventHandler(async (event) => {
   // Org-wide admins only — the platform default is not a region admin's to set.
-  const caller = await requireRole(event, 'global-finops')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

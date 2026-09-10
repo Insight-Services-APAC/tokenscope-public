@@ -8,7 +8,7 @@
  *   teammate are shown disabled with the region they already live in.
  *
  * Region admins may only grant region-scoped roles
- * (developer/manager/admin/finance); org-wide grants (global-finops /
+ * (developer/manager/admin/finance); the org-wide grant (
  * platform-admin) are hidden unless the caller is themselves org-wide.
  *
  * Accessibility mirrors TagSessionDialog: role="dialog" + aria-modal +
@@ -74,12 +74,12 @@ let searchTimer: ReturnType<typeof setTimeout> | null = null
 
 // Region admins can only grant region-scoped roles; org-wide grants are gated.
 const callerIsOrgWide = computed(
-  () => props.callerRole === 'global-finops' || props.callerRole === 'platform-admin',
+  () => props.callerRole === 'platform-admin',
 )
 const grantableRoles = computed<Role[]>(() =>
   callerIsOrgWide.value
     ? [...SELECTABLE_ROLES]
-    : SELECTABLE_ROLES.filter((r) => r !== 'global-finops' && r !== 'platform-admin'),
+    : SELECTABLE_ROLES.filter((r) => r !== 'platform-admin'),
 )
 
 // Shared dialog a11y; onOpen resets the search/placement form on each open.

@@ -8,7 +8,7 @@
  * default so a mis-click cannot cost anything.
  *
  * RBAC: requireRole('platform-admin'), matching network.get.ts:23 and
- * otel-logs.get.ts:43 rather than the wider admin/global-finops tier the rest of
+ * otel-logs.get.ts:43 rather than the wider admin/platform-admin tier the rest of
  * diagnostics uses. Same reason those two are gated there: this returns RAW
  * provider error bodies and infrastructure-level configuration, and it spends
  * real provider budget. assertSameOrigin because it is a POST (the

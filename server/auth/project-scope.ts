@@ -8,7 +8,7 @@
  *   - manager        → the project must be in the caller's OWN region AND its
  *                      cost-owning unit within the caller's org subtree
  *                      (region_id = session.regionId AND cou.path <@ orgPath)
- *   - global-finops  → unbounded
+ *   - platform-admin  → unbounded
  *
  * This is the live gate; RLS is inert at runtime (owner DB connection)
  * until Epic 10's non-owner role lands. See allocation-scope.ts.
@@ -90,8 +90,8 @@ export async function assertProjectScope(event: H3Event, project: ProjectScope):
     }
     return
   }
-  // global-finops / platform-admin are org-wide by design.
-  if (session.role === 'global-finops' || isPlatformAdmin(session.role)) {
+  // platform-admin are org-wide by design.
+  if (isPlatformAdmin(session.role)) {
     return
   }
   // Default DENY (CORE-3): any role not explicitly listed above gets no

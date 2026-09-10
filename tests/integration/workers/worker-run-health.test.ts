@@ -226,12 +226,12 @@ function makeEvent(initialSession: Session) {
   return ev
 }
 
-function finopsSession(): Session {
+function orgWideSession(): Session {
   return {
     teammateId: '00000000-0000-0000-0000-000000000001',
     email: 'finops@wrh.test',
     displayName: 'Finops',
-    role: 'global-finops',
+    role: 'platform-admin',
     regionId,
     orgPath: 'wrh.svc',
   }
@@ -292,7 +292,7 @@ describe('GET /api/v1/admin/diagnostics — workers block', () => {
     await insertRun('diag-failing', 'failure', '2026-06-05T11:00:00Z')
 
     const handler = await loadHandler()
-    const result = await handler(makeEvent(finopsSession()))
+    const result = await handler(makeEvent(orgWideSession()))
 
     const healthy = result.workers.find((w) => w.worker === 'diag-healthy')
     const failing = result.workers.find((w) => w.worker === 'diag-failing')
@@ -316,7 +316,7 @@ describe('GET /api/v1/admin/diagnostics — workers block', () => {
     await insertRun('diag-streak', 'failure', '2026-06-05T10:00:00Z')
 
     const handler = await loadHandler()
-    const result = await handler(makeEvent(finopsSession()))
+    const result = await handler(makeEvent(orgWideSession()))
 
     const streak = result.workers.find((w) => w.worker === 'diag-streak')
     expect(streak!.rag).toBe('failing')
@@ -333,7 +333,7 @@ describe('GET /api/v1/admin/diagnostics — workers block', () => {
     await insertRun('diag-disabled', 'skipped', '2026-06-05T10:30:00Z', 0)
 
     const handler = await loadHandler()
-    const result = await handler(makeEvent(finopsSession()))
+    const result = await handler(makeEvent(orgWideSession()))
 
     const w = result.workers.find((w) => w.worker === 'diag-disabled')
     expect(w!.status).toBe('skipped')
@@ -352,7 +352,7 @@ describe('GET /api/v1/admin/diagnostics — workers block', () => {
     await insertRun('diag-killed', 'running', '2026-06-05T10:00:00Z')
 
     const handler = await loadHandler()
-    const result = await handler(makeEvent(finopsSession()))
+    const result = await handler(makeEvent(orgWideSession()))
 
     const killed = result.workers.find((w) => w.worker === 'diag-killed')
     expect(killed!.status).toBe('running')
@@ -367,7 +367,7 @@ describe('GET /api/v1/admin/diagnostics — workers block', () => {
     await insertRun('diag-wedged', 'running', '2020-01-01T00:00:00Z')
 
     const handler = await loadHandler()
-    const result = await handler(makeEvent(finopsSession()))
+    const result = await handler(makeEvent(orgWideSession()))
 
     const wedged = result.workers.find((w) => w.worker === 'diag-wedged')
     expect(wedged!.status).toBe('running')
@@ -382,7 +382,7 @@ describe('GET /api/v1/admin/diagnostics — workers block', () => {
     await insertRun('diag-inflight', 'running', justNow, null)
 
     const handler = await loadHandler()
-    const result = await handler(makeEvent(finopsSession()))
+    const result = await handler(makeEvent(orgWideSession()))
 
     const inflight = result.workers.find((w) => w.worker === 'diag-inflight')
     expect(inflight!.status).toBe('running')
@@ -393,7 +393,7 @@ describe('GET /api/v1/admin/diagnostics — workers block', () => {
 
   it('a healthy request declares every read available', async () => {
     const handler = await loadHandler()
-    const result = await handler(makeEvent(finopsSession()))
+    const result = await handler(makeEvent(orgWideSession()))
     expect(Object.keys(result.reads).sort()).toEqual(['lastSync', 'pipeline', 'workers'])
     expect(result.reads.workers).toEqual({ available: true })
     expect(result.reads.lastSync).toEqual({ available: true })
@@ -414,7 +414,7 @@ describe('GET /api/v1/admin/diagnostics — workers block', () => {
     await t.client.unsafe('ALTER TABLE worker_run RENAME TO worker_run_hidden_by_test')
     try {
       const handler = await loadHandler()
-      const result = await handler(makeEvent(finopsSession()))
+      const result = await handler(makeEvent(orgWideSession()))
       expect(result.workers).toEqual([])
       expect(result.reads.workers.available).toBe(false)
       expect(result.reads.workers.error).toBe('relation-missing')

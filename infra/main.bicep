@@ -168,10 +168,10 @@ param mcpAllowedHosts string = ''
 // server/api/v1/auth/dev-login.post.ts refuses unless one of:
 //   a) NUXT_OIDC_AUTH_DEV_MODE=true (local dev fallback), OR
 //   b) NUXT_ALLOW_PERSONA_OVERRIDE=true AND caller has a valid Entra
-//      session AND session.role in ('admin', 'global-finops').
+//      session AND session.role in ('admin', 'platform-admin').
 // Production hard-locks this to false; sandbox flips it true so admins
 // can step through the demo personas without re-seeding the DB.
-@description('Allow admin / global-finops users to override their session into a demo persona (dev-login route). MUST be false in production. Sandbox = true; staging starts false (flip only when audit pattern is stakeholder-accepted).')
+@description('Allow admin / platform-admin users to override their session into a demo persona (dev-login route). MUST be false in production. Sandbox = true; staging starts false (flip only when audit pattern is stakeholder-accepted).')
 param allowPersonaOverride bool = false
 
 @description('Bootstrap admin email — the first Entra sign-in matching this address gets `admin` role on JIT teammate creation. Empty = no bootstrap (all JIT-created teammates default to `developer`).')
@@ -644,6 +644,10 @@ module containerApp 'modules/container-app.bicep' = {
     // Microsoft-OTLP-Logs/otlp/v1/logs. Drives the app's LogAnalyticsReader +
     // MI bearer mint + the attest endpoint's emit-config for the plugin.
     azureMonitorLogsEndpoint: '${monitoring.outputs.dceLogsIngestionEndpoint}/dataCollectionRules/${monitoring.outputs.dcrImmutableId}/streams/Microsoft-OTLP-Logs/otlp/v1/logs'
+    // DCR ARM resource id — the Azure Monitor METRICS API target for the
+    // read-path ingest-coverage probe (NUXT_AZURE_DCR_RESOURCE_ID). Needs
+    // Monitoring Reader on the DCR (granted in monitoring.bicep).
+    dcrResourceId: monitoring.outputs.dcrResourceId
     hasAnthropicKey: hasAnthropicKey
     // F2 GitHub Copilot reconciliation PATs (GATED OFF; flags false until provided).
     hasGithubPatPartnerDemo: !empty(githubPatPartnerDemo)
@@ -774,6 +778,7 @@ module opsAlerts 'modules/ops-alerts.bicep' = {
     // resourceId() is a pure string build — NO implicit dependency — hence the
     // explicit dependsOn below.
     opsAlertJobId: !empty(workerBaseUrl) ? resourceId('Microsoft.App/jobs', 'caj-ts-ops-alert') : ''
+    logAnalyticsId: monitoring.outputs.logAnalyticsId
     tags: tags
   }
   dependsOn: [

@@ -188,6 +188,28 @@ export function telemetryFromFlatKeys(flat) {
   return out
 }
 
+/*
+ * ABSOLUTE AND ENV-FREE (MDASH F29/F11). On Windows libuv searches the child's
+ * CWD BEFORE PATH, and this runs with cwd = the project root — so a hostile repo
+ * committing `reg.exe` next to its README got it executed as the developer.
+ * `/bin/sh` was made absolute for exactly this reason in an earlier hardening
+ * pass; `reg` and `defaults` were its unwalked siblings.
+ *
+ * NOT %SystemRoot%. The first version of this fix read it, which was the same
+ * bug wearing a disguise: SystemRoot arrives in the very environment Claude Code
+ * merges a repo's settings into, it is on no denylist, and a repo setting it to
+ * its own directory gets `<repo>/System32/reg.exe` executed. A relative value
+ * such as `.` restores CWD resolution outright. An env-derived "absolute" path
+ * is attacker-derived; it only LOOKS hardened.
+ *
+ * A literal is correct here because the failure mode of a wrong path is benign
+ * and already handled: the caller treats a missing reg.exe as status 'unknown'.
+ * Trading a rare wrong answer for "cannot execute repo-supplied code" is the
+ * right side of that bargain, and a non-C: system drive is the rare case.
+ */
+const REG_EXE = 'C:\\Windows\\System32\\reg.exe'
+const DEFAULTS_BIN = '/usr/bin/defaults'
+
 /**
  * Best-effort Windows native-MDM read (registry). Never throws.
  * @param {{ exec?: (cmd: string, args: string[]) => string }} [deps]
@@ -197,7 +219,7 @@ function readWindowsNativeMdm(deps = {}) {
   const exec = deps.exec ?? ((cmd, args) => execFileSync(cmd, args, { encoding: 'utf8', windowsHide: true }))
   let out
   try {
-    out = exec('reg', ['query', 'HKLM\\SOFTWARE\\Policies\\GitHubCopilot', '/s'])
+    out = exec(REG_EXE, ['query', 'HKLM\\SOFTWARE\\Policies\\GitHubCopilot', '/s'])
   } catch (err) {
     // `reg query` exits non-zero when the key does not exist — a clean "no policy".
     // Any OTHER failure (reg.exe missing, permission denied) is genuinely unknown.
@@ -222,7 +244,7 @@ function readWindowsNativeMdm(deps = {}) {
 function readMacosNativeMdm(deps = {}) {
   const exec = deps.exec ?? ((cmd, args) => execFileSync(cmd, args, { encoding: 'utf8' }))
   try {
-    exec('defaults', ['read', 'com.github.copilot'])
+    exec(DEFAULTS_BIN, ['read', 'com.github.copilot'])
     return { status: 'present-unparsed' }
   } catch (err) {
     const message = String(/** @type {{ message?: string }} */ (err)?.message ?? '')

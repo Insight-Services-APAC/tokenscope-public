@@ -9,7 +9,7 @@
  * separator. These take the primitive's own output, so the CSV cannot re-derive
  * a figure the screen computed differently (build-design §2, byte-identical rule).
  */
-import { csvEscape } from '../utils/csv-escape'
+import { csvEscape, csvMetaLine } from '../utils/csv-escape'
 import type { PerDeveloperSeries } from '../../shared/reports/per-developer'
 import { ACTIVE_DEVELOPERS_NOTE } from '../../shared/reports/per-developer'
 import { TIER_BAND_LABELS, type TierExposure } from '../../shared/reports/tier-exposure'
@@ -44,7 +44,9 @@ export function tierExposureToCsv(
   meta: { scopeLabel: string; asOfDate: string | null },
 ): string {
   const lines = [
-    `# tokenscope behavioural exposure · scope=${meta.scopeLabel} · window=${exposure.window.from}..${exposure.window.to} · as_of=${meta.asOfDate ?? 'n/a'}`,
+    csvMetaLine(
+      `# tokenscope behavioural exposure · scope=${meta.scopeLabel} · window=${exposure.window.from}..${exposure.window.to} · as_of=${meta.asOfDate ?? 'n/a'}`
+    ),
     '# bands come from model_catalog.tier; unclassified and no-model are shown, never folded into economy',
     '# a mix-only provider (Copilot) meters money at DAY grain only — its band spend is 0 and its credits ride the unbanded_spend_usd row',
     'band,provider,spend_usd,consumption,unit,period_start',
@@ -99,7 +101,9 @@ export function perDeveloperToCsv(
   const pct = (v: number | null) =>
     v === null ? 'n/a' : `${v >= 0 ? '+' : '-'}${(Math.abs(v) * 100).toFixed(1)}%`
   const lines = [
-    `# tokenscope spend per active developer · scope=${meta.scopeLabel} · window=${series.window.from}..${series.window.to} · as_of=${meta.asOfDate ?? 'n/a'}`,
+    csvMetaLine(
+      `# tokenscope spend per active developer · scope=${meta.scopeLabel} · window=${series.window.from}..${series.window.to} · as_of=${meta.asOfDate ?? 'n/a'}`
+    ),
     `# ${ACTIVE_DEVELOPERS_NOTE}`,
   ]
   if (series.deltas) {

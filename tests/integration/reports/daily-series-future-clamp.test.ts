@@ -100,7 +100,7 @@ const sess = (): Session =>
     teammateId: '00000000-0000-0000-0000-000000000009',
     email: 'x@fc.test',
     displayName: 'X',
-    role: 'global-finops',
+    role: 'platform-admin',
     regionId: regionNear,
     orgPath: 'near',
     issuedAt: new Date().toISOString(),
@@ -177,7 +177,7 @@ beforeAll(async () => {
   // different frontiers) depends on the region actually asked for being served.
   await t.client`INSERT INTO teammate (id, entra_oid, email, display_name, region_id, org_unit_id, role, is_active)
     VALUES ('00000000-0000-0000-0000-000000000009'::uuid, 'oid-fc-caller', 'x@fc.test', 'X',
-            ${regionNear}::uuid, ${unitNear}::uuid, 'global-finops', true)`
+            ${regionNear}::uuid, ${unitNear}::uuid, 'platform-admin', true)`
   await grantReportAccess(t.client, '00000000-0000-0000-0000-000000000009')
 
   const mkTeammate = async (region: string, unit: string, email: string) => {

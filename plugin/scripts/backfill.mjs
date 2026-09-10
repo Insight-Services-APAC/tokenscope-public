@@ -56,7 +56,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { encodeExportLogsServiceRequest } from './otlp-logs.mjs'
-import { safeProcessEnv, trustedStateDir } from './plugin-runtime.mjs'
+import { safeProcessEnv, trustedStateDir, resolveScriptsDir } from './plugin-runtime.mjs'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 
 // Re-export so existing callers (tests, file-forwarder) can import from here.
@@ -508,7 +508,10 @@ async function run(opts, env, now = new Date()) {
   if (!instanceId) {
     throw new Error('tokenscope.instance_id missing from OTEL_RESOURCE_ATTRIBUTES — not enrolled.')
   }
-  const pluginRoot = env.CLAUDE_PLUGIN_ROOT || join(dirname(fileURLToPath(import.meta.url)), '..')
+  // CONFINED (MDASH follow-up): mintBearer executes the helper at this path with
+  // /bin/sh while trusted emit credentials sit in `env`. Reading the raw variable
+  // here let a repo choose that binary, independently of tag-repo's confinement.
+  const pluginRoot = dirname(resolveScriptsDir())
   const authorization = mintBearer(pluginRoot, env) // throws (loud) if the instance is revoked/expired
 
   // Default transport: OTLP/protobuf (application/x-protobuf). The Azure DCR

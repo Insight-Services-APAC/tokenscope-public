@@ -5,7 +5,7 @@
  * WHAT MUST NOT REGRESS, in order of consequence:
  *   1. It is platform-admin ONLY, and the gate runs BEFORE any provider work.
  *      It returns raw provider error bodies and issues calls that cost money;
- *      the wider admin/global-finops tier the rest of diagnostics uses is not
+ *      the wider admin/platform-admin tier the rest of diagnostics uses is not
  *      enough. The RBAC block runs LAST in this file, against a configured
  *      environment, for the reason stated above it.
  *   2. A surface with no matching provider_org reports 'not-configured' — a
@@ -36,7 +36,6 @@ let t: TestDb
 let regionId: string
 let ouId: string
 let platformId: string
-let finopsId: string
 let adminId: string
 let devId: string
 let stub: Server
@@ -110,7 +109,6 @@ function ev(opts: { body?: unknown; session: Session; origin?: string }) {
 }
 
 const platform = (): Session => ({ teammateId: platformId, email: 'ws-pa@x.test', displayName: 'PA', role: 'platform-admin', regionId, orgPath: 'ws.svc' })
-const finops = (): Session => ({ teammateId: finopsId, email: 'ws-fin@x.test', displayName: 'Fin', role: 'global-finops', regionId, orgPath: 'ws.svc' })
 const admin = (): Session => ({ teammateId: adminId, email: 'ws-admin@x.test', displayName: 'Admin', role: 'admin', regionId, orgPath: 'ws.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'ws-dev@x.test', displayName: 'Dev', role: 'developer', regionId, orgPath: 'ws.svc' })
 
@@ -192,7 +190,6 @@ beforeAll(async () => {
     return row!.id
   }
   platformId = await mk('ws-pa@x.test', 'platform-admin', 'oid-ws-pa')
-  finopsId = await mk('ws-fin@x.test', 'global-finops', 'oid-ws-fin')
   adminId = await mk('ws-admin@x.test', 'admin', 'oid-ws-admin')
   devId = await mk('ws-dev@x.test', 'developer', 'oid-ws-dev')
 }, 180_000)
@@ -919,12 +916,6 @@ describe('RBAC — platform-admin only, and the gate runs BEFORE any work', () =
     await expectRejectedWithoutWorking(ev({ session: admin(), body: spendingBody }), 403)
   })
 
-  it('rejects global-finops — this endpoint is a tier above the rest of diagnostics', async () => {
-    // The other diagnostics reads allow global-finops. This one returns raw
-    // provider error bodies and spends provider budget, so it sits with
-    // network.get.ts / otel-logs.get.ts at platform-admin.
-    await expectRejectedWithoutWorking(ev({ session: finops(), body: spendingBody }), 403)
-  })
 
   it('rejects a cross-origin POST even from a platform-admin', async () => {
     await expectRejectedWithoutWorking(

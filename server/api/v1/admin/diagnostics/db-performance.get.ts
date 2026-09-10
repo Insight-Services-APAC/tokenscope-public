@@ -18,7 +18,7 @@
  * rls-posture.get.ts, otel-logs.get.ts). The response names every table and
  * index in the estate, the server's memory/connection settings, and normalised
  * statement text — infrastructure and control state, not region-scoped
- * operational data. A region-scoped `admin` and global-finops both get a 403,
+ * operational data. A region-scoped `admin` and platform-admin both get a 403,
  * which diagnostics.vue renders as a calm scoped-out note.
  *
  * ── RLS LANE: the REQUEST lane, deliberately ────────────────────────────────

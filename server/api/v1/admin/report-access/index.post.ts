@@ -3,10 +3,10 @@
  * teammate (mig 0129, replaces the three-mode admin dial's write side, task
  * #19).
  *
- * ORG-WIDE ONLY (A4): `requireRole(event, 'global-finops')` — platform-admin
+ * ORG-WIDE ONLY (A4): `requireRole(event, 'platform-admin')` — platform-admin
  * passes any requireRole gate; no 'admin' write access and no re-narrow step
  * (unlike the retired report-visibility.put.ts, which re-narrowed
- * admin|global-finops down to platform-admin|global-finops — this endpoint's
+ * admin|global-finops down to global-finops|platform-admin — this endpoint's
  * ROLE GATE already IS that narrower set).
  *
  * EXPIRY LIFECYCLE (A5, fixes the re-grant deadlock): the partial unique
@@ -31,7 +31,7 @@ import { reportAccessGrant } from '../../../../../drizzle/schema'
 import { ReportAccessGrantBody } from '../../../../../shared/schemas/report-access'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'global-finops')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const body = await readValidated(event, ReportAccessGrantBody)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null

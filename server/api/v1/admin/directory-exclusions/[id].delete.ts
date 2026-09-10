@@ -1,6 +1,6 @@
 /*
  * DELETE /api/v1/admin/directory-exclusions/{id} — remove a directory-exclusion
- * pattern (mig 0083). Org-wide config: global-finops / platform-admin only.
+ * pattern (mig 0083). Org-wide config: platform-admin only.
  * Hard delete (the pattern list is small, current-state config, not a history
  * ledger); audited with the removed pattern.
  */
@@ -14,8 +14,8 @@ import { recordAuditEvent } from '../../../../db/audit'
 import { requireUuidParam } from '../../../../utils/require-uuid-param'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
-  if (!(isPlatformAdmin(caller.role) || caller.role === 'global-finops')) {
+  const caller = await requireRole(event, 'admin')
+  if (!(isPlatformAdmin(caller.role))) {
     throw createError({
       statusCode: 403,
       statusMessage: 'Forbidden',
@@ -23,7 +23,7 @@ export default defineEventHandler(async (event) => {
         type: 'https://tokenscope.example.com/errors/forbidden',
         title: 'Forbidden',
         status: 403,
-        detail: 'Directory-exclusion patterns are org-wide config; requires platform-admin or global-finops.',
+        detail: 'Directory-exclusion patterns are org-wide config; requires platform-admin.',
       },
     })
   }

@@ -9,7 +9,7 @@
  * D4 splits the old single endpoint by COST so the page can draw each panel as
  * its read lands instead of holding the whole page on the slowest probe.
  *
- * RBAC: admin / global-finops. Read-only — no mutations.
+ * RBAC: admin / platform-admin. Read-only — no mutations.
  *
  * Four transactions, one per read (postgres probe, lastSync, pipeline,
  * workers), each with its own catch. A failing statement aborts the Postgres
@@ -61,7 +61,7 @@ interface LastSyncRow extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'admin', 'global-finops')
+  const session = await requireRole(event, 'admin')
 
   // One entry per independently-fallible read below; the only thing separating
   // an empty result from a failed one in the payload.
@@ -258,6 +258,10 @@ export default defineEventHandler(async (event) => {
         duration_ms: number | null
         rows_affected: number | null
         sessions_processed: string | null
+        new_events_seen: string | null
+        source_coverage: string | null
+        source_rows_received: string | null
+        source_rows_dropped: string | null
         consecutive_failures: number
       }>(sql`
         WITH ranked AS (
@@ -287,14 +291,22 @@ export default defineEventHandler(async (event) => {
                r.started_at::text AS started_at,
                r.duration_ms,
                -- THE ATTRIBUTION-STALL EVIDENCE. The stall condition is a streak
-               -- of runs that wrote ZERO rows while there was work to do, and
-               -- until this column was here an operator paged by it had no page
-               -- that could show why. rows_affected is the reader's
-               -- attributionRowsWritten; sessions_processed is what it looked at.
-               -- Zero rows with zero sessions is an idle estate; zero rows with
-               -- sessions processed is the fault.
+               -- of runs that wrote ZERO rows while the ingest pipeline received
+               -- rows the joiner did not land — the operator's narrative is
+               -- "source received N · reader saw M new · wrote R". source_coverage
+               -- is the DCR ingest verdict the alert GATES on (rows-arrived =
+               -- backlog, no-rows = idle, unknown = probe could not measure →
+               -- bearer fallback); source_rows_received/dropped are its metric
+               -- values; new_events_seen is the reader-side middle term (past the
+               -- watermark, diagnostic); sessions_processed is the SELECTION size
+               -- (an open editor keeps it at 1). NULL = a run recorded before the
+               -- key existed (unknown, not zero).
                r.rows_affected,
                (r.result->>'sessionsProcessed') AS sessions_processed,
+               (r.result->>'newEventsSeen') AS new_events_seen,
+               (r.result->'sourceCoverage'->>'status') AS source_coverage,
+               (r.result->'sourceCoverage'->>'rowsReceived') AS source_rows_received,
+               (r.result->'sourceCoverage'->>'rowsDropped') AS source_rows_dropped,
                s.consecutive_failures::int AS consecutive_failures
         FROM ranked r
         JOIN streak s USING (worker_name)
@@ -347,13 +359,19 @@ export default defineEventHandler(async (event) => {
         consecutiveFailures,
         /*
          * The attribution-stall evidence, on the row an operator already looks
-         * at. Zero rows with zero sessions is an idle estate; zero rows WITH
-         * sessions processed is the fault the stall condition pages for. Before
-         * this the condition had no page at all — the cardinal sin of alerting
-         * on something an operator cannot then go and check.
+         * at. sourceCoverage is what the alert GATES on (rows-arrived = the DCR
+         * received rows we did not land = the fault; no-rows = idle; unknown =
+         * probe could not measure → bearer fallback). rowsReceived is its metric
+         * value; newEventsSeen is the reader-side middle term; sessionsProcessed
+         * is the selection size (context, not evidence). null = not recorded (a
+         * pre-deploy run), never 0.
          */
         rowsAffected: r.rows_affected == null ? null : Number(r.rows_affected),
         sessionsProcessed: r.sessions_processed == null ? null : Number(r.sessions_processed),
+        newEventsSeen: r.new_events_seen == null ? null : Number(r.new_events_seen),
+        sourceCoverage: r.source_coverage,
+        sourceRowsReceived: r.source_rows_received == null ? null : Number(r.source_rows_received),
+        sourceRowsDropped: r.source_rows_dropped == null ? null : Number(r.source_rows_dropped),
         rag,
         dispatchBudget,
         dispatchBudgetReason: dispatchBudgetReasonFor(dispatchBudget, durationMs),

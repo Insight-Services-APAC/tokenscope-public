@@ -245,13 +245,17 @@ resource slowStatementLog 'Microsoft.DBforPostgreSQL/flexibleServers/configurati
  * Rollback is this parameter, the previous value, plus a restart. Drift is
  * visible in Admin: the db-performance probe reports the live value.
  */
-@description('shared_preload_libraries. STATIC — a change requires a server RESTART. Replaces the whole list, so it must name EVERY library the server needs. Empty (default outside dev) leaves the setting unmanaged.')
+@description('shared_preload_libraries. STATIC — a change requires a server RESTART. Replaces the whole list, so it must name every USER-settable library the server needs. Empty leaves the setting unmanaged — except dev, which applies devPreloadLibraries below.')
 param sharedPreloadLibraries string = ''
 
-// Read off the live dev server 2026-08-29. `pg_cron,pg_stat_statements` alone —
-// the value this replaced — would have dropped six libraries the server runs,
-// including pgaadauth (Entra authentication) and azure.
-var devPreloadLibraries = 'pg_cron,pg_stat_statements,azure,pg_qs,pgaadauth,pgms_stats,pgms_wait_sampling,pg_availability'
+// ONLY the USER-settable libraries the app needs. Azure auto-injects and manages
+// its own preload libraries (azure, pg_qs, pgaadauth for Entra auth, pgms_stats,
+// pgms_wait_sampling, pg_availability): they appear in the effective read-out but
+// are not in `allowedValues` and cannot be set here. #297 wrote that full
+// effective list back, so every Dev infra apply since failed with
+// ServerParameterToCMSUnAllowedParameterValue — the six are auto-managed, not
+// dropped by a shorter value.
+var devPreloadLibraries = 'pg_cron,pg_stat_statements'
 var effectivePreloadLibraries = !empty(sharedPreloadLibraries)
   ? sharedPreloadLibraries
   : (environment == 'dev' ? devPreloadLibraries : '')

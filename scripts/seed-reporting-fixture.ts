@@ -688,13 +688,13 @@ async function main(): Promise<void> {
   // grant rows or the visual walk opens on a baseline 403. NEW fixture
   // teammates (writeFixtureTeammates, below) are always plain 'developer' —
   // this only ever touches EXISTING org-wide-role personas already in the base
-  // seed (Mara/global-finops today; a platform-admin demo row if one is ever
+  // seed (Mara/platform-admin today; another org-wide demo row if one is ever
   // added). ON CONFLICT against the partial active-grant index keeps this
   // re-runnable, the same discipline the rate-card/governance-setting
   // re-inserts above use for rows this script does not own the deletion of.
   const orgWideExisting = await sql<{ id: string }[]>`
     SELECT id::text AS id FROM teammate
-    WHERE role IN ('global-finops', 'platform-admin') AND source <> ${MARK}`
+    WHERE role = 'platform-admin' AND source <> ${MARK}`
   for (const person of orgWideExisting) {
     for (const permission of ['operational', 'finance'] as const) {
       await sql`

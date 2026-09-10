@@ -7,9 +7,10 @@
  * §A2.2's, NOT `MAX(ts_recorded)` (ar-H2 — re-tags/re-homes advance that during
  * an outage): the joiner's ZERO-WRITE STREAK (consecutive completed
  * azure-monitor-read runs that attributed 0 rows) has persisted for at least
- * OPS_ALERT_STALL_MINUTES, COMBINED with recent emit activity
- * (`instance_attestation.last_bearer_at` inside the same window). Idle estate =
- * no banner.
+ * OPS_ALERT_STALL_MINUTES, COMBINED with INGEST-SIDE work evidence
+ * (streakSourceCoverage: the DCR received rows the joiner did not land), falling
+ * back to recent emit activity (`instance_attestation.last_bearer_at`) only when
+ * the coverage probe cannot measure. Idle estate = no banner.
  *
  * This module holds the ONE §A2.2 decision function, `decideAttributionStall`:
  * the ops-alert worker (§A6.3) and this user-facing helper both call it, and
@@ -29,7 +30,14 @@
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type * as schema from '../../drizzle/schema'
-import { loadReaderRuns, loadLastFleetEmitMs } from '../workers/read-path-health'
+import {
+  loadReaderRuns,
+  loadLastFleetEmitMs,
+  zeroWriteStreak,
+  streakSourceCoverage,
+  type StallCoverageBasis,
+} from '../workers/read-path-health'
+import type { SourceCoverageStatus } from '../azure/dcr-metrics'
 
 type Db = PostgresJsDatabase<typeof schema>
 
@@ -64,11 +72,17 @@ export interface StallRun {
   /** worker_run.rows_affected; null = unknown outcome, breaks the streak. */
   rowsAffected: number | null
   /**
-   * result->>'sessionsProcessed' — how many sessions the run actually LOOKED
-   * AT. The evidence that there was work to do at all; without it a zero-write
-   * run is an idle estate, not a stall. null = the run recorded no outcome.
+   * result->>'sessionsProcessed' — the size of the reader's SELECTION. Carried
+   * for diagnostics; NOT read by the decision (an idle open editor keeps it at
+   * 1, which is why PR #307's guard on it did not close the false positive).
    */
   sessionsProcessed: number | null
+  /**
+   * result->'sourceCoverage'->>'status' — the INGEST-SIDE coverage verdict (see
+   * read-path-health.ts / server/azure/dcr-metrics.ts). THE work-evidence term.
+   * null = not measured = unknown → bearer fallback.
+   */
+  sourceCoverage: SourceCoverageStatus | null
 }
 
 export interface StallDecisionInput {
@@ -84,62 +98,83 @@ export interface StallDecisionInput {
 export interface StallVerdict extends AttributionStall {
   /** Length of the zero-write streak, in runs. */
   zeroRuns: number
+  /**
+   * Which ingest-coverage basis fired the stall (D1). 'source-backlog' — the DCR
+   * received rows the joiner did not land; 'coverage-unknown-bearer-fresh' — the
+   * probe could not measure, fell back to the bearer gate. The ops-alert worker
+   * maps this to its OpsAlertReason so an operator can tell them apart.
+   */
+  basis: StallCoverageBasis
 }
 
 /*
  * PURE §A2.2 decision — no DB, and the ONLY stall decision in the codebase
  * (docs/design/ops-alerting.md A2.2/A6.3: operator page, user banner and phone
  * evaluate THIS function). Stall iff:
- *  1. the fleet emitted within the window (`last_bearer_at` — idle = silent);
- *  1b. AND the reader actually HAD WORK: at least one run in the streak
- *     processed a session. Condition 1 alone is a keep-alive, not evidence of
- *     usage — Claude Code runs its otelHeadersHelper at startup and every ~29
- *     minutes for the life of the process (claude-code-telemetry-contract.md),
- *     and every call stamps last_bearer_at. That is a third of the 90-minute
- *     window, so ONE editor left open holds "the fleet is emitting" true
- *     forever while the reader correctly writes nothing, and the alert fires on
- *     an idle estate. Observed on Dev 2026-08-30: a 9-hour critical page
- *     through a Sunday in which nothing was being emitted.
- *
- *     Requiring work evidence only NARROWS the condition, so it cannot
- *     introduce a false negative except in the case being removed. A reader
- *     that is failing outright records no sessions and so raises
- *     `worker:azure-monitor-read` / worker-fleet (§A2.3) instead — a different
- *     condition with its own page, which is the correct home for "the reader
- *     is down" as opposed to "the reader is running and producing nothing".
- *  2. the zero-write streak — the consecutive most-recent terminal runs with
+ *  1. the zero-write streak — the consecutive most-recent terminal runs with
  *     rows_affected === 0, where a FAILED run does NOT break the streak but a
- *     null (unrecorded outcome) does — contains at least one SUCCESS: a joiner
- *     that only ever fails is the worker-fleet condition (§A2.3), not a stall
- *     claim this module can prove;
- *  3. the streak has PERSISTED for the whole window: its oldest run started at
- *     or before `now - stallMinutes`. Without this, one zero-write tick minutes
- *     after a row-landing run would page — §A2.2 is "writing nothing FOR
- *     OPS_ALERT_STALL_MINUTES", inherently time-integrated.
+ *     null (unrecorded outcome) does (zeroWriteStreak) — contains at least one
+ *     SUCCESS: a joiner that only ever fails is the worker-fleet condition
+ *     (§A2.3), not a stall claim this module can prove;
+ *  2. the streak has PERSISTED for the whole window: its oldest run started at
+ *     or before `now - stallMinutes`. §A2.2 is "writing nothing FOR
+ *     OPS_ALERT_STALL_MINUTES", inherently time-integrated;
+ *  3. WORK EVIDENCE from the INGEST-SIDE coverage verdict (streakSourceCoverage,
+ *     shared with read-path-health) over the same streak — a signal independent
+ *     of the reader's own output (the reason PR #316's reader-derived
+ *     `newEventsSeen` gate was held: a reader that returns empty ON SUCCESS
+ *     reads healthy). 'rows-arrived' → the DCR received rows the joiner did not
+ *     land → page (basis 'source-backlog'), regardless of the bearer.
+ *     'no-rows' → nothing arrived → the idle estate → silent. 'unknown' → the
+ *     probe could not measure → fall back to the bearer gate (last_bearer_at
+ *     fresh within the window → page, basis 'coverage-unknown-bearer-fresh'),
+ *     which fails toward paging. A bearer is a 29-min keep-alive from any open
+ *     editor — evidence the fleet is alive, never that there is usage to land —
+ *     so it is only the fallback. Observed on Dev 2026-08-30: a 9-hour critical
+ *     page through a Sunday in which nothing was being emitted; the coverage
+ *     verdict for that estate is 'no-rows'.
  */
 export function decideAttributionStall(input: StallDecisionInput): StallVerdict | null {
   const { runs, lastFleetEmitMs, nowMs, stallMinutes } = input
   const windowMs = stallMinutes * 60_000
 
-  const fleetEmitting = lastFleetEmitMs !== null && nowMs - lastFleetEmitMs <= windowMs
-  if (!fleetEmitting) return null
-
   // The zero-write streak: the consecutive most-recent runs that all recorded
-  // EXACTLY 0 rows. A null (unknown) or a >0 run ends it — read-path-health.ts.
-  let streakEnd = 0
-  while (streakEnd < runs.length && runs[streakEnd]!.rowsAffected === 0) streakEnd += 1
-  if (streakEnd === 0) return null
+  // EXACTLY 0 rows. A null (unknown) or a >0 run ends it. ONE definition, shared
+  // with read-path-health (zeroWriteStreak) so identical history clears/holds
+  // both alerts the same.
+  const streak = zeroWriteStreak(runs)
+  if (streak.length === 0) return null
 
-  const streak = runs.slice(0, streakEnd)
+  // A streak that never SUCCEEDED is the worker-fleet lane's problem (§A2.3),
+  // not a stall claim this module can prove.
   if (!streak.some((r) => r.status === 'success')) return null
-  // Work evidence (1b): a streak of runs that each looked at NOTHING is an idle
-  // estate, not a stall. sessionsProcessed is already carried on every run.
-  if (!streak.some((r) => (r.sessionsProcessed ?? 0) > 0)) return null
 
+  // Persistence (3): the streak must have held for the whole window.
   const oldest = streak[streak.length - 1]!
   if (oldest.startedAtMs > nowMs - windowMs) return null
 
-  return { since: new Date(oldest.startedAtMs).toISOString(), zeroRuns: streak.length }
+  // Work evidence (1b): the INGEST-SIDE coverage verdict over the SAME streak
+  // (streakSourceCoverage — independent of the reader's own output).
+  const coverage = streakSourceCoverage(streak)
+  let basis: StallCoverageBasis
+  if (coverage === 'rows-arrived') {
+    // The pipeline received rows the joiner did not land: a real backlog. Page
+    // regardless of the bearer — a burst the reader never landed, then the
+    // editor closed, is still a stall (today it would be silent).
+    basis = 'source-backlog'
+  } else if (coverage === 'no-rows') {
+    // Nothing arrived: the idle-but-open-editor estate. Never a stall.
+    return null
+  } else {
+    // 'unknown' — the probe could not measure. Fall back to today's bearer gate
+    // (fresh mints within the window). Fails toward paging; A2.1 already pages
+    // for a probe/LA outage.
+    const fleetEmitting = lastFleetEmitMs !== null && nowMs - lastFleetEmitMs <= windowMs
+    if (!fleetEmitting) return null
+    basis = 'coverage-unknown-bearer-fresh'
+  }
+
+  return { since: new Date(oldest.startedAtMs).toISOString(), zeroRuns: streak.length, basis }
 }
 
 /**

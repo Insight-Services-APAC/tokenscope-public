@@ -16,11 +16,16 @@
  *
  * DEFAULT MONTH = the LAST COMPLETE month (you cannot chargeback an in-progress one).
  *
- * RBAC (owner-decisions D-Q5): Finance is a GLOBAL function — gate on
- * `global-finops` + `platform-admin` ONLY. The zombie `finance` enum member is NOT a
- * gate (it 403s here). `region` is a convenience filter over the CoU table, NEVER a
- * gate relaxation (global-finops already sees every region; platform-admin passes any
- * gate). The Σ=bill reconciliation + exempt gap stay whole-company regardless.
+ * RBAC (owner-decisions D-Q5): Finance is a GLOBAL function. The gate is
+ * `requireReportScope(..., 'finance')`, which is NOT role-only: `platform-admin`
+ * is the baseline role, and a teammate of ANY role holding an active `finance`
+ * `report_access_grant` also passes. That grant path is precisely why
+ * `global-finops` could be retired rather than replaced — reading this as
+ * "platform-admin only" mis-states the contract in the direction that matters,
+ * since it hides the population that can actually reach the ledger. The zombie
+ * `finance` ROLE is still not a gate (a role alone 403s here). `region` is a
+ * convenience filter over the CoU table, NEVER a gate relaxation. The Σ=bill
+ * reconciliation + exempt gap stay whole-company regardless.
  *
  * HOMING (D-Homing): current-org interim — every finance surface carries the
  * "homed to current org structure" disclosure (see server/reporting/finance.ts).
@@ -80,9 +85,10 @@ export default defineEventHandler(async (event) => {
   // Authz tx first, compute tx only for a cache-miss leader (plan D5/r1-M2).
   //
   // Finance pack is whole-company: requires the finance grant (reportGrants.finance
-  // === true). Standard = global-finops / platform-admin only; a region admin gets
-  // it ONLY under a loosened mode (region-admins-see-all / all-admins-see-all), which
-  // may also admit a cost-centre owner. Denies are audited (report-scope-denied).
+  // === true), which any role can hold. Under the standard mode platform-admin is
+  // the only role that carries it implicitly; a region admin gets it ONLY under a
+  // loosened mode (region-admins-see-all / all-admins-see-all), which may also
+  // admit a cost-centre owner. Denies are audited (report-scope-denied).
   await withRequestRls(event, (tx) => requireReportScope(event, tx, 'finance'))
   const session = await requireAuth(event)
 

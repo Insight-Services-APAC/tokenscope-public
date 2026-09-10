@@ -54,7 +54,7 @@ function ev(opts: { session: Session; name: string; origin?: string }) {
   injectTestSession(e as unknown as Parameters<typeof injectTestSession>[0], opts.session)
   return e as unknown as Parameters<typeof runWorker>[0]
 }
-const admin = (): Session => ({ teammateId: adminId, email: 'a@x.test', displayName: 'A', role: 'global-finops', regionId, orgPath: 'd.svc' })
+const admin = (): Session => ({ teammateId: adminId, email: 'a@x.test', displayName: 'A', role: 'platform-admin', regionId, orgPath: 'd.svc' })
 const dev = (): Session => ({ teammateId: devId, email: 'd@x.test', displayName: 'D', role: 'developer', regionId, orgPath: 'd.svc' })
 // A region-scoped `admin` — NOT allowed: every safelisted worker is global.
 const regionAdmin = (): Session => ({ teammateId: devId, email: 'ra@x.test', displayName: 'RA', role: 'admin', regionId, orgPath: 'd.svc' })
@@ -78,7 +78,7 @@ beforeAll(async () => {
   regionId = r!.id
   const [o] = await t.db.insert(schema.orgUnit).values({ regionId, path: 'd.svc', code: 'd-svc', displayName: 'Svc', unitType: 'bu' }).returning()
   ouId = o!.id
-  const [a] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-w-a', email: 'a@x.test', role: 'global-finops', regionId, orgUnitId: ouId }).returning()
+  const [a] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-w-a', email: 'a@x.test', role: 'platform-admin', regionId, orgUnitId: ouId }).returning()
   adminId = a!.id
   const [d] = await t.db.insert(schema.teammate).values({ entraOid: 'oid-w-d', email: 'd@x.test', role: 'developer', regionId, orgUnitId: ouId }).returning()
   devId = d!.id
@@ -99,7 +99,7 @@ describe('POST /admin/workers/[name]/run', () => {
     expect((await t.client`SELECT id FROM worker_run`).length).toBe(0)
   })
 
-  it('a region-scoped admin is rejected 403 (workers are global, global-finops only)', async () => {
+  it('a region-scoped admin is rejected 403 (workers are global, platform-admin only)', async () => {
     const n0 = await auditCount()
     await expect(runWorker(ev({ session: regionAdmin(), name: 'identity-sync' }))).rejects.toMatchObject({ statusCode: 403 })
     expect(await auditCount()).toBe(n0)

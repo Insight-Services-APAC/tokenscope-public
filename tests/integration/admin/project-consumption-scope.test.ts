@@ -7,7 +7,7 @@
  *
  * Coverage:
  *   - region-B admin reading a region-A project → 403;
- *   - same-region admin / global-finops → real numbers;
+ *   - same-region admin / platform-admin → real numbers;
  *   - manager keeps the org-subtree clamp (in-subtree numbers, out-of-subtree
  *     zeros — no region 403 for managers);
  *   - unknown project id → 404; malformed id → 400.
@@ -174,8 +174,8 @@ describe('API-1 — project consumption is region-scoped for admins', () => {
     expect(out.total_tokens).toBe(1000)
   })
 
-  it('global-finops is region-unbounded', async () => {
-    const out = await read(projAId, sessionFor('global-finops', regionBId, 'pc2.gamma'))
+  it('platform-admin is region-unbounded', async () => {
+    const out = await read(projAId, sessionFor('platform-admin', regionBId, 'pc2.gamma'))
     expect(out.total_cost_usd).toBe('42.00')
   })
 

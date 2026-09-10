@@ -4,14 +4,14 @@
  *
  * THE GAP THIS CLOSES. `region-reenrichment` already re-derives placements, but it
  * is a global cron worker and `POST /admin/workers/{name}/run` gates the manual
- * trigger on `global-finops` — deliberately, because every safelisted worker is
+ * trigger on `platform-admin` — deliberately, because every safelisted worker is
  * global and forcing one exceeds a region admin's scope. So the region admin who
  * just added a cost-centre owner had no way to apply it to anyone. This endpoint
  * is that derivation, region-scoped, which is what makes it a region admin's to
  * run.
  *
  * ── AUTHORISATION ─────────────────────────────────────────────────────────────
- * `requireRole('admin','global-finops')` then `requireRegionScope(regionId)` —
+ * `requireRole('admin')` then `requireRegionScope(regionId)` —
  * the same pair every other region-scoped admin surface uses, and the same one
  * bulk-place applies. A region admin cannot re-resolve another region.
  *
@@ -70,7 +70,7 @@ const Body = z.object({
 export const RE_RESOLVE_AUDIT_EVENT = 'region-placement-re-resolved'
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const regionId = requireUuidParam(event, 'regionId')
   await requireRegionScope(event, regionId)

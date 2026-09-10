@@ -15,7 +15,7 @@
  *   - color        : green | amber | red badge.
  *
  * SAFETY: never throws (the probe is caught + classified), never leaks the key or
- * raw provider error text. RBAC: requireRole(admin, global-finops) — same guard as
+ * raw provider error text. RBAC: requireRole(admin) — same guard as
  * the records reader.
  *
  * LANES (docs/design/rls-enforcement.md §2): the config READ runs in the request
@@ -46,7 +46,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   // safeParse → a proper 400 on bad ?org (never an unhandled 500; never echo the input).
   const query = await getValidatedQuery(event, (data) => {
     const parsed = Query.safeParse(data)

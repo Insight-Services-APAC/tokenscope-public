@@ -18,7 +18,7 @@
  * cost_owning_unit is within their org subtree (app.user_org_path); a
  * region `admin` is bounded to the project's region via
  * requireRegionScope (API-1 — the same requireRegionScope pattern the
- * admin/* endpoints apply); global-finops /
+ * admin/* endpoints apply); platform-admin /
  * platform-admin are unbounded. This app-level clamp is the ONLY gate: RLS is
  * dormant by decision, so the attribution_record policy cannot be leaned on.
  * Same rationale as server/auth/allocation-scope.ts. An out-of-subtree project
@@ -27,7 +27,7 @@
  * S3: the in-query clause is orgSubtreeScopePredicate('cou') — the SAME
  * region-clamp + placedBelowRegionRootPredicate() gate every other
  * subtree-scoped surface uses, replacing a hand-rolled `role IN
- * ('admin','global-finops') OR cou.path <@ …` that carried NO region term
+ * ('admin','platform-admin') OR cou.path <@ …` that carried NO region term
  * (org_unit paths are only unique per-region, so a manager's path could
  * collide with a foreign region's) and never checked the manager's OWN
  * placement was a genuine, non-root home.
@@ -47,7 +47,7 @@ import { monthToDateWindow } from '../../../../utils/period'
 import { completeOneProjectSpend } from '../../../../usage/complete-spend'
 
 export default defineEventHandler(async (event) => {
-  const session = await requireRole(event, 'manager', 'admin', 'global-finops')
+  const session = await requireRole(event, 'manager', 'admin')
   const id = requireUuidParam(event, 'id', 'project id')
 
   // MONTH TO DATE — ends at now, not at the month end (server/utils/period.ts).

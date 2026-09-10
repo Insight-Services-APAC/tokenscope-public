@@ -7,7 +7,7 @@
  *     in their OWN region (requireRegionScope); is_standard defaults FALSE (a
  *     region addition is non-standard, distinct from the seeded global set).
  *   - region_id = null    → a GLOBAL/standard entry. Region admins may NOT touch
- *     the global vocabulary — only platform-admin / global-finops (the
+ *     the global vocabulary — only platform-admin (the
  *     org-wide roles). is_standard defaults TRUE.
  *
  * Duplicate label in the same scope is guarded by the partial unique indexes
@@ -36,7 +36,7 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin', 'global-finops')
+  const caller = await requireRole(event, 'admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
 

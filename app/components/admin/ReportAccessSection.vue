@@ -15,7 +15,7 @@
  *
  * ORG-WIDE ONLY, END TO END (post external design review, amendment B1): the
  * page (report-access.vue) mounts this component only when isOrgWide, and
- * every endpoint it calls is requireRole(event, 'global-finops') with no
+ * every endpoint it calls is requireRole(event, 'platform-admin') with no
  * re-narrow step. So unlike the retired section, there is NO read-only mode
  * to render here — if this component is on screen at all, every action on it
  * is available. No `orgWide` prop, no disabled-controls branch.

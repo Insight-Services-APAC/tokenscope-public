@@ -25,7 +25,7 @@
  *      the bearer host and is silent on a same-host re-run.
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, readdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, chmodSync, readFileSync, writeFileSync, rmSync, statSync, readdirSync, existsSync } from 'node:fs'
 import { tmpdir, platform } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
@@ -77,11 +77,13 @@ let dir: string
 const savedStateDir = process.env.TOKENSCOPE_STATE_DIR
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'ts-claude-redeem-'))
-  // S1 fix 4: writeClaudeSettings now ALSO mirrors the refresh token into the
-  // shared device credential store (stateDir()/config.json). Pin it into this
-  // test's own temp dir — without this every run here would write a stray
-  // (test-only, non-secret) config.json into the REAL ~/.tokenscope on
-  // whatever machine runs the suite.
+  // The credential store is pinned by ARGUMENT at every call site below, not by
+  // this variable. writeClaudeSettings resolves it with trustedStateDir(), which
+  // deliberately ignores TOKENSCOPE_STATE_DIR — that is what stops a hostile repo
+  // choosing where the durable credential lands, and it also means this env var
+  // no longer redirects the write. It stayed set for the rest of the suite, but
+  // the store path is now explicit: without that, every run here writes the
+  // fixture credential into the REAL ~/.tokenscope on whatever machine runs it.
   process.env.TOKENSCOPE_STATE_DIR = join(dir, 'state')
 })
 afterEach(() => {
@@ -215,7 +217,7 @@ describe('writeClaudeSettings', () => {
   it('writes otelHeadersHelper + env into a fresh settings.json', () => {
     const path = join(dir, 'settings.json')
     const env = buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH)
-    writeClaudeSettings(path, HELPER, env)
+    writeClaudeSettings(path, HELPER, env, join(dir, 'state'))
     const written = JSON.parse(readFileSync(path, 'utf8'))
     expect(written.otelHeadersHelper).toBe(HELPER)
     expect(written.env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBe('rt_super_secret')
@@ -228,7 +230,7 @@ describe('writeClaudeSettings', () => {
       path,
       JSON.stringify({ permissions: { allow: ['Bash(node:*)'] }, env: { MY_VAR: 'keep' } }),
     )
-    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     const written = JSON.parse(readFileSync(path, 'utf8'))
     expect(written.permissions).toEqual({ allow: ['Bash(node:*)'] }) // top-level key preserved
     expect(written.env.MY_VAR).toBe('keep') // unrelated env key preserved (additive merge)
@@ -237,8 +239,8 @@ describe('writeClaudeSettings', () => {
 
   it('rotates the credential in place on re-run (overwrites the same keys)', () => {
     const path = join(dir, 'settings.json')
-    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
-    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, { ...FAKE_OAUTH, refresh_token: 'rt_rotated' }))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, { ...FAKE_OAUTH, refresh_token: 'rt_rotated' }), join(dir, 'state'))
     const written = JSON.parse(readFileSync(path, 'utf8'))
     expect(written.env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBe('rt_rotated')
   })
@@ -282,7 +284,7 @@ describe('writeClaudeSettings', () => {
   it('REPLACES the env block on an environment change — stale session/read creds and old endpoints are GONE', () => {
     const path = join(dir, 'settings.json')
     writeStaleSandboxSettings(path)
-    const change = writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(DEV_BUNDLE, FAKE_OAUTH))
+    const change = writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(DEV_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     const written = JSON.parse(readFileSync(path, 'utf8'))
     // Env-change was detected (Sandbox host → Dev host).
     expect(change.changed).toBe(true)
@@ -303,7 +305,7 @@ describe('writeClaudeSettings', () => {
   it('preserves NON-env top-level keys (permissions, statusLine) across an environment change', () => {
     const path = join(dir, 'settings.json')
     writeStaleSandboxSettings(path)
-    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(DEV_BUNDLE, FAKE_OAUTH))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(DEV_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     const written = JSON.parse(readFileSync(path, 'utf8'))
     expect(written.permissions).toEqual({ allow: ['Bash(node:*)'] })
     expect(written.statusLine).toEqual({ type: 'command', command: 'node /some/statusline.mjs', padding: 0 })
@@ -314,7 +316,7 @@ describe('writeClaudeSettings', () => {
   it('detects an environment change when the bearer host changes (changed=true, with labels)', () => {
     const path = join(dir, 'settings.json')
     writeStaleSandboxSettings(path)
-    const change = writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(DEV_BUNDLE, FAKE_OAUTH))
+    const change = writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(DEV_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     expect(change.changed).toBe(true)
     expect(change.oldLabel).toBe('Sandbox') // derived from the old bearer host
     expect(change.newLabel).toBe('Dev') // derived from the new bearer host
@@ -323,7 +325,7 @@ describe('writeClaudeSettings', () => {
   it('is SILENT (no env change) on a same-host re-run — additive merge keeps unrelated keys', () => {
     const path = join(dir, 'settings.json')
     // First enrol on FAKE_CLAUDE_BUNDLE (ts.example.com), then re-run on the SAME host.
-    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     // A developer hand-set an unrelated env key between runs — it must survive the
     // same-host (additive) re-run.
     const between = JSON.parse(readFileSync(path, 'utf8'))
@@ -332,7 +334,7 @@ describe('writeClaudeSettings', () => {
     between.env.TOKENSCOPE_SESSION_TOKEN = 'legacy_session_tok'
     between.env.TOKENSCOPE_READ_REFRESH_TOKEN = 'legacy_read_rt'
     writeFileSync(path, JSON.stringify(between))
-    const change = writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, { ...FAKE_OAUTH, refresh_token: 'rt_rotated' }))
+    const change = writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, { ...FAKE_OAUTH, refresh_token: 'rt_rotated' }), join(dir, 'state'))
     expect(change.changed).toBe(false)
     const written = JSON.parse(readFileSync(path, 'utf8'))
     expect(written.env.MY_VAR).toBe('keep') // additive merge preserved a real custom key
@@ -345,21 +347,21 @@ describe('writeClaudeSettings', () => {
 
   it('treats a fresh device (no existing bearer host) as NOT an environment change', () => {
     const path = join(dir, 'settings.json')
-    const change = writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
+    const change = writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     expect(change.changed).toBe(false)
   })
 
   it('refuses to clobber an existing but unparseable settings.json', () => {
     const path = join(dir, 'settings.json')
     writeFileSync(path, '{ this is not json')
-    expect(() => writeClaudeSettings(path, HELPER, { A: '1' })).toThrow(/not valid JSON/)
+    expect(() => writeClaudeSettings(path, HELPER, { A: '1' }, join(dir, 'state'))).toThrow(/not valid JSON/)
     // The bad file is left untouched, not overwritten.
     expect(readFileSync(path, 'utf8')).toBe('{ this is not json')
   })
 
   it('leaves no .tmp file behind after an atomic write', () => {
     const path = join(dir, 'settings.json')
-    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     const leftovers = readdirSync(dir).filter((f) => f.includes('.tmp'))
     expect(leftovers).toEqual([])
   })
@@ -367,7 +369,7 @@ describe('writeClaudeSettings', () => {
   it('writes the settings file with 0600 perms (POSIX only)', () => {
     if (platform() === 'win32') return // chmod is a no-op on Windows
     const path = join(dir, 'settings.json')
-    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     expect(statSync(path).mode & 0o777).toBe(0o600)
   })
 
@@ -379,7 +381,7 @@ describe('writeClaudeSettings', () => {
   // nothing to fall back TO and a tagged repo's emission bricks.
   it('mirrors the refresh token into the shared state-dir credential store on redeem', () => {
     const path = join(dir, 'settings.json')
-    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     const cfg = JSON.parse(readFileSync(join(process.env.TOKENSCOPE_STATE_DIR!, 'config.json'), 'utf8'))
     expect(cfg.oauth_refresh_token).toBe('rt_super_secret')
   })
@@ -387,7 +389,7 @@ describe('writeClaudeSettings', () => {
   it('the state-dir store is 0700/0600 (credential-bearing)', () => {
     if (platform() === 'win32') return
     const path = join(dir, 'settings.json')
-    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     const stateDirPath = process.env.TOKENSCOPE_STATE_DIR!
     expect(statSync(stateDirPath).mode & 0o777).toBe(0o700)
     expect(statSync(join(stateDirPath, 'config.json')).mode & 0o777).toBe(0o600)
@@ -395,27 +397,52 @@ describe('writeClaudeSettings', () => {
 
   it('rotates the stored refresh token on a re-run and preserves unrelated existing config.json fields', () => {
     const path = join(dir, 'settings.json')
-    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     // An operator / the Copilot lane may have set an unrelated field already.
     const cfgPath = join(process.env.TOKENSCOPE_STATE_DIR!, 'config.json')
     const between = JSON.parse(readFileSync(cfgPath, 'utf8'))
     between.instance_id = 'shared-with-copilot-lane'
     writeFileSync(cfgPath, JSON.stringify(between))
-    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, { ...FAKE_OAUTH, refresh_token: 'rt_rotated' }))
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, { ...FAKE_OAUTH, refresh_token: 'rt_rotated' }), join(dir, 'state'))
     const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
     expect(cfg.oauth_refresh_token).toBe('rt_rotated')
     expect(cfg.instance_id).toBe('shared-with-copilot-lane') // unrelated field survived
   })
 
-  it('a state-dir write failure does not fail the whole redeem (settings.json still lands)', () => {
+  it('a store write failure with NO store on disk still completes the redeem', () => {
     // Point the state dir at a path that cannot be created (a FILE sits where
-    // the dir needs to go) — writeSharedCredentialStore must swallow this.
+    // the dir needs to go). Nothing is left behind to shadow the environment,
+    // so the helper's no-store path reads the env block settings.json just
+    // received and emission works — failing the enrolment would help nobody.
     const blocker = join(dir, 'blocked-state')
     writeFileSync(blocker, 'not a directory')
-    process.env.TOKENSCOPE_STATE_DIR = blocker
     const path = join(dir, 'settings.json')
-    expect(() => writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH))).not.toThrow()
+    expect(() => writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), blocker)).not.toThrow()
     expect(JSON.parse(readFileSync(path, 'utf8')).env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBe('rt_super_secret')
+  })
+
+  it('a store write failure that leaves an EXISTING store behind fails the redeem loudly', () => {
+    /*
+     * The bricking case, and the reason this is no longer unconditionally
+     * best-effort. The helper PREFERS a stored credential over the environment
+     * and refuses to pair one with an environment destination — so a stale
+     * token-only store that we failed to update does not degrade to the env
+     * path, it stops emission permanently. Reporting a successful enrolment
+     * over that is silence plus a success message.
+     */
+    const stateDirPath = join(dir, 'occupied-state')
+    mkdirSync(stateDirPath, { recursive: true, mode: 0o700 })
+    // A legacy token-only store: exactly what the helper refuses to pair.
+    writeFileSync(join(stateDirPath, 'config.json'), JSON.stringify({ oauth_refresh_token: 'rt_old' }))
+    // Make the directory unwritable so the update cannot land.
+    chmodSync(stateDirPath, 0o500)
+    try {
+      expect(() =>
+        writeClaudeSettings(join(dir, 'settings2.json'), HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), stateDirPath),
+      ).toThrow(/Enrolment is NOT complete/)
+    } finally {
+      chmodSync(stateDirPath, 0o700)
+    }
   })
 
   it('writeSharedCredentialStore is a no-op when there is no refresh token to store', () => {
@@ -520,7 +547,13 @@ describe('main() against a mock redeem server', () => {
     new Promise<{ status: number | null; stdout: string }>((resolve) => {
       const child = spawn(
         'node',
-        [HELPER, '--handoff-code', code, '--api-base', baseUrl, '--settings-path', settingsPath, ...extra],
+        // --state-dir keeps the spawned CLI's credential store inside this
+        // test's sandbox — without it the subprocess writes the fixture refresh
+        // token into the REAL ~/.tokenscope, which is exactly what happened once.
+        // It must be under homeDir, not a /tmp dir: the flag is confined by
+        // assertConfinedPath, because unconfined it reopened the model-controlled
+        // path sink argv-guard exists to close.
+        [HELPER, '--handoff-code', code, '--api-base', baseUrl, '--settings-path', settingsPath, '--state-dir', join(homeDir, 'state'), ...extra],
         { encoding: 'utf8' } as never,
       )
       let stdout = ''

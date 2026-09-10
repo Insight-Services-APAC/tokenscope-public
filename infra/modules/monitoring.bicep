@@ -299,12 +299,30 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2024-03-11' 
 
 var monitoringMetricsPublisherRoleId = '3913510d-42f4-4e42-8a64-420c390055eb' // Monitoring Metrics Publisher
 var logAnalyticsReaderRoleId = '73c42c96-874c-492b-b04d-ab87d138a893' // Log Analytics Reader
+var monitoringReaderRoleId = '43d0d8ad-25c7-4714-9337-8ba259a9fe05' // Monitoring Reader
 
 resource publisherOnDcr 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRbac && !empty(identityPrincipalId)) {
   name: guid(dataCollectionRule.id, identityPrincipalId, monitoringMetricsPublisherRoleId)
   scope: dataCollectionRule
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', monitoringMetricsPublisherRoleId)
+    principalId: identityPrincipalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Monitoring Reader on the DCR — required to READ the DCR platform metrics
+// (RowsReceived_Count / RowsDropped_Count / TransformationErrors_Count) the
+// read-path stall alerts use as their ingest-side coverage signal (PR #319,
+// docs/design/read-path-attribution-coverage-signal.md). Distinct from
+// publisherOnDcr above, which grants PUBLISH (the ingest-bearer path); READ of
+// the metrics needs its own role. Until this is applied, the coverage probe
+// gets a 403 and the alerts fall back to the bearer gate (fails toward paging).
+resource monitoringReaderOnDcr 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRbac && !empty(identityPrincipalId)) {
+  name: guid(dataCollectionRule.id, identityPrincipalId, monitoringReaderRoleId)
+  scope: dataCollectionRule
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', monitoringReaderRoleId)
     principalId: identityPrincipalId
     principalType: 'ServicePrincipal'
   }
@@ -519,6 +537,9 @@ output dcrImmutableId string = dataCollectionRule.properties.immutableId
 
 @description('DCR name.')
 output dcrName string = dataCollectionRule.name
+
+@description('DCR ARM resource id — the Azure Monitor METRICS API target for the ingest-coverage probe (NUXT_AZURE_DCR_RESOURCE_ID). Needs Monitoring Reader on the DCR (monitoringReaderOnDcr above).')
+output dcrResourceId string = dataCollectionRule.id
 
 @description('Action group resource ID (empty when notificationEmail is empty — alerts still fire, no email). Consumed by the LATE ops-alerts module (ops-alerting.md ar-M19: ONE action group, reused — never a second one) whose alert rules scope resources this module must not depend on (monitoring is their producer; see main.bicep\'s deployment graph).')
 output actionGroupId string = empty(notificationEmail) ? '' : actionGroup.id

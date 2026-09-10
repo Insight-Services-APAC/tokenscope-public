@@ -101,7 +101,6 @@ onBeforeUnmount(() => {
 const role = computed(() => {
   const r = session.value?.role
   if (!r) return 'Guest'
-  if (r === 'global-finops') return 'Finance'
   return r.charAt(0).toUpperCase() + r.slice(1)
 })
 const userInitials = computed(() => {
@@ -154,7 +153,7 @@ const NAV_BY_ROLE: Record<string, Array<{ to: string; label: string; disabled?: 
   // Team / Practices / Finance collapsed into the consolidated Reporting entry
   // (spliced in navLinks below) at the reporting cutover.
   /*
-   * EVERY ROLE HAS PERSONAL SPEND. Manager, admin and global-finops used to get
+   * EVERY ROLE HAS PERSONAL SPEND. Manager, admin and the org-wide role used to get
    * "Home" (plus Reporting/Admin) and nothing else — no "My usage", no "My
    * projects" — while `platform-admin` got both. That was never an access
    * boundary: the pages RENDER for these roles today (a Global-finance capture
@@ -171,12 +170,6 @@ const NAV_BY_ROLE: Record<string, Array<{ to: string; label: string; disabled?: 
     { to: '/usage', label: 'My usage' },
   ],
   admin: [
-    { to: '/', label: 'Home' },
-    { to: '/projects', label: 'My projects' },
-    { to: '/usage', label: 'My usage' },
-    { to: '/admin', label: 'Admin' },
-  ],
-  'global-finops': [
     { to: '/', label: 'Home' },
     { to: '/projects', label: 'My projects' },
     { to: '/usage', label: 'My usage' },
@@ -384,7 +377,7 @@ const navLinks = computed(() => {
                 <div class="text-[11px] text-carbon-3">{{ p.sub }}</div>
               </div>
               <span
-                v-if="isImpersonating && (session?.role === p.key || (p.key === 'finance' && session?.role === 'global-finops'))"
+                v-if="isImpersonating && (session?.role === p.key || (p.key === 'finance' && session?.role === 'platform-admin'))"
                 class="text-[10px] font-bold uppercase tracking-wider text-brand-harmony"
               >Current</span>
               <span

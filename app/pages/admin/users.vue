@@ -14,7 +14,7 @@
  *     why a future drop will refuse.
  *
  * Pagination: limit=50 offset=N. Region filter is implicit (caller's
- * home region for admin; the same for global-finops in Wave VI — a
+ * home region for admin; the same for platform-admin in Wave VI — a
  * region picker lands in a later slice).
  */
 
@@ -60,11 +60,11 @@ const { session } = useSession()
 const regionId = computed(() => session.value?.regionId ?? '')
 const callerTeammateId = computed(() => session.value?.teammateId ?? '')
 
-// Org-wide roles (global-finops / platform-admin) can browse + reassign across
+// The org-wide role (platform-admin) can browse + reassign across
 // regions; a region-scoped admin stays in their own region.
 const isOrgWide = computed(() => {
   const r = session.value?.role
-  return r === 'global-finops' || r === 'platform-admin'
+  return r === 'platform-admin'
 })
 // All three reads are declared lazily and never awaited: navigation is never
 // gated on data (docs/design/admin-nav-responsiveness.md D1/D2).
@@ -518,7 +518,7 @@ function prevPage() {
 
 const isAdmin = computed(() => {
   const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+  return r === 'admin' || r === 'platform-admin'
 })
 
 // Options for a row's role <select>: the assignable roles PLUS the row's own

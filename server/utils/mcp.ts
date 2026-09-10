@@ -62,7 +62,8 @@ function hasScope(teammate: BearerTeammate, scope: string): boolean {
  *
  * `requireOAuthBearer`'s token→teammate→org_unit join now returns `orgPath`, so
  * this no longer costs a second round-trip. `rlsRoleFor` owns the
- * platform-admin → global-finops mapping (server/db/rls.ts).
+ * platform-admin → global-finops mapping (server/db/rls.ts). That arrow is the
+ * GUC scope value, not the retired role: do not "tidy" the two sides to match.
  *
  * Fail CLOSED on a missing org path (CORE-2): '' is the universal ltree
  * ancestor, so `cou.path <@ ''::ltree` would be TRUE for every row and the

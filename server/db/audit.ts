@@ -19,6 +19,7 @@
  *
  * Named after a sibling project's `lib/audit/` pattern (R2 F3 of the build plan).
  */
+import net from 'node:net'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { auditEvent } from '../../drizzle/schema'
 
@@ -53,13 +54,22 @@ export type AuditEventInput = {
 export function normalizeInet(ip: string | null | undefined): string | null {
   if (!ip) return null
   const s = String(ip).trim()
-  const v6 = s.match(/^\[([0-9a-fA-F:]+)\](?::\d+)?$/) // [::1]:443 -> ::1
-  if (v6) return v6[1]!
+  // Capture ANY bracket contents and let net.isIP below judge them. A charset
+  // here is a second, weaker parser: [0-9a-fA-F:]+ excludes dots, so the valid
+  // IPv4-mapped `[::ffff:192.0.2.1]:443` was discarded as malformed.
+  const v6 = s.match(/^\[([^\]]+)\](?::\d+)?$/) // [::1]:443 -> ::1
   const v4 = s.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/) // 10.0.0.1:443 -> 10.0.0.1
-  if (v4) return v4[1]!
-  // Bare IPv4 or IPv6 passes through; anything else (hostname, junk) → null.
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(s) || /^[0-9a-fA-F:]+$/.test(s)) return s
-  return null
+  const candidate = v6?.[1] ?? v4?.[1] ?? s
+  /*
+   * VALIDATE, never shape-match, and REJECT ZONE IDS. Both are load-bearing: a
+   * shape test accepts 999.999.999.999 and `deadbeef`, and net.isIP alone
+   * accepts `fe80::1%eth0` — `inet` refuses all three, the INSERT throws, and
+   * two callers swallow it. The value is a client-set header, so either gap
+   * lets a request suppress the audit row recording its own refusal.
+   * See docs/security-sprint/epic-mdash-remediation.md (W2.1).
+   */
+  if (candidate.includes('%')) return null
+  return net.isIP(candidate) !== 0 ? candidate : null
 }
 
 /**

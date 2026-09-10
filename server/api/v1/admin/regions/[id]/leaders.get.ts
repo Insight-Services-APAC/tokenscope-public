@@ -1,6 +1,6 @@
 /*
  * GET /api/v1/admin/regions/{id}/leaders — list a region's ACTIVE leaders
- * (region derivation, mig 0068). admin (region-scoped) / global-finops.
+ * (region derivation, mig 0068). admin (region-scoped) / platform-admin.
  *
  * A region leader is the manager-walk fallback target: an unplaced user's
  * manager chain is walked up to the nearest ancestor that is a leader, and
@@ -14,7 +14,7 @@ import { withRequestRls } from '../../../../../db/request-rls'
 import { requireUuidParam } from '../../../../../utils/require-uuid-param'
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin', 'global-finops')
+  await requireRole(event, 'admin')
   const id = requireUuidParam(event, 'id', 'region id')
 
   return await withRequestRls(event, async (tx) => {

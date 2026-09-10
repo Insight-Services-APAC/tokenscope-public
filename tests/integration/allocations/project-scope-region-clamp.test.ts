@@ -98,8 +98,8 @@ const mgrA = (): Session =>
     orgPath: ENG_PATH,
   }) as Session
 const adminA = (): Session => ({ ...mgrA(), email: 'admin.a@x.test', role: 'admin' }) as Session
-const globalFinops = (): Session =>
-  ({ ...mgrA(), email: 'gfin@x.test', role: 'global-finops' }) as Session
+const orgWide = (): Session =>
+  ({ ...mgrA(), email: 'gfin@x.test', role: 'platform-admin' }) as Session
 
 async function makeRegion(code: string): Promise<{ regionId: string; engId: string }> {
   const [r] = await t.client<{ id: string }[]>`
@@ -305,9 +305,9 @@ describe('the other role arms are unchanged', () => {
     expect(res.members.map((m) => m.teammate_id)).toContain(memberAId)
   })
 
-  it('global-finops stays org-wide — region B is still readable', async () => {
+  it('platform-admin stays org-wide — region B is still readable', async () => {
     const res = (await assignmentsGet(
-      ev({ session: globalFinops(), method: 'GET', params: { id: projBId } }),
+      ev({ session: orgWide(), method: 'GET', params: { id: projBId } }),
     )) as { members: { teammate_id: string }[] }
     expect(res.members.map((m) => m.teammate_id)).toContain(memberBId)
   })

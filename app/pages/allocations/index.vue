@@ -31,7 +31,7 @@ const { session } = useSession()
 // re-creates the contradiction this note exists to dispel.
 const scopeNote = computed(() => {
   const r = session.value?.role
-  return r === 'admin' || r === 'global-finops' || r === 'platform-admin'
+  return r === 'admin' || r === 'platform-admin'
     ? 'Showing projects across all regions (org-wide).'
     : "Showing the projects in your part of the org."
 })

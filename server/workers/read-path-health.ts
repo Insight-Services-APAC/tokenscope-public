@@ -16,13 +16,18 @@
  * endpoint) — it does NOT re-run the gatherer. worker_run.result is the JoinResult
  * jsonb ({ sessionsProcessed, attributionRowsWritten, errors, ... }); the endpoint
  * also maps attributionRowsWritten -> worker_run.rows_affected (extractRowsAffected
- * in run-worker/[name].post.ts). We read rows_affected for the STALL streak and
+ * in run-worker/[name].post.ts). We read rows_affected + the ingest-coverage
+ * verdict (result->'sourceCoverage'->>'status') for the STALL streak and
  * result->>'errors' / result->>'sessionsProcessed' for the ALL-FAULT case.
  *
  * Fires (see decideReadPathAlert for the exact truth table + thresholds) when
  * ANY of these hold for worker_name = 'azure-monitor-read':
- *   - STALL:      the last N runs ALL wrote 0 rows WHILE clients are still
- *                 emitting (fresh attribution_record.ts_event). This is the
+ *   - STALL:      a zero-write streak of >= N runs WHILE the DCR ingest pipeline
+ *                 received rows the joiner did not land (DCR RowsReceived_Count,
+ *                 an ingest-side metric INDEPENDENT of this reader's output — see
+ *                 streakSourceCoverage / server/azure/dcr-metrics.ts). When the
+ *                 coverage probe cannot measure, STALL falls back to the bearer
+ *                 gate (fresh mints), which fails toward paging. This is the
  *                 exact "reader dead but clients still emitting" outage.
  *   - ALL-FAULT:  the latest run errored on EVERY session it processed.
  *   - NO-SUCCESS: no successful run in the recent window (the cron is dead /
@@ -30,7 +35,7 @@
  *
  * Idempotency (don't re-alert every 15-min tick) + auto-resolve on recovery,
  * modelled on went-silent (auto-resolve) + budget-alert (idempotency pre-check).
- * Admin-routed via dispatchInbox 'read-path-stale' (platform-admin/global-finops).
+ * Admin-routed via dispatchInbox 'read-path-stale' (platform-admin).
  *
  * Recommended cadence: every ~15 min (registry). The actual cron is infra.
  */
@@ -38,6 +43,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
 import type * as schema from '../../drizzle/schema'
 import { dispatchInbox } from '../notifications/dispatch'
+import type { SourceCoverageStatus } from '../azure/dcr-metrics'
 
 const READER_WORKER = 'azure-monitor-read'
 
@@ -50,25 +56,17 @@ const READER_WORKER = 'azure-monitor-read'
 // cadence this is ~30-45 min of dead reads.
 const STALL_MIN_ZERO_RUNS = 3
 
-// STALL "is the fleet still emitting?" gate. CRITICAL: this MUST be measured
-// with a signal INDEPENDENT of the read path's own output, or the alert
-// auto-resolves mid-outage on the exact incident it exists to catch. We use
-// MAX(instance_attestation.last_bearer_at) — the timestamp the /bearer emit-token
-// mint endpoint stamps on every heartbeat (the WRITE / emit-auth side). It keeps
-// advancing all through a read-path outage because clients keep minting/emitting,
-// so STALL stays ARMED for the whole outage; it only stops when rows_affected>0
-// returns (the zero-write streak breaking — the correct recovery signal).
-//
-// (The earlier draft read MAX(attribution_record.ts_event) here — reader OUTPUT —
-// which ages out ~2h into a sustained silent-zero-write outage, dropped the gate,
-// and FALSELY auto-resolved while the reader was still dead. Never gate a
-// read-path-liveness alert on the read path's own writes.)
-//
-// last_bearer_at is a ~29-min heartbeat while a session is open, so 2h reads as
-// "fleet active recently". A genuinely idle fleet (no bearer mints in 2h)
-// correctly does NOT page on zero-write runs (there is nothing to land). Pre-
-// mig-0030 instances have last_bearer_at IS NULL and simply don't contribute to
-// the MAX — a fleet with only such instances reads as not-recently-emitting.
+// STALL bearer FALLBACK gate. The primary STALL signal is the ingest-side
+// coverage verdict (streakSourceCoverage). This bearer gate is consulted ONLY
+// when coverage is 'unknown' (the probe could not measure: pre-deploy, a scoped
+// streak, a 403 while Monitoring Reader is unassigned, a probe fault) — the same
+// state 'main' paged on. MAX(instance_attestation.last_bearer_at) is the
+// timestamp the /bearer emit-token mint endpoint stamps on every heartbeat (the
+// WRITE / emit-auth side, INDEPENDENT of the read path's output). It is NOT
+// usage — an editor left open mints all night and emits nothing (attribution-gap.ts
+// says so), which is exactly why it is only the FALLBACK now and coverage is
+// primary. Pre-mig-0030 instances have last_bearer_at IS NULL and don't
+// contribute to the MAX.
 const FLEET_EMITTING_FRESH_MS = 2 * 60 * 60 * 1000 // 2h
 
 // NO-SUCCESS: alert if there has been no SUCCESSFUL azure-monitor-read run in
@@ -101,15 +99,99 @@ export interface ReaderRun {
   // "unknown", NOT as a zero-write for the stall streak (see decideReadPathAlert).
   rowsAffected: number | null
   // From worker_run.result (the JoinResult jsonb). null when absent.
+  // sessionsProcessed is the size of the reader's SELECTION (JoinResult docs):
+  // it includes every open instance with a fresh bearer, so an idle laptop is 1,
+  // not 0. It feeds ALL-FAULT (errors vs sessions) and is NOT work evidence.
   sessionsProcessed: number | null
   errors: number | null
+  /*
+   * result->'sourceCoverage'->>'status' — the INGEST-SIDE coverage verdict for
+   * this run's tick (server/azure/dcr-metrics.ts): did the DCR pipeline receive
+   * rows the joiner did not land? THE work-evidence term for STALL, independent
+   * of this reader's own output. null = not measured (a run recorded before the
+   * probe shipped, a scoped/recovery run, or a thrown run with no result) —
+   * unknown, and an unknown falls STALL back to the bearer gate (see
+   * streakSourceCoverage / decideReadPathAlert).
+   */
+  sourceCoverage: SourceCoverageStatus | null
+  /*
+   * result->>'newEventsSeen' — DIAGNOSTIC only (folded from PR #316): usage
+   * records the run saw past the instance watermark. It is the middle term of
+   * the operator narrative "source received N · reader saw M new · wrote R"; it
+   * is NOT read by any alert decision (that is sourceCoverage). null = absent.
+   */
+  newEventsSeen: number | null
+}
+
+/*
+ * The consecutive most-recent zero-write streak: runs from the top whose
+ * rows_affected is EXACTLY 0. A >0 run or a null (unknown outcome — a thrown
+ * run, which we cannot claim as a zero-write) ends it. ONE definition, shared by
+ * both stall decisions (docs/design/ops-alerting.md A2.2 makes the operator
+ * page and the user banner evaluate one streak): the read-path-health STALL leg
+ * previously sliced the top 3 while attribution-stall walked the full streak, so
+ * identical history could clear one and hold the other, and evidence could age
+ * out of the top-3 window mid-outage (external review of PR #316, findings 7/10).
+ */
+export function zeroWriteStreak<T extends { rowsAffected: number | null }>(runs: readonly T[]): T[] {
+  let end = 0
+  while (end < runs.length && runs[end]!.rowsAffected === 0) end += 1
+  return runs.slice(0, end)
+}
+
+/*
+ * The INGEST-SIDE coverage verdict over a zero-write streak — the ONE
+ * work-evidence predicate both stall alerts share (imported by
+ * attribution-stall.ts exactly as the loaders are). Did the DCR pipeline receive
+ * rows the joiner did not land, anywhere in the streak?
+ *   - 'rows-arrived' — some run's probe saw rows: a real backlog → page.
+ *   - 'no-rows'      — no run saw rows but at least one measured empty: idle → quiet.
+ *   - 'unknown'      — no run measured (all pre-probe / scoped / failed): the
+ *                      decision falls back to the bearer gate (fails toward paging).
+ * 'rows-arrived' wins over 'no-rows' wins over 'unknown': a single tick that saw
+ * rows the joiner never landed is a backlog even if later probes read empty.
+ * During an ACTIVE outage (clients still emitting) rows keep physically arriving,
+ * so every tick RE-MEASURES 'rows-arrived' and the streak stays armed — unlike
+ * PR #316's watermark count, which only the first run saw and which aged out.
+ * The residual: once the source truly goes quiet (a burst the reader never
+ * landed, then the editor closes and ingestion stops), later probes read
+ * 'no-rows' and, after the run that saw rows scrolls out of the loaded window,
+ * the stall clears — a backlog that OUTLIVES ingestion is the recovery lane's
+ * (attribution-gap 72h / telemetry-recovery), not the 90-minute stall's.
+ */
+export function streakSourceCoverage(
+  streak: ReadonlyArray<{ sourceCoverage: SourceCoverageStatus | null }>,
+): SourceCoverageStatus {
+  if (streak.some((r) => r.sourceCoverage === 'rows-arrived')) return 'rows-arrived'
+  if (streak.some((r) => r.sourceCoverage === 'no-rows')) return 'no-rows'
+  return 'unknown'
+}
+
+/** True iff the streak's coverage is 'rows-arrived' — the DCR received rows the
+ *  joiner did not land. The single, positive work-evidence predicate; 'no-rows'
+ *  (idle) and 'unknown' (unmeasured) are both false. */
+export function hasWorkEvidenceCoverage(
+  streak: ReadonlyArray<{ sourceCoverage: SourceCoverageStatus | null }>,
+): boolean {
+  return streakSourceCoverage(streak) === 'rows-arrived'
 }
 
 export type ReadPathAlertReason = 'stall' | 'all-fault' | 'no-success'
 
+/*
+ * WHY a STALL fired, for the inbox body + reasonSummary (alert-diagnosability
+ * D1). 'source-backlog' — the DCR received rows the joiner did not land.
+ * 'coverage-unknown-bearer-fresh' — the probe could not measure, so we fell back
+ * to the bearer gate (today's behaviour): the estate LOOKS idle but the fleet is
+ * minting, and A2.1 is already paging for the same probe outage.
+ */
+export type StallCoverageBasis = 'source-backlog' | 'coverage-unknown-bearer-fresh'
+
 export interface ReadPathDecision {
   fire: boolean
   reason: ReadPathAlertReason | null
+  /** Present when reason === 'stall': which coverage basis fired it. */
+  coverageBasis?: StallCoverageBasis
 }
 
 export interface DecideInput {
@@ -152,21 +234,35 @@ export function decideReadPathAlert(input: DecideInput): ReadPathDecision {
     return { fire: true, reason: 'all-fault' }
   }
 
-  // ── STALL: the >= STALL_MIN_ZERO_RUNS most-recent runs ALL wrote 0 rows, ──
-  // WHILE the fleet is still emitting (fresh bearer mints — see
-  // FLEET_EMITTING_FRESH_MS; this is the INDEPENDENT signal, not reader output).
-  // rows_affected === 0 exactly: a null (unknown) breaks the streak (we can't
-  // claim a zero-write we didn't record), and a run that never recorded an
-  // outcome shouldn't mask an outage either way. We require at least
-  // STALL_MIN_ZERO_RUNS runs to exist.
-  const fleetEmitting =
-    lastFleetEmitMs !== null && nowMs - lastFleetEmitMs <= FLEET_EMITTING_FRESH_MS
-  if (fleetEmitting && runs.length >= STALL_MIN_ZERO_RUNS) {
-    const topN = runs.slice(0, STALL_MIN_ZERO_RUNS)
-    const allZero = topN.every((r) => r.rowsAffected === 0)
-    if (allZero) {
-      return { fire: true, reason: 'stall' }
+  // ── STALL: a zero-write streak of >= STALL_MIN_ZERO_RUNS runs, gated on the ──
+  // INGEST-SIDE coverage signal (streakSourceCoverage), NOT the reader's own
+  // output. The streak is the full consecutive zero-write run (shared
+  // zeroWriteStreak), not the top-3 slice — so evidence cannot age out of one
+  // window mid-outage (external review findings 7/10).
+  //   - coverage 'rows-arrived' → the pipeline received rows the joiner did not
+  //     land: a real backlog. Page REGARDLESS of the bearer (a burst the reader
+  //     never landed, then the editor closed, is still a stall).
+  //   - coverage 'no-rows' → nothing arrived: the idle-but-open-editor estate.
+  //     NEVER a stall — this is the false positive PR #316 tried and failed to
+  //     close, and the reason read-path-stale paged Dev 7×/24h.
+  //   - coverage 'unknown' → the probe could not measure (pre-deploy, a scoped
+  //     streak, a 403 while the role is unassigned, a probe fault). Fall back to
+  //     today's bearer gate: fresh mints → page. Fails toward paging, and A2.1
+  //     is already paging for a probe/LA outage.
+  const streak = zeroWriteStreak(runs)
+  if (streak.length >= STALL_MIN_ZERO_RUNS) {
+    const coverage = streakSourceCoverage(streak)
+    if (coverage === 'rows-arrived') {
+      return { fire: true, reason: 'stall', coverageBasis: 'source-backlog' }
     }
+    if (coverage === 'unknown') {
+      const fleetEmitting =
+        lastFleetEmitMs !== null && nowMs - lastFleetEmitMs <= FLEET_EMITTING_FRESH_MS
+      if (fleetEmitting) {
+        return { fire: true, reason: 'stall', coverageBasis: 'coverage-unknown-bearer-fresh' }
+      }
+    }
+    // coverage === 'no-rows' → idle estate; do not fire on the stall leg.
   }
 
   // ── NO-SUCCESS: no successful run within NO_SUCCESS_WINDOW_MS. ──
@@ -186,10 +282,12 @@ export function decideReadPathAlert(input: DecideInput): ReadPathDecision {
 }
 
 // Human-readable one-liner per reason for the inbox subject/body.
-function reasonSummary(reason: ReadPathAlertReason): string {
+function reasonSummary(reason: ReadPathAlertReason, coverageBasis?: StallCoverageBasis): string {
   switch (reason) {
     case 'stall':
-      return `The OTel read path wrote 0 rows on the last ${STALL_MIN_ZERO_RUNS} runs while clients are still emitting — the reader looks stuck.`
+      return coverageBasis === 'coverage-unknown-bearer-fresh'
+        ? `The OTel read path wrote 0 rows for ${STALL_MIN_ZERO_RUNS}+ runs while the fleet is still minting bearers, and the ingest-coverage probe could not measure — falling back to the bearer gate. Check the DCR metrics probe (Monitoring Reader on the DCR) and A2.1 telemetry-read.`
+        : `The OTel read path wrote 0 rows for ${STALL_MIN_ZERO_RUNS}+ runs although the ingest pipeline received rows it has not attributed (DCR RowsReceived_Count) — the reader looks stuck.`
     case 'all-fault':
       return 'The latest OTel read-path run errored on every session it processed — no attribution is landing.'
     case 'no-success':
@@ -219,9 +317,11 @@ const RUN_LOAD_LIMIT = 20
  * are part of this worker's contract and must not fork per consumer.
  *
  * Model on shouldDeepRescan's worker_run query + the diagnostics workers-RAG
- * SQL: read rows_affected and the result jsonb's errors/sessionsProcessed.
- * errors/sessionsProcessed are cast from the jsonb text — NULL-safe (a missing
- * key yields NULL, not 0).
+ * SQL: read rows_affected and the result jsonb's errors/sessionsProcessed/
+ * sourceCoverage/newEventsSeen. All are cast from the jsonb text — NULL-safe (a
+ * missing key yields NULL, not 0). For sourceCoverage that NULL is load-bearing:
+ * a run recorded before the probe shipped must read as UNKNOWN, never as "no
+ * rows" (streakSourceCoverage → bearer fallback).
  */
 export async function loadReaderRuns(
   db: PostgresJsDatabase<typeof schema>,
@@ -233,12 +333,19 @@ export async function loadReaderRuns(
     rows_affected: number | null
     sessions_processed: string | null
     errors: string | null
+    source_coverage: string | null
+    new_events_seen: string | null
   }>(sql`
     SELECT status,
            (EXTRACT(EPOCH FROM started_at) * 1000)::bigint::text AS started_at_ms,
            rows_affected,
            (result->>'sessionsProcessed') AS sessions_processed,
-           (result->>'errors') AS errors
+           (result->>'errors') AS errors,
+           -- The ingest-coverage verdict (JoinResult.sourceCoverage.status).
+           -- NULL when absent (pre-probe / scoped / thrown run) is load-bearing:
+           -- it must read as UNKNOWN, never as "no rows" (streakSourceCoverage).
+           (result->'sourceCoverage'->>'status') AS source_coverage,
+           (result->>'newEventsSeen') AS new_events_seen
       FROM worker_run
      WHERE worker_name = ${READER_WORKER}
        -- SCOPED runs (an operator recovery batch over explicit instance ids) are
@@ -268,7 +375,19 @@ export async function loadReaderRuns(
     rowsAffected: r.rows_affected === null ? null : Number(r.rows_affected),
     sessionsProcessed: r.sessions_processed === null ? null : Number(r.sessions_processed),
     errors: r.errors === null ? null : Number(r.errors),
+    sourceCoverage: normaliseCoverageStatus(r.source_coverage),
+    newEventsSeen: r.new_events_seen === null ? null : Number(r.new_events_seen),
   }))
+}
+
+/*
+ * The jsonb text `result->'sourceCoverage'->>'status'` is a free-form string at
+ * rest — validate it against the closed status union before it reaches a
+ * decision. An unrecognised value (a future status, corruption) reads as null =
+ * UNKNOWN, which is the fail-safe direction (bearer fallback → paging).
+ */
+function normaliseCoverageStatus(value: string | null): SourceCoverageStatus | null {
+  return value === 'rows-arrived' || value === 'no-rows' || value === 'unknown' ? value : null
 }
 
 /*
@@ -358,8 +477,12 @@ export async function runReadPathHealth(
     subject: 'TokenScope OTel read path has stalled — spend is not attributing',
     body: {
       reason,
+      // Present for a stall: which coverage basis fired it (D1). Lets an
+      // operator tell "the pipeline received rows we did not land" from "the
+      // probe could not measure, so we paged on the bearer".
+      ...(decision.coverageBasis ? { coverageBasis: decision.coverageBasis } : {}),
       worker: READER_WORKER,
-      summary: reasonSummary(reason),
+      summary: reasonSummary(reason, decision.coverageBasis),
       detectedAt: now.toISOString(),
       hint: 'The azure-monitor-read gatherer is not landing attribution while clients emit. Check the run-worker dispatch (worker_run + diagnostics), then force a full re-read with a one-off ACA job execution: DEEP_RESCAN=true against azure-monitor-read.',
     },

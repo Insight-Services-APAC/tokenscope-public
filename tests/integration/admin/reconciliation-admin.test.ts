@@ -45,7 +45,7 @@ beforeAll(async () => {
     VALUES (gen_random_uuid(),'oid-a','a@x.com',${regionA},${ouA},'developer'),
            (gen_random_uuid(),'oid-b','b@x.com',${regionB},${ouB},'developer'),
            (gen_random_uuid(),'oid-ra-admin','ra-admin@x.com',${regionA},${ouA},'admin'),
-           (gen_random_uuid(),'oid-ra-finops','ra-finops@x.com',${regionA},${ouA},'global-finops')`
+           (gen_random_uuid(),'oid-ra-finops','ra-finops@x.com',${regionA},${ouA},'platform-admin')`
   const tms = await t.client<{ id: string; oid: string }[]>`SELECT id::text AS id, entra_oid AS oid FROM teammate`
   teammateA = tms.find((m) => m.oid === 'oid-a')!.id
   teammateB = tms.find((m) => m.oid === 'oid-b')!.id
@@ -148,7 +148,7 @@ describe('records region clamp + summary', () => {
       FROM reconciliation_record WHERE status='proposed' ${regionClause}`)
   }
 
-  it('global-finops (no clamp) sees all rows incl org-scope', async () => {
+  it('platform-admin (no clamp) sees all rows incl org-scope', async () => {
     await seed()
     const [g] = await summary(null)
     expect(Number(g!.total)).toBe(4)
@@ -201,7 +201,7 @@ function ev(opts: { session: Session; body: unknown }) {
 }
 
 const raAdmin = (): Session => ({ teammateId: adminAId, email: 'ra-admin@x.com', displayName: 'RA Admin', role: 'admin', regionId: regionA, orgPath: 'ra.b' })
-const raFinops = (): Session => ({ teammateId: finopsId, email: 'ra-finops@x.com', displayName: 'RA Finops', role: 'global-finops', regionId: regionA, orgPath: 'ra.b' })
+const raFinops = (): Session => ({ teammateId: finopsId, email: 'ra-finops@x.com', displayName: 'RA Finops', role: 'platform-admin', regionId: regionA, orgPath: 'ra.b' })
 
 async function mapBoundTeammateId(login: string): Promise<string | null> {
   const rows = await t.client<{ teammate_id: string }[]>`
@@ -233,7 +233,7 @@ describe('github/map region clamp', () => {
     expect(res.teammateId).toBe(teammateA)
   })
 
-  it('global-finops → succeeds', async () => {
+  it('platform-admin → succeeds', async () => {
     const res = (await mapPost(ev({ session: raFinops(), body: { enterpriseId: ghEnterpriseId, teammateId: teammateB, login: 'ra-map-finops' } }))) as { teammateId: string }
     expect(res.teammateId).toBe(teammateB)
   })
