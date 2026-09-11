@@ -77,9 +77,10 @@ flowchart TD
   into the **repo-local** settings, so the project rides along with the repo
   across every ephemeral session — no per-repo token, no re-provision. The
   repo-local block is written with the endpoints and exporter config the device
-  needs but **without the durable OAuth refresh token** — the emit helper falls
-  back to the device credential store (0700 state dir) for that, so the durable
-  credential is not planted in every tagged working tree.
+  needs but **without the durable OAuth refresh token** — the emit helper reads
+  that from the device's own store first (`~/.tokenscope/config.claude-code.json`,
+  0600 in a 0700 dir; `~/.claude/settings.json` only while no store exists), so
+  the durable credential is not planted in every tagged working tree.
 - **Membership-gated attribution.** The joiner resolves the **teammate from the
   attestation by DEVICE_SID** (unspoofable per-event) and takes the **project
   from the emitted `code_hash` claim**, billing it only if that teammate is a

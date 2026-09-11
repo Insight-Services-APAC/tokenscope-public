@@ -7,6 +7,12 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-09-11 (snapshot e1d3321f)
+
+- Dependency security update: the fourteen advisories GitHub reported against
+  the lockfile (transitive packages under the MCP SDK, the Nuxt build tooling
+  and Nuxt UI) are cleared; `npm audit` is clean. No behaviour change.
+
 ## 2026-09-11 (snapshot 9c3df90d)
 
 - If you use both Claude Code and Copilot CLI on the same machine, they no
