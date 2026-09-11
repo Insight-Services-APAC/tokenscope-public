@@ -8,8 +8,8 @@
  * Writes (1 + 2 under the account's PASSWD home, which `$HOME` cannot move —
  * see TOKENSCOPE_DIR; 3 under `$HOME`, because a shell resolves its rc files
  * that way):
- *   1. ~/.tokenscope/config.json — durable emit creds + endpoints (mode 0600).
- *   2. ~/.tokenscope/oauth-access.json — OAuth creds (mode 0600). (same shape
+ *   1. ~/.tokenscope/config.copilot-cli.json — durable emit creds + endpoints (mode 0600).
+ *   2. ~/.tokenscope/oauth-access.copilot-cli.json — OAuth creds (mode 0600). (same shape
  *      as otel-headers-helper.sh expects)
  *   3. Shell RC files (login AND non-login: ~/.bashrc + ~/.profile [+ ~/.bash_profile
  *      if present]; or ~/.zshrc [+ ~/.zprofile/~/.zshenv]) — a DELIMITED REMOVABLE
@@ -49,12 +49,14 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import https from 'node:https'
 import http from 'node:http'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 import { discoverMcpOrigin } from './mcp-origin.mjs'
 import { realHome } from './real-home.mjs'
+import { deviceStorePath, assertStoreConsistent } from './device-store.mjs'
 import {
   acceptApiBaseArg,
   assertConfinedPath,
@@ -68,7 +70,7 @@ const BLOCK_END = '# <<< TokenScope <<<'
 /**
  * The durable Copilot credential store. Anchored on the PASSWD home, not `$HOME`.
  *
- * `config.json` under this dir holds `oauth_refresh_token` — a long-lived
+ * `config.copilot-cli.json` under this dir holds `oauth_refresh_token` — a long-lived
  * credential — so this path is a TRUST SINK, not merely a location. `os.homedir()`
  * consults `HOME` first, so a leaked or model-set `HOME` would write a live
  * refresh token into a directory somebody else chose (the working tree, a shared
@@ -89,9 +91,9 @@ const TOKENSCOPE_DIR = join(realHome(), '.tokenscope')
  * Per-PROJECT telemetry dir, RELATIVE to the project root (= Copilot's launch cwd).
  * The span file, byte-offset, and singleton lock all live here so telemetry travels
  * with the PROJECT, never HOME (Copilot runs container-per-project; only the device
- * credential — ~/.tokenscope/config.json — stays in HOME). NOT an absolute path: the
+ * credential — ~/.tokenscope/config.copilot-cli.json — stays in HOME). NOT an absolute path: the
  * shell-rc export below is deliberately relative so Copilot's file exporter resolves
- * it against the project root, and config.json carries the same relative value as the
+ * it against the project root, and config.copilot-cli.json carries the same relative value as the
  * fallback the forwarder resolves against ITS cwd (the project root).
  */
 const PROJECT_LOCAL_DIR = '.tokenscope.local'
@@ -99,11 +101,12 @@ const PROJECT_LOCAL_DIR = '.tokenscope.local'
 const HTTP_TIMEOUT_MS = 30_000
 
 // ── atomic file write (temp + rename) ────────────────────────────────────────
-// The forwarder daemon loadConfig()s config.json every tick and a crash mid-write
+// The forwarder daemon loadConfig()s config.copilot-cli.json every tick and a crash mid-write
 // must never truncate a shell RC file — write to a per-process temp then rename
 // (atomic on the same filesystem). Same pattern as claude-redeem's writeClaudeSettings.
 function writeFileAtomic(path, content, mode) {
-  const tmp = `${path}.tmp.${process.pid}`
+  // Random, not PID-only: PIDs collide across containers on the shared mount.
+  const tmp = `${path}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`
   try {
     writeFileSync(tmp, content, { encoding: 'utf8', ...(mode != null ? { mode } : {}) })
     if (mode != null) chmodSync(tmp, mode) // defeat umask
@@ -370,11 +373,14 @@ export function armOtelExporterRc(rcTargets, { log } = {}) {
 }
 
 // ── env-change detection + label classification ───────────────────────────────
-// The credential/endpoint fields config.json manages — always overwritten with the
+// The credential/endpoint fields config.copilot-cli.json manages — always overwritten with the
 // fresh redeem values. A SAME-environment re-run preserves any OTHER (user-set) key
 // but rewrites these; an environment change drops everything not in this set so no
 // stale cross-env field can survive at rest. Single source of truth for "managed".
 const MANAGED_CONFIG_KEYS = [
+  // The v2 envelope is managed, so a re-redeem repairs a mis-declared store.
+  'version',
+  'tool',
   'instance_id',
   'bearer_endpoint',
   'logs_endpoint',
@@ -442,7 +448,7 @@ export function detectEnvChange(existingConfig, newBundle) {
   }
 }
 
-// ── ~/.tokenscope/config.json ─────────────────────────────────────────────────
+// ── ~/.tokenscope/config.copilot-cli.json ──────────────────────────────────────────
 // CROSS-ENVIRONMENT TRANSITION: read any existing config first. When it points at a
 // DIFFERENT deployment (the bearer host changed — Sandbox→Dev, Dev→Prod), write a
 // CLEAN config so stale cross-env credentials/endpoints from the old deployment
@@ -454,12 +460,14 @@ function writeTokenscopeConfig(bundle, oauthRefreshToken, oauthClientId, overrid
   const targetDir = overrideDir ?? TOKENSCOPE_DIR
   mkdirSync(targetDir, { recursive: true, mode: 0o700 })
 
-  // config.json — the stable, forwarder-readable store.
-  // IMPORTANT: oauth_refresh_token lives HERE, not in oauth-access.json.
-  // otel-headers-helper.sh uses oauth-access.json as its *access-token cache*
+  // config.copilot-cli.json — the stable, forwarder-readable store.
+  // IMPORTANT: oauth_refresh_token lives HERE, not in oauth-access.copilot-cli.json.
+  // otel-headers-helper.sh uses oauth-access.copilot-cli.json as its *access-token cache*
   // (it mv's a {access_token,expires_at} object over it on every refresh) so
   // putting the refresh_token there would destroy it on the first bearer mint.
-  const configPath = join(targetDir, 'config.json')
+  // Per-tool: this lane owns config.copilot-cli.json outright, so a whole-file
+  // write is correct. docs/design/device-store-per-tool-sections.md
+  const configPath = deviceStorePath('copilot-cli', targetDir)
 
   // Read any existing config so we can (a) detect an environment change and (b) on a
   // same-env re-run preserve user-set extras. A present-but-unparseable config is
@@ -479,6 +487,8 @@ function writeTokenscopeConfig(bundle, oauthRefreshToken, oauthClientId, overrid
   // The fresh, managed credential/endpoint fields — always written with this redeem's
   // values, regardless of env change.
   const managed = {
+    version: 2,
+    tool: 'copilot-cli',
     instance_id: bundle.instance_id,
     bearer_endpoint: bundle.TOKENSCOPE_BEARER_ENDPOINT,
     logs_endpoint: bundle.TOKENSCOPE_LOGS_ENDPOINT,
@@ -488,7 +498,7 @@ function writeTokenscopeConfig(bundle, oauthRefreshToken, oauthClientId, overrid
     // PER-PROJECT, RELATIVE telemetry path. Telemetry + forwarder state live with the
     // PROJECT (`<project-root>/.tokenscope.local/`), NOT in HOME — Copilot runs
     // container-per-project, so the span file belongs to the project; only this
-    // config.json (the device credential) stays in HOME. We store the RELATIVE value
+    // config.copilot-cli.json (the device credential) stays in HOME. We store the RELATIVE value
     // (not join(targetDir, …)) so the forwarder's fallback resolves it against ITS cwd
     // (= the project root). A HOME-absolute fallback would silently drag the forwarder
     // back to the old per-HOME model on a host where COPILOT_OTEL_FILE_EXPORTER_PATH
@@ -502,6 +512,9 @@ function writeTokenscopeConfig(bundle, oauthRefreshToken, oauthClientId, overrid
   // ENVIRONMENT CHANGE: start from a CLEAN object so no stale cross-env field (an
   // old deployment's endpoints, a foreign oauth credential, or anything the old
   // config carried) can survive at rest pointing at the wrong deployment.
+  // Same rule the helper refuses on; a bad bundle fails HERE, loudly, not at
+  // the next mint with a store nothing can repair.
+  assertStoreConsistent('copilot-cli', managed)
   const configData = { ...managed }
   if (!envChange.changed && existingConfig) {
     for (const [k, v] of Object.entries(existingConfig)) {
@@ -513,31 +526,21 @@ function writeTokenscopeConfig(bundle, oauthRefreshToken, oauthClientId, overrid
   // a re-redeem must never race it into a half-written read.
   writeFileAtomic(configPath, JSON.stringify(configData, null, 2) + '\n', 0o600)
 
-  // oauth-access.json — the helper's access-token cache (access_token + expires_at only).
-  // Written as an empty initial placeholder; otel-headers-helper.sh will populate and
-  // overwrite it on first bearer mint. Do NOT store the refresh_token here.
-  // SKIP when the file already exists (re-redeem): clobbering a live cache would
-  // discard a perfectly valid access token for no reason — the helper self-heals a
-  // superseded one anyway. EXCEPTION: on an environment change the cached access token
-  // was minted by the OLD deployment's credential and is useless against the new
-  // bearer endpoint, so reset it to the empty placeholder (the helper re-mints).
-  const oauthPath = join(targetDir, 'oauth-access.json')
-  if (!existsSync(oauthPath) || envChange.changed) {
-    const oauthData = { access_token: '', expires_at: 0 }
-    writeFileAtomic(oauthPath, JSON.stringify(oauthData, null, 2) + '\n', 0o600)
-  }
-
+  // The access-token cache (oauth-access.copilot-cli.json) is NOT touched: the
+  // helper is its only writer, and it is bound to the bearer endpoint it was
+  // minted for, so a cache from a previous deployment fails the binding and is
+  // re-minted without anyone clearing it (design doc, cache section).
   return envChange
 }
 
 // ── redeem-bundle endpoint validation ─────────────────────────────────────────
 /**
  * Validate the redeem response's server-supplied endpoint bundle is safe to
- * persist — called BEFORE writeTokenscopeConfig writes it into config.json.
+ * persist — called BEFORE writeTokenscopeConfig writes it into config.copilot-cli.json.
  * Mirrors claude-redeem.mjs's assertClaudeRedeemResponse (S1 fix 3 — "S1's fix
  * said 'both redeem paths'; this is the second one"): a compromised/MITM'd
  * redeem response could otherwise plant a plaintext or malformed endpoint into
- * config.json, and every SUBSEQUENT bearer mint (otel-headers-helper.sh, every
+ * config.copilot-cli.json, and every SUBSEQUENT bearer mint (otel-headers-helper.sh, every
  * ~29 min) or span forward (copilot-forwarder.mjs's httpsPost, every tick) would
  * then send the durable credential / span data wherever that endpoint points.
  * Loopback allowed — a locally-running dev server legitimately returns its own
@@ -674,9 +677,9 @@ async function main() {
     )
     process.exit(1)
   }
-  // M3 fix: validate top-level OAuth fields before writing config.json.
+  // M3 fix: validate top-level OAuth fields before writing config.copilot-cli.json.
   // If the server returns a partial response (schema mismatch, old server version),
-  // writing config.json without oauth_refresh_token would silently re-introduce the
+  // writing config.copilot-cli.json without oauth_refresh_token would silently re-introduce the
   // B1 defect (mintBearer passes undefined to otel-headers-helper.sh → exits 1).
   if (!resp.oauth_refresh_token || typeof resp.oauth_refresh_token !== 'string') {
     console.error(
@@ -714,7 +717,7 @@ async function main() {
   }
   const envChange = writeTokenscopeConfig(bundle, resp.oauth_refresh_token, resp.oauth_client_id)
   // Cross-environment transition note (never prints a credential — only env labels).
-  // The bearer host changed, so the device just moved deployments and config.json was
+  // The bearer host changed, so the device just moved deployments and config.copilot-cli.json was
   // written CLEAN (stale old-env credentials/endpoints dropped, not carried forward).
   if (envChange?.changed) {
     const from = envChange.oldLabel ?? 'previous'
@@ -735,7 +738,7 @@ async function main() {
   //     OTel var: exporting Copilot's value would clobber Claude Code's (and vice
   //     versa) in any shell that launches both, silently mis-attributing one to
   //     the other. Attribution (instance / project / tool) is instead stamped by
-  //     the forwarder from ~/.tokenscope/config.json (see copilot-forwarder.mjs),
+  //     the forwarder from ~/.tokenscope/config.copilot-cli.json (see copilot-forwarder.mjs),
   //     so plain `copilot` Just Works with no per-tool OTel env in the shell.
   //
   // PER-PROJECT, RELATIVE path (`.tokenscope.local/copilot-otel.jsonl`). Copilot runs

@@ -26,12 +26,17 @@ let dir: string
 
 function writeConfig(over: Record<string, unknown> = {}) {
   writeFileSync(
-    join(dir, 'config.json'),
+    join(dir, 'config.copilot-cli.json'),
     JSON.stringify({ instance_id: INSTANCE, bearer_endpoint: BEARER, ...over }),
   )
 }
 function writeAccess(token: string | null = 'tok') {
-  writeFileSync(join(dir, 'oauth-access.json'), JSON.stringify(token ? { access_token: token } : {}))
+  // BOUND to the destination it was minted for, as every cache reader now
+  // requires: a record naming a different endpoint is discarded, not presented.
+  writeFileSync(
+    join(dir, 'oauth-access.copilot-cli.json'),
+    JSON.stringify(token ? { access_token: token, bearer_endpoint: BEARER } : {}),
+  )
 }
 function mockFetch(impl: () => unknown) {
   vi.stubGlobal('fetch', vi.fn(impl as never))
@@ -85,7 +90,7 @@ describe('refreshLanded — fail-open guards', () => {
   })
 
   it('config missing instance_id → not-configured', async () => {
-    writeFileSync(join(dir, 'config.json'), JSON.stringify({ bearer_endpoint: BEARER }))
+    writeFileSync(join(dir, 'config.copilot-cli.json'), JSON.stringify({ bearer_endpoint: BEARER }))
     writeAccess()
     const r = await refreshLanded({ dir })
     expect(r).toEqual({ ok: false, reason: 'not-configured' })

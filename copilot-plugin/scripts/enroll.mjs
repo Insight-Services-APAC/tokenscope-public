@@ -7,7 +7,7 @@
  * (forwarder-lifecycle.mjs `start`) calls enrollIfNeeded() so this very session can
  * start emitting WITHOUT any login: the plugin presents its bundled enrollment
  * secret + a claimed email to POST /api/v1/setup/enroll, and writes the returned
- * emit-only credential + the forwarder's config into ~/.tokenscope/config.json
+ * emit-only credential + the forwarder's config into ~/.tokenscope/config.copilot-cli.json
  * (mode 0600, atomic temp+rename) using the SAME on-disk shape the redeem flow
  * writes (copilot-redeem's writeTokenscopeConfig). Usage then attributes
  * PROVISIONALLY to the claimed email until the human signs in and confirms.
@@ -15,7 +15,7 @@
  * It is a strict NO-OP unless ALL of these hold, so it never re-enrols, never
  * clobbers a real credential, and never fires for an un-injected dev checkout:
  *   - the device is NOT already enrolled (no complete emit credential in
- *     ~/.tokenscope/config.json), AND
+ *     ~/.tokenscope/config.copilot-cli.json), AND
  *   - a bundled enrollment secret IS configured (publish-injected, not the
  *     placeholder), AND
  *   - we can determine a real claimed email (never guessed).
@@ -46,20 +46,14 @@
  *
  * STANDALONE: this file imports nothing from plugin/scripts/* — the copilot-plugin
  * ships independently (like copilot-redeem.mjs, it inlines its own HTTP + api-base
- * + config IO). It reads ~/.tokenscope/config.json inline; it does NOT introduce a
+ * + config IO). It reads ~/.tokenscope/config.copilot-cli.json inline; it does NOT introduce a
  * shared config-reader module.
  */
-import {
-  readFileSync,
-  writeFileSync,
-  existsSync,
-  mkdirSync,
-  chmodSync,
-  renameSync,
-  rmSync,
-} from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, renameSync, rmSync, linkSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
 import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { deviceStorePath, legacyStorePath, assertStoreConsistent } from './device-store.mjs'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { trustedGitPath } from './trusted-git.mjs'
@@ -71,7 +65,7 @@ import { resolveEnrollmentSecret } from './enrollment-secret.mjs'
 // assertSafeRedeemBundle (S2) is REACHED here too, not re-implemented: enroll.mjs
 // already imports from this vendored sibling, so validating the server-supplied
 // endpoint bundle before it is persisted uses the SAME check copilot-redeem.mjs's
-// own redeem path uses (both write onto the identical ~/.tokenscope/config.json
+// own redeem path uses (both write onto the identical ~/.tokenscope/config.copilot-cli.json
 // contract, so they must agree on what "safe" means).
 import {
   armOtelExporterRc,
@@ -84,7 +78,7 @@ import {
 // same as landed-check.mjs and status.mjs.
 import { assertSafeEndpoint } from './endpoint-guard.mjs'
 // real-home.mjs — the ONE answer to "where is the account's home", vendored verbatim
-// like endpoint-guard.mjs. This door WRITES config.json (oauth_refresh_token), so it
+// like endpoint-guard.mjs. This door WRITES config.copilot-cli.json (oauth_refresh_token), so it
 // must land on the same anchor copilot-redeem.mjs writes and copilot-forwarder.mjs
 // reads; see stateDir() below.
 import { realHome } from './real-home.mjs'
@@ -115,7 +109,7 @@ const DEFAULT_API_BASE = 'https://tokenscope.example.com'
  * TOKENSCOPE_API_BASE IS DELIBERATELY NOT A SOURCE HERE, and it used to be the
  * FIRST one — above even the explicit argument. This is the call that POSTs the
  * bundled ENROLLMENT SECRET and then persists whatever bearer / OTLP / oauth
- * endpoints come back into ~/.tokenscope/config.json, so whoever names the host
+ * endpoints come back into ~/.tokenscope/config.copilot-cli.json, so whoever names the host
  * gets the org-wide secret on the way out and the destination of every future
  * token and span on the way back. `plugin/scripts/api-base.mjs` documents why
  * that env var is not a trustworthy source (a repository can supply it, and
@@ -226,7 +220,7 @@ export function httpsPostJson(urlStr, body, { timeoutMs = 30_000 } = {}) {
  * and `copilot-redeem.mjs` anchors its own `TOKENSCOPE_DIR` on `realHome()` too.
  *
  * The anchor is `realHome()`, not `homedir()`, because this is the SECOND writer of
- * `config.json` — which holds `oauth_refresh_token`. `os.homedir()` consults `HOME`
+ * `config.copilot-cli.json` — which holds `oauth_refresh_token`. `os.homedir()` consults `HOME`
  * first, so a leaked or model-set `HOME` would decide where a live durable credential
  * lands, and would split this writer from the forwarder that has to read it back.
  *
@@ -240,7 +234,7 @@ export function stateDir(env = process.env, home = realHome()) {
   return (env?.TOKENSCOPE_STATE_DIR ?? '').trim() || join(home, '.tokenscope')
 }
 
-/** Read ~/.tokenscope/config.json (or null on any failure — missing/unparseable). */
+/** Read the Copilot store (or null on any failure — missing/unparseable). */
 export function readConfig(configPath) {
   try {
     return JSON.parse(readFileSync(configPath, 'utf8'))
@@ -250,7 +244,7 @@ export function readConfig(configPath) {
 }
 
 /**
- * True if `config` (the parsed ~/.tokenscope/config.json) already carries a
+ * True if `config` (the parsed ~/.tokenscope/config.copilot-cli.json) already carries a
  * COMPLETE emit enrolment — a durable OAuth refresh token AND a bearer endpoint
  * AND a non-empty instance id. When enrolled we must NEVER re-enrol (it would mint
  * a second provisional instance) or clobber the existing (possibly
@@ -334,12 +328,18 @@ export function computeDeviceBinding() {
 }
 
 /** Atomic temp+rename write (mode if given) — never truncates on a crash mid-write. */
-function writeFileAtomic(path, content, mode) {
-  const tmp = `${path}.tmp.${process.pid}`
+function writeFileAtomic(path, content, mode, { exclusive = false } = {}) {
+  // Random, not PID-only: PIDs collide across containers on the shared mount.
+  const tmp = `${path}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`
   try {
     writeFileSync(tmp, content, { encoding: 'utf8', ...(mode != null ? { mode } : {}) })
     if (mode != null) chmodSync(tmp, mode) // defeat umask
-    renameSync(tmp, path)
+    if (exclusive) {
+      // link fails with EEXIST: check and create in one operation.
+      linkSync(tmp, path)
+    } else {
+      renameSync(tmp, path)
+    }
   } catch (err) {
     try {
       rmSync(tmp, { force: true })
@@ -347,11 +347,19 @@ function writeFileAtomic(path, content, mode) {
       /* best-effort cleanup */
     }
     throw err
+  } finally {
+    if (exclusive) {
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        /* best-effort */
+      }
+    }
   }
 }
 
 /**
- * Build the ~/.tokenscope/config.json payload from a COPILOT-shaped enroll response.
+ * Build the ~/.tokenscope/config.copilot-cli.json payload from a COPILOT-shaped enroll response.
  *
  * The enroll POST now passes `tool: 'copilot-cli'` (P1-5), so the server returns the
  * copilot bundle directly (telemetry.copilot, the CopilotBundle shape — TOKENSCOPE_*
@@ -399,7 +407,7 @@ export function buildCopilotConfig(resp) {
   // explicitly allowed loopback) BEFORE it is returned for persisting. Reuses
   // copilot-redeem.mjs's assertSafeRedeemBundle (imported above) rather than a
   // second validator: emit-on-install and the manual redeem write onto the
-  // IDENTICAL ~/.tokenscope/config.json contract, so both paths must agree on
+  // IDENTICAL ~/.tokenscope/config.copilot-cli.json contract, so both paths must agree on
   // what "safe" means. Throws — the caller (enrollIfNeeded) already treats any
   // throw from buildCopilotConfig as a fail-open 'write-failed'.
   assertSafeRedeemBundle({
@@ -408,7 +416,10 @@ export function buildCopilotConfig(resp) {
     TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: tokenEndpoint,
   })
 
-  return {
+  const config = {
+    // The same v2 envelope copilot-redeem writes.
+    version: 2,
+    tool: 'copilot-cli',
     instance_id: instanceId,
     bearer_endpoint: bearerEndpoint,
     logs_endpoint: logsEndpoint,
@@ -422,29 +433,32 @@ export function buildCopilotConfig(resp) {
     copilot_otel_file_path: join(PROJECT_LOCAL_DIR, 'copilot-otel.jsonl'),
     otel_resource_attributes: attrs,
   }
+  // Same rule the helper refuses on. enrollIfNeeded treats a throw here as a
+  // fail-open 'write-failed', which is right: never persist a store setup
+  // cannot later repair.
+  assertStoreConsistent('copilot-cli', config)
+  return config
 }
 
 /**
  * Write the enroll config into `targetDir` (default ~/.tokenscope), mirroring
  * copilot-redeem's writeTokenscopeConfig on-disk contract:
- *   - config.json (mode 0600, atomic) — the forwarder-readable durable store.
- *   - oauth-access.json (mode 0600) — the helper's access-token cache, written as
- *     an EMPTY placeholder ONLY when absent (never clobber a live cache).
+ *   - config.copilot-cli.json (mode 0600, atomic) — the forwarder-readable durable store.
+ * The access-token cache is the helper's alone; nothing here writes it.
  * Exported for unit testing.
  */
-export function writeTokenscopeConfig(config, targetDir = stateDir()) {
+export function writeTokenscopeConfig(config, targetDir = stateDir(), { exclusive = false } = {}) {
   mkdirSync(targetDir, { recursive: true, mode: 0o700 })
-  const configPath = join(targetDir, 'config.json')
-  writeFileAtomic(configPath, JSON.stringify(config, null, 2) + '\n', 0o600)
-
-  const oauthPath = join(targetDir, 'oauth-access.json')
-  if (!existsSync(oauthPath)) {
-    writeFileAtomic(
-      oauthPath,
-      JSON.stringify({ access_token: '', expires_at: 0 }, null, 2) + '\n',
-      0o600,
-    )
+  // Per-tool: this lane owns config.copilot-cli.json. Two writers though
+  // (auto-enrol here, manual redeem), so auto-enrol creates EXCLUSIVELY and
+  // treats EEXIST as already-enrolled; redeem keeps replacement semantics.
+  const configPath = deviceStorePath('copilot-cli', targetDir)
+  if (exclusive && existsSync(configPath)) {
+    const err = new Error(`EEXIST: ${configPath} already exists`)
+    err.code = 'EEXIST'
+    throw err
   }
+  writeFileAtomic(configPath, JSON.stringify(config, null, 2) + '\n', 0o600, { exclusive })
 }
 
 /**
@@ -484,8 +498,18 @@ export async function enrollIfNeeded({
   cwd = process.cwd(),
   home = homedir(),
 } = {}) {
-  // 1. Already enrolled — never re-enrol / never clobber an existing credential.
-  if (isEnrolled(readConfig(join(targetDir, 'config.json')))) {
+  // 1. An OWN store on disk, in ANY shape, is a no-op, and it is checked FIRST:
+  //    auto-enrol creates the file exclusively and can never replace it, so
+  //    re-POSTing here would present the enrolment secret on every launch and
+  //    never repair the device. Repair is the manual redeem. Only when no own
+  //    store exists does a COMPLETE legacy shared store count as enrolled (this
+  //    lane's pre-split read); an incomplete or corrupt legacy file is not ours.
+  const ownStore = deviceStorePath('copilot-cli', targetDir)
+  if (existsSync(ownStore)) {
+    const reason = isEnrolled(readConfig(ownStore)) ? 'already-enrolled' : 'own-store-incomplete'
+    return { enrolled: false, reason }
+  }
+  if (isEnrolled(readConfig(legacyStorePath(targetDir)))) {
     return { enrolled: false, reason: 'already-enrolled' }
   }
 
@@ -531,10 +555,17 @@ export async function enrollIfNeeded({
   }
 
   // 6. Validate + write. buildCopilotConfig throws on any incomplete/unattributable
-  //    bundle BEFORE we touch config.json (so we never write a half-config).
+  //    bundle BEFORE we touch config.copilot-cli.json (so we never write a half-config).
   try {
     const config = buildCopilotConfig(resp)
-    writeConfig(config, targetDir)
+    // Exclusive: a redeem may have landed during the POST above. EEXIST is the
+    // outcome we wanted, not a failure.
+    try {
+      writeConfig(config, targetDir, { exclusive: true })
+    } catch (err) {
+      if (err && err.code === 'EEXIST') return { enrolled: false, reason: 'already-enrolled' }
+      throw err
+    }
     // Arm span emission for FUTURE copilot launches (parity with Claude's settings.json
     // emit-on-install). Copilot reads COPILOT_OTEL_FILE_EXPORTER_PATH at launch, so this
     // takes effect on the next shell that sources the rc — same next-launch contract as

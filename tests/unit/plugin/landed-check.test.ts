@@ -31,7 +31,12 @@ const env = {
 let dir: string
 
 function writeAccess(token: string | null = 'tok') {
-  writeFileSync(join(dir, 'oauth-access.json'), JSON.stringify(token ? { access_token: token } : {}))
+  // BOUND to the destination it was minted for, as every cache reader now
+  // requires: a record naming a different endpoint is discarded, not presented.
+  writeFileSync(
+    join(dir, 'oauth-access.claude-code.json'),
+    JSON.stringify(token ? { access_token: token, bearer_endpoint: env.TOKENSCOPE_BEARER_ENDPOINT } : {}),
+  )
 }
 function mockFetch(impl: () => unknown) {
   vi.stubGlobal('fetch', vi.fn(impl as never))

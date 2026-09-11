@@ -7,20 +7,21 @@
  * Mirrors the Claude landed-check contract (plugin/scripts/landed-check.mjs):
  * calls GET /api/v1/instances/{id}/health (emit-credential authed — the SAME gate
  * as /bearer) using the emit access token the headers-helper already cached
- * (~/.tokenscope/oauth-access.json), then writes a small last-landed.json cache.
+ * (~/.tokenscope/oauth-access.copilot-cli.json), then writes a small last-landed.json cache.
  * Best-effort + short timeout: ANY failure leaves the last-landed cache untouched
  * and returns a typed `{ ok:false, reason }` — it NEVER throws, so a status probe
  * can fail-open to "unconfirmed" rather than red.
  *
  * The ONE Copilot difference from Claude: the instance id + bearer endpoint come
- * from ~/.tokenscope/config.json (Copilot has no ~/.claude/settings.json env block
+ * from ~/.tokenscope/config.copilot-cli.json (Copilot has no ~/.claude/settings.json env block
  * and does not export OTEL_RESOURCE_ATTRIBUTES to the shell — see copilot-redeem.mjs),
  * NOT from OTEL_RESOURCE_ATTRIBUTES / settings.json. The access-token cache file is
- * the same one otel-headers-helper.sh writes (oauth-access.json), so reading it here
+ * the same one otel-headers-helper.sh writes (oauth-access.copilot-cli.json), so reading it here
  * never needs the durable refresh token.
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { resolveStorePath, accessCachePath, readBoundAccessToken } from './device-store.mjs'
 import { fileURLToPath } from 'node:url'
 // endpoint-guard.mjs (S1/S2) — the ONE endpoint validator, vendored verbatim
 // (see scripts/sync-copilot-plugin.mjs). Do not write a second one; mirrors
@@ -47,7 +48,7 @@ function readJson(p) {
  * under the PASSWD home — the one resolution `copilot-forwarder.mjs`, `enroll.mjs`,
  * `status.mjs` and `copilot-redeem.mjs`'s `TOKENSCOPE_DIR` all share.
  *
- * `realHome()`, not `homedir()`: this reads `config.json` (which holds
+ * `realHome()`, not `homedir()`: this reads `config.copilot-cli.json` (which holds
  * `oauth_refresh_token`) for the instance id and the bearer endpoint it derives the
  * health URL from, so a leaked or model-set `HOME` would otherwise choose which
  * device's identity is checked and which host is asked — and, absent a planted file,
@@ -64,7 +65,7 @@ export function stateDir() {
  * OR when the derived URL fails assertSafeEndpoint (S2 fix — closes the Copilot
  * leg of client-plugins:mitm:0003: refreshLanded's `fetch(healthUrl, ...)` picks
  * whatever scheme the URL carries with no complaint, so an off-box http:// bearer
- * endpoint — a poisoned config.json, or a MITM'd redeem/enroll response — would
+ * endpoint — a poisoned config.copilot-cli.json, or a MITM'd redeem/enroll response — would
  * otherwise be GET'd in plaintext carrying the cached emit access token).
  * allowLoopback:true — local-dev TOKENSCOPE_API_BASE (:3450) legitimately returns
  * a loopback bearer endpoint.
@@ -83,15 +84,15 @@ export function healthUrlFromBearer(bearerEndpoint) {
 
 /**
  * Refresh the last-landed cache for a Copilot device. Returns a small typed result
- * object; NEVER throws. Reads creds from ~/.tokenscope/config.json (instance_id +
- * bearer_endpoint) and the access token from oauth-access.json.
+ * object; NEVER throws. Reads creds from ~/.tokenscope/config.copilot-cli.json (instance_id +
+ * bearer_endpoint) and the access token from oauth-access.copilot-cli.json.
  *
  * @param {{ dir?: string }} [opts] — override the state dir (tests).
  * @returns {Promise<{ ok: boolean, reason?: string, lastEmission?: string|null, silent?: boolean, revoked?: boolean }>}
  */
 export async function refreshLanded({ dir } = {}) {
   const stateD = dir || stateDir()
-  const config = readJson(join(stateD, 'config.json'))
+  const config = readJson(resolveStorePath('copilot-cli', stateD))
   const instanceId = config?.instance_id
   const bearerEndpoint = config?.bearer_endpoint
   if (!instanceId || !bearerEndpoint) return { ok: false, reason: 'not-configured' }
@@ -99,8 +100,9 @@ export async function refreshLanded({ dir } = {}) {
   const healthUrl = healthUrlFromBearer(bearerEndpoint)
   if (!healthUrl) return { ok: false, reason: 'bad-endpoint' }
 
-  const access = readJson(join(stateD, 'oauth-access.json'))
-  const token = access?.access_token || access?.accessToken || access?.token
+  const access = readJson(accessCachePath('copilot-cli', stateD))
+  // Only a cache bound to this destination may be presented.
+  const token = readBoundAccessToken(access, bearerEndpoint)
   if (!token) return { ok: false, reason: 'no-token' }
 
   let res
@@ -139,7 +141,7 @@ export async function refreshLanded({ dir } = {}) {
   return { ok: true, lastEmission, silent, revoked }
 }
 
-// CLI: refresh from ~/.tokenscope/config.json (best-effort, prints the result JSON).
+// CLI: refresh from ~/.tokenscope/config.copilot-cli.json (best-effort, prints the result JSON).
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   refreshLanded().then((r) => process.stdout.write(`${JSON.stringify(r)}\n`))
 }

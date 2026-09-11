@@ -89,12 +89,14 @@ export default defineEventHandler(async (event) => {
     // return target is `callbackRedirectUrl` (login.get.js stores it in the session)
     // — NOT `redirect`, which it silently ignores (→ falls to the configured default
     // `/`, i.e. home: the bug seen in the live flow). The module's OWN bug (#149)
-    // would clear the session before the callback reads it, but we already PATCH that
-    // (patches/nuxt-oidc-auth+1.0.0-beta.11.patch reads the value before session.clear),
-    // so the native callbackRedirectUrl survives — no cookie/middleware hack needed.
-    // Its sanitizer requires a path starting with `/` but not `//`; our authorize path
-    // satisfies that. (Honoured because the entra provider config does not pin
-    // callbackRedirectUrl — a configured value would override this per-request one.)
+    // would clear the session before the callback reads it; that is fixed upstream
+    // as of 1.0.0-beta.12 (we carried a local patch for it through beta.11), so the
+    // native callbackRedirectUrl survives — no cookie/middleware hack needed.
+    // Its sanitizer requires a path starting with `/` but not `//`, and since
+    // beta.12 also rejects `\`, TAB, LF and CR; `returnTo` is a pathname plus a
+    // percent-encoded search, so it carries none of them. (Honoured because the
+    // entra provider config does not pin callbackRedirectUrl — a configured value
+    // would override this per-request one.)
     const loginUrl = `/auth/entra/login?callbackRedirectUrl=${encodeURIComponent(returnTo)}`
     return sendRedirect(event, loginUrl, 302)
   }

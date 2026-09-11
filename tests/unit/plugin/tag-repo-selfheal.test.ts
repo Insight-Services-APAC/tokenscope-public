@@ -11,11 +11,12 @@
  * exits 0) so a hook can never break the session.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, chmodSync, existsSync, cpSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, chmodSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { writeRepoTag, computeCodeHash } from '../../../plugin/scripts/tag-repo.mjs'
+import { materialiseSandboxedPlugin } from './helpers/sandboxed-plugin.js'
 
 // --- fixtures ------------------------------------------------------------
 
@@ -433,9 +434,9 @@ let installedHook: string
 
 function materialiseInstall(home: string): void {
   versionsDir = join(home, 'versions')
-  const installed = join(versionsDir, '0.1.0')
-  cpSync(BUNDLE_SRC, installed, { recursive: true })
-  installedHook = join(installed, 'hooks', 'session-start.mjs')
+  // Stubs the emit helper and the store migration, which anchor on the passwd
+  // home and would otherwise run against the developer's real device.
+  installedHook = materialiseSandboxedPlugin(BUNDLE_SRC, join(versionsDir, '0.1.0'))
 }
 
 /** Write a fake global ~/.claude/settings.json under `home`. */

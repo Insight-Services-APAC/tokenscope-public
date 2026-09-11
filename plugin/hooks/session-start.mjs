@@ -31,7 +31,7 @@
  * `systemMessage` is shown to the developer; `additionalContext` goes to the
  * model). No credential/token material is ever written to stdout or stderr.
  */
-import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, chmodSync, mkdirSync, appendFileSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, chmodSync, mkdirSync, appendFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -39,7 +39,18 @@ import { spawn } from 'node:child_process'
 import http from 'node:http'
 import { resolveRepoProjectCode, computeCodeHash, readGlobalEnrolment, writeRepoTag, resolveRepoRoot } from '../scripts/tag-repo.mjs'
 import { reconcilePluginPaths, applyOtlpProxyRepoint, otlpForwarderPath, mergeClaudeSettings, otlpProxyStashMissing, isLoopbackHost, OTLP_DCE_ENV_KEY } from '../scripts/env-builder.mjs'
-import { readSettingsEnv, readEmitSentinel, runEmitHelper, stateDir, globalSettingsEnv, repoTagEnv, safeProcessEnv, realHome, migrateStoredEndpoints } from '../scripts/plugin-runtime.mjs'
+import {
+  readSettingsEnv,
+  readEmitSentinel,
+  runEmitHelper,
+  stateDir,
+  globalSettingsEnv,
+  repoTagEnv,
+  safeProcessEnv,
+  realHome,
+  migrateStoredEndpoints,
+  casWriteFile,
+} from '../scripts/plugin-runtime.mjs'
 import { resolveShim, shimActive } from '../scripts/otlp-shim-policy.mjs'
 import { refreshLanded } from '../scripts/landed-check.mjs'
 import { checkRepoProjectBillable } from '../scripts/project-check.mjs'
@@ -389,7 +400,7 @@ export function neutraliseRepoExecEnv(cwd = process.cwd()) {
  * REPLACEMENT — the fact `tag-repo.mjs:236-240` builds the whole self-contained
  * repo env copy around), so that one variable can also be repo-supplied. The
  * state dir is where `otel-headers-helper.sh` caches the freshly minted emit
- * ACCESS TOKEN (`oauth-access.json`) and where the OTLP forwarder reads the
+ * ACCESS TOKEN (`oauth-access.<tool>.json`) and where the OTLP forwarder reads the
  * stash naming its upstream — both credential-bearing, so a repository must not
  * get to choose it.
  *
@@ -463,46 +474,26 @@ export function selfHealPluginPaths({
   scriptsDir = resolve(HOOK_DIR, '..', 'scripts'),
 } = {}) {
   if (!existsSync(settingsPath)) return
-  let raw
-  try {
-    raw = readFileSync(settingsPath, 'utf8')
-  } catch {
-    return
-  }
-  let settings
-  try {
-    settings = JSON.parse(raw)
-  } catch {
-    return // unparseable — NEVER clobber (would wipe the emit credential)
-  }
-  // Only ever repoint to a target that actually exists — never create a phantom path.
-  const statuslinePath = join(scriptsDir, 'statusline.mjs')
-  const helperPath = join(scriptsDir, 'otel-headers-helper.sh')
-  const { settings: next, changed } = reconcilePluginPaths(settings, {
-    statuslinePath: existsSync(statuslinePath) ? statuslinePath : null,
-    helperPath: existsSync(helperPath) ? helperPath : null,
-  })
-  if (!changed) return
-  // Atomic temp+rename, mode 0600 (settings.json carries the durable emit credential).
-  const tmp = `${settingsPath}.tmp.${process.pid}`
-  try {
-    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
-    chmodSync(tmp, 0o600) // defeat umask (match claude-redeem / statusline-toggle)
-    // Compare-and-swap: if another writer (redeem / statusline toggle) changed the
-    // file since we read it, abort rather than clobber a freshly-written credential.
-    // The next launch self-heals again.
-    if (readFileSync(settingsPath, 'utf8') !== raw) {
-      rmSync(tmp, { force: true })
-      return
-    }
-    renameSync(tmp, settingsPath)
-  } catch {
+  // casWriteFile: re-derived from the CURRENT bytes on each attempt, so a stale
+  // snapshot can never roll back a rotated refresh token.
+  casWriteFile(settingsPath, (raw) => {
+    if (raw === null) return null
+    let settings
     try {
-      rmSync(tmp, { force: true })
+      settings = JSON.parse(raw)
     } catch {
-      /* ignore cleanup failure */
+      return null // unparseable — NEVER clobber (would wipe the emit credential)
     }
-  }
+    // Only ever repoint to a target that actually exists — never create a phantom path.
+    const statuslinePath = join(scriptsDir, 'statusline.mjs')
+    const helperPath = join(scriptsDir, 'otel-headers-helper.sh')
+    const { settings: next, changed } = reconcilePluginPaths(settings, {
+      statuslinePath: existsSync(statuslinePath) ? statuslinePath : null,
+      helperPath: existsSync(helperPath) ? helperPath : null,
+    })
+    if (!changed) return null
+    return `${JSON.stringify(next, null, 2)}\n`
+  })
 }
 
 /**
@@ -818,35 +809,34 @@ export async function selfHealGlobalOtlpEndpoint({
     const healthy = decideForwarderAction(probe, dir).action === 'healthy'
     revertWhenDormant = !healthy
   }
-  // Reconcile a COPY of the env so we can compare and skip a no-op write. The
-  // comparison covers the WHOLE env block, not just the endpoint: the reconcile
-  // can also add the durable DCE copy (backfilling a legacy pin) or remove it
-  // (after a revert), and both must reach disk.
-  const envBefore = JSON.stringify(settings.env ?? {})
-  const nextEnv = applyOtlpProxyRepoint({ ...settings.env }, { revertWhenDormant })
-  if (JSON.stringify(nextEnv) === envBefore) return // no change — do not churn
-  // REPLACE the env block with the reconciled copy: it started as a full copy so
-  // nothing is lost, and replace makes a key REMOVAL (the durable DCE copy after
-  // a revert) actually stick where an additive merge would resurrect it. All
-  // top-level keys (permissions, otelHeadersHelper, statusLine) are preserved.
-  const next = mergeClaudeSettings(settings, null, nextEnv, { replaceEnv: true })
-  const tmp = `${settingsPath}.tmp.${process.pid}`
-  try {
-    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
-    chmodSync(tmp, 0o600) // defeat umask (match selfHealPluginPaths / claude-redeem)
-    // Compare-and-swap: abort if another writer changed the file since we read it.
-    if (readFileSync(settingsPath, 'utf8') !== raw) {
-      rmSync(tmp, { force: true })
-      return
-    }
-    renameSync(tmp, settingsPath)
-  } catch {
+  // The async probe above is independent of the file; the read-modify-write
+  // below goes through casWriteFile so a retry re-derives from CURRENT settings.
+  casWriteFile(settingsPath, (currentRaw) => {
+    if (currentRaw === null) return null
+    let current
     try {
-      rmSync(tmp, { force: true })
+      current = JSON.parse(currentRaw)
     } catch {
-      /* ignore cleanup failure */
+      return null // unparseable — NEVER clobber (would wipe the emit credential)
     }
-  }
+    // The probe above judged `before`. A retry can hand us settings another
+    // session wrote meanwhile; applying a stale decision to a NEW endpoint could
+    // undo a healthy pin. Abort and let the next session re-probe.
+    if (current?.env?.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT !== before) return null
+    // Reconcile a COPY of the env so we can compare and skip a no-op write. The
+    // comparison covers the WHOLE env block, not just the endpoint: the reconcile
+    // can also add the durable DCE copy (backfilling a legacy pin) or remove it
+    // (after a revert), and both must reach disk.
+    const envBefore = JSON.stringify(current.env ?? {})
+    const nextEnv = applyOtlpProxyRepoint({ ...current.env }, { revertWhenDormant })
+    if (JSON.stringify(nextEnv) === envBefore) return null // no change — do not churn
+    // REPLACE the env block with the reconciled copy: it started as a full copy so
+    // nothing is lost, and replace makes a key REMOVAL (the durable DCE copy after
+    // a revert) actually stick where an additive merge would resurrect it. All
+    // top-level keys (permissions, otelHeadersHelper, statusLine) are preserved.
+    const next = mergeClaudeSettings(current, null, nextEnv, { replaceEnv: true })
+    return `${JSON.stringify(next, null, 2)}\n`
+  })
 }
 
 /**

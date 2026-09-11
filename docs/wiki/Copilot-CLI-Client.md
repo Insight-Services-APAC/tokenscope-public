@@ -37,7 +37,9 @@ each project root gets its own forwarder. All forwarder state — the span file,
 persisted byte-offset, and the singleton PID/heartbeat lock — lives WITH the project
 in `<project-root>/.tokenscope.local/` (the daemon's launch cwd, passed by the hook
 as `COPILOT_PROJECT_DIR`). Only the device credential stays in HOME
-(`~/.tokenscope/config.json`), shared by every project on the host. On start the
+(`~/.tokenscope/config.copilot-cli.json`), shared by every project on the host.
+The Claude lane has its own `config.claude-code.json` beside it; neither lane
+reads or writes the other's. On start the
 forwarder self-heals the project's `.gitignore` so `.tokenscope.local/` is never
 committed. It:
 
@@ -51,7 +53,9 @@ committed. It:
    lane, see below).
 4. Encodes to protobuf and forwards to Azure Monitor every ~60 seconds.
 5. Mints the bearer via `otel-headers-helper.sh` (refresh + 401 self-heal) using
-   credentials from `~/.tokenscope/config.json` only — **no dependency on
+   credentials from `~/.tokenscope/config.copilot-cli.json` only (falling back to the
+   read-only pre-split `config.json` until a redeem writes the per-tool file, so an
+   un-migrated device keeps forwarding) — **no dependency on
    `~/.claude`**.
 
 Two guards sit on that loop, both because the span file lives **inside a
@@ -93,14 +97,14 @@ Summing both would double the token count. The transcoder filters on
 
 | What                                          | Where it comes from                                                                                                             | Why                                                                                                                                                                                                                                                                                                                          |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `instance_id` (teammate binding)              | `~/.tokenscope/config.json` (minted by `provision_emit`)                                                                        | Unspoofable — written by the local redeem helper, never by the Copilot client itself                                                                                                                                                                                                                                         |
+| `instance_id` (teammate binding)              | `~/.tokenscope/config.copilot-cli.json` (minted by `provision_emit`)                                                                        | Unspoofable — written by the local redeem helper, never by the Copilot client itself                                                                                                                                                                                                                                         |
 | `claude_session_id` (session grouping)        | `gen_ai.conversation.id` span attr                                                                                              | Copilot's own session id; subagents share the parent's id                                                                                                                                                                                                                                                                    |
 | `project.code_hash` (project claim, B′)       | Derived **per batch** from the project-root `.tokenscope` (the daemon's cwd), via `resolveRepoProjectCode` + `computeCodeHash`  | The forwarder hashes the committed `.tokenscope` in the project root — the SAME shared resolver Claude Code uses, so both hash an identical repo to the same value. The config stamp is **explicitly not read** (a host-wide config hash is the per-HOME footgun the per-project model removes); no `.tokenscope` → untagged |
 | `github.org` (+ mirrored `github.repository`) | The project's **git remote** (`remote.origin.url`), with an `invoke_agent` span-attr (`github.copilot.git.repository`) fallback | Stamped for org→enterprise keying (F2). Lowercased org; omitted when neither source yields one (untagged-enterprise is acceptable). Not an identity factor                                                                                                                                                                   |
 | `tool`                                        | always `copilot-cli` (hardcoded by the forwarder)                                                                               | Fixed — not controllable by the Copilot client                                                                                                                                                                                                                                                                               |
 
 > **Attribution is split by concern.** `instance_id` (the security invariant) and the
-> emit endpoints come from `~/.tokenscope/config.json`, never from process env — that
+> emit endpoints come from `~/.tokenscope/config.copilot-cli.json`, never from process env — that
 > config is authoritative for those. The `project.code_hash` is a **different axis**:
 > it is derived per batch from the project-root `.tokenscope` (the daemon's cwd), NOT
 > from config. The ONLY shell-rc env var is `COPILOT_OTEL_FILE_EXPORTER_PATH` (Copilot's
@@ -129,7 +133,7 @@ provision_emit { tool: 'copilot-cli' }   (MCP tool, OAuth-scoped)
          │  ← response: instance_id, bearer_endpoint, oauth_token_endpoint,
          │              logs_endpoint, OAuth emit credential
          │
-         ├─ write ~/.tokenscope/config.json   (durable emit credential + endpoints;
+         ├─ write ~/.tokenscope/config.copilot-cli.json  (durable emit credential + endpoints;
          │                                      instance_id/endpoints authoritative — NO project hash)
          └─ write shell-rc env block           (ONLY COPILOT_OTEL_FILE_EXPORTER_PATH — a RELATIVE
                                                 per-project path .tokenscope.local/copilot-otel.jsonl;
@@ -140,6 +144,15 @@ Provisioning does **not** write `~/.copilot/config.json` — the SessionStart + 
 lifecycle hooks ship in the plugin's `copilot-plugin/hooks/hooks.json` (the "B3 fix":
 `copilot-redeem.mjs` no longer writes a competing hook config with inconsistent
 casing/args).
+
+**Emit-on-install** (`copilot-plugin/scripts/enroll.mjs`, run by the SessionStart
+hook) is the no-human alternative to the flow above: with a bundled enrolment
+secret it POSTs `/api/v1/setup/enroll` and creates `config.copilot-cli.json`
+**exclusively**. It is a no-op whenever that file already exists, in any shape —
+a complete one is `already-enrolled`, an incomplete or corrupt one is
+`own-store-incomplete` and is repaired only by the manual redeem, never by
+re-enrolling. With no own file, a complete legacy `config.json` also counts as
+enrolled; an incomplete or corrupt legacy file does not block enrolment.
 
 The `CopilotBundle` returned by `redeem` (see `server/api/v1/setup/redeem.post.ts`)
 is the Copilot-specific variant of the `telemetry.*` envelope — it contains the
@@ -176,7 +189,8 @@ shell init file. The validation therefore sits in the helper, in the shared
 
 The same skill needs this host's existing `instance_id` so a re-run rotates the
 device instead of minting a duplicate — and that id sits in
-`~/.tokenscope/config.json` next to `oauth_refresh_token`. It therefore asks
+`~/.tokenscope/config.copilot-cli.json` next to `oauth_refresh_token`. It
+therefore asks
 `scripts/device-id.mjs --tool copilot-cli` (vendored verbatim from the Claude
 plugin), which reads the store out of process and prints only
 `{enrolled, tool, instance_id, bearer_host, reason}`. `--tool` is load-bearing:

@@ -167,7 +167,7 @@ describe('device-id end-to-end against real files', () => {
       })
 
       mkdirSync(join(home, '.tokenscope'), { recursive: true })
-      writeFileSync(join(home, '.tokenscope', 'config.json'), JSON.stringify(copilotConfig()))
+      writeFileSync(join(home, '.tokenscope', 'config.copilot-cli.json'), JSON.stringify(copilotConfig()))
       const copilot = deviceIdentity('copilot-cli', home)
       expect(copilot).toMatchObject({ enrolled: true, instance_id: INSTANCE })
       expect(JSON.stringify(copilot)).not.toContain(SECRET)
@@ -224,7 +224,7 @@ describe('device-id resolves each store on the right home', () => {
       (moved) => {
         mkdirSync(join(moved, '.tokenscope'), { recursive: true })
         writeFileSync(
-          join(moved, '.tokenscope', 'config.json'),
+          join(moved, '.tokenscope', 'config.copilot-cli.json'),
           JSON.stringify(copilotConfig({ instance_id: PLANTED })),
         )
       },
@@ -264,7 +264,7 @@ describe('device-id resolves each store on the right home', () => {
     try {
       mkdirSync(join(home, '.tokenscope'), { recursive: true })
       writeFileSync(
-        join(home, '.tokenscope', 'config.json'),
+        join(home, '.tokenscope', 'config.copilot-cli.json'),
         JSON.stringify(copilotConfig({ instance_id: PLANTED })),
       )
       expect(deviceIdentity('copilot-cli', home).instance_id).toBe(PLANTED)

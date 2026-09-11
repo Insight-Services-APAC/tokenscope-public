@@ -33,7 +33,11 @@ function mockFetch(impl: () => unknown) {
 beforeEach(() => {
   stateDir = mkdtempSync(join(tmpdir(), 'pc-state-'))
   emptyCwd = mkdtempSync(join(tmpdir(), 'pc-cwd-')) // no .tokenscope here
-  writeFileSync(join(stateDir, 'oauth-access.json'), JSON.stringify({ access_token: 'tok' }))
+  // BOUND to the destination it was minted for, as every cache reader now requires.
+  writeFileSync(
+    join(stateDir, 'oauth-access.claude-code.json'),
+    JSON.stringify({ access_token: 'tok', bearer_endpoint: BEARER }),
+  )
 })
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -57,7 +61,7 @@ describe('checkRepoProjectBillable — the one warning case', () => {
 
 describe('checkRepoProjectBillable — fail-open firewall (all silent)', () => {
   it('no token cached → unverifiable (silent)', async () => {
-    rmSync(join(stateDir, 'oauth-access.json'), { force: true })
+    rmSync(join(stateDir, 'oauth-access.claude-code.json'), { force: true })
     mockFetch(() => {
       throw new Error('should not be called')
     })

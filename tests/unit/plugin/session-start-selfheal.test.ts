@@ -7,7 +7,7 @@
  * fail-open.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { selfHealPluginPaths } from '../../../plugin/hooks/session-start.mjs'
@@ -52,6 +52,19 @@ describe('selfHealPluginPaths', () => {
     writeFileSync(settingsPath, garbage)
     selfHealPluginPaths({ settingsPath, scriptsDir })
     expect(readFileSync(settingsPath, 'utf8')).toBe(garbage) // byte-for-byte untouched
+  })
+
+  it('NEVER replaces a present-but-unreadable settings.json (throws; main() contains it)', () => {
+    const body = JSON.stringify(STALE, null, 2)
+    writeFileSync(settingsPath, body)
+    chmodSync(settingsPath, 0o000)
+    try {
+      expect(() => selfHealPluginPaths({ settingsPath, scriptsDir })).toThrow(/EACCES/)
+    } finally {
+      chmodSync(settingsPath, 0o600)
+    }
+    expect(readFileSync(settingsPath, 'utf8')).toBe(body)
+    expect(readdirSync(dir).filter((f) => f.includes('.tmp.'))).toEqual([])
   })
 
   it('is idempotent: a second run makes no change and leaves no temp files', () => {

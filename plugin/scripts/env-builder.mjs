@@ -18,8 +18,9 @@
  *     DCE URL in BOTH the state-dir stash (what the forwarder reads) and the env
  *     block itself (OTLP_DCE_ENV_KEY — survives an ephemeral state dir).
  */
-import { writeFileSync, renameSync, mkdirSync, readFileSync } from 'node:fs'
+import { writeFileSync, renameSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { stateDir } from './plugin-runtime.mjs'
 import { shimActive } from './otlp-shim-policy.mjs'
 import { isUsableDce } from './endpoint-guard.mjs'
@@ -247,12 +248,30 @@ function writeStashedDce(dce) {
   const dir = stateDir()
   const stashPath = join(dir, 'otlp-forward.json')
   mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const tmp = `${stashPath}.tmp.${process.pid}`
-  writeFileSync(tmp, JSON.stringify({ dceLogsEndpoint: dce }) + '\n', {
-    encoding: 'utf8',
-    mode: 0o600,
-  })
-  renameSync(tmp, stashPath) // atomic on the same filesystem
+  // RANDOM, not the PID alone. Containers have separate PID namespaces over one
+  // shared bind-mounted home, so two writers can pick the SAME pid, open the same
+  // temp inode, and mutate it after the other has renamed it into place — which
+  // defeats the atomicity this temp+rename exists to provide. This file holds the
+  // DCE revert key, not a credential; losing it orphans the endpoint pin, which is
+  // its own outage.
+  const tmp = `${stashPath}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`
+  // Clean up on failure, as the five sibling writers do. A randomised name is
+  // not self-reaping the way a PID-keyed one eventually was, so a write or
+  // rename that throws would otherwise leave a 0600 file behind for good.
+  try {
+    writeFileSync(tmp, JSON.stringify({ dceLogsEndpoint: dce }) + '\n', {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+    renameSync(tmp, stashPath) // atomic on the same filesystem
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      /* best-effort */
+    }
+    throw err
+  }
 }
 
 /**

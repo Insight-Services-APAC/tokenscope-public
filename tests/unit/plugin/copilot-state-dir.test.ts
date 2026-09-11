@@ -96,7 +96,7 @@ describe('the Copilot credential store resolves identically at every site', () =
     const r = await resolveAll({ HOME: moved, USERPROFILE: moved })
 
     expect(r.forwarder).toBe(r.redeem)
-    expect(r.forwarderConfig).toBe(join(r.redeem, 'config.json'))
+    expect(r.forwarderConfig).toBe(join(r.redeem, 'config.copilot-cli.json'))
   })
 
   it('with no pin: enroll and landed-check agree with the forwarder too', async () => {
@@ -133,7 +133,7 @@ describe('the Copilot credential store resolves identically at every site', () =
     const r = await resolveAll({ HOME: moved, USERPROFILE: moved, TOKENSCOPE_STATE_DIR: pin })
 
     expect(r.forwarder).toBe(pin)
-    expect(r.forwarderConfig).toBe(join(pin, 'config.json'))
+    expect(r.forwarderConfig).toBe(join(pin, 'config.copilot-cli.json'))
     expect(r.enroll).toBe(pin)
     expect(r.landed).toBe(pin)
   })

@@ -216,7 +216,7 @@ describe('unprovisioned host → graceful no-op exit 0 (Stop hook must not fail)
     // the child resolved the pinned dir, not the developer's own ~/.tokenscope. A
     // bare "not provisioned" assertion would pass on an unenrolled machine even if
     // the pin were ignored entirely.
-    expect(r.stderr).toContain(join(stateDir, 'config.json'))
+    expect(r.stderr).toContain(join(stateDir, 'config.copilot-cli.json'))
   })
 
   it('start → exits 0 and does not hang (guard fires before claiming the singleton)', () => {
@@ -224,6 +224,6 @@ describe('unprovisioned host → graceful no-op exit 0 (Stop hook must not fail)
     expect(r.status).toBe(0)
     expect(r.signal).toBeNull() // not killed by the 10s timeout
     expect(r.stderr).toContain('not provisioned')
-    expect(r.stderr).toContain(join(stateDir, 'config.json'))
+    expect(r.stderr).toContain(join(stateDir, 'config.copilot-cli.json'))
   })
 })

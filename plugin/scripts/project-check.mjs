@@ -22,7 +22,8 @@
  * never breaks the session.
  */
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+
+import { accessCachePath, readBoundAccessToken } from './device-store.mjs'
 import { fileURLToPath } from 'node:url'
 import { resolveRepoProjectCode, computeCodeHash } from './tag-repo.mjs'
 import { stateDir as resolveStateDir, trustedGlobalSettingsEnv } from './plugin-runtime.mjs'
@@ -102,8 +103,9 @@ export async function checkRepoProjectBillable({
     return { status: 'unverifiable', reason: 'bad-endpoint' }
   }
 
-  const access = readJson(join(dir, 'oauth-access.json'))
-  const token = access?.access_token || access?.accessToken || access?.token
+  const access = readJson(accessCachePath('claude-code', dir))
+  // Only a cache bound to this destination may be presented.
+  const token = readBoundAccessToken(access, bearerEndpoint)
   if (!token) return { status: 'unverifiable', reason: 'no-token' }
 
   let res

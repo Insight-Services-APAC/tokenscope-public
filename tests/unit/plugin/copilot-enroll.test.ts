@@ -12,7 +12,7 @@
  *   2. no bundled secret → no-op (un-injected dev build enrols no one)
  *   3. no claimed email  → no-op (never guess a bad identity)
  *   4. success           → POSTs {secret, claimed_email, device_binding} and
- *                          writes config.json + oauth-access.json
+ *                          writes config.copilot-cli.json
  *   5. failures (network / bad bundle) stay silent and write NOTHING
  *
  * plus the email-source selection (git identity first — Copilot has no Claude OAuth
@@ -50,18 +50,18 @@ import {
 const FAKE_ENROLL_RESPONSE = {
   instance_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
   tool: 'copilot-cli',
-  bearer_endpoint: 'https://ts.example.com/api/v1/instances/abc/bearer',
+  bearer_endpoint: 'https://ts.example.com/api/v1/instances/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/bearer',
   oauth_refresh_token: 'rt_provisional_secret',
   oauth_token_endpoint: 'https://ts.example.com/api/v1/oauth/token',
   oauth_client_id: 'client-prov',
   telemetry: {
     copilot: {
-      TOKENSCOPE_BEARER_ENDPOINT: 'https://ts.example.com/api/v1/instances/abc/bearer',
+      TOKENSCOPE_BEARER_ENDPOINT: 'https://ts.example.com/api/v1/instances/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/bearer',
       TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://ts.example.com/api/v1/oauth/token',
       TOKENSCOPE_OAUTH_CLIENT_ID: 'client-prov',
       TOKENSCOPE_LOGS_ENDPOINT: 'https://ts.example.com/v1/logs',
       COPILOT_OTEL_FILE_EXPORTER_PATH: '~/.tokenscope/copilot-otel.jsonl',
-      OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=aaaaaaaa,tool=copilot-cli',
+      OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,tool=copilot-cli',
       instance_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
     },
   },
@@ -246,7 +246,27 @@ describe('buildCopilotConfig — response → config.json mapping', () => {
     // against its launch cwd (= project root), NOT an absolute HOME path.
     expect(cfg.copilot_otel_file_path).toBe(join('.tokenscope.local', 'copilot-otel.jsonl'))
     // tool=copilot-cli comes baked from the server bundle — consumed verbatim, no rewrite.
-    expect(cfg.otel_resource_attributes).toBe('tokenscope.instance_id=aaaaaaaa,tool=copilot-cli')
+    expect(cfg.otel_resource_attributes).toBe('tokenscope.instance_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,tool=copilot-cli')
+  })
+
+  /*
+   * THE SAME v2 SHAPE THE MANUAL REDEEM WRITES. Emit-on-install used to produce
+   * a v2-NAMED file with a v1 body, so the helper's own tool check — the one
+   * that catches a store renamed or copied between lanes — silently did nothing
+   * on every auto-enrolled device.
+   */
+  it('REFUSES a response whose attributes disagree with the envelope (fail-open, nothing written)', () => {
+    const bad = JSON.parse(JSON.stringify(FAKE_ENROLL_RESPONSE))
+    bad.telemetry.copilot.OTEL_RESOURCE_ATTRIBUTES = 'tokenscope.instance_id=someone-else,tool=copilot-cli'
+    expect(() => buildCopilotConfig(bad)).toThrow(/instance/)
+  })
+
+  it('stamps the v2 envelope so the helper tool check is not a no-op', () => {
+    const cfg = buildCopilotConfig(FAKE_ENROLL_RESPONSE)
+    expect(cfg.version).toBe(2)
+    expect(cfg.tool).toBe('copilot-cli')
+    // and it agrees with the marker the client actually emits
+    expect(cfg.otel_resource_attributes).toContain(`tool=${cfg.tool}`)
   })
 
   it('maps the bundle even when the top-level oauth/endpoint mirrors are absent (bundle is the source of truth)', () => {
@@ -259,11 +279,11 @@ describe('buildCopilotConfig — response → config.json mapping', () => {
       telemetry: { copilot: { ...FAKE_ENROLL_RESPONSE.telemetry.copilot } },
     }
     const cfg = buildCopilotConfig(bundleOnly)
-    expect(cfg.bearer_endpoint).toBe('https://ts.example.com/api/v1/instances/abc/bearer')
+    expect(cfg.bearer_endpoint).toBe('https://ts.example.com/api/v1/instances/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/bearer')
     expect(cfg.logs_endpoint).toBe('https://ts.example.com/v1/logs')
     expect(cfg.oauth_token_endpoint).toBe('https://ts.example.com/api/v1/oauth/token')
     expect(cfg.oauth_client_id).toBe('client-prov')
-    expect(cfg.otel_resource_attributes).toBe('tokenscope.instance_id=aaaaaaaa,tool=copilot-cli')
+    expect(cfg.otel_resource_attributes).toBe('tokenscope.instance_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,tool=copilot-cli')
   })
 
   it('throws when the resource attrs carry no non-empty instance id', () => {
@@ -342,7 +362,7 @@ describe('buildCopilotConfig — response → config.json mapping', () => {
       telemetry: {
         claude: {
           OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://ts.example.com/v1/logs',
-          otel_headers_helper_url: 'https://ts.example.com/api/v1/instances/abc/bearer',
+          otel_headers_helper_url: 'https://ts.example.com/api/v1/instances/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/bearer',
           OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=aaaaaaaa,tool=claude-code',
         },
       },
@@ -352,23 +372,22 @@ describe('buildCopilotConfig — response → config.json mapping', () => {
 })
 
 describe('writeTokenscopeConfig — on-disk contract', () => {
-  it('writes config.json (with refresh token) and an EMPTY oauth-access.json placeholder', () => {
+  it('writes config.copilot-cli.json (with refresh token) and never the access-token cache', () => {
     const cfg = buildCopilotConfig(FAKE_ENROLL_RESPONSE)
     writeTokenscopeConfig(cfg, dir)
-    const written = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))
+    const written = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
     expect(written.oauth_refresh_token).toBe('rt_provisional_secret')
     expect(written.instance_id).toBe(cfg.instance_id)
-    const oauth = JSON.parse(readFileSync(join(dir, 'oauth-access.json'), 'utf8'))
-    expect(oauth).toEqual({ access_token: '', expires_at: 0 })
-    expect(oauth).not.toHaveProperty('oauth_refresh_token')
+    // The cache has one writer, the helper.
+    expect(existsSync(join(dir, 'oauth-access.copilot-cli.json'))).toBe(false)
   })
 
   it('does NOT clobber an existing oauth-access.json (live helper cache)', () => {
     const cfg = buildCopilotConfig(FAKE_ENROLL_RESPONSE)
     const live = { access_token: 'live', expires_at: 9999999999 }
-    writeFileSync(join(dir, 'oauth-access.json'), JSON.stringify(live))
+    writeFileSync(join(dir, 'oauth-access.copilot-cli.json'), JSON.stringify(live))
     writeTokenscopeConfig(cfg, dir)
-    expect(JSON.parse(readFileSync(join(dir, 'oauth-access.json'), 'utf8'))).toEqual(live)
+    expect(JSON.parse(readFileSync(join(dir, 'oauth-access.copilot-cli.json'), 'utf8'))).toEqual(live)
   })
 
   it('leaves no temp droppings', () => {
@@ -378,10 +397,95 @@ describe('writeTokenscopeConfig — on-disk contract', () => {
 })
 
 describe('enrollIfNeeded — decision logic', () => {
+  /*
+   * THE RACE THE EXCLUSIVE CREATE CLOSES. The already-enrolled check runs BEFORE
+   * the async POST, so a manual redeem can land during that request. An
+   * unconditional write would then replace a deliberate re-provision with this
+   * PROVISIONAL instance and token. EEXIST is the same outcome we wanted, so it
+   * reports already-enrolled rather than an error.
+   */
+  it('does NOT overwrite a store that appeared during its own POST', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ts-enrol-race-'))
+    const existing = JSON.stringify({ version: 2, tool: 'copilot-cli', instance_id: 'from-redeem' })
+    const res = await enrollIfNeeded({
+      targetDir: dir,
+      cwd: dir,
+      home: dir,
+      claimedEmail: 'dev@example.com',
+      enrollmentSecret: 'secret',
+      deviceBinding: { device_id: 'd' },
+      apiBase: 'https://api.example.com',
+      post: async () => {
+        // a manual redeem lands WHILE the POST is in flight
+        writeFileSync(join(dir, 'config.copilot-cli.json'), existing)
+        return FAKE_ENROLL_RESPONSE
+      },
+    })
+    expect(res.enrolled).toBe(false)
+    expect(res.reason).toBe('already-enrolled')
+    expect(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8')).toBe(existing)
+  })
+
+  // An own store in ANY shape is a no-op: auto-enrol can only create, never
+  // repair, so re-POSTing would present the enrolment secret every launch.
+  it.each([
+    ['incomplete (no refresh token)', JSON.stringify({ ...ENROLLED_CONFIG, oauth_refresh_token: '' })],
+    ['corrupt (not JSON)', '{ not json'],
+    ['empty', ''],
+  ])('own store present but %s: no POST, no write, distinct reason', async (_l, body) => {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'config.copilot-cli.json'), body)
+    const post = vi.fn()
+    const writeConfig = vi.fn()
+    const r = await enrollIfNeeded({ ...baseOpts(), post, writeConfig })
+    expect(r).toEqual({ enrolled: false, reason: 'own-store-incomplete' })
+    expect(post).not.toHaveBeenCalled()
+    expect(writeConfig).not.toHaveBeenCalled()
+    expect(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8')).toBe(body) // untouched
+  })
+
+  /*
+   * Precedence, as a table: the own store decides whenever it exists; the
+   * legacy file is consulted only when it does not.
+   */
+  it.each([
+    ['own incomplete + legacy complete', JSON.stringify({ ...ENROLLED_CONFIG, oauth_refresh_token: '' }), JSON.stringify(ENROLLED_CONFIG), 'own-store-incomplete', 0],
+    ['own complete + legacy corrupt', JSON.stringify(ENROLLED_CONFIG), '{ not json', 'already-enrolled', 0],
+    ['own absent + legacy corrupt', null, '{ not json', null, 1],
+    ['own absent + legacy complete', null, JSON.stringify(ENROLLED_CONFIG), 'already-enrolled', 0],
+  ])('%s', async (_l, own, legacy, reason, posts) => {
+    mkdirSync(dir, { recursive: true })
+    if (own !== null) writeFileSync(join(dir, 'config.copilot-cli.json'), own)
+    if (legacy !== null) writeFileSync(join(dir, 'config.json'), legacy)
+    const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
+    const r = await enrollIfNeeded({ ...baseOpts(), post })
+    expect(post).toHaveBeenCalledTimes(posts)
+    if (reason) expect(r).toEqual({ enrolled: false, reason })
+    else expect(r.enrolled).toBe(true)
+  })
+
+  it('a complete LEGACY config.json still counts as enrolled (pre-split read)', async () => {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'config.json'), JSON.stringify(ENROLLED_CONFIG))
+    const post = vi.fn()
+    const r = await enrollIfNeeded({ ...baseOpts(), post, writeConfig: vi.fn() })
+    expect(r).toEqual({ enrolled: false, reason: 'already-enrolled' })
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('an INCOMPLETE legacy config.json does not block a fresh enrolment of this lane', async () => {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...ENROLLED_CONFIG, oauth_refresh_token: '' }))
+    const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
+    const r = await enrollIfNeeded({ ...baseOpts(), post })
+    expect(r.enrolled).toBe(true)
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
   it('no-op when already enrolled (no POST, no write)', async () => {
     // Seed an enrolled config.json in the target dir.
     mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, 'config.json'), JSON.stringify(ENROLLED_CONFIG))
+    writeFileSync(join(dir, 'config.copilot-cli.json'), JSON.stringify(ENROLLED_CONFIG))
     const post = vi.fn()
     const writeConfig = vi.fn()
     const r = await enrollIfNeeded({ ...baseOpts(), post, writeConfig })
@@ -460,16 +564,16 @@ describe('enrollIfNeeded — decision logic', () => {
     expect(cfg.oauth_refresh_token).toBe('rt_provisional_secret')
     expect(cfg.bearer_endpoint).toBe(FAKE_ENROLL_RESPONSE.bearer_endpoint)
     expect(cfg.logs_endpoint).toBe('https://ts.example.com/v1/logs')
-    expect(cfg.otel_resource_attributes).toBe('tokenscope.instance_id=aaaaaaaa,tool=copilot-cli')
+    expect(cfg.otel_resource_attributes).toBe('tokenscope.instance_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,tool=copilot-cli')
   })
 
-  it('end-to-end: with the real writer, config.json + oauth-access.json land on disk', async () => {
+  it('end-to-end: with the real writer, config.copilot-cli.json lands on disk and the cache is left to the helper', async () => {
     const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
     const r = await enrollIfNeeded({ ...baseOpts(), post }) // real writeTokenscopeConfig
     expect(r.enrolled).toBe(true)
-    expect(existsSync(join(dir, 'config.json'))).toBe(true)
-    expect(existsSync(join(dir, 'oauth-access.json'))).toBe(true)
-    const written = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))
+    expect(existsSync(join(dir, 'config.copilot-cli.json'))).toBe(true)
+    expect(existsSync(join(dir, 'oauth-access.copilot-cli.json'))).toBe(false)
+    const written = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
     expect(written.oauth_refresh_token).toBe('rt_provisional_secret')
     expect(written.copilot_otel_file_path).toBe(join('.tokenscope.local', 'copilot-otel.jsonl'))
   })

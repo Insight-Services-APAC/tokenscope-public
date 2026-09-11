@@ -32,14 +32,18 @@
 # Token material (refresh token, access token) is NEVER written to stderr or the
 # sentinel.
 #
-# Required env:
-#   TOKENSCOPE_BEARER_ENDPOINT   — e.g. https://attestation/api/v1/instances/{instanceId}/bearer
-# Auth env (OAuth — all three required):
-#   TOKENSCOPE_OAUTH_REFRESH_TOKEN + TOKENSCOPE_OAUTH_TOKEN_ENDPOINT + TOKENSCOPE_OAUTH_CLIENT_ID
-# Args (NOT env — see THE STATE DIR below). Both must be ABSOLUTE paths; an
-# unknown argument is refused outright rather than ignored:
+# Inputs: the credential and both destinations (TOKENSCOPE_OAUTH_REFRESH_TOKEN,
+# TOKENSCOPE_OAUTH_TOKEN_ENDPOINT, TOKENSCOPE_BEARER_ENDPOINT) come from ONE of
+# the ordered sources under "Where the credential and destinations come from";
+# the environment is the last of them, and TOKENSCOPE_OAUTH_CLIENT_ID may come
+# from it regardless.
+# Args (NOT env — see THE STATE DIR below). Paths must be ABSOLUTE; an unknown
+# argument is refused outright rather than ignored:
 #   --state-dir <path>           — where the sentinel + token cache live
 #                                  (default: ~/.tokenscope under the PASSWD home)
+#   --tool <claude-code|copilot-cli>
+#                                — which lane's store and cache to use
+#                                  (default: claude-code)
 #   --tool-dir <path>            — prepend a directory to PATH ahead of the
 #                                  trusted ones (test stubs / local debugging)
 set -eu
@@ -48,7 +52,7 @@ set -eu
 
 # ── A TRUSTED PATH, BEFORE THE FIRST EXTERNAL COMMAND ────────────────────────
 #
-# Everything below runs `curl`, `id`, `date`, `sed`, `awk`, `mkdir`, `rm` by NAME,
+# Everything below runs `curl`, `id`, `date`, `sed`, `awk`, `mkdir`, `rm`, `mktemp` by NAME,
 # and this script is handed TOKENSCOPE_OAUTH_REFRESH_TOKEN — the durable emit
 # credential. `PATH` is repo-settable and reaches this process (Claude Code
 # invokes this script itself with the merged settings environment; see THE STATE
@@ -109,9 +113,9 @@ export PATH
 # ── THE STATE DIR: an ARGUMENT, never an environment variable ────────────────
 #
 # This directory is where the freshly minted emit ACCESS TOKEN is cached
-# (`oauth-access.json`) and where a stored durable credential is read back from
-# (`config.json`). It decides who receives a secret, so its provenance has to be
-# something a repository cannot write.
+# (`oauth-access.<tool>.json`) and where a stored durable credential is read back
+# from (`config.<tool>.json`). It decides who receives a secret, so its
+# provenance has to be something a repository cannot write.
 #
 # `TOKENSCOPE_STATE_DIR` USED TO CHOOSE IT, AND WAS REACHABLE. Claude Code merges
 # a repository's `.claude/settings.json` `env` block into the environment, and
@@ -195,7 +199,8 @@ passwd_home() {
 # Parsed BEFORE the default is resolved: `--tool-dir` has to be in effect before
 # passwd_home() runs, because that function shells out to `getent`/`awk`/`id`.
 STATE_DIR=""
-# Parse the ONE accepted argument. An unknown argument is refused rather than
+TOOL="claude-code"
+# Parse the accepted arguments. An unknown argument is refused rather than
 # ignored, the same rule argv-guard.mjs applies to the redeem helpers: a flag
 # this script does not implement is argv nobody in the product wrote.
 while [ $# -gt 0 ]; do
@@ -211,6 +216,16 @@ while [ $# -gt 0 ]; do
       case "$2" in
         /*) STATE_DIR="$2" ;;
         *) echo "otel-headers-helper: --state-dir must be a non-empty absolute path" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    --tool)
+      [ $# -ge 2 ] || { echo "otel-headers-helper: --tool requires a value" >&2; exit 2; }
+      # Closed set: the store filename derives from this. Default stays
+      # claude-code because Claude Code invokes the script with no arguments.
+      case "$2" in
+        claude-code|copilot-cli) TOOL="$2" ;;
+        *) echo "otel-headers-helper: --tool must be claude-code or copilot-cli" >&2; exit 2 ;;
       esac
       shift 2
       ;;
@@ -232,7 +247,12 @@ done
 # tools passwd_home() needs are resolved through the PATH argv just set up.
 [ -n "$STATE_DIR" ] || STATE_DIR="$(passwd_home)/.tokenscope"
 SENTINEL="${STATE_DIR}/emit-failure.json"
-ACCESS_CACHE="${STATE_DIR}/oauth-access.json"
+# Per-tool, both of them: each lane has its own enrolment, and a shared cache
+# would present one lane's token to the other's endpoint.
+# docs/design/device-store-per-tool-sections.md
+STORE="${STATE_DIR}/config.${TOOL}.json"
+LEGACY_STORE="${STATE_DIR}/config.json"
+ACCESS_CACHE="${STATE_DIR}/oauth-access.${TOOL}.json"
 # Re-mint the access token if it expires within this many seconds.
 EXPIRY_SKEW=120
 
@@ -259,13 +279,15 @@ write_sentinel() {
 
 # Extract a JSON string field value (best-effort, no jq). Args: $1=body $2=field.
 json_str() {
-  printf '%s' "$1" \
+  # Newlines flattened first: sed is line-based, and a key and its value on
+  # separate lines (any pretty-printer) would otherwise read as absent.
+  printf '%s' "$1" | tr -d '\n\r' \
     | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
     | head -n1
 }
 # Extract a JSON numeric field value (best-effort, no jq). Args: $1=body $2=field.
 json_num() {
-  printf '%s' "$1" \
+  printf '%s' "$1" | tr -d '\n\r' \
     | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" \
     | head -n1
 }
@@ -273,50 +295,202 @@ json_num() {
 # ── Trusted device store ───────────────────────────────────────────────────────
 # Loaded ONCE, here, because the endpoint overrides below must land before the
 # bearer/OAuth checks further down read those variables.
-DEVICE_CFG=''
-if [ -f "${STATE_DIR}/config.json" ]; then
-  DEVICE_CFG="$(cat "${STATE_DIR}/config.json" 2>/dev/null || echo '')"
+
+# The instance segment of a .../instances/<id>/bearer URL (empty if not that shape).
+#
+# END-ANCHORED, and no query or fragment allowed anywhere before it. The earlier
+# `.*/instances/\(...\)/bearer.*` matched a substring ANYWHERE in the URL, so
+# `https://evil.example/?next=/instances/good/bearer` read as instance `good` —
+# and this value decides OWNERSHIP. Kept greedy so a repeated segment resolves to
+# the LAST one, which is what device-store.mjs's regex does; the shell and the JS
+# decide the same question and must not disagree.
+bearer_instance() {
+  printf '%s' "$1" | sed -n 's|^[^?#]*/instances/\([^/?#][^/?#]*\)/bearer$|\1|p'
+}
+# The single `tool=` marker inside an OTEL_RESOURCE_ATTRIBUTES string.
+attrs_tool() {
+  printf '%s' "$1" | tr ',' '\n' | sed -n 's/^[[:space:]]*tool=//p' | head -n1
+}
+
+# ── Where the credential and destinations come from ───────────────────────────
+#
+# ONE ordered list of sources, ONE rule. The property, stated once:
+#
+#   A credential from a trusted source is NEVER paired with a destination from a
+#   less trusted one.
+#
+# Sources, most trusted first:
+#   1. ${STORE}                       this lane's own store: 0600 in a 0700 dir,
+#                                     exactly one writer
+#   2. ${LEGACY_STORE}                the pre-split shared store, but only if
+#                                     THIS lane can claim it
+#   3. $(passwd_home)/.claude/settings.json
+#                                     the device's own settings: a repository can
+#                                     contribute to the ENVIRONMENT, it cannot
+#                                     edit this file
+#   4. the process environment        NOT trusted — Claude Code merges a
+#                                     repository's settings env into it
+#
+# Per source: absent goes to the next; present-but-incomplete REFUSES (borrowing
+# a destination from a different source is the exfiltration); present-and-
+# complete is adopted whole.
+#
+# KEEP THIS AS ONE ORDERED FALL-THROUGH LIST. Separate per-case branches
+# previously created downgrade seams between them. Table and rationale:
+# docs/design/device-store-per-tool-sections.md ("Where the credential and
+# destinations come from").
+
+# Adopt a source whole. Client id is an identifier, not a credential or a
+# destination, so it is optional and may still come from the environment.
+adopt_source() { # $1=token $2=bearer $3=token_ep $4=client_id
+  TOKENSCOPE_OAUTH_REFRESH_TOKEN="$1"
+  TOKENSCOPE_BEARER_ENDPOINT="$2"
+  TOKENSCOPE_OAUTH_TOKEN_ENDPOINT="$3"
+  [ -n "$4" ] && TOKENSCOPE_OAUTH_CLIENT_ID="$4"
+  RESOLVED=1
+  return 0
+}
+
+# A source that is PRESENT but cannot be used in full. Never fall through.
+refuse_source() { # $1=sentinel message $2=operator explanation
+  echo "TokenScope: emission auth REFUSED — $2 Telemetry will not emit." >&2
+  write_sentinel 0 "$1"
+  exit 1
+}
+
+RESOLVED=0
+# A trusted source that was present but unusable by this lane. Reaching the
+# environment afterwards would pair the DEVICE's ambient token with repo-supplied
+# endpoints; see the refusal before source 4.
+TRUSTED_SEEN_UNUSABLE=0
+
+# ── source 1: this lane's own store ───────────────────────────────────────────
+if [ "$RESOLVED" -eq 0 ] && [ -f "$STORE" ]; then
+  _cfg="$(cat "$STORE" 2>/dev/null || echo '')"
+  _s_tool="$(json_str "$_cfg" tool)"
+  _s_inst="$(json_str "$_cfg" instance_id)"
+  _s_bear="$(json_str "$_cfg" bearer_endpoint)"
+  _s_tok_ep="$(json_str "$_cfg" oauth_token_endpoint)"
+  _s_tok="$(json_str "$_cfg" oauth_refresh_token)"
+  _s_cid="$(json_str "$_cfg" oauth_client_id)"
+  _s_attr="$(json_str "$_cfg" otel_resource_attributes)"
+  _s_ver="$(json_num "$_cfg" version)"
+
+  # Self-inconsistent: copied or renamed between lanes. Refuse, never repair.
+  if [ -n "$_s_tool" ] && [ "$_s_tool" != "$TOOL" ]; then
+    refuse_source "store tool mismatch" "${STORE} declares tool=${_s_tool} but this is the ${TOOL} lane. The file was renamed or copied; re-run setup."
+  fi
+  if [ -n "$_s_attr" ]; then
+    _s_attr_tool="$(attrs_tool "$_s_attr")"
+    if [ -n "$_s_attr_tool" ] && [ "$_s_attr_tool" != "$TOOL" ]; then
+      refuse_source "store marker mismatch" "${STORE} carries tool=${_s_attr_tool} in its resource attributes but this is the ${TOOL} lane. Re-run setup."
+    fi
+  fi
+
+  # Incomplete (unreadable, empty, truncated, or missing a field): never borrow
+  # the missing half from a lower source.
+  if [ -z "$_s_tok" ] || [ -z "$_s_bear" ] || [ -z "$_s_tok_ep" ]; then
+    refuse_source "store present but unreadable" "${STORE} exists but is not a complete v2 enrolment (credential plus both destinations), and the session environment is not an acceptable substitute. Re-run the tokenscope-setup MCP prompt."
+  fi
+  # The v2 envelope is REQUIRED and must be VALID: version 2, a tool, an
+  # instance, and attributes naming both. Presence alone let a renamed file in.
+  if [ "$_s_ver" != "2" ] || [ -z "$_s_tool" ] || [ -z "$_s_inst" ] || [ -z "$_s_attr" ]; then
+    refuse_source "store missing the v2 envelope" "${STORE} is not a v2 enrolment (version/tool/instance_id/resource attributes), so this lane cannot confirm it belongs here. Re-run the tokenscope-setup MCP prompt."
+  fi
+  _s_attr_inst="$(printf '%s' "$_s_attr" | tr ',' '\n' | sed -n 's/^[[:space:]]*tokenscope\.instance_id=//p' | head -n1)"
+  if [ -z "$(attrs_tool "$_s_attr")" ] || [ -z "$_s_attr_inst" ] || [ "$_s_attr_inst" != "$_s_inst" ]; then
+    refuse_source "store attributes inconsistent" "${STORE} resource attributes do not name this file's instance and tool. Re-run the tokenscope-setup MCP prompt."
+  fi
+  # A bearer that is not instance-shaped is a mismatch, not a skip: skipping
+  # let a malformed https endpoint receive the minted token.
+  _s_bear_inst="$(bearer_instance "$_s_bear")"
+  if [ -z "$_s_bear_inst" ] || [ "$_s_bear_inst" != "$_s_inst" ]; then
+    refuse_source "store instance/endpoint mismatch" "${STORE} names instance ${_s_inst} but its bearer endpoint addresses '${_s_bear_inst}'. Re-run setup."
+  fi
+  adopt_source "$_s_tok" "$_s_bear" "$_s_tok_ep" "$_s_cid"
 fi
 
-# THE DESTINATIONS COME FROM THE DEVICE, NOT THE ENVIRONMENT (MDASH F120/F119/F309).
-#
-# Claude Code invokes this helper itself, roughly every 29 minutes, with its own
-# repo-merged environment — which is precisely why the state dir was moved out of
-# the environment and onto argv. The endpoints were left behind. A hostile repo
-# setting TOKENSCOPE_OAUTH_TOKEN_ENDPOINT therefore received the durable emit
-# refresh token (non-rotating; revocation is the only control, ADR-0005), and
-# TOKENSCOPE_BEARER_ENDPOINT is the same defect one credential down — the access
-# token in an Authorization header. It did not need the credential, only the
-# destination: assert_safe_endpoint validates the SCHEME only, so every https
-# host was accepted, unpinned.
-#
-# ${STATE_DIR}/config.json is the device's own 0700 store, written by redeem on
-# both lanes and already the trusted source for the refresh TOKEN. When it names
-# an endpoint, that value WINS over the environment.
-#
-# When it does NOT, what happens depends on whether the store holds a credential,
-# and the two outcomes are opposite — so do not read this block as "the
-# environment is the fallback":
-#   - no store at all: the environment is used and emission continues.
-#   - a store WITH a refresh token but missing either endpoint: the refusal below
-#     EXITS. A legacy token-only store stops emission until migration or
-#     re-provisioning completes, because pairing the durable credential with an
-#     environment-supplied destination is the thing this exists to prevent.
-ENDPOINTS_FROM_STORE=0
-BEARER_FROM_STORE=0
-if [ -n "$DEVICE_CFG" ]; then
-  _cfg_token_ep="$(json_str "$DEVICE_CFG" oauth_token_endpoint)"
-  if [ -n "$_cfg_token_ep" ]; then
-    TOKENSCOPE_OAUTH_TOKEN_ENDPOINT="$_cfg_token_ep"
-    ENDPOINTS_FROM_STORE=1
+# ── source 2: the legacy shared store, if this lane can claim it ──────────────
+# Unclaimable => absent for this lane (resolution continues to settings), but
+# remembered in TRUSTED_SEEN_UNUSABLE so the environment is not reached.
+if [ "$RESOLVED" -eq 0 ] && [ -f "$LEGACY_STORE" ]; then
+  _lg="$(cat "$LEGACY_STORE" 2>/dev/null || echo '')"
+  _lg_claimed=0
+  if [ "$TOOL" = "copilot-cli" ]; then
+    # Copilot has no repo-unwritable source to prove ownership against; it keeps
+    # its pre-split read. Requiring proof would force fleet-wide re-enrolment.
+    _lg_claimed=1
+  else
+    # Claude proves ownership against the device's own settings (repo-unwritable,
+    # passwd home). The tool= marker cannot decide it: see the design doc,
+    # Migration.
+    _lg_bear="$(json_str "$_lg" bearer_endpoint)"
+    _set_file="$(passwd_home)/.claude/settings.json"
+    _set_bear=''
+    [ -f "$_set_file" ] && _set_bear="$(json_str "$(cat "$_set_file" 2>/dev/null || echo '')" TOKENSCOPE_BEARER_ENDPOINT)"
+    _a="$(bearer_instance "$_lg_bear")"
+    [ -n "$_a" ] && [ "$_a" = "$(bearer_instance "$_set_bear")" ] && _lg_claimed=1
+    [ "$_lg_claimed" -eq 1 ] || TRUSTED_SEEN_UNUSABLE=1
   fi
-  _cfg_bearer_ep="$(json_str "$DEVICE_CFG" bearer_endpoint)"
-  if [ -n "$_cfg_bearer_ep" ]; then
-    TOKENSCOPE_BEARER_ENDPOINT="$_cfg_bearer_ep"
-    BEARER_FROM_STORE=1
+  if [ "$_lg_claimed" -eq 1 ]; then
+    _lg_tok="$(json_str "$_lg" oauth_refresh_token)"
+    _lg_bear2="$(json_str "$_lg" bearer_endpoint)"
+    _lg_tok_ep="$(json_str "$_lg" oauth_token_endpoint)"
+    _lg_cid="$(json_str "$_lg" oauth_client_id)"
+    if [ -z "$_lg_tok" ] || [ -z "$_lg_bear2" ] || [ -z "$_lg_tok_ep" ]; then
+      refuse_source "legacy store present but incomplete" "${LEGACY_STORE} belongs to this lane but is not a complete enrolment (credential plus both destinations), so one would come from the session environment. Re-run the tokenscope-setup MCP prompt."
+    fi
+    adopt_source "$_lg_tok" "$_lg_bear2" "$_lg_tok_ep" "$_lg_cid"
   fi
 fi
 
+# ── source 3: the device's own settings file ──────────────────────────────────
+# Covers a device with a credential but no store yet. Both destinations must come
+# from this file too; the environment is not an acceptable substitute.
+if [ "$RESOLVED" -eq 0 ]; then
+  _gs_file="$(passwd_home)/.claude/settings.json"
+  if [ -f "$_gs_file" ]; then
+    _gs="$(cat "$_gs_file" 2>/dev/null || echo '')"
+    _gs_tok="$(json_str "$_gs" TOKENSCOPE_OAUTH_REFRESH_TOKEN)"
+    # Present-but-unparseable is not absent: Claude Code already merged this
+    # file's token into the environment, possibly before the file was replaced
+    # or corrupted. A present file counts as "genuinely no credential" ONLY when
+    # it is recognisably a settings file (has an "env" block) that never mentions
+    # the credential key. Anything else that fails extraction is unusable.
+    if [ -z "$_gs_tok" ]; then
+      case "$_gs" in
+        *TOKENSCOPE_OAUTH_REFRESH_TOKEN*) TRUSTED_SEEN_UNUSABLE=1 ;;
+        *'"env"'*) : ;;
+        *) TRUSTED_SEEN_UNUSABLE=1 ;;
+      esac
+    fi
+    # No credential here => nothing of ours to protect => absent.
+    if [ -n "$_gs_tok" ]; then
+      _gs_bear="$(json_str "$_gs" TOKENSCOPE_BEARER_ENDPOINT)"
+      _gs_tok_ep="$(json_str "$_gs" TOKENSCOPE_OAUTH_TOKEN_ENDPOINT)"
+      _gs_cid="$(json_str "$_gs" TOKENSCOPE_OAUTH_CLIENT_ID)"
+      if [ -z "$_gs_bear" ] || [ -z "$_gs_tok_ep" ]; then
+        refuse_source "settings credential without both settings endpoints" "${_gs_file} holds a durable credential but not both destinations, so one would come from the session environment. Re-run the tokenscope-setup MCP prompt."
+      fi
+      adopt_source "$_gs_tok" "$_gs_bear" "$_gs_tok_ep" "$_gs_cid"
+    fi
+  fi
+fi
+
+# The environment is safe ONLY when no trusted source held a credential. A
+# trusted source that was present and unusable means the ambient token is the
+# device's and the endpoints beside it are the repository's: refuse.
+if [ "$RESOLVED" -eq 0 ] && [ "$TRUSTED_SEEN_UNUSABLE" -eq 1 ] && [ -n "${TOKENSCOPE_OAUTH_REFRESH_TOKEN:-}" ]; then
+  refuse_source "trusted source unusable, ambient credential present" "this device has a stored enrolment this lane cannot use, and the session environment is not an acceptable substitute while a durable credential is reachable. Re-run the tokenscope-setup MCP prompt."
+fi
+
+# ── source 4: the process environment ─────────────────────────────────────────
+# The terminator, and the only untrusted source: reached only when nothing is
+# stored anywhere. Its completeness check is the "Require OAuth auth" block below.
+
+# The three variables above are now bound. Whichever source they came from, the
+# checks below (scheme, bindability, completeness) apply to the RESULT; no source
+# is exempt. MDASH F120/F119/F309 is the finding this ordering closes.
 now_epoch() { date -u +%s 2>/dev/null || echo 0; }
 
 # Percent-encode a value for an application/x-www-form-urlencoded body (POSIX sh,
@@ -440,12 +614,32 @@ oauth_refresh() {
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   _umask="$(umask)"
   umask 077
-  _tmp_cache="${ACCESS_CACHE}.tmp.$$"
-  if printf '{"access_token":"%s","expires_at":%s}\n' "$_new_access" "$_new_exp_at" >"$_tmp_cache" 2>/dev/null; then
-    mv -f "$_tmp_cache" "$ACCESS_CACHE" 2>/dev/null || rm -f "$_tmp_cache" 2>/dev/null
-  else
-    rm -f "$_tmp_cache" 2>/dev/null
+  # mktemp, not `$$`: PIDs collide across containers on the shared bind-mount.
+  # No mktemp is a broken host: fail loudly. Skipping the cache instead meant a
+  # refresh on EVERY invocation, and two concurrent refreshes invalidate each
+  # other server-side (one access token per instance), which the fresh-token
+  # path treats as a genuine 401 and does not retry.
+  _tmp_cache="$(mktemp "${ACCESS_CACHE}.tmp.XXXXXX" 2>/dev/null)" || _tmp_cache=""
+  if [ -z "$_tmp_cache" ]; then
+    umask "$_umask"
+    echo "TokenScope: emission auth FAILED (cannot create a temp file under ${STATE_DIR}; mktemp unavailable or directory unwritable) — telemetry is being DROPPED." >&2
+    write_sentinel 0 "cannot create access cache temp"
+    exit 1
   fi
+  # The cache is BOUND to the bearer endpoint it was minted for (design doc,
+  # cache section). Non-lossy: an endpoint with JSON-hostile characters does not
+  # bind at all, so two endpoints can never collide on one key.
+  _cache_bear="$(printf '%s' "$TOKENSCOPE_BEARER_ENDPOINT" | tr -d '\000-\037"\\')"
+  [ "$_cache_bear" = "$TOKENSCOPE_BEARER_ENDPOINT" ] || _cache_bear=""
+  if [ -n "$_tmp_cache" ]; then
+    if printf '{"access_token":"%s","expires_at":%s,"bearer_endpoint":"%s"}\n' "$_new_access" "$_new_exp_at" "$_cache_bear" >"$_tmp_cache" 2>/dev/null; then
+      mv -f "$_tmp_cache" "$ACCESS_CACHE" 2>/dev/null || rm -f "$_tmp_cache" 2>/dev/null
+    else
+      rm -f "$_tmp_cache" 2>/dev/null
+    fi
+  fi
+  # ALWAYS restored, on every path out of this block: an early return here would
+  # leave the process at umask 077 for everything after it.
   umask "$_umask"
   AUTH_TOKEN="$_new_access"
 }
@@ -585,47 +779,13 @@ if [ -z "${TOKENSCOPE_BEARER_ENDPOINT:-}" ]; then
 fi
 assert_safe_endpoint "$TOKENSCOPE_BEARER_ENDPOINT" "TOKENSCOPE_BEARER_ENDPOINT"
 
-# ── OAuth refresh token: env, else the device credential store fallback ──────
-# Claude's repo-local tag no longer carries TOKENSCOPE_OAUTH_REFRESH_TOKEN (S1
-# fix 4 — a hostile repo must not be able to exfiltrate the durable refresh
-# credential merely by sitting in the working tree: `tag-repo.mjs` now strips
-# it from the repo-local env copy it writes). When the env omits it, fall back
-# to the device's OWN 0700 global state dir store (${STATE_DIR}/config.json →
-# .oauth_refresh_token), which claude-redeem.mjs now writes on THIS lane and
-# copilot-redeem.mjs already writes+reads on the Copilot lane
-# (copilot-plugin/scripts/status.mjs) — ONE shared store, keyed by the SAME
-# field name, so a tagged repo's session still finds the refresh token (from
-# the device store, never from the repo) and removing it from the repo tag
-# cannot brick emission.
-if [ -n "$DEVICE_CFG" ]; then
-  _cfg_refresh="$(json_str "$DEVICE_CFG" oauth_refresh_token)"
-  if [ -n "$_cfg_refresh" ]; then
-    # NEVER PAIR A TRUSTED CREDENTIAL WITH AN UNTRUSTED DESTINATION.
-    #
-    # A device enrolled before the endpoints were persisted has a refresh token
-    # in the store but no endpoint, so the environment still named where it went
-    # — and the environment is what a hostile repo contributes to. Taking the
-    # DURABLE credential from the trusted store and POSTing it to a repo-chosen
-    # host is strictly worse than not emitting: the token does not rotate, and
-    # revocation is the only control (ADR-0005). Fail closed and say how to fix
-    # it. A fully-legacy device, with NO stored credential, is unchanged — that
-    # is the pre-existing state, not a new pairing.
-    #
-    # THE STORE IS CONSULTED EVEN WHEN THE ENVIRONMENT ALREADY HAS A TOKEN.
-    # Gating this on an empty ${TOKENSCOPE_OAUTH_REFRESH_TOKEN} skipped the whole
-    # check for the NORMAL configuration: redeem writes the real credential into
-    # global settings, Claude Code merges that into the environment, and a
-    # hostile repo contributes only the endpoint keys. A token-only store (a
-    # legacy device, or a migration that failed) then sent the real durable
-    # credential to a repo-chosen host with no refusal. "The environment holds a
-    # token" says nothing about WHERE that token came from; the store does.
-    if [ "$ENDPOINTS_FROM_STORE" -ne 1 ] || [ "$BEARER_FROM_STORE" -ne 1 ]; then
-      echo "TokenScope: emission auth REFUSED — this device stores a durable credential but not BOTH destinations, so one of them would come from the session environment. Re-run the tokenscope-setup MCP prompt to re-provision. Telemetry will not emit." >&2
-      write_sentinel 0 "stored credential without both stored endpoints"
-      exit 1
-    fi
-    TOKENSCOPE_OAUTH_REFRESH_TOKEN="$_cfg_refresh"
-  fi
+# Bindable, or refuse now: an endpoint the cache cannot key on would otherwise
+# refresh on every invocation forever and report no-token to every reader.
+_bindable="$(printf '%s' "$TOKENSCOPE_BEARER_ENDPOINT" | tr -d '\000-\037"\\')"
+if [ "$_bindable" != "$TOKENSCOPE_BEARER_ENDPOINT" ]; then
+  echo "TokenScope: emission auth FAILED (TOKENSCOPE_BEARER_ENDPOINT contains a quote, backslash or control character) — telemetry is being DROPPED. Re-run the tokenscope-setup MCP prompt." >&2
+  write_sentinel 0 "bearer endpoint not bindable"
+  exit 1
 fi
 
 # ── Require OAuth auth ─────────────────────────────────────────────────────────
@@ -634,7 +794,7 @@ fi
 if [ -z "${TOKENSCOPE_OAUTH_REFRESH_TOKEN:-}" ] \
   || [ -z "${TOKENSCOPE_OAUTH_TOKEN_ENDPOINT:-}" ] \
   || [ -z "${TOKENSCOPE_OAUTH_CLIENT_ID:-}" ]; then
-  echo "TokenScope: emission auth NOT CONFIGURED — no OAuth credential (TOKENSCOPE_OAUTH_REFRESH_TOKEN/_TOKEN_ENDPOINT/_CLIENT_ID, and none found in ${STATE_DIR}/config.json); run the tokenscope-setup MCP prompt. Telemetry will not emit." >&2
+  echo "TokenScope: emission auth NOT CONFIGURED — no OAuth credential (TOKENSCOPE_OAUTH_REFRESH_TOKEN/_TOKEN_ENDPOINT/_CLIENT_ID, and none found in ${STORE}); run the tokenscope-setup MCP prompt. Telemetry will not emit." >&2
   write_sentinel 0 "no OAuth credential configured"
   exit 1
 fi
@@ -654,6 +814,15 @@ if [ -f "$ACCESS_CACHE" ]; then
   CACHED_TOKEN="$(json_str "$_cache" access_token)"
   CACHED_EXP="$(json_num "$_cache" expires_at)"
   [ -z "$CACHED_EXP" ] && CACHED_EXP=0
+  # Only a cache bound to THIS destination may be used. A pre-binding record has
+  # no endpoint, fails once, and is replaced.
+  _cache_bear_now="$(printf '%s' "$TOKENSCOPE_BEARER_ENDPOINT" | tr -d '\000-\037"\\')"
+  # An endpoint that does not survive the strip was never bound; never matches.
+  if [ "$_cache_bear_now" != "$TOKENSCOPE_BEARER_ENDPOINT" ] \
+    || [ -z "$_cache_bear_now" ] \
+    || [ "$(json_str "$_cache" bearer_endpoint)" != "$_cache_bear_now" ]; then
+    CACHED_TOKEN=""
+  fi
 fi
 
 NOW="$(now_epoch)"

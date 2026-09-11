@@ -47,7 +47,6 @@ import {
   rmSync,
   existsSync,
   symlinkSync,
-  cpSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -58,6 +57,7 @@ import {
   repoSettingsDirs,
 } from '../../../plugin/hooks/session-start.mjs'
 import { realHome } from '../../../plugin/scripts/plugin-runtime.mjs'
+import { materialiseSandboxedPlugin } from './helpers/sandboxed-plugin.js'
 
 const BUNDLE_SRC = resolve(__dirname, '../../../plugin')
 
@@ -81,11 +81,12 @@ let installedHook: string
 
 function materialiseInstall(): void {
   versionsDir = join(home, 'versions')
-  const installed = join(versionsDir, '0.1.0')
-  cpSync(BUNDLE_SRC, installed, { recursive: true })
-  installedHook = join(installed, 'hooks', 'session-start.mjs')
+  // The copy stubs the emit helper and the store migration: both anchor on the
+  // passwd home, which no variable can redirect. See the fixture's header.
+  installedHook = materialiseSandboxedPlugin(BUNDLE_SRC, join(versionsDir, '0.1.0'))
 }
 const DEFAULT_STATE_DIR = join(realHome(), '.tokenscope')
+
 
 /** An enrolment-shaped global env: enough for the hook to run the emit probe. */
 function enrolmentEnv(extra: Record<string, string> = {}) {

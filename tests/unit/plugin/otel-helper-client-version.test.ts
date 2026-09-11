@@ -113,6 +113,22 @@ beforeEach(() => {
   const curl = join(stubDir, 'curl')
   writeFileSync(curl, STUB)
   chmodSync(curl, 0o755)
+  /*
+   * Redirect the passwd lookup at an empty temp home. With no store, the helper
+   * resolves the credential and BOTH destinations from the device's own
+   * ~/.claude/settings.json rather than the environment; left unstubbed that is
+   * the DEVELOPER'S real file, so this fixture would run against a real
+   * enrolment and never reach the endpoints it sets.
+   */
+  const passwdHome = join(tmp, 'passwd-home')
+  mkdirSync(passwdHome, { recursive: true })
+  writeFileSync(join(stubDir, 'id'), `#!/bin/sh\nprintf 'tsprobe\\n'\n`)
+  chmodSync(join(stubDir, 'id'), 0o755)
+  writeFileSync(
+    join(stubDir, 'getent'),
+    `#!/bin/sh\nprintf 'tsprobe:x:1000:1000::%s:/bin/sh\\n' "${passwdHome}"\n`,
+  )
+  chmodSync(join(stubDir, 'getent'), 0o755)
   helperPath = installHelper('{"name":"tokenscope","version":"9.9.9"}')
 })
 afterEach(() => rmSync(tmp, { recursive: true, force: true }))
@@ -213,7 +229,17 @@ exit 0
     writeFileSync(curl, healStub)
     chmodSync(curl, 0o755)
     // Seed a cached (now-superseded) token so the first /bearer uses it and 401s.
-    writeFileSync(join(stateDir, 'oauth-access.json'), JSON.stringify({ access_token: 'STALE', expires_at: 9999999999 }))
+    // BOUND to the endpoint this run resolves to: the cache is part of the source
+    // model now, so a record naming a different destination is discarded rather
+    // than replayed, and this case needs the cached-token path to be reached.
+    writeFileSync(
+      join(stateDir, 'oauth-access.claude-code.json'),
+      JSON.stringify({
+        access_token: 'STALE',
+        expires_at: 9999999999,
+        bearer_endpoint: 'https://stub.local/api/v1/instances/x/bearer',
+      }),
+    )
 
     const r = runHelper({ STUB_COUNTER: join(tmp, 'counter'), CLAUDE_CODE_EXECPATH: '/versions/2.1.212/claude' })
     expect(r.status).toBe(0)

@@ -20,11 +20,16 @@
  * red: the planted endpoint appears.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, cpSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, cpSync, readdirSync } from 'node:fs'
 import { tmpdir, userInfo } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { join, resolve } from 'node:path'
-import { globalSettingsEnv, trustedGlobalSettingsEnv, migrateStoredEndpoints } from '../../../plugin/scripts/plugin-runtime.mjs'
+import {
+  globalSettingsEnv,
+  trustedGlobalSettingsEnv,
+  migrateStoredEndpoints,
+  writeDeviceStore,
+} from '../../../plugin/scripts/plugin-runtime.mjs'
 
 let sandbox: string
 let fakeHome: string
@@ -80,43 +85,228 @@ describe('a repo-moved HOME cannot choose where a credential is sent', () => {
 })
 
 describe('migrateStoredEndpoints — the legacy shape heals from a TRUSTED source', () => {
-  const TRUSTED = { TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://device.local/token', TOKENSCOPE_BEARER_ENDPOINT: 'https://device.local/bearer' }
+  // Instance-shaped, as every real bearer endpoint is. The migration refuses to
+  // write a store whose instance it cannot name, because an empty instance_id
+  // would ride every emitted record and break the teammate join silently.
+  const TRUSTED = {
+    TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://device.local/token',
+    TOKENSCOPE_BEARER_ENDPOINT: 'https://device.local/api/v1/instances/claude-one/bearer',
+  }
 
+  /*
+   * `store` plants the LEGACY shared file — that is what the migration reads.
+   * `read` opens the CLAUDE lane's own file, because the migration now promotes
+   * into it rather than writing back into the shared one. Writing back was
+   * itself a cross-lane defect: on every session start it stamped Claude's
+   * bearer endpoint into whatever store it found, including a Copilot enrolment.
+   */
   const store = (name: string, cfg: object) => {
     const dir = join(sandbox, name)
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     writeFileSync(join(dir, 'config.json'), JSON.stringify(cfg))
     return dir
   }
-  const read = (dir: string) => JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))
+  const read = (dir: string) => JSON.parse(readFileSync(join(dir, 'config.claude-code.json'), 'utf8'))
+  /** A minimal but CONSISTENT set of fields writeDeviceStore will accept. */
+  const consistent = (extra: Record<string, unknown> = {}) => ({
+    instance_id: 'claude-one',
+    bearer_endpoint: 'https://device.local/api/v1/instances/claude-one/bearer',
+    oauth_token_endpoint: 'https://device.local/token',
+    oauth_refresh_token: 'rt',
+    otel_resource_attributes: 'tokenscope.instance_id=claude-one,tool=claude-code',
+    ...extra,
+  })
+  const legacyUntouched = (dir: string, expected: string) =>
+    expect(readFileSync(join(dir, 'config.json'), 'utf8')).toBe(expected)
 
-  it('backfills BOTH destinations when only the credential is stored', () => {
+  /*
+   * A TOKEN-ONLY LEGACY STORE IS LEFT UNCLAIMED. The ownership proof is the
+   * legacy bearer matching the device's settings; with no legacy bearer there is
+   * nothing to match, and this branch is only reached when settings holds no
+   * token to corroborate it either. Promoting that credential on the strength
+   * of settings' ENDPOINT would pair a possibly foreign token with our
+   * destination. Such a device re-enrols; it is not a normal state (redeem has
+   * always written the token to settings).
+   */
+  it('leaves a token-only legacy store unclaimed rather than pairing it with settings endpoints', () => {
     const dir = store('legacy', { oauth_refresh_token: 'rt' })
-    expect(migrateStoredEndpoints(dir, TRUSTED)).toBe(true)
-    expect(read(dir)).toMatchObject({
-      oauth_refresh_token: 'rt',
-      oauth_token_endpoint: TRUSTED.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT,
-      bearer_endpoint: TRUSTED.TOKENSCOPE_BEARER_ENDPOINT,
-    })
+    expect(migrateStoredEndpoints(dir, TRUSTED)).toBe(false)
+    expect(existsSync(join(dir, 'config.claude-code.json'))).toBe(false)
   })
 
-  it('backfills the MISSING one when the store is half-migrated', () => {
-    /*
-     * The token-only store was a permanent refusal before this: the helper needs
-     * both destinations from the store, and the migration returned early as soon
-     * as the token endpoint existed.
-     */
+  it('leaves a half-migrated legacy store (token + token endpoint, no bearer) unclaimed too', () => {
     const dir = store('half', { oauth_refresh_token: 'rt', oauth_token_endpoint: 'https://kept/token' })
+    expect(migrateStoredEndpoints(dir, TRUSTED)).toBe(false)
+    expect(existsSync(join(dir, 'config.claude-code.json'))).toBe(false)
+  })
+
+  it('is idempotent once this lane has its own store', () => {
+    const bearer = TRUSTED.TOKENSCOPE_BEARER_ENDPOINT
+    const dir = store('done', { oauth_refresh_token: 'rt', bearer_endpoint: bearer })
     expect(migrateStoredEndpoints(dir, TRUSTED)).toBe(true)
-    const after = read(dir)
-    expect(after.oauth_token_endpoint).toBe('https://kept/token') // not overwritten
-    expect(after.bearer_endpoint).toBe(TRUSTED.TOKENSCOPE_BEARER_ENDPOINT)
+    const first = readFileSync(join(dir, 'config.claude-code.json'), 'utf8')
+    expect(migrateStoredEndpoints(dir, TRUSTED)).toBe(false)
+    expect(readFileSync(join(dir, 'config.claude-code.json'), 'utf8')).toBe(first)
   })
 
   it('REFUSES to persist an unsafe endpoint', () => {
-    const dir = store('unsafe', { oauth_refresh_token: 'rt' })
-    expect(migrateStoredEndpoints(dir, { TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'http://evil.example/token' })).toBe(false)
-    expect(read(dir).oauth_token_endpoint).toBeUndefined()
+    // A claimable legacy store (bearer matches settings) so the run REACHES the
+    // endpoint validator; the old fixture returned at the completeness check
+    // before ever validating, so the assertion held with the validator removed.
+    const bearer = TRUSTED.TOKENSCOPE_BEARER_ENDPOINT
+    const dir = store('unsafe', { oauth_refresh_token: 'rt', bearer_endpoint: bearer })
+    expect(
+      migrateStoredEndpoints(dir, {
+        TOKENSCOPE_BEARER_ENDPOINT: bearer,
+        TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'http://evil.example/token',
+      }),
+    ).toBe(false)
+    expect(existsSync(join(dir, 'config.claude-code.json'))).toBe(false)
+  })
+
+  /*
+   * THE ROLLOUT CASE, and the one that keeps a dual-CLI device emitting.
+   *
+   * Every device that ever enrolled Copilot has a pre-split config.json. The
+   * helper refuses a legacy store this lane cannot prove it owns, so without
+   * this promotion those devices would stop emitting until someone re-ran setup
+   * by hand. The settings env is repo-unwritable and is the same source the
+   * no-store path already trusts.
+   */
+  it('mints this lane store from the trusted settings alone, beside an unclaimable legacy file', () => {
+    const dir = store('rollout', {
+      // the pre-split file holds the OTHER lane enrolment, as on a real device
+      oauth_refresh_token: 'copilot-rt',
+      bearer_endpoint: 'https://device.local/api/v1/instances/copilot-one/bearer',
+      otel_resource_attributes: 'tokenscope.instance_id=copilot-one,tool=copilot-cli',
+    })
+    const legacyBefore = readFileSync(join(dir, 'config.json'), 'utf8')
+    expect(
+      migrateStoredEndpoints(dir, {
+        ...TRUSTED,
+        TOKENSCOPE_BEARER_ENDPOINT: 'https://device.local/api/v1/instances/claude-one/bearer',
+        TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'claude-rt',
+        TOKENSCOPE_OAUTH_CLIENT_ID: 'cid',
+      }),
+    ).toBe(true)
+    expect(read(dir)).toMatchObject({
+      version: 2,
+      tool: 'claude-code',
+      instance_id: 'claude-one',
+      oauth_refresh_token: 'claude-rt',
+    })
+    // the other lane pre-split file is untouched, so Copilot keeps working
+    legacyUntouched(dir, legacyBefore)
+  })
+
+  /*
+   * MIGRATION ONLY EVER CREATES, and this tests the MECHANISM rather than the
+   * early return. It runs on every session start while redeem is a second
+   * writer of the same file, so an existence check followed by an unconditional
+   * rename could overwrite a store a concurrent redeem had just written, and no
+   * later migration would correct it because they all stop once the file
+   * exists. The exclusive create is what closes the window between the two.
+   *
+   * Asserting this through migrateStoredEndpoints does NOT work: its own
+   * existence check short-circuits before the write, so the assertion passes
+   * with the exclusive create reverted. Drive writeDeviceStore directly.
+   */
+  it('an exclusive create refuses to replace an existing store', () => {
+    const dir = store('exclusive', { oauth_refresh_token: 'rt' })
+    const fresh = JSON.stringify({ version: 2, tool: 'claude-code', oauth_refresh_token: 'from-redeem' })
+    writeFileSync(join(dir, 'config.claude-code.json'), fresh)
+    expect(() =>
+      writeDeviceStore('claude-code', consistent({ oauth_refresh_token: 'stale' }), dir, { exclusive: true }),
+    ).toThrow(/EEXIST/)
+    expect(readFileSync(join(dir, 'config.claude-code.json'), 'utf8')).toBe(fresh)
+    expect(readdirSync(dir).filter((f) => f.includes('.tmp.'))).toEqual([])
+  })
+
+  /*
+   * The temp holds the DURABLE REFRESH TOKEN at 0600. A successful rename
+   * consumes it, but a failed write, chmod or rename would otherwise leave it on
+   * disk indefinitely. Cleanup used to run only on the exclusive path, so the
+   * ordinary redeem write leaked it. Provoked here by putting a DIRECTORY where
+   * the store belongs, which makes the rename fail.
+   */
+  it('leaves no credential-bearing temp behind when a non-exclusive write fails', () => {
+    const dir = store('failed-write', { oauth_refresh_token: 'rt' })
+    mkdirSync(join(dir, 'config.claude-code.json'), { recursive: true })
+    expect(() =>
+      writeDeviceStore('claude-code', consistent({ oauth_refresh_token: 'SECRET' }), dir),
+    ).toThrow()
+    expect(readdirSync(dir).filter((f) => f.includes('.tmp.'))).toEqual([])
+  })
+
+  it('the MANAGED envelope wins over caller-supplied fields', () => {
+    const dir = store('envelope', { oauth_refresh_token: 'rt' })
+    // a caller trying to declare another lane must not be able to
+    writeDeviceStore('claude-code', consistent({ version: 99, tool: 'copilot-cli', x: 1 }), dir)
+    const v2 = JSON.parse(readFileSync(join(dir, 'config.claude-code.json'), 'utf8'))
+    expect(v2.version).toBe(2)
+    expect(v2.tool).toBe('claude-code')
+    expect(v2.x).toBe(1) // ordinary fields still come through
+  })
+
+  it('a non-exclusive write still replaces, which is what redeem needs', () => {
+    const dir = store('replace', { oauth_refresh_token: 'rt' })
+    writeFileSync(join(dir, 'config.claude-code.json'), '{"old":true}')
+    writeDeviceStore('claude-code', consistent({ oauth_refresh_token: 'new' }), dir)
+    expect(JSON.parse(readFileSync(join(dir, 'config.claude-code.json'), 'utf8'))).toMatchObject({
+      version: 2,
+      tool: 'claude-code',
+      oauth_refresh_token: 'new',
+    })
+    expect(readdirSync(dir).filter((f) => f.includes('.tmp.'))).toEqual([])
+  })
+
+  it('refuses to write a store whose instance it cannot name', () => {
+    const dir = store('nameless', { oauth_refresh_token: 'rt' })
+    expect(
+      migrateStoredEndpoints(dir, {
+        ...TRUSTED,
+        // not instance-shaped, and no resource attributes to fall back on
+        TOKENSCOPE_BEARER_ENDPOINT: 'https://device.local/bearer',
+      }),
+    ).toBe(false)
+    expect(existsSync(join(dir, 'config.claude-code.json'))).toBe(false)
+  })
+
+  /*
+   * THE BEARER NAMES THE INSTANCE. Settings attributes can be stale (the design
+   * doc's Copilot-then-Claude state). Preferring them wrote a v2 store whose
+   * instance_id disagreed with its own bearer endpoint; the helper refused it as
+   * inconsistent, and no later migration retried because the file existed — a
+   * recoverable device turned into a permanent outage.
+   */
+  it('derives the instance from the PROVEN bearer, regenerating stale attributes', () => {
+    const dir = store('attrs', { oauth_refresh_token: 'rt' })
+    expect(
+      migrateStoredEndpoints(dir, {
+        ...TRUSTED,
+        TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'claude-rt',
+        TOKENSCOPE_BEARER_ENDPOINT: 'https://device.local/api/v1/instances/current/bearer',
+        OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=stale,tool=copilot-cli',
+      }),
+    ).toBe(true)
+    const v2 = read(dir)
+    expect(v2.instance_id).toBe('current')
+    expect(v2.otel_resource_attributes).toBe('tokenscope.instance_id=current,tool=claude-code')
+  })
+
+  it('a legacy store with stale attributes migrates to a store the helper will ACCEPT', () => {
+    const bearer = 'https://device.local/api/v1/instances/current/bearer'
+    const dir = store('stale-legacy', {
+      oauth_refresh_token: 'rt',
+      bearer_endpoint: bearer,
+      otel_resource_attributes: 'tokenscope.instance_id=stale,tool=copilot-cli',
+    })
+    expect(migrateStoredEndpoints(dir, { ...TRUSTED, TOKENSCOPE_BEARER_ENDPOINT: bearer })).toBe(true)
+    const v2 = read(dir)
+    // self-consistent: the helper's invariant-3 check would pass this
+    expect(v2.instance_id).toBe('current')
+    expect(v2.otel_resource_attributes).toContain('tokenscope.instance_id=current')
+    expect(v2.bearer_endpoint).toBe(bearer)
   })
 
   it('does nothing when there is no stored credential to protect', () => {
@@ -124,10 +314,36 @@ describe('migrateStoredEndpoints — the legacy shape heals from a TRUSTED sourc
     expect(migrateStoredEndpoints(dir, TRUSTED)).toBe(false)
   })
 
-  it('is idempotent once both are stored', () => {
-    const dir = store('done', { oauth_refresh_token: 'rt', oauth_token_endpoint: 'https://a/t', bearer_endpoint: 'https://a/b' })
-    expect(migrateStoredEndpoints(dir, TRUSTED)).toBe(false)
-    expect(read(dir).oauth_token_endpoint).toBe('https://a/t')
+  /*
+   * OWNERSHIP, NOT INFERENCE. A legacy store naming a DIFFERENT instance than
+   * the device's own settings is not this lane's to promote: claude-redeem
+   * replaces the token and endpoints while preserving an existing instance_id,
+   * so a Copilot-then-Claude sequence leaves a mixed store behind. Guessing
+   * would file a durable credential under the wrong tool.
+   */
+  it('refuses a legacy store whose bearer names another instance', () => {
+    const dir = store('foreign', {
+      oauth_refresh_token: 'rt',
+      bearer_endpoint: 'https://device.local/api/v1/instances/copilot-one/bearer',
+    })
+    expect(
+      migrateStoredEndpoints(dir, {
+        ...TRUSTED,
+        TOKENSCOPE_BEARER_ENDPOINT: 'https://device.local/api/v1/instances/claude-one/bearer',
+      }),
+    ).toBe(false)
+    expect(existsSync(join(dir, 'config.claude-code.json'))).toBe(false)
+  })
+
+  it('promotes a legacy store whose bearer matches the device settings', () => {
+    const bearer = 'https://device.local/api/v1/instances/claude-one/bearer'
+    const dir = store('mine', { oauth_refresh_token: 'rt', bearer_endpoint: bearer })
+    const legacyBefore = readFileSync(join(dir, 'config.json'), 'utf8')
+    expect(migrateStoredEndpoints(dir, { ...TRUSTED, TOKENSCOPE_BEARER_ENDPOINT: bearer })).toBe(true)
+    const v2 = read(dir)
+    expect(v2).toMatchObject({ version: 2, tool: 'claude-code', instance_id: 'claude-one' })
+    // The legacy file is READ-ONLY from the split onwards.
+    legacyUntouched(dir, legacyBefore)
   })
 })
 

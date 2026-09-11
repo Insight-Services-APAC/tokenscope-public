@@ -36,7 +36,7 @@ import { resolveEnrollmentSecret } from '../../../plugin/scripts/enrollment-secr
 const FAKE_ENROLL_RESPONSE = {
   instance_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
   tool: 'claude-code',
-  bearer_endpoint: 'https://ts.example.com/api/v1/instances/abc/bearer',
+  bearer_endpoint: 'https://ts.example.com/api/v1/instances/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/bearer',
   oauth_refresh_token: 'rt_provisional_secret',
   oauth_token_endpoint: 'https://ts.example.com/api/v1/oauth/token',
   oauth_client_id: 'client-prov',
@@ -46,8 +46,8 @@ const FAKE_ENROLL_RESPONSE = {
       OTEL_METRICS_EXPORTER: 'none',
       OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://ts.example.com/v1/logs',
       OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/protobuf',
-      otel_headers_helper_url: 'https://ts.example.com/api/v1/instances/abc/bearer',
-      OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=aaaaaaaa,tool=claude-code',
+      otel_headers_helper_url: 'https://ts.example.com/api/v1/instances/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/bearer',
+      OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,tool=claude-code',
     },
   },
 }
@@ -202,7 +202,7 @@ describe('enrollIfNeeded — decision logic', () => {
     expect(helperPath).toBe('/plugin/scripts/otel-headers-helper.sh')
     expect(envBlock.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBe('rt_provisional_secret')
     expect(envBlock.TOKENSCOPE_BEARER_ENDPOINT).toBe(FAKE_ENROLL_RESPONSE.telemetry.claude.otel_headers_helper_url)
-    expect(envBlock.OTEL_RESOURCE_ATTRIBUTES).toContain('tokenscope.instance_id=aaaaaaaa')
+    expect(envBlock.OTEL_RESOURCE_ATTRIBUTES).toContain('tokenscope.instance_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
   })
 
   it('stays silent and writes NOTHING when the POST fails', async () => {

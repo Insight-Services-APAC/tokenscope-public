@@ -6,7 +6,7 @@
  *
  * Calls GET /api/v1/instances/{id}/health (emit-credential authed — the same gate as
  * /bearer) using the emit access token the headers-helper already cached
- * (`<state>/oauth-access.json`). Best-effort + short timeout: ANY failure leaves the
+ * (`<state>/oauth-access.<tool>.json`). Best-effort + short timeout: ANY failure leaves the
  * last-landed cache untouched, so the statusline simply renders from the last good
  * answer. Called by the session-start hook, `/tokenscope:status`, AND — throttled +
  * detached, never blocking a render — by the always-on statusline itself, so the
@@ -15,6 +15,7 @@
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { accessCachePath, readBoundAccessToken } from './device-store.mjs'
 import { fileURLToPath } from 'node:url'
 import { trustedStateDir, trustedGlobalSettingsEnv } from './plugin-runtime.mjs'
 import { assertSafeEndpoint } from './endpoint-guard.mjs'
@@ -90,8 +91,9 @@ export async function refreshLanded({ env = {}, stateDir } = {}) {
     return { ok: false, reason: 'bad-endpoint' }
   }
 
-  const access = readJson(join(dir, 'oauth-access.json'))
-  const token = access?.access_token || access?.accessToken || access?.token
+  const access = readJson(accessCachePath('claude-code', dir))
+  // Only a cache bound to this destination may be presented.
+  const token = readBoundAccessToken(access, bearerEndpoint)
   if (!token) return { ok: false, reason: 'no-token' }
 
   let res

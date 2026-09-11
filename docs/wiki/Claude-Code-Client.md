@@ -113,7 +113,7 @@ every MCP client supports tools + prompts, so this is the cross-client surface.
 *rotate* this device rather than mint a duplicate, which needs one non-secret
 fact: the `tokenscope.instance_id` the host was last provisioned with. That id
 sits in `~/.claude/settings.json` next to `TOKENSCOPE_OAUTH_REFRESH_TOKEN` (and,
-on the Copilot side, in `~/.tokenscope/config.json` next to
+on the Copilot side, in `~/.tokenscope/config.copilot-cli.json` next to
 `oauth_refresh_token`), so instructing the agent to read the file would pull a
 durable credential into the model's context on every ordinary setup — no attacker
 required. `plugin/scripts/device-id.mjs` reads the store out of process and

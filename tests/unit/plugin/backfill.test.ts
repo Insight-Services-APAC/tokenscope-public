@@ -21,6 +21,25 @@ import {
 } from '../../../plugin/scripts/backfill.mjs'
 import { safeProcessEnv, REPO_UNTRUSTED_ENV_KEYS } from '../../../plugin/scripts/plugin-runtime.mjs'
 
+
+/**
+ * A `--tool-dir` whose stubbed passwd database points "the real home" at an
+ * empty temp dir, so the helper cannot resolve the developer's own enrolment.
+ */
+function stubToolDir(root: string): string {
+  const dir = join(root, 'stub-tools')
+  const home = join(root, 'passwd-home')
+  mkdirSync(dir, { recursive: true })
+  mkdirSync(home, { recursive: true })
+  writeFileSync(join(dir, 'id'), `#!/bin/sh\nprintf 'tsprobe\\n'\n`, { mode: 0o755 })
+  writeFileSync(
+    join(dir, 'getent'),
+    `#!/bin/sh\nprintf 'tsprobe:x:1000:1000::%s:/bin/sh\\n' "${home}"\n`,
+    { mode: 0o755 },
+  )
+  return dir
+}
+
 const NOW = new Date('2026-05-15T12:00:00Z')
 
 function assistantLine(
@@ -416,6 +435,15 @@ describe('run — S1 fix 3: the ingest endpoint is validated BEFORE any network 
           since: null,
           until: null,
           dryRun: false,
+          // A SANDBOX, because this case actually reaches mintBearer. Without
+          // it the run drives the real emit helper against the developer's own
+          // ~/.tokenscope: trustedStateDir() honours no environment override by
+          // design, so a dir is the only way to redirect it. mintBearer refuses
+          // the real dir under Vitest rather than let that happen silently.
+          stateDir: root,
+          // And a stubbed passwd database, so the helper's no-store path reads a
+          // temp ~/.claude/settings.json rather than the developer's real one.
+          toolDir: stubToolDir(root),
         },
         {
           OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=inst-1,tool=claude-code',

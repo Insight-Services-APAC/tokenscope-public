@@ -452,7 +452,7 @@ function maybeSpawnLandedRefresh(env, cache) {
     const script = join(dirname(fileURLToPath(import.meta.url)), 'landed-check.mjs')
     // landed-check reads OTEL_RESOURCE_ATTRIBUTES + TOKENSCOPE_BEARER_ENDPOINT from
     // its env, so pass the settings env merged over ours. It reads the emit access
-    // token from the shared oauth-access.json cache — no secret is passed on argv.
+    // token from this lane's oauth-access.claude-code.json cache — no secret is passed on argv.
     const child = spawn(process.execPath, [script], {
       env: { ...process.env, ...env },
       detached: true,

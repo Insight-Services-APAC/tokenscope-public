@@ -13,7 +13,7 @@
  *                              env.TOKENSCOPE_OAUTH_REFRESH_TOKEN
  *                              (claude-redeem.mjs's writeClaudeSettings puts
  *                              both into one `env`).
- *   ~/.tokenscope/config.json  instance_id sits beside oauth_refresh_token
+ *   ~/.tokenscope/config.copilot-cli.json  instance_id sits beside oauth_refresh_token
  *                              (copilot-redeem.mjs's writeTokenscopeConfig
  *                              writes both flat).
  *
@@ -38,7 +38,7 @@
  *     CLAUDE CODE itself will read, and Claude Code resolves its own settings
  *     through $HOME. Following the passwd home instead would report a device as
  *     un-enrolled on a host where it is emitting perfectly well.
- *   - ~/.tokenscope/config.json → realHome(). This one is OURS, and
+ *   - ~/.tokenscope/config.<tool>.json → realHome(). This one is OURS, and
  *     copilot-redeem.mjs writes it under the passwd home precisely so a moved
  *     $HOME cannot choose where a durable refresh token lands. A reader that
  *     followed $HOME would read a store the writer never wrote — and, worse,
@@ -54,6 +54,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { realHome } from './real-home.mjs'
+import { resolveStorePath } from './device-store.mjs'
 
 /** The emit tools an instance can be bound to. An instance is bound to exactly one. */
 const EMIT_TOOLS = ['claude-code', 'copilot-cli']
@@ -151,18 +152,21 @@ export function readClaudeDevice(settings, wantTool = 'claude-code') {
 }
 
 /**
- * Device identity from a PARSED ~/.tokenscope/config.json object. Pure +
- * exported for tests. Same contract as readClaudeDevice.
+ * Device identity from a PARSED Copilot store (`config.copilot-cli.json`, or
+ * the legacy `config.json`). Pure + exported for tests. Same contract as
+ * readClaudeDevice.
  */
 export function readCopilotDevice(config, wantTool = 'copilot-cli') {
   if (!config || typeof config !== 'object') return result({ reason: 'no-enrolment' })
   const instanceId = typeof config.instance_id === 'string' ? config.instance_id.trim() : ''
   if (!instanceId) return result({ reason: 'no-enrolment' })
-  // config.json is written only by the two COPILOT enrolment paths —
-  // copilot-redeem.mjs and copilot-plugin/scripts/enroll.mjs, both of which
-  // build it from a copilot-shaped bundle — so copilot-cli is the sound default
-  // when otel_resource_attributes carries no `tool=`.
-  const tool = attrValue(config.otel_resource_attributes, 'tool') ?? 'copilot-cli'
+  // A v2 store names its lane. The legacy config.json may be EITHER lane's (it
+  // was shared before the per-tool split), so its attrs marker decides, and
+  // copilot-cli is the default only for a marker-less legacy file.
+  const tool =
+    (typeof config.tool === 'string' && config.tool) ||
+    attrValue(config.otel_resource_attributes, 'tool') ||
+    'copilot-cli'
   const bearerHost = hostOf(config.bearer_endpoint)
   if (tool !== wantTool) return result({ tool, bearerHost, reason: 'tool-mismatch' })
   return result({ enrolled: true, tool, instanceId, bearerHost })
@@ -189,7 +193,7 @@ function readJson(path) {
 export function deviceIdentity(tool = 'claude-code', home = undefined) {
   if (!EMIT_TOOLS.includes(tool)) return result({ reason: 'unknown-tool' })
   if (tool === 'copilot-cli') {
-    const cfg = readJson(join(home ?? realHome(), '.tokenscope', 'config.json'))
+    const cfg = readJson(resolveStorePath('copilot-cli', join(home ?? realHome(), '.tokenscope')))
     return cfg === null ? result({ reason: 'no-enrolment' }) : readCopilotDevice(cfg, tool)
   }
   const settings = readJson(join(home ?? homedir(), '.claude', 'settings.json'))

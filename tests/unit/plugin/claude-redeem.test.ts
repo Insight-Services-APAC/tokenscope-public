@@ -53,7 +53,7 @@ const FAKE_REDEEM_RESPONSE = {
       OTEL_METRICS_EXPORTER: 'none',
       OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://ts.example.com/v1/logs',
       OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/protobuf',
-      otel_headers_helper_url: 'https://ts.example.com/api/v1/instances/abc/bearer',
+      otel_headers_helper_url: 'https://ts.example.com/api/v1/instances/f825e796/bearer',
       OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=f825e796,tool=claude-code',
     },
   },
@@ -130,12 +130,24 @@ describe('buildClaudeDeviceEnv', () => {
 describe('assertClaudeRedeemResponse', () => {
   it('returns {claude, oauth} for a complete valid response', () => {
     const { claude, oauth } = assertClaudeRedeemResponse(FAKE_REDEEM_RESPONSE)
-    expect(claude.otel_headers_helper_url).toBe('https://ts.example.com/api/v1/instances/abc/bearer')
+    expect(claude.otel_headers_helper_url).toBe('https://ts.example.com/api/v1/instances/f825e796/bearer')
     expect(oauth).toEqual({
       refresh_token: 'rt_super_secret',
       token_endpoint: 'https://ts.example.com/api/v1/oauth/token',
       client_id: 'client-abc',
     })
+  })
+
+  it.each([
+    ['attributes name the other lane', { OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=f825e796,tool=copilot-cli' }],
+    ['attributes name another instance', { OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=other,tool=claude-code' }],
+    ['bearer addresses another instance', { otel_headers_helper_url: 'https://ts.example.com/api/v1/instances/other/bearer' }],
+  ])('rejects a bundle the helper would refuse (%s) before anything is written', (_l, patch) => {
+    const bad = {
+      ...FAKE_REDEEM_RESPONSE,
+      telemetry: { claude: { ...FAKE_REDEEM_RESPONSE.telemetry.claude, ...patch } },
+    }
+    expect(() => assertClaudeRedeemResponse(bad)).toThrow(/tool|instance/)
   })
 
   it('rejects a Copilot bundle with a helpful message', () => {
@@ -201,7 +213,7 @@ describe('assertClaudeRedeemResponse', () => {
       telemetry: {
         claude: {
           ...FAKE_REDEEM_RESPONSE.telemetry.claude,
-          otel_headers_helper_url: 'http://localhost:3450/api/v1/instances/abc/bearer',
+          otel_headers_helper_url: 'http://localhost:3450/api/v1/instances/f825e796/bearer',
           OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'http://127.0.0.1:3450/v1/logs',
         },
       },
@@ -351,10 +363,104 @@ describe('writeClaudeSettings', () => {
     expect(change.changed).toBe(false)
   })
 
+  /*
+   * The tuple is validated BEFORE settings.json is touched. Round-10 review
+   * reproduced the opposite: a fresh device, a bundle whose attributes named the
+   * wrong lane, settings written, the store write's validation error swallowed
+   * as best-effort, and success reported with the bad attributes persisted.
+   */
+  it.each([
+    ['attributes name the other lane', { OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=abc,tool=copilot-cli' }],
+    ['attributes name another instance', { OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=zzz,tool=claude-code' }],
+    ['bearer addresses another instance', { TOKENSCOPE_BEARER_ENDPOINT: 'https://ts.example.com/api/v1/instances/zzz/bearer' }],
+    ['no refresh token', { TOKENSCOPE_OAUTH_REFRESH_TOKEN: '' }],
+  ])('on a fresh device, an inconsistent bundle (%s) writes NOTHING and throws', (_l, patch) => {
+    const path = join(dir, 'settings.json')
+    const state = join(dir, 'state')
+    const env = { ...buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), ...patch }
+    expect(() => writeClaudeSettings(path, HELPER, env, state)).toThrow()
+    expect(existsSync(path)).toBe(false)
+    expect(existsSync(join(state, 'config.claude-code.json'))).toBe(false)
+  })
+
+  /*
+   * settings.json has other writers (session-start's two self-heals, the
+   * status-line toggle), all through casWriteFile. This one was the last blind
+   * read/merge/rename; a concurrent write between its read and its rename was
+   * silently overwritten.
+   */
+  /*
+   * The concurrent write is triggered from INSIDE casWriteFile's render, between
+   * its read and its compare: mergeClaudeSettings spreads the env block there,
+   * and a spread invokes getters. OTEL_METRICS_EXPORTER is a key the up-front
+   * validation never reads, so the getter fires only in the render. No mock and
+   * no test-only seam; vitest cannot mock node:fs inside plugin-runtime.mjs.
+   */
+  const withRenderSideEffect = (onRender: () => void) => {
+    const env = buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH)
+    const value = env.OTEL_METRICS_EXPORTER
+    Object.defineProperty(env, 'OTEL_METRICS_EXPORTER', {
+      enumerable: true,
+      get() {
+        onRender()
+        return value
+      },
+    })
+    return env
+  }
+
+  it('re-derives from a concurrent write instead of renaming a stale snapshot over it', () => {
+    const path = join(dir, 'settings.json')
+    writeFileSync(path, JSON.stringify({ permissions: { allow: ['x'] }, env: { KEEP: '1' } }))
+    let landed = false
+    const env = withRenderSideEffect(() => {
+      if (landed) return
+      landed = true
+      writeFileSync(path, JSON.stringify({ permissions: { allow: ['x'] }, env: { KEEP: '1', LANDED_MEANWHILE: 'yes' } }))
+    })
+    writeClaudeSettings(path, HELPER, env, join(dir, 'state'))
+    const written = JSON.parse(readFileSync(path, 'utf8'))
+    expect(landed).toBe(true)
+    expect(written.env.LANDED_MEANWHILE).toBe('yes') // the winner's bytes survived
+    expect(written.env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBe('rt_super_secret') // and ours landed on top
+    expect(written.permissions).toEqual({ allow: ['x'] })
+  })
+
+  it('fails the enrolment loudly when the file never stops changing', () => {
+    const path = join(dir, 'settings.json')
+    writeFileSync(path, JSON.stringify({ env: {} }))
+    let n = 0
+    const env = withRenderSideEffect(() => {
+      writeFileSync(path, JSON.stringify({ env: { CHURN: String(++n) } }))
+    })
+    expect(() => writeClaudeSettings(path, HELPER, env, join(dir, 'state'))).toThrow(/kept changing/)
+    expect(n).toBeGreaterThan(1)
+    expect(JSON.parse(readFileSync(path, 'utf8')).env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBeUndefined()
+    expect(existsSync(join(dir, 'state', 'config.claude-code.json'))).toBe(false)
+  })
+
+  it('refuses to replace a present-but-unreadable settings.json, and writes no store', () => {
+    const path = join(dir, 'settings.json')
+    const body = JSON.stringify({ env: { TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'precious' } })
+    writeFileSync(path, body)
+    chmodSync(path, 0o000)
+    try {
+      expect(() =>
+        writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state')),
+      ).toThrow(/EACCES/)
+    } finally {
+      chmodSync(path, 0o600)
+    }
+    expect(readFileSync(path, 'utf8')).toBe(body)
+    expect(existsSync(join(dir, 'state', 'config.claude-code.json'))).toBe(false)
+  })
+
   it('refuses to clobber an existing but unparseable settings.json', () => {
     const path = join(dir, 'settings.json')
     writeFileSync(path, '{ this is not json')
-    expect(() => writeClaudeSettings(path, HELPER, { A: '1' }, join(dir, 'state'))).toThrow(/not valid JSON/)
+    expect(() =>
+      writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state')),
+    ).toThrow(/not valid JSON/)
     // The bad file is left untouched, not overwritten.
     expect(readFileSync(path, 'utf8')).toBe('{ this is not json')
   })
@@ -382,7 +488,7 @@ describe('writeClaudeSettings', () => {
   it('mirrors the refresh token into the shared state-dir credential store on redeem', () => {
     const path = join(dir, 'settings.json')
     writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
-    const cfg = JSON.parse(readFileSync(join(process.env.TOKENSCOPE_STATE_DIR!, 'config.json'), 'utf8'))
+    const cfg = JSON.parse(readFileSync(join(process.env.TOKENSCOPE_STATE_DIR!, 'config.claude-code.json'), 'utf8'))
     expect(cfg.oauth_refresh_token).toBe('rt_super_secret')
   })
 
@@ -392,21 +498,49 @@ describe('writeClaudeSettings', () => {
     writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
     const stateDirPath = process.env.TOKENSCOPE_STATE_DIR!
     expect(statSync(stateDirPath).mode & 0o777).toBe(0o700)
-    expect(statSync(join(stateDirPath, 'config.json')).mode & 0o777).toBe(0o600)
+    expect(statSync(join(stateDirPath, 'config.claude-code.json')).mode & 0o777).toBe(0o600)
   })
 
-  it('rotates the stored refresh token on a re-run and preserves unrelated existing config.json fields', () => {
+  it('rotates the stored refresh token on a re-run', () => {
     const path = join(dir, 'settings.json')
     writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
-    // An operator / the Copilot lane may have set an unrelated field already.
-    const cfgPath = join(process.env.TOKENSCOPE_STATE_DIR!, 'config.json')
-    const between = JSON.parse(readFileSync(cfgPath, 'utf8'))
-    between.instance_id = 'shared-with-copilot-lane'
-    writeFileSync(cfgPath, JSON.stringify(between))
+    const cfgPath = join(process.env.TOKENSCOPE_STATE_DIR!, 'config.claude-code.json')
+    expect(JSON.parse(readFileSync(cfgPath, 'utf8')).oauth_refresh_token).toBe('rt_super_secret')
     writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, { ...FAKE_OAUTH, refresh_token: 'rt_rotated' }), join(dir, 'state'))
-    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
-    expect(cfg.oauth_refresh_token).toBe('rt_rotated')
-    expect(cfg.instance_id).toBe('shared-with-copilot-lane') // unrelated field survived
+    expect(JSON.parse(readFileSync(cfgPath, 'utf8')).oauth_refresh_token).toBe('rt_rotated')
+  })
+
+  /*
+   * THE INVERSE OF THE OLD ASSERTION, DELIBERATELY.
+   *
+   * This test used to require that a Claude redeem PRESERVE an `instance_id`
+   * the Copilot lane had written into the shared config.json. That merge is the
+   * 2026-09-09 outage: the two lanes have different instances, so preserving
+   * one lane's field across the other's redeem left Claude's credential paired
+   * with Copilot's bearer endpoint and every mint 401'd. Each lane now owns one
+   * file, and the requirement is that a Claude redeem cannot reach the Copilot
+   * lane's file at all.
+   */
+  it('a Claude redeem does not touch the Copilot lane store', () => {
+    const path = join(dir, 'settings.json')
+    const stateDirPath = process.env.TOKENSCOPE_STATE_DIR!
+    mkdirSync(stateDirPath, { recursive: true })
+    const copilotStore = join(stateDirPath, 'config.copilot-cli.json')
+    const copilotBefore = JSON.stringify({
+      version: 2,
+      tool: 'copilot-cli',
+      instance_id: 'copilot-instance',
+      bearer_endpoint: 'https://api/api/v1/instances/copilot-instance/bearer',
+      oauth_refresh_token: 'copilot-rt',
+    })
+    writeFileSync(copilotStore, copilotBefore)
+    writeClaudeSettings(path, HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), join(dir, 'state'))
+    expect(readFileSync(copilotStore, 'utf8')).toBe(copilotBefore)
+    const claude = JSON.parse(
+      readFileSync(join(stateDirPath, 'config.claude-code.json'), 'utf8'),
+    )
+    expect(claude.tool).toBe('claude-code')
+    expect(claude.instance_id).not.toBe('copilot-instance')
   })
 
   it('a store write failure with NO store on disk still completes the redeem', () => {
@@ -439,6 +573,36 @@ describe('writeClaudeSettings', () => {
     try {
       expect(() =>
         writeClaudeSettings(join(dir, 'settings2.json'), HELPER, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), stateDirPath),
+      ).toThrow(/Enrolment is NOT complete/)
+    } finally {
+      chmodSync(stateDirPath, 0o700)
+    }
+  })
+
+  it('a write failure over an existing V2 store fails the redeem loudly too', () => {
+    /*
+     * The same bricking case one filename along, and the reason it needs its own
+     * test: the shadowing probe used to name `config.json`, which after the
+     * per-tool split is no longer the file this writer produces. A failed update
+     * over a stale `config.claude-code.json` therefore looked like "nothing left
+     * behind", and the redeem reported success while the helper kept preferring
+     * the stale store.
+     */
+    const stateDirPath = join(dir, 'occupied-v2-state')
+    mkdirSync(stateDirPath, { recursive: true, mode: 0o700 })
+    writeFileSync(
+      join(stateDirPath, 'config.claude-code.json'),
+      JSON.stringify({ version: 2, tool: 'claude-code', oauth_refresh_token: 'rt_old' }),
+    )
+    chmodSync(stateDirPath, 0o500)
+    try {
+      expect(() =>
+        writeClaudeSettings(
+          join(dir, 'settings3.json'),
+          HELPER,
+          buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH),
+          stateDirPath,
+        ),
       ).toThrow(/Enrolment is NOT complete/)
     } finally {
       chmodSync(stateDirPath, 0o700)

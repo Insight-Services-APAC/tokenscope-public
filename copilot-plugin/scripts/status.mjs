@@ -13,7 +13,8 @@
  *     Authorization header → the credential is VALID (emitting). Non-zero → the
  *     helper wrote a failure sentinel (precise HTTP status + reason) which we surface.
  *     The bearer the helper prints is NEVER surfaced — we only read whether one was
- *     minted. Creds come from ~/.tokenscope/config.json (Copilot's only cred store);
+ *     minted. Creds come from ~/.tokenscope/config.copilot-cli.json (this lane's
+ *     store; the pre-split config.json is read only until a redeem writes it);
  *     we build the TOKENSCOPE_* env the helper needs exactly as copilot-forwarder.mjs
  *     does, because Copilot does NOT export these to the shell.
  *
@@ -53,7 +54,7 @@
  * Env in:
  *   TOKENSCOPE_STATE_DIR  state dir pin (default ~/.tokenscope under the PASSWD home,
  *                         not $HOME — see landed-check.mjs's stateDir()) — holds
- *                         config.json, oauth-access.json, the emit-failure sentinel.
+ *                         config.copilot-cli.json, oauth-access.copilot-cli.json, the emit-failure sentinel.
  *   TOKENSCOPE_NEEDS_TAGGING_COUNT  optional — the untagged/unbound session count the
  *                         skill read from `my_usage`'s unallocated.needs_tagging_count.
  *                         Absent / non-numeric → attribution reported UNKNOWN (the skill
@@ -61,6 +62,7 @@
  */
 import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { resolveStorePath } from './device-store.mjs'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 // landed-check.mjs already owns the state-dir resolver this probe needs, and this
@@ -168,7 +170,7 @@ export function interpretLanded(result) {
   let message
   if (reason === 'not-configured') {
     message =
-      'Landed check unavailable — no ~/.tokenscope/config.json (run the tokenscope-setup skill first).'
+      'Landed check unavailable — no ~/.tokenscope/config.copilot-cli.json (run the tokenscope-setup skill first).'
   } else if (reason === 'no-token') {
     message =
       'Landed check unavailable — no cached emit access token yet. The emission probe mints one; re-run after it succeeds.'
@@ -283,18 +285,18 @@ export function interpretManagedTelemetry(managed) {
 
 /**
  * Active emission-auth probe for Copilot. Builds the TOKENSCOPE_* env from
- * config.json (Copilot does NOT export these to the shell — same approach as
+ * config.copilot-cli.json (Copilot does NOT export these to the shell — same approach as
  * copilot-forwarder.mjs's mintBearer), runs otel-headers-helper.sh, and interprets
  * the result. NEVER surfaces the bearer.
  */
 function probeEmissionAuth(stateD) {
-  const cfg = readJson(join(stateD, 'config.json'))
+  const cfg = readJson(resolveStorePath('copilot-cli', stateD))
   if (!cfg) {
     return {
       emitting: false,
       probe_status: null,
       message:
-        'Not configured — no ~/.tokenscope/config.json. Run the tokenscope-setup skill (provision_emit + local redeem), then re-check.',
+        'Not configured — no ~/.tokenscope/config.copilot-cli.json. Run the tokenscope-setup skill (provision_emit + local redeem), then re-check.',
     }
   }
   const hasCreds = Boolean(
@@ -308,7 +310,7 @@ function probeEmissionAuth(stateD) {
       emitting: false,
       probe_status: null,
       message:
-        'Not fully provisioned — config.json is missing emit credentials (bearer_endpoint / oauth_*). Re-run the tokenscope-setup skill.',
+        'Not fully provisioned — config.copilot-cli.json is missing emit credentials (bearer_endpoint / oauth_*). Re-run the tokenscope-setup skill.',
     }
   }
 
@@ -333,7 +335,7 @@ function probeEmissionAuth(stateD) {
   // TOKENSCOPE_STATE_DIR (Claude Code invokes it directly with a repo-merged
   // environment — see otel-headers-helper.sh's header), and a bare `sh` resolves
   // through a PATH that same merge can set.
-  const res = spawnSync('/bin/sh', [helperPath, '--state-dir', stateD], {
+  const res = spawnSync('/bin/sh', [helperPath, '--state-dir', stateD, '--tool', 'copilot-cli'], {
     encoding: 'utf8',
     env,
     stdio: ['ignore', 'pipe', 'pipe'],

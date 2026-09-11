@@ -20,6 +20,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { readBoundAccessToken } from '../../../plugin/scripts/device-store.mjs'
 
 // ── helpers: dynamically import the CJS-like MJS helpers ────────────────────
 // writeTokenscopeConfig is a module-private helper; we test via the public API
@@ -49,13 +50,17 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
+// A bundle the helper would ACCEPT: instance-shaped bearer, and attributes that
+// name this instance and this tool. Writers now refuse anything less, because a
+// store written inconsistently is one the helper refuses forever.
+const FAKE_INSTANCE = 'bbbaaaaa-0000-0000-0000-000000000001'
 const FAKE_BUNDLE = {
-  instance_id: 'bbbaaaaa-0000-0000-0000-000000000001',
-  TOKENSCOPE_BEARER_ENDPOINT: 'https://ts.example.com/bearer',
+  instance_id: FAKE_INSTANCE,
+  TOKENSCOPE_BEARER_ENDPOINT: `https://ts.example.com/api/v1/instances/${FAKE_INSTANCE}/bearer`,
   TOKENSCOPE_LOGS_ENDPOINT: 'https://ts.example.com/logs',
   TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://ts.example.com/oauth/token',
   COPILOT_OTEL_FILE_EXPORTER_PATH: '/tmp/copilot-otel.ndjson',
-  OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=bbbaaaaa',
+  OTEL_RESOURCE_ATTRIBUTES: `tokenscope.instance_id=${FAKE_INSTANCE},tool=copilot-cli`,
 }
 
 // ── S2: validate the server-supplied endpoint bundle BEFORE persisting ─────────
@@ -104,28 +109,20 @@ describe('assertSafeRedeemBundle — S2: no unsafe endpoint reaches config.json'
 describe('writeTokenscopeConfig — credential separation', () => {
   it('config.json contains oauth_refresh_token (required by mintBearer)', () => {
     writeTokenscopeConfig(FAKE_BUNDLE, 'rt_super_secret', 'client-abc', dir)
-    const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))
+    const config = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
     expect(config.oauth_refresh_token).toBe('rt_super_secret')
     expect(config.oauth_client_id).toBe('client-abc')
     expect(config.instance_id).toBe(FAKE_BUNDLE.instance_id)
   })
 
-  it('oauth-access.json does NOT contain oauth_refresh_token', () => {
+  /*
+   * The access-token cache has ONE writer, the helper. A redeem never creates,
+   * resets or clears it: a cache from another deployment is bound to that
+   * deployment's bearer endpoint and fails the binding on its own.
+   */
+  it('never creates the access-token cache', () => {
     writeTokenscopeConfig(FAKE_BUNDLE, 'rt_super_secret', 'client-abc', dir)
-    const oauthCache = JSON.parse(readFileSync(join(dir, 'oauth-access.json'), 'utf8'))
-    // Must be the empty access-token cache shape only — no refresh_token!
-    expect(oauthCache).not.toHaveProperty('oauth_refresh_token')
-    expect(oauthCache).not.toHaveProperty('refresh_token')
-    expect(oauthCache).toHaveProperty('access_token')
-    expect(oauthCache).toHaveProperty('expires_at')
-  })
-
-  it('oauth-access.json access_token placeholder is empty (helper populates on first mint)', () => {
-    writeTokenscopeConfig(FAKE_BUNDLE, 'rt_super_secret', 'client-abc', dir)
-    const oauthCache = JSON.parse(readFileSync(join(dir, 'oauth-access.json'), 'utf8'))
-    // The placeholder must not accidentally carry a real token.
-    expect(oauthCache.access_token).toBe('')
-    expect(oauthCache.expires_at).toBe(0)
+    expect(existsSync(join(dir, 'oauth-access.copilot-cli.json'))).toBe(false)
   })
 
   it('copilot_otel_file_path is PER-PROJECT and RELATIVE, not the server-sent value', () => {
@@ -135,7 +132,7 @@ describe('writeTokenscopeConfig — credential separation', () => {
     // the forwarder back to the old per-HOME model) and NOT the server-sent value (the
     // server bakes its own container $HOME, which never exists on the client).
     writeTokenscopeConfig(FAKE_BUNDLE, 'rt', 'client-abc', dir)
-    const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))
+    const config = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
     expect(config.copilot_otel_file_path).toBe(join('.tokenscope.local', 'copilot-otel.jsonl'))
     expect(config.copilot_otel_file_path).not.toBe(FAKE_BUNDLE.COPILOT_OTEL_FILE_EXPORTER_PATH)
     // Relative — never an absolute path (would re-pin to HOME).
@@ -147,20 +144,19 @@ describe('writeTokenscopeConfig — credential separation', () => {
     writeTokenscopeConfig(FAKE_BUNDLE, 'rt1', 'client-abc', dir)
     // Second write (same dir, new token)
     writeTokenscopeConfig(FAKE_BUNDLE, 'rt2', 'client-abc', dir)
-    const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))
+    const config = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
     expect(config.oauth_refresh_token).toBe('rt2')
-    expect(existsSync(join(dir, 'oauth-access.json'))).toBe(true)
   })
 
   it('re-redeem does NOT clobber an existing oauth-access.json (live helper cache — PLG-2)', () => {
     writeTokenscopeConfig(FAKE_BUNDLE, 'rt1', 'client-abc', dir)
     // Simulate otel-headers-helper.sh having populated the access-token cache.
     const live = { access_token: 'live-access-token', expires_at: 9999999999 }
-    writeFileSync(join(dir, 'oauth-access.json'), JSON.stringify(live))
+    writeFileSync(join(dir, 'oauth-access.copilot-cli.json'), JSON.stringify(live))
     // Re-redeem (credential rotation) must rotate config.json but keep the cache.
     writeTokenscopeConfig(FAKE_BUNDLE, 'rt2', 'client-abc', dir)
-    expect(JSON.parse(readFileSync(join(dir, 'oauth-access.json'), 'utf8'))).toEqual(live)
-    expect(JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')).oauth_refresh_token).toBe('rt2')
+    expect(JSON.parse(readFileSync(join(dir, 'oauth-access.copilot-cli.json'), 'utf8'))).toEqual(live)
+    expect(JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8')).oauth_refresh_token).toBe('rt2')
   })
 
   it('atomic write leaves no temp droppings in the target dir', () => {
@@ -174,12 +170,25 @@ describe('writeTokenscopeConfig — credential separation', () => {
 // Re-provisioning a device from one TokenScope deployment to another (Sandbox→Dev,
 // Dev→Prod) must NOT leave the OLD deployment's bearer/logs endpoints or OAuth
 // credential at rest in config.json. The change is detected from the bearer host.
+describe('writeTokenscopeConfig — refuses to write a store the helper would refuse', () => {
+  /*
+   * The helper refuses an inconsistent envelope on read. Without this, a bad
+   * bundle was WRITTEN successfully, setup reported success, and every later
+   * mint failed with nothing able to repair the file.
+   */
+  it('throws on a bundle whose attributes name another instance, and writes nothing', () => {
+    const bad = { ...FAKE_BUNDLE, OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=someone-else,tool=copilot-cli' }
+    expect(() => writeTokenscopeConfig(bad, 'rt', 'client-abc', dir)).toThrow(/instance/)
+    expect(existsSync(join(dir, 'config.copilot-cli.json'))).toBe(false)
+  })
+})
+
 describe('writeTokenscopeConfig — cross-environment transition', () => {
   // A SANDBOX bundle (the device's first/old enrolment).
   const SANDBOX_BUNDLE = {
     instance_id: 'sandbox-inst-0000',
     TOKENSCOPE_BEARER_ENDPOINT:
-      'https://ep-tokenscope-sandbox-aue.example.com/api/v1/instances/old/bearer',
+      'https://ep-tokenscope-sandbox-aue.example.com/api/v1/instances/sandbox-inst-0000/bearer',
     TOKENSCOPE_LOGS_ENDPOINT: 'https://dce-tokenscope-otlp.example.com/v1/logs',
     TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://ep-tokenscope-sandbox-aue.example.com/oauth/token',
     OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=sandbox-inst-0000,tool=copilot-cli',
@@ -187,7 +196,7 @@ describe('writeTokenscopeConfig — cross-environment transition', () => {
   // A DEV bundle — a DIFFERENT deployment (bearer host differs from SANDBOX_BUNDLE).
   const DEV_BUNDLE = {
     instance_id: 'dev-inst-0000',
-    TOKENSCOPE_BEARER_ENDPOINT: 'https://tokenscope.example.com/api/v1/instances/dev/bearer',
+    TOKENSCOPE_BEARER_ENDPOINT: 'https://tokenscope.example.com/api/v1/instances/dev-inst-0000/bearer',
     TOKENSCOPE_LOGS_ENDPOINT: 'https://dce-tokenscope-dev.example.com/v1/logs',
     TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://tokenscope.example.com/oauth/token',
     OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=dev-inst-0000,tool=copilot-cli',
@@ -197,13 +206,13 @@ describe('writeTokenscopeConfig — cross-environment transition', () => {
     // First enrol on Sandbox (writes config.json with Sandbox endpoints + a Sandbox cred,
     // plus an unrelated key the old deployment happened to carry).
     writeTokenscopeConfig(SANDBOX_BUNDLE, 'sandbox_rt', 'sandbox-client', dir)
-    const stale = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))
+    const stale = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
     stale.stale_old_env_field = 'should-not-survive'
-    writeFileSync(join(dir, 'config.json'), JSON.stringify(stale, null, 2) + '\n')
+    writeFileSync(join(dir, 'config.copilot-cli.json'), JSON.stringify(stale, null, 2) + '\n')
 
     // Re-provision onto Dev (a different deployment).
     const change = writeTokenscopeConfig(DEV_BUNDLE, 'dev_rt', 'dev-client', dir)
-    const cfg = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))
+    const cfg = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
 
     expect(change.changed).toBe(true)
     // Endpoints + credential are the NEW (Dev) environment's.
@@ -230,28 +239,57 @@ describe('writeTokenscopeConfig — cross-environment transition', () => {
     expect(change.newLabel).toBe('Dev')
   })
 
-  it('resets the oauth-access.json cache on an environment change (old access token is useless)', () => {
+  it('leaves the cache alone on an environment change; the endpoint binding retires it', () => {
     writeTokenscopeConfig(SANDBOX_BUNDLE, 'sandbox_rt', 'sandbox-client', dir)
-    // Simulate the helper having minted+cached a Sandbox access token.
-    const live = { access_token: 'sandbox-access-token', expires_at: 9999999999 }
-    writeFileSync(join(dir, 'oauth-access.json'), JSON.stringify(live))
+    const live = {
+      access_token: 'sandbox-access-token',
+      expires_at: 9999999999,
+      bearer_endpoint: SANDBOX_BUNDLE.TOKENSCOPE_BEARER_ENDPOINT,
+    }
+    writeFileSync(join(dir, 'oauth-access.copilot-cli.json'), JSON.stringify(live))
     writeTokenscopeConfig(DEV_BUNDLE, 'dev_rt', 'dev-client', dir)
-    const cache = JSON.parse(readFileSync(join(dir, 'oauth-access.json'), 'utf8'))
-    // The Sandbox-minted token can't authorise the Dev bearer endpoint — must be reset.
-    expect(cache.access_token).toBe('')
-    expect(cache.expires_at).toBe(0)
+    const cache = JSON.parse(readFileSync(join(dir, 'oauth-access.copilot-cli.json'), 'utf8'))
+    expect(cache).toEqual(live)
+    // What actually retires it: no consumer will present it to the Dev endpoint.
+    expect(readBoundAccessToken(cache, DEV_BUNDLE.TOKENSCOPE_BEARER_ENDPOINT)).toBeNull()
+    expect(readBoundAccessToken(cache, SANDBOX_BUNDLE.TOKENSCOPE_BEARER_ENDPOINT)).toBe('sandbox-access-token')
+  })
+
+  /*
+   * A store copied or renamed from the other lane declares tool: 'claude-code',
+   * and the helper refuses it. Re-running setup is the documented repair, so the
+   * v2 envelope has to be REPLACED, not preserved. It was missing from
+   * MANAGED_CONFIG_KEYS, so this branch copied the stale value straight back
+   * over the fresh one and setup could not fix the one thing it exists to fix.
+   */
+  it('SAME environment: REPAIRS a wrong-lane v2 envelope rather than preserving it', () => {
+    writeFileSync(
+      join(dir, 'config.copilot-cli.json'),
+      JSON.stringify({
+        version: 1,
+        tool: 'claude-code', // copied from the other lane
+        bearer_endpoint: FAKE_BUNDLE.TOKENSCOPE_BEARER_ENDPOINT,
+        logs_endpoint: FAKE_BUNDLE.TOKENSCOPE_LOGS_ENDPOINT,
+        keep_me: 'operator-set',
+      }),
+    )
+    writeTokenscopeConfig(FAKE_BUNDLE, 'rt_new', 'client-abc', dir)
+    const cfg = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
+    expect(cfg.tool).toBe('copilot-cli')
+    expect(cfg.version).toBe(2)
+    expect(cfg.keep_me).toBe('operator-set') // genuinely user-set keys still survive
   })
 
   it('SAME environment: refreshes credential/endpoint fields, PRESERVES user-set keys', () => {
     // Enrol, then a user/tool adds an unrelated key to config.json.
     writeTokenscopeConfig(FAKE_BUNDLE, 'rt1', 'client-abc', dir)
-    const cfg0 = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))
+    const cfg0 = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
     cfg0.my_custom_setting = 'keep-me'
-    writeFileSync(join(dir, 'config.json'), JSON.stringify(cfg0, null, 2) + '\n')
+    writeFileSync(join(dir, 'config.copilot-cli.json'), JSON.stringify(cfg0, null, 2) + '\n')
 
     // Same-deployment re-run (same bearer host) with a rotated credential.
     const change = writeTokenscopeConfig(FAKE_BUNDLE, 'rt2', 'client-abc', dir)
-    const cfg1 = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))
+    const cfg1 = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
 
     expect(change.changed).toBe(false)
     // Credential refreshed in place.
@@ -263,10 +301,10 @@ describe('writeTokenscopeConfig — cross-environment transition', () => {
   it('SAME environment: does NOT reset a live oauth-access.json cache', () => {
     writeTokenscopeConfig(FAKE_BUNDLE, 'rt1', 'client-abc', dir)
     const live = { access_token: 'live-access-token', expires_at: 9999999999 }
-    writeFileSync(join(dir, 'oauth-access.json'), JSON.stringify(live))
+    writeFileSync(join(dir, 'oauth-access.copilot-cli.json'), JSON.stringify(live))
     writeTokenscopeConfig(FAKE_BUNDLE, 'rt2', 'client-abc', dir)
     // Same-env re-run keeps a perfectly valid cached access token (PLG-2 behaviour).
-    expect(JSON.parse(readFileSync(join(dir, 'oauth-access.json'), 'utf8'))).toEqual(live)
+    expect(JSON.parse(readFileSync(join(dir, 'oauth-access.copilot-cli.json'), 'utf8'))).toEqual(live)
   })
 
   it('a fresh device (no existing config) is NOT an environment change', () => {
@@ -275,11 +313,11 @@ describe('writeTokenscopeConfig — cross-environment transition', () => {
   })
 
   it('ignores an unparseable existing config (treats as fresh, writes clean valid JSON)', () => {
-    writeFileSync(join(dir, 'config.json'), '{ not valid json')
+    writeFileSync(join(dir, 'config.copilot-cli.json'), '{ not valid json')
     const change = writeTokenscopeConfig(FAKE_BUNDLE, 'rt1', 'client-abc', dir)
     // No prior bearer host to compare → not an env change; the corrupt file is replaced.
     expect(change.changed).toBe(false)
-    const cfg = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))
+    const cfg = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
     expect(cfg.oauth_refresh_token).toBe('rt1')
     expect(cfg.bearer_endpoint).toBe(FAKE_BUNDLE.TOKENSCOPE_BEARER_ENDPOINT)
   })

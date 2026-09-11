@@ -83,7 +83,7 @@ const isDirectRun = !!process.argv[1] && resolve(process.argv[1]) === fileURLToP
 if (isDirectRun && (action === 'start' || action === '--start')) {
   // EMIT-ON-INSTALL: on a FRESH install of the real (publish-injected) plugin,
   // enrol now — BEFORE spawning the forwarder — so this very session emits with no
-  // login. enrollIfNeeded writes ~/.tokenscope/config.json, which the forwarder
+  // login. enrollIfNeeded writes ~/.tokenscope/config.copilot-cli.json, which the forwarder
   // then reads (loadConfig) on spawn, so the order matters on a fresh install. It
   // is a strict NO-OP when already enrolled or when no bundled secret is configured
   // (dev), and is bounded by its own ~4s timeout. Fail-OPEN + fast: any failure (or

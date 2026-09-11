@@ -19,6 +19,7 @@ import {
   lstatSync,
 } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { parseTokenscope } from './tokenscope-reader.mjs'
@@ -395,10 +396,10 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   // fleet-wide, which is exactly what this must NOT do). This walks the
   // SAME sibling path the two deletes above already established for the
   // retired read credential — one design, three keys.
-  // otel-headers-helper.sh falls back to the device's own 0700 state-dir
-  // credential store (${STATE_DIR}/config.json) when this key is absent, so a
-  // tagged repo's session still mints a bearer — see that script's "OAuth
-  // refresh token: env, else the device credential store fallback".
+  // otel-headers-helper.sh reads the credential from the device's own 0700
+  // store (${STATE_DIR}/config.claude-code.json) before it ever looks at the
+  // environment, so a tagged repo's session still mints a bearer without this
+  // key — see that script's "Where the credential and destinations come from".
   const deviceEnv = { ...(enrolment.env ?? {}) }
   delete deviceEnv.TOKENSCOPE_READ_REFRESH_TOKEN
   delete deviceEnv.TOKENSCOPE_READ_CLIENT_ID
@@ -429,7 +430,12 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   // landed file because writeFileSync's `mode` only applies on CREATE and a
   // pre-existing target could have looser perms. (LOW-B, mirrors
   // otel-headers-helper.sh's cache-write pattern.)
-  const tmpPath = `${settingsPath}.tmp.${process.pid}`
+  // RANDOM, not the PID alone. Containers have separate PID namespaces over one
+  // shared bind-mounted home, so two writers can pick the SAME pid, open the same
+  // temp inode, and mutate it after the other has renamed it into place — which
+  // defeats the atomicity this temp+rename exists to provide. This is the
+  // REPO-local settings file, which deliberately carries no durable credential.
+  const tmpPath = `${settingsPath}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`
   try {
     writeFileSync(tmpPath, targetRaw, { encoding: 'utf8', mode: 0o600 })
     chmodSync(tmpPath, 0o600)

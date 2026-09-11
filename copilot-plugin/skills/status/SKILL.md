@@ -66,7 +66,7 @@ It prints a JSON object:
 ```
 
 The probe runs the **real emit path** (`otel-headers-helper.sh` against the creds in
-`~/.tokenscope/config.json`) — success means the credential minted an Azure Monitor
+`~/.tokenscope/config.copilot-cli.json`) — success means the credential minted an Azure Monitor
 bearer. It then calls `GET /api/v1/instances/{id}/health` with the cached emit token
 to see whether a real record has landed. It never prints the bearer.
 
@@ -188,7 +188,7 @@ call the **`my_usage`** MCP tool: data back = authed; "Not authenticated" = run 
 
 | Problem                                                                       | Solution                                                                                                                                                                                                |
 | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status.mjs` says "Not configured"                                            | Run the `tokenscope-setup` skill — there's no `~/.tokenscope/config.json` yet.                                                                                                                          |
+| `status.mjs` says "Not configured"                                            | Run the `tokenscope-setup` skill — there's no `~/.tokenscope/config.copilot-cli.json` yet.                                                                                                                          |
 | `emitting: false` with HTTP 401/403/404                                       | The durable credential lapsed or the instance was revoked — re-provision via `tokenscope-setup`.                                                                                                        |
 | `emitting: true` but `emission_healthy: false`, `managed_telemetry.state: "hostile"` | An enterprise-managed telemetry policy is blocking Copilot's own export — **not a credential problem**, re-provisioning will not help. Raise it with your GitHub enterprise/IT admin (mention the `source`). |
 | `managed_telemetry.state: "unknown"`                                          | The check could not confirm either way (often: server-managed settings, which no local script can read). Treat as "cannot confirm clean", not as healthy.                                              |

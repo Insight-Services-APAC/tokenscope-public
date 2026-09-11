@@ -30,11 +30,25 @@ export default defineConfig({
      * suite ran 11 forks wide on a 6-core devcontainer against one shared
      * Postgres, which is how a 5-second timing assertion measured 32 minutes.
      */
+    // Fails the run if any test wrote the developer's real enrolment files.
+    globalSetup: ['tests/helpers/real-device-guard.ts'],
     maxWorkers: Number(process.env.VITEST_MAX_FORKS) || 4,
     // Each integration test file spins up its own testcontainers Postgres
     // (slow startup, ~5-10 s); allow plenty of room for the hook + tests.
     hookTimeout: 180_000,
     testTimeout: 60_000,
+    /*
+     * nuxt-oidc-auth's runtime must go through Vite's transform, not Node's
+     * native ESM resolver. Since 1.0.0-beta.12 `utils/redirect.js` imports
+     * Nuxt's `#imports`, which Node resolves against the PACKAGE's own
+     * `imports` field and cannot find — an externalised dep never sees the
+     * `#imports` alias below. Inlining is what makes that alias apply.
+     */
+    server: {
+      deps: {
+        inline: [/nuxt-oidc-auth/],
+      },
+    },
     coverage: {
       provider: 'v8',
       include: ['lib/**', 'server/**', 'app/**', 'shared/**'],
@@ -49,6 +63,13 @@ export default defineConfig({
       // build; Vitest has no Nuxt resolver, so mirror it here (e.g.
       // `#shared/reports/types` → `./shared/reports/types`).
       '#shared': new URL('./shared', import.meta.url).pathname,
+      // Nuxt's `#imports` virtual module resolves only inside a Nuxt build.
+      // nuxt-oidc-auth's runtime and one app composable import it; point them
+      // at a stub so a deep-import test can load the real module under test.
+      '#imports': new URL(
+        './tests/helpers/nuxt-imports-stub.ts',
+        import.meta.url,
+      ).pathname,
       // nuxt-oidc-auth's runtime uses Nuxt's `#imports` virtual module
       // which only resolves inside a Nuxt build. In Vitest we point the
       // import at a stub that returns null sessions; the actual auth

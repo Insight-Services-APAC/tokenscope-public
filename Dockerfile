@@ -10,18 +10,6 @@ FROM node:24-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
-# patches/ holds vetted node_modules fixes applied via patch-package. --ignore-scripts
-# (above) stops untrusted dependency postinstall scripts from running, but it ALSO
-# skips our own postinstall — the only thing that runs patch-package — so apply the
-# patches EXPLICITLY here. Without this the deployed image ships the unpatched
-# nuxt-oidc-auth, whose OAuth callback drops `callbackRedirectUrl` (reads it after
-# session.clear()), breaking the MCP login resume (post-login lands on `/` instead
-# of completing). Applied in `deps` so it propagates to BOTH the build bundle (stage
-# 2 copies this node_modules before `npm run build`) and the runtime node_modules
-# (stage 3 prod-deps derives FROM deps). Separate layer so a patch change does not
-# bust the npm ci cache. Fail loud on any drift (matches the postinstall flags).
-COPY patches ./patches
-RUN npx patch-package --error-on-fail --error-on-warn
 
 # ── Stage 2: Build ───────────────────────────────────────────────────
 FROM node:24-slim AS build

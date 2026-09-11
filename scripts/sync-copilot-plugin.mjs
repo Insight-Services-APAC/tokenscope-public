@@ -49,6 +49,11 @@ const FILES = [
   // a drifted second copy would send one client's single-use credential to a
   // host the other client never talked to.
   { name: 'mcp-origin.mjs', type: 'js' },
+  // device-store.mjs — the ONE definition of where each lane's enrolment lives.
+  // Gated for the same reason endpoint-guard.mjs is: if the two lanes ever
+  // disagreed about a store filename they would each read the other's enrolment
+  // as absent, which is precisely the split this module exists to end.
+  { name: 'device-store.mjs', type: 'js' },
   // real-home.mjs — the ONE answer to "where is the account's home", used by
   // mcp-origin.mjs to decide which config names the redeem host and by
   // claude-redeem.mjs to decide where the durable credential is written. Gated

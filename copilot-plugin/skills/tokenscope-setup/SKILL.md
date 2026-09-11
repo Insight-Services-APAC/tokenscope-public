@@ -138,7 +138,7 @@ old → new` note so the old deployment's credentials/endpoints don't linger.
 2. Adds a `# >>> TokenScope >>>` block to your shell rc (`~/.bashrc`, `~/.zshrc`)
    exporting **only** `COPILOT_OTEL_FILE_EXPORTER_PATH` — the one var Copilot needs to
    emit. Attribution (instance/project/tool) is stamped by the forwarder from
-   `config.json`, not the shell, so nothing else is exported.
+   `config.copilot-cli.json`, not the shell, so nothing else is exported.
 
 The forwarder lifecycle hooks (`SessionStart`/`Stop`) come from the plugin's
 `hooks.json`, not the redeem helper — nothing extra to register. **Do not** ask for,

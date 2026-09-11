@@ -18,11 +18,24 @@
  * whether a bearer was minted (never the token) — the right contract for a health
  * probe, the wrong one for a re-emitter.
  */
-import { readFileSync, existsSync, realpathSync, writeFileSync, renameSync } from 'node:fs'
+import { readFileSync, existsSync, realpathSync, writeFileSync, renameSync, mkdirSync, chmodSync, linkSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, sep, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+// Store layout lives in device-store.mjs (synced to both plugins); re-exported
+// so existing importers keep one import site.
+import {
+  TOOLS,
+  deviceStorePath,
+  accessCachePath,
+  legacyStorePath,
+  bearerInstance,
+  attrsTool,
+  attrsInstance,
+  assertStoreConsistent,
+} from './device-store.mjs'
 import https from 'node:https'
 import http from 'node:http'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
@@ -30,6 +43,16 @@ import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 // reach it without importing this module (copilot-plugin does not vendor it).
 import { realHome } from './real-home.mjs'
 export { realHome }
+export {
+  TOOLS,
+  deviceStorePath,
+  accessCachePath,
+  legacyStorePath,
+  bearerInstance,
+  attrsTool,
+  attrsInstance,
+  assertStoreConsistent,
+}
 
 // Re-exported so every existing importer of plugin-runtime.mjs has ONE name to
 // reach for (S1 fix 3) — the implementation lives in endpoint-guard.mjs, which
@@ -237,46 +260,201 @@ export function trustedStateDir() {
   return join(realHome(), '.tokenscope')
 }
 
-/*
- * SELF-HEAL: copy the emit ENDPOINTS into the device store when only the
- * credential is there. Without it the helper's refusal is an outage for every
- * device enrolled before endpoints were persisted.
+/**
+ * The lanes that own an enrolment. The store filename is derived from this, so
+ * it is a closed set rather than free text.
+ */
+/** Parse a store file, or null when absent/unreadable/not an object. */
+function readJsonObject(path) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/** This lane's v2 store, or null. */
+export function readDeviceStore(tool, dir = trustedStateDir()) {
+  return readJsonObject(deviceStorePath(tool, dir))
+}
+
+/**
+ * Read-modify-write with optimistic concurrency and bounded retry.
  *
- * Endpoints MUST come from `trustedGlobalSettingsEnv()`, never the ambient
- * environment — the ambient one is the channel this refusal exists to distrust.
- * Best-effort and idempotent: on failure the refusal stands, which is the safe
- * direction. See docs/security-sprint/epic-mdash-remediation.md (Wave 1).
+ * `render(raw)` receives the CURRENT bytes (null when absent) and returns new
+ * content, or null for "no change". It is called again on every retry, so a
+ * retry can never write a value derived from bytes another writer replaced.
+ *
+ * NOT A LOCK, deliberately: `~/.claude` is a host bind-mount shared across
+ * containers with separate PID namespaces, so a lockfile's "is the holder pid
+ * alive?" recovery is meaningless here and a wedged lock would stop every
+ * session on the host. A two-syscall window between the final check and the
+ * rename remains; it is irreducible without a lock. Design doc, "Concurrency".
+ */
+export function casWriteFile(path, render, { mode = 0o600, attempts = 3 } = {}) {
+  // ONLY an absent file is null. Any other read failure (EACCES, EIO) throws:
+  // mapping it to null renders "fresh" over a file that is still there.
+  const readNow = () => {
+    try {
+      return readFileSync(path, 'utf8')
+    } catch (err) {
+      if (err && err.code === 'ENOENT') return null
+      throw err
+    }
+  }
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const raw = readNow()
+    const next = render(raw)
+    if (next == null) return { changed: false, reason: 'no-change' }
+    const tmp = `${path}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`
+    try {
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(tmp, next, { encoding: 'utf8', mode })
+      chmodSync(tmp, mode) // defeat umask
+      if (readNow() !== raw) {
+        // Someone else won. Drop our temp and re-derive from THEIR bytes.
+        rmSync(tmp, { force: true })
+        continue
+      }
+      renameSync(tmp, path)
+      return { changed: true }
+    } catch (err) {
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        /* best-effort */
+      }
+      throw err
+    }
+  }
+  // Persistently contended. The callers here are all self-healing on the next
+  // launch, so giving up is safer than looping until something wins.
+  return { changed: false, reason: 'contended' }
+}
+
+/**
+ * Write a complete v2 store for one lane, atomically, 0600.
+ *
+ * Temp names carry randomness, not only the PID: separate PID namespaces over
+ * one shared bind-mount collide. `exclusive` creates via link (EEXIST) for
+ * callers that only ever mean to create.
+ */
+export function writeDeviceStore(tool, fields, dir = trustedStateDir(), { exclusive = false } = {}) {
+  // Validate BEFORE writing, with the same rule the helper refuses on: a writer
+  // that skips this reports success while producing a permanently refused store.
+  assertStoreConsistent(tool, { ...fields, version: 2, tool })
+  const path = deviceStorePath(tool, dir)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const tmp = `${path}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`
+  // Whole temp lifecycle inside the try: the temp holds the refresh token.
+  try {
+    // Managed envelope LAST, so a caller cannot override version/tool.
+    writeFileSync(tmp, `${JSON.stringify({ ...fields, version: 2, tool }, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+    chmodSync(tmp, 0o600)
+    if (exclusive) {
+      // link fails with EEXIST: check and create in one operation.
+      linkSync(tmp, path)
+    } else {
+      renameSync(tmp, path)
+    }
+  } finally {
+    // Always: a no-op after a successful rename, a credential leak otherwise.
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      /* best-effort */
+    }
+  }
+  return path
+}
+
+/*
+ * SELF-HEAL: promote a legacy shared store into THIS lane's own v2 store, from
+ * `trustedGlobalSettingsEnv()` only — never the ambient environment. Writes
+ * `config.claude-code.json`; the legacy file is read-only from the split on.
+ * Best-effort and idempotent. Design doc, "Migration".
  */
 export function migrateStoredEndpoints(dir = trustedStateDir(), settingsEnv = null) {
   try {
-    const configPath = join(dir, 'config.json')
-    if (!existsSync(configPath)) return false
-    const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
-    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return false
-    if (!cfg.oauth_refresh_token) return false // nothing stored to protect
-    // BOTH destinations, backfilled INDEPENDENTLY. Returning early on a present
-    // token endpoint left a token-only store permanently missing its bearer
-    // endpoint — and the helper needs both from the store before it will use a
-    // stored credential, so a partial migration is a permanent refusal.
-    if (cfg.oauth_token_endpoint && cfg.bearer_endpoint) return false
+    // Already split: this lane has its own complete store, nothing to repair.
+    if (existsSync(deviceStorePath('claude-code', dir))) return false
     const global = settingsEnv ?? trustedGlobalSettingsEnv()
-    const next = { ...cfg }
-    let changed = false
-    for (const [field, key] of [
-      ['oauth_token_endpoint', 'TOKENSCOPE_OAUTH_TOKEN_ENDPOINT'],
-      ['bearer_endpoint', 'TOKENSCOPE_BEARER_ENDPOINT'],
-    ]) {
-      if (next[field]) continue
-      const value = (global[key] ?? '').trim()
-      if (!value) continue
-      assertSafeEndpoint(value, { allowLoopback: true })
-      next[field] = value
-      changed = true
+    const settingsBearer = (global.TOKENSCOPE_BEARER_ENDPOINT ?? '').trim()
+    const settingsToken = (global.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT ?? '').trim()
+
+    // A device with a complete enrolment in its own settings mints its store
+    // from there; nothing new is trusted.
+    const settingsRefresh = (global.TOKENSCOPE_OAUTH_REFRESH_TOKEN ?? '').trim()
+    if (settingsRefresh && settingsBearer && settingsToken) {
+      assertSafeEndpoint(settingsBearer, { allowLoopback: true })
+      assertSafeEndpoint(settingsToken, { allowLoopback: true })
+      // The BEARER names the instance. Settings attributes can be stale (the
+      // design doc's Copilot-then-Claude state); preferring them here wrote a
+      // store whose instance_id disagreed with its own bearer, which the helper
+      // then refused — and no later migration retried, because the file existed.
+      const id = bearerInstance(settingsBearer)
+      if (!id) return false
+      const attrs = `tokenscope.instance_id=${id},tool=claude-code`
+      writeDeviceStore(
+        'claude-code',
+        {
+          instance_id: id,
+          bearer_endpoint: settingsBearer,
+          oauth_token_endpoint: settingsToken,
+          oauth_client_id: global.TOKENSCOPE_OAUTH_CLIENT_ID ?? '',
+          logs_endpoint: global.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ?? '',
+          oauth_refresh_token: settingsRefresh,
+          otel_resource_attributes: attrs,
+        },
+        dir,
+        { exclusive: true },
+      )
+      return true
     }
-    if (!changed) return false
-    const tmp = `${configPath}.tmp.${process.pid}`
-    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
-    renameSync(tmp, configPath)
+
+    const legacy = readJsonObject(legacyStorePath(dir))
+    if (!legacy) return false
+    if (!legacy.oauth_refresh_token) return false // nothing stored to protect
+
+    // Ownership by correlation against settings, never by the tool= marker
+    // (design doc, Migration). A named endpoint must match; an unnamed one is
+    // supplied from settings and is therefore ours.
+    // The claim REQUIRES a non-empty legacy bearer that matches settings. A
+    // token-only legacy file cannot be proven to be this lane's; promoting its
+    // credential on the strength of settings' endpoint would pair a possibly
+    // foreign token with our destination. Leave it unclaimed; re-enrol.
+    const legacyBearer = (legacy.bearer_endpoint ?? '').trim()
+    const a = bearerInstance(legacyBearer)
+    if (!a || a !== bearerInstance(settingsBearer)) return false
+
+    const bearerEndpoint = legacyBearer
+    const tokenEndpoint = (legacy.oauth_token_endpoint ?? '').trim() || settingsToken
+    if (!bearerEndpoint || !tokenEndpoint) return false
+    assertSafeEndpoint(bearerEndpoint, { allowLoopback: true })
+    assertSafeEndpoint(tokenEndpoint, { allowLoopback: true })
+
+    // Ownership was just proved by matching the BEARER against settings, so the
+    // bearer names the instance. Legacy attributes may be stale; never copy them.
+    const instanceId = bearerInstance(bearerEndpoint)
+    if (!instanceId) return false
+    writeDeviceStore(
+      'claude-code',
+      {
+        instance_id: instanceId,
+        bearer_endpoint: bearerEndpoint,
+        oauth_token_endpoint: tokenEndpoint,
+        oauth_client_id: legacy.oauth_client_id ?? global.TOKENSCOPE_OAUTH_CLIENT_ID ?? '',
+        logs_endpoint: legacy.logs_endpoint ?? global.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ?? '',
+        oauth_refresh_token: legacy.oauth_refresh_token,
+        otel_resource_attributes: `tokenscope.instance_id=${instanceId},tool=claude-code`,
+      },
+      dir,
+      { exclusive: true },
+    )
     return true
   } catch {
     return false
@@ -487,10 +665,16 @@ export function readEmitSentinel(env = process.env, dir = stateDir(env)) {
  * function argument is safe for the same reason `--state-dir` is: anyone able to
  * pass one is already executing our code.
  */
-export function runEmitHelper({ env = process.env, timeoutMs, stateDir: dir, helperPath } = {}) {
+export function runEmitHelper({
+  env = process.env,
+  timeoutMs,
+  stateDir: dir,
+  helperPath,
+  tool = 'claude-code',
+} = {}) {
   const helper = helperPath ?? resolveHelperPath()
   if (!existsSync(helper)) return { ran: false, status: null, hasAuth: false }
-  const res = spawnSync('/bin/sh', [helper, '--state-dir', dir ?? trustedStateDir()], {
+  const res = spawnSync('/bin/sh', [helper, '--state-dir', dir ?? trustedStateDir(), '--tool', tool], {
     encoding: 'utf8',
     env,
     ...(timeoutMs ? { timeout: timeoutMs } : {}),

@@ -84,8 +84,14 @@ describe.each(BUNDLES)('%s — endpoint provenance', (_label, HELPER) => {
 
   it('a repo-set endpoint does NOT receive the credential when the device store names one', () => {
     writeFileSync(
-      join(stateDir, 'config.json'),
+      join(stateDir, 'config.claude-code.json'),
       JSON.stringify({
+        // A complete v2 store: the envelope is REQUIRED for adoption now, and
+        // instance_id must agree with the instance the bearer endpoint names.
+        version: 2,
+        tool: 'claude-code',
+        instance_id: 'x',
+        otel_resource_attributes: 'tokenscope.instance_id=x,tool=claude-code',
         oauth_refresh_token: 'device-rt',
         oauth_token_endpoint: REAL_TOKEN_EP,
         bearer_endpoint: REAL_BEARER_EP,
@@ -144,7 +150,18 @@ describe.each(BUNDLES)('%s — endpoint provenance', (_label, HELPER) => {
      * trusted store and POSTing it to a repo-chosen host is strictly worse than
      * not emitting: the token does not rotate and revocation is the only control.
      */
-    writeFileSync(join(stateDir, 'config.json'), JSON.stringify({ oauth_refresh_token: 'device-rt' }))
+    // A v2 envelope but NO destinations: the case the refusal exists for. It must
+    // not borrow the missing endpoints from the environment.
+    writeFileSync(
+      join(stateDir, 'config.claude-code.json'),
+      JSON.stringify({
+        version: 2,
+        tool: 'claude-code',
+        instance_id: 'x',
+        otel_resource_attributes: 'tokenscope.instance_id=x,tool=claude-code',
+        oauth_refresh_token: 'device-rt',
+      }),
+    )
 
     const res = run({
       // no TOKENSCOPE_OAUTH_REFRESH_TOKEN — the store is the only source
@@ -177,7 +194,16 @@ describe.each(BUNDLES)('%s — endpoint provenance', (_label, HELPER) => {
      * "The environment holds a token" says nothing about where that token came
      * from. The store does, so the store is what decides.
      */
-    writeFileSync(join(stateDir, 'config.json'), JSON.stringify({ oauth_refresh_token: 'device-rt' }))
+    writeFileSync(
+      join(stateDir, 'config.claude-code.json'),
+      JSON.stringify({
+        version: 2,
+        tool: 'claude-code',
+        instance_id: 'x',
+        otel_resource_attributes: 'tokenscope.instance_id=x,tool=claude-code',
+        oauth_refresh_token: 'device-rt',
+      }),
+    )
 
     const res = run({
       // Present, and genuinely trusted — this is what global settings supply.

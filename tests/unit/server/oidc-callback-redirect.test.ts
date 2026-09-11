@@ -2,19 +2,21 @@
  * sanitizeCallbackRedirectUrl — the anonymous post-authentication open
  * redirect (server-edge-auth:mitm:0001/0002/0004).
  *
- * The unpatched module pattern-matched instead of parsing: it rejected a
- * leading `//` but ACCEPTED `/\evil`, which WHATWG URL normalisation turns
- * into a cross-origin URL in a real browser (`\` is treated as `/` for
- * special schemes during parsing — verified against Node's URL). Our own
- * patch (patches/nuxt-oidc-auth+1.0.0-beta.11.patch) is what revived this
- * previously-dead path by threading `session.data.callbackRedirectUrl`
- * through BEFORE `session.clear()`; the weak sanitizer downstream of that
- * is the actual defect.
+ * nuxt-oidc-auth 1.0.0-beta.11 pattern-matched instead of parsing: it
+ * rejected a leading `//` but ACCEPTED `/\evil`, which WHATWG URL
+ * normalisation turns into a cross-origin URL in a real browser (`\` is
+ * treated as `/` for special schemes during parsing). We carried a local
+ * patch for that, plus the `session.data.callbackRedirectUrl` read that had
+ * to move BEFORE `session.clear()` to revive this path at all.
  *
- * This test imports the INSTALLED (patched) module via the same deep-import
- * style as server/utils/auth.ts:36 — deliberately, so patch drift (a
- * `npm install` that re-applies an unpatched or differently-patched
- * nuxt-oidc-auth) fails THIS test, not just a manual code read.
+ * Both fixes are UPSTREAM as of 1.0.0-beta.12, so the patch is gone
+ * (dropped in the dep catch-up). Upstream closes the hole by denylisting
+ * `\`, TAB, LF and CR rather than by parsing, which passes every case
+ * below — that equivalence is exactly what this file exists to keep proving.
+ *
+ * This test imports the INSTALLED module via the same deep-import style as
+ * server/utils/auth.ts:36 — deliberately, so a future version that weakens
+ * the sanitiser fails THIS test, not just a manual code read.
  */
 import { describe, it, expect } from 'vitest'
 import { sanitizeCallbackRedirectUrl } from 'nuxt-oidc-auth/runtime/server/utils/redirect.js'

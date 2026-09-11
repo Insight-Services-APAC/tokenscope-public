@@ -382,17 +382,32 @@ export function buildOtlpLogsPayload(records, resourceAttrs) {
  * session's process.env may carry a repo-supplied TOKENSCOPE_BEARER_ENDPOINT
  * / _STATE_DIR / _API_BASE, and the safe env is what closes that.
  */
-function mintBearer(pluginRoot, env) {
+function mintBearer(pluginRoot, env, stateDirOverride = undefined, toolDirOverride = undefined) {
   const helper = join(pluginRoot, 'scripts', 'otel-headers-helper.sh')
   if (!existsSync(helper)) {
     throw new Error(`otel-headers-helper.sh not found at ${helper} (is CLAUDE_PLUGIN_ROOT set?)`)
+  }
+  // A test must never drive the real state dir (same guard as
+  // writeSharedCredentialStore). Covers in-process imports only; callers pass a
+  // sandbox dir, this is the net beneath that.
+  const underVitest =
+    typeof globalThis.__vitest_worker__ === 'object' && globalThis.__vitest_worker__ !== null
+  const stateDir = stateDirOverride ?? trustedStateDir()
+  if (underVitest && stateDir === trustedStateDir()) {
+    throw new Error(
+      'refusing to run the emit helper against the REAL state dir from a test — pass an explicit stateDir',
+    )
   }
   let stdout
   try {
     // State dir as an ARGUMENT and `/bin/sh` absolute — the helper no longer
     // reads TOKENSCOPE_STATE_DIR, and a bare `sh` would be resolved through a
     // PATH a repository can set. See otel-headers-helper.sh's header.
-    stdout = execFileSync('/bin/sh', [helper, '--state-dir', trustedStateDir()], {
+    const helperArgs = [helper, '--state-dir', stateDir, '--tool', 'claude-code']
+    // --tool-dir is trusted by the same argument as --state-dir; tests use it
+    // to stub the passwd lookup.
+    if (toolDirOverride) helperArgs.push('--tool-dir', toolDirOverride)
+    stdout = execFileSync('/bin/sh', helperArgs, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'inherit'],
       env,
@@ -417,6 +432,9 @@ function mintBearer(pluginRoot, env) {
 
 // ── main ───────────────────────────────────────────────────────────────────
 async function run(opts, env, now = new Date()) {
+  // `opts.stateDir` exists so a test can sandbox the emit helper: mintBearer
+  // otherwise resolves trustedStateDir(), which honours no environment override
+  // by design and therefore cannot be redirected any other way.
   if (!Number.isFinite(opts.maxRecords) || opts.maxRecords <= 0) {
     throw new Error('--max-records must be a positive number')
   }
@@ -512,7 +530,7 @@ async function run(opts, env, now = new Date()) {
   // /bin/sh while trusted emit credentials sit in `env`. Reading the raw variable
   // here let a repo choose that binary, independently of tag-repo's confinement.
   const pluginRoot = dirname(resolveScriptsDir())
-  const authorization = mintBearer(pluginRoot, env) // throws (loud) if the instance is revoked/expired
+  const authorization = mintBearer(pluginRoot, env, opts.stateDir, opts.toolDir) // throws (loud) if the instance is revoked/expired
 
   // Default transport: OTLP/protobuf (application/x-protobuf). The Azure DCR
   // rejects OTLP/JSON with HTTP 415 (verified live) — protobuf is the only

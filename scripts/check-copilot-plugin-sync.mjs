@@ -63,6 +63,14 @@ const FILES = [
   // ~/.tokenscope/config.json. Gated so the copy that reads a credential store
   // can never drift from the reviewed source.
   'device-id.mjs',
+  // device-store.mjs — the ONE definition of where each lane's enrolment lives
+  // (config.<tool>.json / oauth-access.<tool>.json). Gated because a drifted
+  // copy means the two lanes disagree about a FILENAME, and each then reads the
+  // other's enrolment as absent: the exact split the module exists to end.
+  'device-store.mjs',
+  // trusted-git.mjs — vendored alongside the others; gated so the copy that
+  // decides which `git` runs cannot drift on one client only.
+  'trusted-git.mjs',
 ]
 
 // Match the FULL auto-generated signature (not a bare `// SYNC NOTE:` prefix), so a

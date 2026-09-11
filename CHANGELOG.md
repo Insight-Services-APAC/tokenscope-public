@@ -7,6 +7,23 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-09-11 (snapshot 9c3df90d)
+
+- If you use both Claude Code and Copilot CLI on the same machine, they no
+  longer overwrite each other's TokenScope enrolment. Each now keeps its own
+  credentials, so setting up the second one stops silently switching off
+  telemetry for the first. A device where this had already happened repairs
+  itself the next time you start a session, with nothing to re-run: Claude Code
+  falls back to the credentials in your own settings while it waits, so
+  telemetry keeps flowing. If it ever cannot work out which enrolment is yours,
+  it now stops with an explanation naming the file to fix rather than going
+  quiet. Update to plugin 0.1.37 (Claude) / 0.1.15 (Copilot) to pick it up.
+
+- Copilot CLI: a device whose TokenScope enrolment file is present but
+  incomplete no longer re-attempts automatic enrolment on every launch (it
+  could never succeed, and it sent the enrolment secret each time). Re-run the
+  `tokenscope-setup` skill to repair such a device. Copilot plugin 0.1.16.
+
 ## 2026-09-10 (snapshot c5ba50b4)
 
 - The "Global finance" role has been withdrawn. It was described as a

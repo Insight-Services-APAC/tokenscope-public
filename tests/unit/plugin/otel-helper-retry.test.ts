@@ -72,8 +72,17 @@ function bearerCalls() {
   const f = join(tmp, 'counter')
   return existsSync(f) ? Number(readFileSync(f, 'utf8')) : 0
 }
-function seedBogusCache() {
-  writeFileSync(join(stateDir, 'oauth-access.json'), JSON.stringify({ access_token: 'BOGUS', expires_at: 9999999999 }))
+const BEARER_EP = 'https://stub.local/api/v1/instances/x/bearer'
+/*
+ * The cache is BOUND to the bearer endpoint it was minted for, so a fixture has
+ * to record the endpoint this run resolves to or it is (correctly) discarded as
+ * belonging to a different destination.
+ */
+function seedBogusCache(bearerEndpoint: string = BEARER_EP) {
+  writeFileSync(
+    join(stateDir, 'oauth-access.claude-code.json'),
+    JSON.stringify({ access_token: 'BOGUS', expires_at: 9999999999, bearer_endpoint: bearerEndpoint }),
+  )
 }
 const sentinelExists = () => existsSync(join(stateDir, 'emit-failure.json'))
 
@@ -86,6 +95,25 @@ beforeEach(() => {
   const curl = join(stubDir, 'curl')
   writeFileSync(curl, STUB)
   chmodSync(curl, 0o755)
+  /*
+   * Redirect the passwd lookup at a temp home with NO ~/.claude/settings.json.
+   *
+   * With no store, the helper now sources the credential and BOTH destinations
+   * from the device's own global settings file rather than the process env
+   * (a repository can contribute to the env; it cannot edit that file). Left
+   * unstubbed, `passwd_home()` resolves the DEVELOPER'S real home, so these
+   * fixtures would silently run against a real enrolment and the assertions
+   * would depend on the machine.
+   */
+  const passwdHome = join(tmp, 'passwd-home')
+  mkdirSync(passwdHome, { recursive: true })
+  writeFileSync(join(stubDir, 'id'), `#!/bin/sh\nprintf 'tsprobe\\n'\n`)
+  chmodSync(join(stubDir, 'id'), 0o755)
+  writeFileSync(
+    join(stubDir, 'getent'),
+    `#!/bin/sh\nprintf 'tsprobe:x:1000:1000::%s:/bin/sh\\n' "${passwdHome}"\n`,
+  )
+  chmodSync(join(stubDir, 'getent'), 0o755)
 })
 afterEach(() => rmSync(tmp, { recursive: true, force: true }))
 
@@ -127,12 +155,22 @@ describe('otel-headers-helper retry-once-on-401', () => {
   })
 
   it('a valid cached token is used directly — exactly ONE /bearer call, no retry (200)', () => {
-    writeFileSync(join(stateDir, 'oauth-access.json'), JSON.stringify({ access_token: 'GOOD', expires_at: 9999999999 }))
-    const r = runHelper({ STUB_BEARER_MODE: 'ok' })
+    // BOUND, or the binding check discards it and this stops testing cache use at
+    // all: both the cached and the refreshed path make exactly one /bearer call,
+    // so the old assertion passed either way.
+    writeFileSync(
+      join(stateDir, 'oauth-access.claude-code.json'),
+      JSON.stringify({ access_token: 'GOOD', expires_at: 9999999999, bearer_endpoint: BEARER_EP }),
+    )
+    const r = runHelper({ STUB_BEARER_MODE: 'ok', STUB_ARGV: join(tmp, 'argv.txt') })
     expect(r.status).toBe(0)
     expect(r.stdout).toContain('stub-bearer')
     expect(bearerCalls()).toBe(1) // no retry needed
     expect(sentinelExists()).toBe(false)
+    // The point of the case: the CACHE was used, so no refresh happened. Without
+    // this the assertion above holds on the refreshed path too.
+    const argv = existsSync(join(tmp, 'argv.txt')) ? readFileSync(join(tmp, 'argv.txt'), 'utf8') : ''
+    expect(argv).not.toContain('/oauth/token')
   })
 })
 
@@ -204,8 +242,14 @@ describe('otel-headers-helper — S1 fix 4: the shared device credential store f
      * post-migration one: both come from the device.
      */
     writeFileSync(
-      join(stateDir, 'config.json'),
+      join(stateDir, 'config.claude-code.json'),
       JSON.stringify({
+        // The v2 envelope is required for adoption, and instance_id must agree
+        // with the instance the bearer endpoint names.
+        version: 2,
+        tool: 'claude-code',
+        instance_id: 'x',
+        otel_resource_attributes: 'tokenscope.instance_id=x,tool=claude-code',
         oauth_refresh_token: 'rt-from-device-store',
         // BOTH destinations: the helper will not use a stored credential unless
         // both come from the store, because pairing one with an env-supplied
@@ -214,7 +258,7 @@ describe('otel-headers-helper — S1 fix 4: the shared device credential store f
         bearer_endpoint: 'https://stub.local/api/v1/instances/x/bearer',
       }),
     )
-    chmodSync(join(stateDir, 'config.json'), 0o600)
+    chmodSync(join(stateDir, 'config.claude-code.json'), 0o600)
     const argvLog = join(tmp, 'argv.log')
     const r = runHelperNoRefreshTokenEnv({ STUB_BEARER_MODE: 'ok', STUB_ARGV: argvLog })
     expect(r.status).toBe(0)
@@ -233,7 +277,7 @@ describe('otel-headers-helper — S1 fix 4: the shared device credential store f
   })
 
   it('a config.json present but WITHOUT an oauth_refresh_token field → still fails loud (no silent half-config)', () => {
-    writeFileSync(join(stateDir, 'config.json'), JSON.stringify({ instance_id: 'x' }))
+    writeFileSync(join(stateDir, 'config.claude-code.json'), JSON.stringify({ version: 2, tool: 'claude-code', instance_id: 'x', otel_resource_attributes: 'tokenscope.instance_id=x,tool=claude-code' }))
     const r = runHelperNoRefreshTokenEnv({})
     expect(r.status).toBe(1)
     expect(sentinelExists()).toBe(true)
