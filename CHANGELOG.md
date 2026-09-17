@@ -7,6 +7,15 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-09-17 (snapshot 725be6e1)
+
+- The "attribution stall" alert no longer pages when the estate simply goes
+  quiet after activity (an overnight lull paged every night and cleared on the
+  first message of the morning): rows the previous landing already wrote no
+  longer count as a backlog. Unchanged: when the ingest metric cannot be read
+  at all, the alert still errs toward paging while emission is recent. The inbox `read-path-stale` items from the same
+  cause stop too.
+
 ## 2026-09-11 (snapshot e1d3321f)
 
 - Dependency security update: the fourteen advisories GitHub reported against

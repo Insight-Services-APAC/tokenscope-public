@@ -35,6 +35,7 @@ import {
   loadLastFleetEmitMs,
   zeroWriteStreak,
   streakSourceCoverage,
+  lastLandingBeforeStreak,
   type StallCoverageBasis,
 } from '../workers/read-path-health'
 import type { SourceCoverageStatus } from '../azure/dcr-metrics'
@@ -155,7 +156,7 @@ export function decideAttributionStall(input: StallDecisionInput): StallVerdict 
 
   // Work evidence (1b): the INGEST-SIDE coverage verdict over the SAME streak
   // (streakSourceCoverage — independent of the reader's own output).
-  const coverage = streakSourceCoverage(streak)
+  const coverage = streakSourceCoverage(streak, lastLandingBeforeStreak(runs, streak))
   let basis: StallCoverageBasis
   if (coverage === 'rows-arrived') {
     // The pipeline received rows the joiner did not land: a real backlog. Page

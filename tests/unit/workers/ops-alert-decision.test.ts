@@ -27,7 +27,7 @@ import {
 } from '../../../server/workers/ops-alert'
 import { decideAttributionStall } from '../../../server/usage/attribution-stall'
 import { WORKERS } from '../../../server/workers/registry'
-import type { ReaderRun } from '../../../server/workers/read-path-health'
+import { zeroWriteStreak, type ReaderRun } from '../../../server/workers/read-path-health'
 import type { SourceCoverageStatus } from '../../../server/azure/dcr-metrics'
 
 const MIN = 60_000
@@ -189,6 +189,114 @@ describe('decideAttributionStall (A2.2, ar-H2 — the UNIFIED streak semantic + 
     const runs = [readerRun(5 * MIN, 0), readerRun(35 * MIN, 0), readerRun(65 * MIN, 0), readerRun(95 * MIN, 0)]
     const v = decideAttributionStall({ runs, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES })
     expect(v).toEqual({ since: new Date(NOW - 95 * MIN).toISOString(), zeroRuns: 4, basis: 'source-backlog' })
+  })
+
+  /*
+   * THE OVERNIGHT FLAP (Dev, 2026-09-11 03:24 -> 06:39 local, ntfy count 22).
+   * The probe window (15 min) is three ticks (5 min) wide, so the two runs after
+   * a landing still SEE the rows that landing wrote. A streak built on those two
+   * runs, followed by a quiet night, paged as a backlog and cleared on the first
+   * message of the morning. Runs are 5 min apart, newest first; the run at
+   * T+3 landed the last real activity; T+8 and T+13 read rows-arrived with
+   * nothing left to write; everything after is no-rows.
+   */
+  function overnight(coverageAfter: SourceCoverageStatus = 'no-rows') {
+    const runs: ReaderRun[] = []
+    // 22 zero-write runs, 5 min apart: the newest at 5 min ago, the oldest at 110.
+    for (let i = 0; i < 22; i += 1) {
+      const ago = (5 + 5 * i) * MIN
+      const isOverhang = i >= 20 // the two oldest zero runs sit inside the landing's probe window
+      runs.push(readerRun(ago, 0, 'success', isOverhang ? 'rows-arrived' : coverageAfter))
+    }
+    runs.push(readerRun(115 * MIN, 7, 'success', 'rows-arrived')) // the landing that ended the streak
+    runs.push(readerRun(120 * MIN, 0, 'success', 'no-rows'))
+    return runs
+  }
+
+  it('does NOT page on the overnight replay: the rows-arrived runs sit inside the landing window', () => {
+    const v = decideAttributionStall({ runs: overnight(), lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES })
+    expect(v).toBeNull()
+  })
+
+  it('still pages on a real outage: rows keep arriving past the landing window and nothing lands', () => {
+    const v = decideAttributionStall({ runs: overnight('rows-arrived'), lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES })
+    expect(v).toMatchObject({ zeroRuns: 22, basis: 'source-backlog' })
+  })
+
+  it('still pages on a burst that arrived after the last landing and was never landed', () => {
+    // Landing long ago; a burst seen 100 min ago (outside any landing window),
+    // never landed, then silence. The doc keeps this in the 90-minute lane.
+    const runs = [
+      readerRun(5 * MIN, 0, 'success', 'no-rows'),
+      readerRun(35 * MIN, 0, 'success', 'no-rows'),
+      readerRun(65 * MIN, 0, 'success', 'no-rows'),
+      readerRun(100 * MIN, 0, 'success', 'rows-arrived'),
+      readerRun(6 * HOUR, 3, 'success', 'rows-arrived'),
+    ]
+    const v = decideAttributionStall({ runs, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES })
+    expect(v).toMatchObject({ zeroRuns: 4, basis: 'source-backlog' })
+  })
+
+  it('a streak ended by an unknown-outcome run keeps its evidence (an unknown is not a landing)', () => {
+    const runs = [
+      readerRun(5 * MIN, 0, 'success', 'no-rows'),
+      readerRun(50 * MIN, 0, 'success', 'no-rows'),
+      readerRun(95 * MIN, 0, 'success', 'rows-arrived'),
+      readerRun(100 * MIN, null, 'failure', null), // thrown run: breaks the streak, landed nothing
+      readerRun(4 * HOUR, 3, 'success', 'rows-arrived'), // the real last landing, hours before: explains nothing
+    ]
+    const v = decideAttributionStall({ runs, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES })
+    expect(v).toMatchObject({ zeroRuns: 3, basis: 'source-backlog' })
+  })
+
+  it('a failed run between the landing and the overhang does not hide the landing', () => {
+    // Landing at T (115 min ago), a thrown run at T+5 (null ends the zero-write
+    // prefix), the overhang at T+10 reading rows-arrived, then a quiet night.
+    const runs: ReaderRun[] = []
+    for (let i = 0; i < 21; i += 1) runs.push(readerRun((5 + 5 * i) * MIN, 0, 'success', i === 20 ? 'rows-arrived' : 'no-rows'))
+    runs.push(readerRun(110 * MIN, null, 'failure', null))
+    runs.push(readerRun(115 * MIN, 7, 'success', 'rows-arrived'))
+    expect(zeroWriteStreak(runs)).toHaveLength(21)
+    const v = decideAttributionStall({ runs, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES })
+    expect(v).toBeNull()
+  })
+
+  it('a streak that fills the loaded history treats its oldest window as undeterminable', () => {
+    // The landing sits one row beyond what the loader fetched; the overhang runs
+    // are the two oldest loaded rows. Not loaded is not none.
+    const runs: ReaderRun[] = []
+    for (let i = 0; i < 40; i += 1) runs.push(readerRun((5 + 5 * i) * MIN, 0, 'success', i >= 38 ? 'rows-arrived' : 'no-rows'))
+    const v = decideAttributionStall({ runs, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES })
+    expect(v).toBeNull()
+    // ...but arrivals past that oldest window are still evidence.
+    const outage = runs.map((r, i) => (i < 38 ? { ...r, sourceCoverage: 'rows-arrived' as const } : r))
+    expect(decideAttributionStall({ runs: outage, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES })).toMatchObject({ basis: 'source-backlog' })
+  })
+
+  it('load ending on a failed run below the prefix with the landing unloaded does not page', () => {
+    const runs: ReaderRun[] = []
+    for (let i = 0; i < 38; i += 1) runs.push(readerRun((5 + 5 * i) * MIN, 0, 'success', i >= 36 ? 'rows-arrived' : 'no-rows'))
+    runs.push(readerRun(195 * MIN, null, 'failure', null))
+    runs.push(readerRun(200 * MIN, 0, 'success', 'rows-arrived'))
+    const v = decideAttributionStall({ runs, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES })
+    expect(v).toBeNull()
+  })
+
+  it.each([
+    ['inside the window (14:59 after)', 15 * MIN - 1000, null],
+    ['exactly one window after (inclusive)', 15 * MIN, null],
+    ['one second past the window', 15 * MIN + 1000, 'source-backlog'],
+  ])('window boundary: a rows-arrived run %s the landing', (_l, afterMs, basis) => {
+    const landingAgo = 120 * MIN
+    const runs = [
+      readerRun(5 * MIN, 0, 'success', 'no-rows'),
+      readerRun(50 * MIN, 0, 'success', 'no-rows'),
+      readerRun(landingAgo - afterMs, 0, 'success', 'rows-arrived'),
+      readerRun(landingAgo, 6, 'success', 'rows-arrived'),
+    ]
+    const v = decideAttributionStall({ runs, lastFleetEmitMs: NOW - 10 * MIN, nowMs: NOW, stallMinutes: STALL_MINUTES })
+    if (basis === null) expect(v).toBeNull()
+    else expect(v).toMatchObject({ basis })
   })
 
   it('a LAPTOP LEFT ON is silent — bearer fresh, session selected, coverage no-rows', () => {

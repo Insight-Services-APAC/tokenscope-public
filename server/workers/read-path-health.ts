@@ -43,7 +43,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
 import type * as schema from '../../drizzle/schema'
 import { dispatchInbox } from '../notifications/dispatch'
-import type { SourceCoverageStatus } from '../azure/dcr-metrics'
+import { SOURCE_COVERAGE_WINDOW_MINUTES, type SourceCoverageStatus } from '../azure/dcr-metrics'
 
 const READER_WORKER = 'azure-monitor-read'
 
@@ -143,37 +143,62 @@ export function zeroWriteStreak<T extends { rowsAffected: number | null }>(runs:
  * The INGEST-SIDE coverage verdict over a zero-write streak — the ONE
  * work-evidence predicate both stall alerts share (imported by
  * attribution-stall.ts exactly as the loaders are). Did the DCR pipeline receive
- * rows the joiner did not land, anywhere in the streak?
- *   - 'rows-arrived' — some run's probe saw rows: a real backlog → page.
- *   - 'no-rows'      — no run saw rows but at least one measured empty: idle → quiet.
+ * rows the joiner did not land?
+ *   - 'rows-arrived' — some run's probe saw rows nothing had landed: a real
+ *                      backlog → page.
+ *   - 'no-rows'      — no such run, but at least one measured empty: idle → quiet.
  *   - 'unknown'      — no run measured (all pre-probe / scoped / failed): the
  *                      decision falls back to the bearer gate (fails toward paging).
- * 'rows-arrived' wins over 'no-rows' wins over 'unknown': a single tick that saw
- * rows the joiner never landed is a backlog even if later probes read empty.
- * During an ACTIVE outage (clients still emitting) rows keep physically arriving,
- * so every tick RE-MEASURES 'rows-arrived' and the streak stays armed — unlike
- * PR #316's watermark count, which only the first run saw and which aged out.
- * The residual: once the source truly goes quiet (a burst the reader never
- * landed, then the editor closes and ingestion stops), later probes read
- * 'no-rows' and, after the run that saw rows scrolls out of the loaded window,
- * the stall clears — a backlog that OUTLIVES ingestion is the recovery lane's
- * (attribution-gap 72h / telemetry-recovery), not the 90-minute stall's.
+ *
+ * CONTRACT. The probe window (SOURCE_COVERAGE_WINDOW_MINUTES) is wider than the
+ * reader tick, so the runs after a landing still see that landing's rows. A
+ * 'rows-arrived' run is evidence only when no loaded run landed rows within one
+ * window (inclusive) before it (`lastLandingMs`, the nearest landing below the
+ * streak). With no loaded landing (`null`), the oldest window-worth of the
+ * streak is undeterminable and is not evidence. A discounted sample is a known
+ * measurement (quiet), never 'unknown'. Why, and the incident that set it:
+ * docs/design/ops-alerting.md A2.2.
  */
 export function streakSourceCoverage(
-  streak: ReadonlyArray<{ sourceCoverage: SourceCoverageStatus | null }>,
+  streak: ReadonlyArray<{ startedAtMs: number; sourceCoverage: SourceCoverageStatus | null }>,
+  lastLandingMs: number | null = null,
 ): SourceCoverageStatus {
-  if (streak.some((r) => r.sourceCoverage === 'rows-arrived')) return 'rows-arrived'
-  if (streak.some((r) => r.sourceCoverage === 'no-rows')) return 'no-rows'
+  const windowMs = SOURCE_COVERAGE_WINDOW_MINUTES * 60_000
+  const oldestMs = streak.length > 0 ? streak[streak.length - 1]!.startedAtMs : null
+  const withinWindowAfter = (r: { startedAtMs: number }, fromMs: number) =>
+    r.startedAtMs >= fromMs && r.startedAtMs - fromMs <= windowMs
+  const explained = (r: { startedAtMs: number }) =>
+    lastLandingMs !== null ? withinWindowAfter(r, lastLandingMs) : oldestMs !== null && withinWindowAfter(r, oldestMs)
+  if (streak.some((r) => r.sourceCoverage === 'rows-arrived' && !explained(r))) return 'rows-arrived'
+  // A discounted 'rows-arrived' is a KNOWN measurement the landing explains, so
+  // it is quiet, not unmeasured: returning 'unknown' here would hand a streak
+  // of nothing but explained samples to the bearer fallback, which pages.
+  if (streak.some((r) => r.sourceCoverage === 'no-rows' || r.sourceCoverage === 'rows-arrived')) return 'no-rows'
   return 'unknown'
+}
+
+/**
+ * The start time of the nearest run below the streak that LANDED rows, or null
+ * when no loaded run did. Unknown-outcome runs (null) and zero runs below the
+ * streak are walked past: they landed nothing and do not cancel an earlier
+ * landing. `runs` newest-first, `streak` its zero-write prefix (zeroWriteStreak).
+ */
+export function lastLandingBeforeStreak<T extends { startedAtMs: number; rowsAffected: number | null }>(
+  runs: readonly T[],
+  streak: readonly T[],
+): number | null {
+  const landing = runs.slice(streak.length).find((r) => r.rowsAffected !== null && r.rowsAffected > 0)
+  return landing?.startedAtMs ?? null
 }
 
 /** True iff the streak's coverage is 'rows-arrived' — the DCR received rows the
  *  joiner did not land. The single, positive work-evidence predicate; 'no-rows'
  *  (idle) and 'unknown' (unmeasured) are both false. */
 export function hasWorkEvidenceCoverage(
-  streak: ReadonlyArray<{ sourceCoverage: SourceCoverageStatus | null }>,
+  streak: ReadonlyArray<{ startedAtMs: number; sourceCoverage: SourceCoverageStatus | null }>,
+  lastLandingMs: number | null = null,
 ): boolean {
-  return streakSourceCoverage(streak) === 'rows-arrived'
+  return streakSourceCoverage(streak, lastLandingMs) === 'rows-arrived'
 }
 
 export type ReadPathAlertReason = 'stall' | 'all-fault' | 'no-success'
@@ -251,7 +276,7 @@ export function decideReadPathAlert(input: DecideInput): ReadPathDecision {
   //     is already paging for a probe/LA outage.
   const streak = zeroWriteStreak(runs)
   if (streak.length >= STALL_MIN_ZERO_RUNS) {
-    const coverage = streakSourceCoverage(streak)
+    const coverage = streakSourceCoverage(streak, lastLandingBeforeStreak(runs, streak))
     if (coverage === 'rows-arrived') {
       return { fire: true, reason: 'stall', coverageBasis: 'source-backlog' }
     }

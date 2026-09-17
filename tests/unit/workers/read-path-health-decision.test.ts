@@ -27,6 +27,7 @@ import {
   hasWorkEvidenceCoverage,
   zeroWriteStreak,
   streakSourceCoverage,
+  lastLandingBeforeStreak,
   type ReaderRun,
   type DecideInput,
 } from '../../../server/workers/read-path-health'
@@ -76,17 +77,92 @@ describe('zeroWriteStreak / streakSourceCoverage — the shared streak + coverag
     expect(zeroWriteStreak([run(0, MIN), run(0, 2 * MIN), run(0, 3 * MIN)]).length).toBe(3)
   })
 
+  // A landing far older than the probe window: it explains nothing, so these
+  // exercise precedence alone.
+  const OLD_LANDING = NOW - 4 * HOUR
+
   it('streakSourceCoverage: rows-arrived wins over no-rows wins over unknown', () => {
-    expect(streakSourceCoverage([run(0, MIN, 'no-rows'), run(0, 2 * MIN, 'rows-arrived')])).toBe('rows-arrived')
-    expect(streakSourceCoverage([run(0, MIN, 'no-rows'), run(0, 2 * MIN, null)])).toBe('no-rows')
-    expect(streakSourceCoverage([run(0, MIN, null), run(0, 2 * MIN, null)])).toBe('unknown')
-    expect(streakSourceCoverage([])).toBe('unknown')
+    expect(streakSourceCoverage([run(0, MIN, 'no-rows'), run(0, 2 * MIN, 'rows-arrived')], OLD_LANDING)).toBe('rows-arrived')
+    expect(streakSourceCoverage([run(0, MIN, 'no-rows'), run(0, 2 * MIN, null)], OLD_LANDING)).toBe('no-rows')
+    expect(streakSourceCoverage([run(0, MIN, null), run(0, 2 * MIN, null)], OLD_LANDING)).toBe('unknown')
+    expect(streakSourceCoverage([], OLD_LANDING)).toBe('unknown')
+  })
+
+  it('with no loaded landing, the oldest probe window of the streak is not evidence', () => {
+    // Nothing below the streak was loaded: the run(s) inside one window of the
+    // oldest are undeterminable (explained -> quiet); a later sample still counts.
+    expect(streakSourceCoverage([run(0, MIN, 'rows-arrived')])).toBe('no-rows')
+    expect(streakSourceCoverage([run(0, MIN, 'rows-arrived'), run(0, 30 * MIN, 'no-rows')])).toBe('rows-arrived')
+    expect(streakSourceCoverage([run(0, MIN, 'no-rows'), run(0, 30 * MIN, 'rows-arrived')])).toBe('no-rows')
   })
 
   it('hasWorkEvidenceCoverage is true only for a rows-arrived streak', () => {
-    expect(hasWorkEvidenceCoverage([run(0, MIN, 'rows-arrived')])).toBe(true)
-    expect(hasWorkEvidenceCoverage([run(0, MIN, 'no-rows')])).toBe(false)
-    expect(hasWorkEvidenceCoverage([run(0, MIN, null)])).toBe(false)
+    expect(hasWorkEvidenceCoverage([run(0, MIN, 'rows-arrived')], OLD_LANDING)).toBe(true)
+    expect(hasWorkEvidenceCoverage([run(0, MIN, 'no-rows')], OLD_LANDING)).toBe(false)
+    expect(hasWorkEvidenceCoverage([run(0, MIN, null)], OLD_LANDING)).toBe(false)
+  })
+})
+
+describe('STALL work evidence must postdate the last landing (the overnight flap)', () => {
+  // 5-min ticks, newest first. The landing at 115 min ago wrote 7 rows; the two
+  // zero runs inside its 15-min probe window read rows-arrived with nothing to
+  // write; the rest of the night is no-rows.
+  function overnight(coverageAfter: SourceCoverageStatus = 'no-rows'): ReaderRun[] {
+    const runs: ReaderRun[] = []
+    for (let i = 0; i < 22; i += 1) runs.push(run(0, (5 + 5 * i) * MIN, i >= 20 ? 'rows-arrived' : coverageAfter))
+    runs.push(run(7, 115 * MIN, 'rows-arrived'))
+    runs.push(run(0, 120 * MIN, 'no-rows'))
+    return runs
+  }
+
+  it('does not fire on the overnight replay', () => {
+    expect(decideReadPathAlert(base({ runs: overnight() }))).toEqual({ fire: false, reason: null })
+  })
+
+  it('fires when rows keep arriving past the landing window', () => {
+    expect(decideReadPathAlert(base({ runs: overnight('rows-arrived') }))).toEqual({
+      fire: true,
+      reason: 'stall',
+      coverageBasis: 'source-backlog',
+    })
+  })
+
+  it('a streak of nothing but explained samples is quiet, not unknown (no bearer fallback)', () => {
+    // The inbox item's minimum streak (3 zero runs), all inside the landing's
+    // window and all reading rows-arrived. Every sample is explained; the fleet
+    // is minting. Before: coverage 'unknown' -> bearer fallback -> fired.
+    const runs = [run(0, 5 * MIN), run(0, 10 * MIN), run(0, 15 * MIN), run(6, 18 * MIN)]
+    expect(streakSourceCoverage(zeroWriteStreak(runs), lastLandingBeforeStreak(runs, zeroWriteStreak(runs)))).toBe('no-rows')
+    expect(decideReadPathAlert(base({ runs, lastFleetEmitMs: NOW - 2 * MIN }))).toEqual({ fire: false, reason: null })
+    // Genuinely unmeasured stays unknown (and the bearer fallback applies).
+    const unmeasured = [run(0, 5 * MIN, null), run(0, 10 * MIN, null), run(0, 15 * MIN, null), run(6, 18 * MIN)]
+    expect(streakSourceCoverage(zeroWriteStreak(unmeasured), NOW - 18 * MIN)).toBe('unknown')
+  })
+
+  it('lastLandingBeforeStreak: the nearest landing below the streak, past unknown and zero runs', () => {
+    const landed = [run(0, 5 * MIN), run(0, 10 * MIN), run(4, 15 * MIN)]
+    expect(lastLandingBeforeStreak(landed, zeroWriteStreak(landed))).toBe(NOW - 15 * MIN)
+    // A thrown run ends the streak but is not a landing; the landing below it still counts.
+    const pastFailure = [run(0, 5 * MIN), run(null, 10 * MIN, null, { status: 'failure' }), run(0, 15 * MIN), run(4, 20 * MIN)]
+    expect(lastLandingBeforeStreak(pastFailure, zeroWriteStreak(pastFailure))).toBe(NOW - 20 * MIN)
+    const noLanding = [run(0, 5 * MIN), run(0, 10 * MIN)]
+    expect(lastLandingBeforeStreak(noLanding, zeroWriteStreak(noLanding))).toBeNull()
+  })
+
+  it('load ending on a failed run below the prefix, landing unloaded: oldest window is not evidence', () => {
+    // 20-row cap: 18 zero runs, a failed run (ends the prefix), one more zero run —
+    // the landing is the 21st row and was not loaded. streak.length !== runs.length.
+    const runs: ReaderRun[] = []
+    for (let i = 0; i < 18; i += 1) runs.push(run(0, (5 + 5 * i) * MIN, i >= 16 ? 'rows-arrived' : 'no-rows'))
+    runs.push(run(null, 95 * MIN, null, { status: 'failure' }))
+    runs.push(run(0, 100 * MIN, 'rows-arrived'))
+    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
+  })
+
+  it('a streak filling the loaded history (landing not loaded): oldest window is not evidence', () => {
+    const runs: ReaderRun[] = []
+    for (let i = 0; i < 20; i += 1) runs.push(run(0, (5 + 5 * i) * MIN, i >= 18 ? 'rows-arrived' : 'no-rows'))
+    expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: false, reason: null })
   })
 })
 
@@ -134,6 +210,7 @@ describe('decideReadPathAlert — STALL', () => {
       run(0, 2 * MIN, 'no-rows', { sessionsProcessed: 1, newEventsSeen: 0 }),
       run(0, 17 * MIN, 'rows-arrived', { sessionsProcessed: 1 }),
       run(0, 32 * MIN, 'no-rows', { sessionsProcessed: 1, newEventsSeen: 0 }),
+      run(9, 4 * HOUR, 'rows-arrived'), // the last landing, long before the burst: it explains nothing
     ]
     expect(decideReadPathAlert(base({ runs: stuck }))).toEqual({
       fire: true,
@@ -196,6 +273,7 @@ describe('decideReadPathAlert — STALL', () => {
       run(0, 20 * MIN, 'no-rows', { newEventsSeen: 0 }),
       run(0, 35 * MIN, 'no-rows', { newEventsSeen: 0 }),
       run(0, 3 * HOUR, 'rows-arrived'), // the burst that started the outage, deep in the streak
+      run(9, 5 * HOUR, 'rows-arrived'), // the last landing, two hours before the burst
     ]
     expect(decideReadPathAlert(base({ runs, lastFleetEmitMs: NOW - 3 * HOUR }))).toEqual({
       fire: true,
