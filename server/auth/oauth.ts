@@ -64,8 +64,23 @@ export function computeGrantedScopes(scopeParam: string | undefined): OAuthScope
 export const AUTH_CODE_TTL_MS = 5 * 60 * 1000
 /** Access token: 30 days (matches a sibling project's PAT-as-access-token lifetime). */
 export const ACCESS_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000
-/** Refresh token: 90 days. */
+/**
+ * Refresh token: 90 days. For a credential bound to a LIVE device this is an
+ * IDLE window, renewed on every use (`deviceIdleWindowEnd`); every other
+ * credential keeps it as a fixed lifetime from issuance.
+ */
 export const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000
+
+/**
+ * `now() + REFRESH_TOKEN_TTL_MS` as SQL — the horizon a live emitting device and
+ * its bound credential renew to on use. The device (`ts_expected_end`, renewed by
+ * /bearer and re-provisioning) and the credential (`refresh_expires_at`, renewed
+ * by refresh) share it so neither outlives the other by more than a refresh
+ * cycle. Always applied through GREATEST: renewal never shortens.
+ */
+export function deviceIdleWindowEnd() {
+  return sql`now() + make_interval(secs => ${REFRESH_TOKEN_TTL_MS / 1000})`
+}
 /**
  * Grace window for the access token a refresh supersedes (AUTH-3): the old
  * hash stays valid this long after the refresh so concurrent refreshers
@@ -573,13 +588,20 @@ export async function issueTokens(
  * Refresh: NON-ROTATING (ADR-0005). Re-mint a fresh ACCESS token IN PLACE on the
  * existing oauth_token row, keeping the SAME refresh token live and reusable
  * across cycles. Revocation — not rotation — is the control: the row's
- * revoked_at (explicit revoke, or the E2 teammate-revocation cascade) is what
- * kills a refresh, never the act of using it.
+ * revoked_at (explicit revoke, or the E2 teammate-revocation cascade), the
+ * teammate's deactivation, or its bound device ending is what kills a refresh,
+ * never the act of using it.
  *
  * This is the durable-emission fix: the headless emit helper re-presents the
  * same env refresh token every ~29min; a rotating scheme would invalidate it on
  * the first refresh and recreate the silent-death. The returned `refresh_token`
  * is the SAME one the caller presented (echoed for RFC-6749 conformance).
+ *
+ * SLIDING EXPIRY, DEVICE-BOUND ONLY. A bound credential that passes the gate has
+ * `refresh_expires_at` renewed to `deviceIdleWindowEnd()`. Without it the
+ * headless helper hit a hard wall 90 days after redeem with no interactive path
+ * to recover. Unbound credentials keep the fixed lifetime, because a user
+ * re-consents those interactively.
  *
  * Atomicity + checks in ONE UPDATE (compare-and-swap on the matched row):
  *   - refresh_token_hash matches, row live (revoked_at IS NULL), not expired,
@@ -595,8 +617,13 @@ export async function issueTokens(
  *     is_active=FALSE (never revoked_at), so without this a cleaned account
  *     refreshes itself a fresh access token every ~29 minutes, indefinitely.
  *     `IS TRUE` (not `= TRUE`) so a NULL fails CLOSED rather than yielding NULL.
+ *   - DEVICE LIVENESS: a credential bound to a device (`instance_id`) refreshes
+ *     only while that device is live, unpurged and owned by the same teammate.
+ *     Ending a device (revoke, re-provision, session-gc) therefore ends its
+ *     credential's ability to refresh. Unbound credentials (read/tag, legacy
+ *     emit) are not device-gated.
  * No match ⇒ invalid_grant (replayed/expired/revoked refresh, revoked teammate,
- * or DEACTIVATED teammate).
+ * DEACTIVATED teammate, or an ended/foreign bound device).
  */
 export async function refreshAccessToken(
   db: Db,
@@ -623,7 +650,11 @@ export async function refreshAccessToken(
            access_token_hash = ${hashSessionToken(newAccessToken)},
            access_issued_at  = ${accessIssuedAt.toISOString()},
            access_expires_at = ${accessExpiresAt.toISOString()},
-           last_used_at      = now()
+           last_used_at      = now(),
+           refresh_expires_at = CASE
+             WHEN t.instance_id IS NULL THEN t.refresh_expires_at
+             ELSE GREATEST(t.refresh_expires_at, ${deviceIdleWindowEnd()})
+           END
       FROM teammate tm
      WHERE t.teammate_id = tm.id
        AND t.refresh_token_hash = ${refreshHash}
@@ -632,6 +663,16 @@ export async function refreshAccessToken(
        AND t.client_id = ${clientId}::uuid
        AND NOT (tm.revoked_at IS NOT NULL AND tm.revoked_at > t.refresh_issued_at)
        AND tm.is_active IS TRUE
+       AND (
+         t.instance_id IS NULL
+         OR EXISTS (
+           SELECT 1 FROM instance_attestation ia
+            WHERE ia.instance_id = t.instance_id
+              AND ia.teammate_id = t.teammate_id
+              AND ia.ts_actual_end IS NULL
+              AND ia.ts_purged IS NULL
+         )
+       )
     RETURNING t.teammate_id::text AS teammate_id, t.scope AS scope
   `)
   const row = [...rows][0]

@@ -29,9 +29,11 @@
  * for those we fall back to ending the teammate's live instances (the old
  * behaviour) since there's no per-device link to scope by.
  */
-import { and, eq, isNull } from 'drizzle-orm'
+import { createError } from 'h3'
+import { and, eq, isNull, sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { schema } from '../db'
+import { lockLiveDevicesOf } from './device-lifecycle'
 
 type Db = PostgresJsDatabase<Record<string, unknown>>
 
@@ -58,35 +60,51 @@ export function grantIsEmit(scope: string): boolean {
 }
 
 /**
- * Revoke a grant + cascade to its emitting instances. Idempotent: an
- * already-revoked grant is a no-op for the token UPDATE, but the emit cascade
- * still runs (defensively — if a prior revoke flipped the token but the instance
- * end didn't land, this reconverges; ending an already-ended instance is itself
- * a no-op via the `ts_actual_end IS NULL` predicate).
+ * Revoke a grant + cascade to its emitting instances. Idempotent: a grant that
+ * is already revoked, when this call reads it under lock, is a complete no-op.
+ *
+ * `grant` is the caller's pre-lock snapshot and is used only to find the rows.
+ * Whether to act is decided on the grant row as it is AFTER the locks: a
+ * re-provision can rotate this grant out while we wait for its device, and a
+ * decision from the snapshot would then end the reused device and (mig 0141)
+ * revoke its replacement credential.
  */
 export async function revokeGrant(db: Db, grant: RevokableGrant): Promise<GrantRevokeResult> {
   const now = new Date()
   const isEmit = grantIsEmit(grant.scope)
 
-  // 1. Revoke the token row — only flip a still-live row.
-  const alreadyRevoked = grant.revokedAt !== null
-  if (!alreadyRevoked) {
-    await db
-      .update(schema.oauthToken)
-      .set({ revokedAt: now })
-      .where(and(eq(schema.oauthToken.id, grant.id), isNull(schema.oauthToken.revokedAt)))
+  // 1. Locks, in the order every path takes them: device, then emit_handoff,
+  // then oauth_token (see consumeEmitHandoff). Token-then-device deadlocks
+  // against a concurrent redeem, re-provision or admin end of the device.
+  // Legacy emit grants (instance_id NULL, pre-0031) have no per-device link and
+  // cover the teammate's live devices, locked in the shared multi-device order
+  // (server/utils/device-lifecycle.ts).
+  if (isEmit && grant.instanceId) {
+    await db.execute(sql`
+      SELECT 1 FROM instance_attestation
+       WHERE instance_id = ${grant.instanceId}::uuid AND ts_actual_end IS NULL
+         FOR UPDATE
+    `)
+  } else if (isEmit) {
+    await lockLiveDevicesOf(db as never, grant.teammateId)
+  }
+  const current = await db.execute<{ revoked: boolean; teammate_id: string; instance_id: string | null }>(sql`
+    SELECT revoked_at IS NOT NULL AS revoked, teammate_id::text AS teammate_id, instance_id::text AS instance_id
+      FROM oauth_token WHERE id = ${grant.id}::uuid FOR UPDATE
+  `)
+  const row = [...current][0]
+  if (!row || row.revoked) return { revoked: false, isEmit, instancesEnded: 0 }
+  // The snapshot chose which devices to lock and end. If the grant was re-pointed
+  // meanwhile (confirm-instance moves a provisional grant to its real teammate),
+  // those are the wrong devices and the caller authorised a different grant.
+  if (row.teammate_id !== grant.teammateId || row.instance_id !== grant.instanceId) {
+    throw createError({ statusCode: 409, statusMessage: 'The grant changed while it was being revoked; reload and retry.' })
   }
 
-  // 2. Revoke↔emission wiring (F3.4) — end the emit grant's instance only.
-  // Re-running the cascade on an ALREADY-revoked grant is safe ONLY when it's
-  // instance-scoped (it re-ends just its own device). For a legacy NULL-instance
-  // grant the cascade is teammate-wide, so re-revoking an already-revoked one
-  // would end a SINCE-re-provisioned device — gate that out (R2 F2).
+  // 2. Revoke↔emission wiring (F3.4): end the emit grant's device only (1:1 via
+  // oauth_token.instance_id), or a legacy grant's teammate's live devices.
   let instancesEnded = 0
-  if (isEmit && (!alreadyRevoked || grant.instanceId)) {
-    // 1:1 scope: end ONLY this grant's device (oauth_token.instance_id). Legacy
-    // emit grants (instance_id NULL, pre-0031) fall back to the teammate's live
-    // instances — there's no per-device link to scope by.
+  if (isEmit) {
     const target = grant.instanceId
       ? eq(schema.instanceAttestation.instanceId, grant.instanceId)
       : eq(schema.instanceAttestation.teammateId, grant.teammateId)
@@ -98,5 +116,12 @@ export async function revokeGrant(db: Db, grant: RevokableGrant): Promise<GrantR
     instancesEnded = ended.length
   }
 
-  return { revoked: !alreadyRevoked, isEmit, instancesEnded }
+  // 3. Revoke the token row. A device-bound grant was already revoked by its
+  // device ending (mig 0141); this covers unbound ones.
+  await db
+    .update(schema.oauthToken)
+    .set({ revokedAt: now })
+    .where(and(eq(schema.oauthToken.id, grant.id), isNull(schema.oauthToken.revokedAt)))
+
+  return { revoked: true, isEmit, instancesEnded }
 }

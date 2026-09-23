@@ -336,9 +336,9 @@ token); the read joiner gates on `attestation_state = 'attested'`.
 | `tool` | TEXT NOT NULL | `claude-code` / `copilot-cli` / future |
 | `session_token_hash` | TEXT UNIQUE | **vestigial** — legacy session-token bridge auth; now **nullable** (emit auth is OAuth `tokenscope.emit` since the cutover) |
 | `ts_start` | TIMESTAMPTZ NOT NULL = now() | |
-| `ts_expected_end` | TIMESTAMPTZ | soft cleanup target |
-| `ts_actual_end` | TIMESTAMPTZ | written on session-end signal |
-| `ts_purged` | TIMESTAMPTZ | soft-purge marker (PII cleared, row + `instance_id` retained so the attribution FK stays valid) |
+| `ts_expected_end` | TIMESTAMPTZ | idle-window end: renewed by every `/bearer` mint and re-provision; `session-gc` closes the device once both this and last mint + 90d have passed |
+| `ts_actual_end` | TIMESTAMPTZ | set when the device ends (any path); a trigger (mig 0141) revokes its bound `oauth_token` rows in the same transaction |
+| `ts_purged` | TIMESTAMPTZ | soft-purge marker on an ended device (PII cleared, row + `instance_id` retained so the attribution FK stays valid; bound credentials revoked) |
 | `last_bearer_at` | TIMESTAMPTZ | heartbeat (mig 0030): last successful `/bearer` emit-credential mint, stamped on each mint. Drives heartbeat-coverage — spend whose instance window doesn't span its `ts_event` is unverified/quarantined until reconciliation |
 | `region_id` | UUID NOT NULL → region | |
 | `org_unit_id` | UUID NOT NULL → org_unit | |

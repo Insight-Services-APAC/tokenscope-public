@@ -376,7 +376,7 @@ describe('the drain worker', () => {
     // sessionsProcessed rather than by slice size would park the cursor on a
     // skipped id forever — a campaign that never finishes.
     const skipped = await enrol()
-    await t.client.unsafe(`UPDATE instance_attestation SET ts_purged = NOW() WHERE instance_id = '${skipped}'`)
+    await t.client.unsafe(`UPDATE instance_attestation SET ts_actual_end = NOW(), ts_purged = NOW() WHERE instance_id = '${skipped}'`)
     await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [skipped], lookbackDays: 30 } }))
     const res = await runTelemetryRecovery(t.db, { readerFor: spyFactory() })
     expect(res.status).toBe('succeeded')

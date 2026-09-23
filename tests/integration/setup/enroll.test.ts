@@ -425,7 +425,7 @@ describe('enroll — provisional caps return 429', () => {
 
       // Same again for a PURGED row (soft-purge, the other lifecycle terminal).
       await t.client`
-        UPDATE instance_attestation SET ts_purged = now()
+        UPDATE instance_attestation SET ts_actual_end = now(), ts_purged = now()
          WHERE instance_id = ${second.instance_id}::uuid`
       const third = await enroll(
         validBody({ claimed_email: 'lifecycle@example.com', device_binding: 'lifecycle-dev-3' }),

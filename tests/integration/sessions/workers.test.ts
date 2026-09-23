@@ -52,7 +52,8 @@ beforeAll(async () => {
   //       under the 90d fallback. (Was a GC candidate under the old 12h fallback —
   //       the bug this fix removes: a recent durable instance must NOT be closed.)
   //   B — open, ts_expected_end after TS_NOW → still alive
-  //   C — open, ts_expected_end before TS_NOW → GC candidate (explicit expiry)
+  //   C — open, enrolled 143d before TS_NOW, never minted, ts_expected_end
+  //       before TS_NOW → GC candidate (idle past its window)
   //   D — open, ts_start > 365 days ago, NO expected_end → GC candidate (90d fallback)
   await t.client.unsafe(`
     INSERT INTO instance_attestation
@@ -67,7 +68,7 @@ beforeAll(async () => {
        'PRJ-B', 'claude-code', 'hashB', '${TS_NOW.toISOString()}',
        '2099-01-01 00:00:00+00', NULL, '${region!.id}', '${orgUnit!.id}', '${orgUnit!.id}'),
       ('00000000-0000-4000-8000-00000000000c', 'oid-c', 'c@i.com', '${tm!.id}', 'h',
-       'PRJ-C', 'claude-code', 'hashC', '${TS_NOW.toISOString()}',
+       'PRJ-C', 'claude-code', 'hashC', '2026-01-01T00:00:00Z',
        '${TS_LONG_AGO.toISOString()}', NULL, '${region!.id}', '${orgUnit!.id}', '${orgUnit!.id}'),
       ('00000000-0000-4000-8000-00000000000d', 'oid-d', 'd@i.com', '${tm!.id}', 'h',
        'PRJ-D', 'claude-code', 'hashD', '${TS_VERY_LONG_AGO.toISOString()}',
@@ -121,9 +122,9 @@ describe('runSessionGc', () => {
 
 describe('runSoftPurge', () => {
   it('clears PII on the > 12-month-old row only', async () => {
-    // Re-insert a row that is over 12 months old and never ended — soft
-    // purge candidate. Use a NEW session id so the prior GC doesn't
-    // interfere with the assertion.
+    // A row enrolled over 12 months ago and since ENDED: a soft-purge
+    // candidate (an open device is not; see device-idle-window.test.ts). Use a
+    // NEW session id so the prior GC doesn't interfere with the assertion.
     await t.client.unsafe(`
       INSERT INTO instance_attestation
         (instance_id, principal_oid, principal_email, claimed_email, teammate_id,
@@ -134,7 +135,7 @@ describe('runSoftPurge', () => {
       VALUES
         ('00000000-0000-4000-8000-00000000000e', 'oid-e', 'e@i.com', 'claimed-e@i.com',
          (SELECT id FROM teammate LIMIT 1), 'h', 'PRJ-E',
-         'claude-code', 'hashE', '2025-04-01 00:00:00+00', NULL, NULL, NULL,
+         'claude-code', 'hashE', '2025-04-01 00:00:00+00', NULL, '2025-05-01 00:00:00+00', NULL,
          (SELECT id FROM region LIMIT 1),
          (SELECT id FROM org_unit LIMIT 1),
          (SELECT id FROM org_unit LIMIT 1),

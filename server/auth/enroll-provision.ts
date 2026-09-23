@@ -27,7 +27,7 @@ import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { hashSessionToken, constantTimeEqualHex } from './hmac'
 import { advisoryGlobalCapLock, advisoryXactLock } from '../db/advisory-lock'
-import { REFRESH_TOKEN_TTL_MS } from './oauth'
+import { deviceIdleWindowEnd } from './oauth'
 import type { EmitTool } from './emit-provision'
 import { resolveDefaultRegionId, unplacedOrgUnitIdForRegion } from './placement-home'
 
@@ -198,13 +198,24 @@ export async function locateOrCreateProvisionalInstance(
      WHERE identity_state = 'provisional'
        AND claimed_email = ${claimedEmail}
        AND ts_actual_end IS NULL
+       AND ts_purged IS NULL
        AND notes->>'device_binding_hash' = ${deviceHash}
        AND tool = ${tool}
      ORDER BY ts_start DESC
      LIMIT 1
+       FOR UPDATE
   `)
   const found = [...existing][0]
   if (found) {
+    // The caller rotates this device's credential next, so renew its idle
+    // window with it (the same rule as emit-provision.ts's reuse). Grants the
+    // enrolling caller nothing beyond the reuse itself. The row lock keeps
+    // session-gc from ending the device between the check and the renewal.
+    await db.execute(sql`
+      UPDATE instance_attestation
+         SET ts_expected_end = GREATEST(ts_expected_end, ${deviceIdleWindowEnd()})
+       WHERE instance_id = ${found.instance_id}::uuid
+    `)
     return { instanceId: found.instance_id, teammateId: found.teammate_id, reused: true }
   }
 
@@ -294,14 +305,13 @@ export async function locateOrCreateProvisionalInstance(
   // provisional rows, per the instance_attestation schema note). notes holds the
   // hashed device-binding dedup hint.
   const instanceId = randomUUID()
-  const tsExpectedEnd = new Date(Date.now() + REFRESH_TOKEN_TTL_MS)
   await db.execute(sql`
     INSERT INTO instance_attestation
       (instance_id, principal_oid, principal_email, teammate_id, tool,
        ts_expected_end, region_id, org_unit_id, attestation_state,
        identity_state, claimed_email, notes)
     VALUES (${instanceId}::uuid, ${provisionalOid}, NULL, ${teammateId}::uuid, ${tool},
-            ${tsExpectedEnd.toISOString()}::timestamptz, ${regionId}::uuid, ${orgUnitId}::uuid,
+            ${deviceIdleWindowEnd()}, ${regionId}::uuid, ${orgUnitId}::uuid,
             'unassigned', 'provisional', ${claimedEmail},
             ${JSON.stringify({ device_binding_hash: deviceHash })}::jsonb)
   `)

@@ -34,17 +34,28 @@
  *     must answer that before it enables `teammate`.
  */
 import { createError, defineEventHandler, getRouterParam, getRequestHeaders } from 'h3'
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { z } from 'zod'
 import { getDb, schema } from '../../../../db'
 import { withMachineRls } from '../../../../db/machine-rls'
 import { requireOAuthBearer, presentedTokenInfo } from '../../../../auth/oauth-bearer'
 import { mintAzureMonitorBearer } from '../../../../auth/obo'
+import { deviceIdleWindowEnd } from '../../../../auth/oauth'
 import { recordBearerAuthFailed, resolveBearerAuthFailed } from '../../../../db/instance-health'
 import { readClientVersionHeaders } from '../../../../utils/client-version'
 
 const SidSchema = z.string().uuid()
+
+/**
+ * Ended OR purged. Soft-purge used to select by age alone, so a historical row
+ * can be purged without ever being ended; mig 0141 revoked its credentials, and
+ * every lifecycle reading here must treat it as ended, not as a live device
+ * whose credential is failing.
+ */
+function deviceEnded(row: Pick<InstanceRow, 'tsActualEnd' | 'tsPurged'>): boolean {
+  return row.tsActualEnd !== null || row.tsPurged !== null
+}
 
 /**
  * True when the 401's silence would be EXPECTED (lifecycle), not the disaster.
@@ -55,7 +66,7 @@ const SidSchema = z.string().uuid()
  * alarm on every poll of an intentionally-retired device.
  */
 function instanceLifecycleSilent(row: InstanceRow): boolean {
-  if (row.tsActualEnd) return true
+  if (deviceEnded(row)) return true
   // Deactivated owner: retiring an account is a deliberate act, so its device
   // going silent is the intended outcome, not an incident. Same LEFT JOIN
   // nuance as assertInstanceLive — `=== false`, never `!== true`.
@@ -70,6 +81,7 @@ interface InstanceRow {
   principalOid: string
   teammateId: string | null
   tsActualEnd: Date | null
+  tsPurged: Date | null
   tsStart: Date | null
   teammateRevokedAt: Date | null
   /** NULL when the LEFT JOIN found no owner at all — not the same as `false`. */
@@ -87,13 +99,15 @@ interface InstanceRow {
 async function loadInstance(
   db: PostgresJsDatabase<typeof schema>,
   sid: string,
+  opts: { lock?: boolean } = {},
 ): Promise<InstanceRow | null> {
-  const [row] = await db
+  const query = db
     .select({
       instanceId: schema.instanceAttestation.instanceId,
       principalOid: schema.instanceAttestation.principalOid,
       teammateId: schema.instanceAttestation.teammateId,
       tsActualEnd: schema.instanceAttestation.tsActualEnd,
+      tsPurged: schema.instanceAttestation.tsPurged,
       tsStart: schema.instanceAttestation.tsStart,
       // E2 (ADR-0005): the emit-path analogue of isRevoked().
       teammateRevokedAt: schema.teammate.revokedAt,
@@ -104,6 +118,7 @@ async function loadInstance(
     .leftJoin(schema.teammate, eq(schema.teammate.id, schema.instanceAttestation.teammateId))
     .where(eq(schema.instanceAttestation.instanceId, sid))
     .limit(1)
+  const [row] = await (opts.lock ? query.for('update', { of: schema.instanceAttestation }) : query)
   return row ?? null
 }
 
@@ -136,7 +151,7 @@ async function loadInstance(
  * for a cleaned account.
  */
 function assertInstanceLive(row: InstanceRow): void {
-  if (row.tsActualEnd) {
+  if (deviceEnded(row)) {
     throw createError({ statusCode: 401, statusMessage: 'Session ended' })
   }
   // Durable state, no timestamp comparison — a retired account has no "after" to
@@ -202,14 +217,17 @@ export default defineEventHandler(async (event) => {
   } catch (err: unknown) {
     if ((err as { statusCode?: number })?.statusCode === 401) {
       const row = await loadInstance(db, sid)
-      if (row && !instanceLifecycleSilent(row)) {
-        const token = await presentedTokenInfo(event, db as never)
-        const isOwner = Boolean(token && token.teammateId === row.teammateId)
-        const isEmit = Boolean(token?.scope.split(' ').includes('tokenscope.emit'))
-        const boundHere = token?.instanceId === null || token?.instanceId === sid
-        if (isOwner && isEmit && boundHere) {
-          await recordBearerAuthFailed(db, sid)
-        }
+      const token = row ? await presentedTokenInfo(event, db as never) : null
+      const isOwner = Boolean(row && token && token.teammateId === row.teammateId)
+      const isEmit = Boolean(token?.scope.split(' ').includes('tokenscope.emit'))
+      const boundHere = token?.instanceId === null || token?.instanceId === sid
+      if (row && isOwner && isEmit && boundHere) {
+        // Ending a device revokes its credential (mig 0141), so the owner's
+        // token is refused above before the lifecycle gate can say why. Say it
+        // here, to the owner only: an ended device is the diagnosis, and a
+        // non-owner still gets the uniform 401.
+        if (deviceEnded(row)) throw createError({ statusCode: 401, statusMessage: 'Session ended' })
+        if (!instanceLifecycleSilent(row)) await recordBearerAuthFailed(db, sid)
       }
     }
     throw err
@@ -220,7 +238,10 @@ export default defineEventHandler(async (event) => {
   // left until after the transaction commits — it is third-party HTTP, and
   // holding a request transaction across it is the anti-pattern design §2 names.
   const row = await withMachineRls(teammate, async (tx) => {
-  const row = await loadInstance(tx, sid)
+  // Row lock from the lifecycle check through the renewal below: session-gc
+  // closing this device mid-request either lands first (the gate refuses) or
+  // waits and re-checks the renewed window. Never a mint for an ended device.
+  const row = await loadInstance(tx, sid, { lock: true })
   // Not-found AND not-owned collapse to the SAME 404 (mirrors
   // me/instances/[instanceId]/revoke.post.ts's "don't leak a peer's instance
   // existence with a 403" rule) — an unknown id and a peer's real instance
@@ -237,19 +258,26 @@ export default defineEventHandler(async (event) => {
   // resolve someone else's open failure (the mirror of the record abuse guard).
   await resolveBearerAuthFailed(tx, sid)
 
-  // Lifecycle gate (ended / E2-revoked). ts_expected_end is NOT enforced for
-  // OAuth — durability is the whole point; revocation is the gate.
+  // Lifecycle gate (ended / E2-revoked). ts_expected_end is not read here; it is
+  // session-gc's abandonment cue, and the stamp below renews it on every mint.
   assertInstanceLive(row)
 
-  // Heartbeat (0030): a successful mint proves this LIVE, OWNED instance held a
-  // valid emit credential now — the authenticated signal heartbeat-coverage uses
-  // to verify emitted spend. Best-effort; never fail the mint over the stamp.
-  //
-  // CLIENT VERSION (mig 0092) rides the SAME write. The client states its plugin
-  // and CLI versions in request headers, so capturing them costs one extra
-  // `.set()` on a statement that already runs ~every 29 minutes per live device —
-  // no new endpoint, no new client traffic, and the value recorded is the version
-  // of the code that ACTUALLY minted this bearer.
+  // Heartbeat (0030) + idle-window renewal. REQUIRED, not best-effort: this is
+  // the write that keeps a device in use from being closed by session-gc
+  // (`ts_expected_end`, `last_bearer_at`), and heartbeat-coverage verifies
+  // emitted spend against it. If it fails, the mint fails and the helper
+  // retries, rather than handing out a bearer while the device ages out.
+  await tx
+    .update(schema.instanceAttestation)
+    .set({
+      lastBearerAt: new Date(),
+      tsExpectedEnd: sql`GREATEST(${schema.instanceAttestation.tsExpectedEnd}, ${deviceIdleWindowEnd()})`,
+    })
+    .where(eq(schema.instanceAttestation.instanceId, sid))
+
+  // CLIENT VERSION (mig 0092): the client states its plugin and CLI versions in
+  // request headers; recording them here costs nothing extra per live device and
+  // captures the version of the code that ACTUALLY minted this bearer.
   //
   // The values are CLIENT-ASSERTED and are stored as diagnostic hints ONLY. Note
   // where this write sits: AFTER requireOAuthBearer, AFTER the ownership check.
@@ -271,27 +299,27 @@ export default defineEventHandler(async (event) => {
   // Consequence to know when reading the data: client_version_at is "when a
   // version claim was last recorded", not a per-column timestamp, so on a
   // partially-reporting client the un-updated column may be older than the stamp.
+  //
+  // Best-effort, in a savepoint: a caught SQL error inside a transaction leaves
+  // the backend in 25P02 and would fail every later statement, so without the
+  // savepoint "never fail the mint over a version claim" would be a comment,
+  // not a behaviour.
   const claim = readClientVersionHeaders(getRequestHeaders(event))
-  // NOTE the savepoint (`tx.transaction`). The stamp is advisory and its catch
-  // must stay a catch — but a caught SQL error inside a transaction leaves the
-  // backend in 25P02 and would fail every later statement (the fault-isolation
-  // inversion design §2 describes for the worker lane). A savepoint keeps the
-  // "never fail the mint over the stamp" promise true now that this runs inside
-  // a transaction; without it the promise would be a comment, not a behaviour.
-  try {
-    await tx.transaction(async (sp) => {
-      await sp
-        .update(schema.instanceAttestation)
-        .set({
-          lastBearerAt: new Date(),
-          ...(claim.pluginVersion !== null ? { clientPluginVersion: claim.pluginVersion } : {}),
-          ...(claim.cliVersion !== null ? { clientCliVersion: claim.cliVersion } : {}),
-          ...(claim.reported ? { clientVersionAt: new Date() } : {}),
-        })
-        .where(eq(schema.instanceAttestation.instanceId, sid))
-    })
-  } catch {
-    /* heartbeat stamp is advisory */
+  if (claim.reported) {
+    try {
+      await tx.transaction(async (sp) => {
+        await sp
+          .update(schema.instanceAttestation)
+          .set({
+            ...(claim.pluginVersion !== null ? { clientPluginVersion: claim.pluginVersion } : {}),
+            ...(claim.cliVersion !== null ? { clientCliVersion: claim.cliVersion } : {}),
+            clientVersionAt: new Date(),
+          })
+          .where(eq(schema.instanceAttestation.instanceId, sid))
+      })
+    } catch {
+      /* version capture is a diagnostic hint */
+    }
   }
 
     return row

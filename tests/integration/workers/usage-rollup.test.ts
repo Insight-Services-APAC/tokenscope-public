@@ -802,7 +802,9 @@ describe('usage-rollup — NULL and empty-string identity_state collapse to ONE 
       { identity_state: string | null; record_count: number; cost_usd: string }[]
     >`
       SELECT identity_state, record_count, cost_usd::text
-      FROM usage_rollup_daily WHERE day = ${day}::date`
+      FROM usage_rollup_daily WHERE day = ${day}::date AND teammate_id = ${tmB}::uuid`
+    // Scoped to tmB: the fixed day can fall inside another test's now()-relative
+    // span (the provisional-shadow span sits at today-200..today-189).
     expect(cells.length).toBe(1) // ONE cell, not an error and not two
     expect(cells[0]!.identity_state).toBeNull() // '' normalised to NULL
     expect(cells[0]!.record_count).toBe(2)

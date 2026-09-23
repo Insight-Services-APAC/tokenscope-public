@@ -18,7 +18,22 @@
  * whether a bearer was minted (never the token) — the right contract for a health
  * probe, the wrong one for a re-emitter.
  */
-import { readFileSync, existsSync, realpathSync, writeFileSync, renameSync, mkdirSync, chmodSync, linkSync, rmSync } from 'node:fs'
+import {
+  readFileSync,
+  existsSync,
+  realpathSync,
+  writeFileSync,
+  renameSync,
+  mkdirSync,
+  chmodSync,
+  linkSync,
+  rmSync,
+  openSync,
+  fstatSync,
+  readSync,
+  closeSync,
+  constants as fsConstants,
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, sep, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -463,11 +478,41 @@ export function migrateStoredEndpoints(dir = trustedStateDir(), settingsEnv = nu
 
 /** Read a settings.json's `env` block (or {} on any failure). */
 export function readSettingsEnv(path) {
+  const text = readRegularFileBounded(path, SETTINGS_MAX_BYTES)
+  if (text === null) return {}
   try {
-    const s = JSON.parse(readFileSync(path, 'utf8'))
+    const s = JSON.parse(text)
     return s && typeof s.env === 'object' && s.env ? s.env : {}
   } catch {
     return {}
+  }
+}
+
+/** A settings file is a few KB; anything past this is not one. */
+const SETTINGS_MAX_BYTES = 1024 * 1024
+
+/**
+ * `path`'s text if it is a REGULAR file of at most `maxBytes`, else null.
+ * Repo-local settings are repo-controlled: a checkout can make the path a FIFO
+ * (which blocks a plain read) or a symlink to /dev/zero (which never ends).
+ * O_NONBLOCK makes the open itself return for a FIFO, and the type and size are
+ * judged on the OPEN descriptor, so nothing can be swapped in between. A
+ * symlink to a regular file is still followed: dotfile managers link
+ * ~/.claude/settings.json on purpose.
+ */
+export function readRegularFileBounded(path, maxBytes) {
+  let fd
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
+    const st = fstatSync(fd)
+    if (!st.isFile() || st.size > maxBytes) return null
+    const buf = Buffer.alloc(st.size)
+    const n = readSync(fd, buf, 0, st.size, 0)
+    return buf.toString('utf8', 0, n)
+  } catch {
+    return null
+  } finally {
+    if (fd !== undefined) closeSync(fd)
   }
 }
 
@@ -530,6 +575,32 @@ export function repoTagEnv(globalEnv, repoEnv) {
     repoEnv && typeof repoEnv === 'object' ? repoEnv.OTEL_RESOURCE_ATTRIBUTES : undefined
   if (typeof attrs === 'string') out.OTEL_RESOURCE_ATTRIBUTES = attrs
   return out
+}
+
+/**
+ * The `OTEL_RESOURCE_ATTRIBUTES` a script run from a Bash tool should emit
+ * under. Claude Code starts those shells WITHOUT the `OTEL_*` settings env, so
+ * the session's own value is not there to read.
+ *
+ * Device identity (`tokenscope.instance_id`, `tool`) comes ONLY from the trusted
+ * global enrolment, the same device the bearer is minted for. The repo-local
+ * `settings.local.json` may contribute nothing but a well-formed
+ * `project.code_hash` (sha256 hex, `computeCodeHash`): it is repo-controlled.
+ *
+ * @param {string} cwd
+ * @param {Record<string,string>} [globalEnv]
+ * @returns {string}
+ */
+export function launchResourceAttrs(cwd, globalEnv = trustedGlobalSettingsEnv()) {
+  const trusted =
+    typeof globalEnv?.OTEL_RESOURCE_ATTRIBUTES === 'string' ? globalEnv.OTEL_RESOURCE_ATTRIBUTES : ''
+  const repo = readSettingsEnv(join(cwd, '.claude', 'settings.local.json')).OTEL_RESOURCE_ATTRIBUTES
+  // A repo with no attrs of its own inherits the global tag, as at launch.
+  if (typeof repo !== 'string') return trusted
+  const tag = /(?:^|,)project\.code_hash=([0-9a-f]{64})(?=,|$)/.exec(repo)?.[1]
+  const attrs = trusted.split(',').filter((kv) => kv && !kv.startsWith('project.code_hash='))
+  if (tag) attrs.push(`project.code_hash=${tag}`)
+  return attrs.join(',')
 }
 
 /**

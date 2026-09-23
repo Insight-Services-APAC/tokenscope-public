@@ -41,6 +41,7 @@ import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { evaluateRevokeSessions } from '../../../../../auth/admin-guards'
 import { recordAuditEvent } from '../../../../../db/audit'
+import { endLiveDevicesOf } from '../../../../../utils/device-lifecycle'
 
 // Body shape: { reason?: string } where reason is bounded to 200 chars.
 // The body is intentionally optional — an operator-driven revoke from
@@ -174,10 +175,7 @@ export default defineEventHandler(async (event) => {
     // them, and the dashboard reflects it immediately rather than relying on
     // someone noticing. The /bearer + joiner revoked_at live-check is the
     // guarantee; this cascade is the hygiene.
-    await tx.execute(sql`
-      UPDATE instance_attestation SET ts_actual_end = NOW()
-      WHERE teammate_id = ${target.id}::uuid AND ts_actual_end IS NULL
-    `)
+    await endLiveDevicesOf(tx as never, target.id)
     // E2 (ADR-0005): same eager cascade for the OAuth emit credential — revoke
     // the teammate's live oauth_token rows so neither a cached access token
     // (requireOAuthBearer rejects revoked_at) nor the durable refresh token

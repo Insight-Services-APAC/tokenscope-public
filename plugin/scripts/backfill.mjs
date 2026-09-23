@@ -43,8 +43,8 @@
  *   --dry-run                  parse + report, emit nothing.
  *   --json                     machine-readable summary only.
  *
- * Env (read the same way the rest of the plugin does — from the enrolled
- * settings env block, injected by Claude into the process environment):
+ * Env (the enrolled settings env block; `OTEL_RESOURCE_ATTRIBUTES` is always
+ * rebuilt from trusted state, see withLaunchResourceAttrs):
  *   OTEL_EXPORTER_OTLP_LOGS_ENDPOINT   the Azure DCR logs ingest URL (POST target).
  *   OTEL_RESOURCE_ATTRIBUTES           tokenscope.instance_id, project.code_hash, tool.
  *   TOKENSCOPE_BEARER_ENDPOINT + (OAuth or session) creds — consumed by the helper.
@@ -56,8 +56,14 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { encodeExportLogsServiceRequest } from './otlp-logs.mjs'
-import { safeProcessEnv, trustedStateDir, resolveScriptsDir } from './plugin-runtime.mjs'
+import {
+  launchResourceAttrs,
+  safeProcessEnv,
+  trustedStateDir,
+  resolveScriptsDir,
+} from './plugin-runtime.mjs'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
+import { resolveRepoRoot } from './tag-repo.mjs'
 
 // Re-export so existing callers (tests, file-forwarder) can import from here.
 export { encodeExportLogsServiceRequest } from './otlp-logs.mjs'
@@ -581,6 +587,17 @@ async function run(opts, env, now = new Date()) {
   return summary
 }
 
+/**
+ * `env` with `OTEL_RESOURCE_ATTRIBUTES` ALWAYS rebuilt by `launchResourceAttrs`
+ * for the repository containing `cwd`: device identity from the trusted global
+ * enrolment, the project tag from the repo root's settings.local.json. An
+ * inherited value is discarded, because a repo-tagged session's process.env
+ * is repo-merged (see safeProcessEnv), and a Bash-tool shell has none at all.
+ */
+export function withLaunchResourceAttrs(env, cwd, resolve = launchResourceAttrs) {
+  return { ...env, OTEL_RESOURCE_ATTRIBUTES: resolve(resolveRepoRoot(cwd) ?? cwd) }
+}
+
 // CLI entry (guarded so tests can import the pure helpers without running).
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
 if (isMain) {
@@ -588,7 +605,8 @@ if (isMain) {
     try {
       const opts = parseArgs(process.argv.slice(2))
       // S1 fix 2: the safe env, not raw process.env — see mintBearer's doc.
-      const summary = await run(opts, safeProcessEnv())
+      const env = withLaunchResourceAttrs(safeProcessEnv(), opts.cwd || process.cwd())
+      const summary = await run(opts, env)
       if (opts.json) {
         console.log(JSON.stringify(summary))
       } else {

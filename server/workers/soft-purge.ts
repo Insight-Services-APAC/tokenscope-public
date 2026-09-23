@@ -12,6 +12,13 @@
  *     stays valid for the financial-audit retention horizon.
  *   - Emit one audit_event per purged row of type 'session-pii-purged'
  *     with actor_system = 'session-attestation-purge-worker'.
+ *
+ * ENDED DEVICES ONLY. A device's life is an idle window renewed by use
+ * (session-gc), so an open row can be older than the cutoff while still
+ * emitting, and it needs its identity columns for as long as it is live.
+ * Purging it would also end it: a bound credential refuses to refresh against
+ * a purged device. Every row that could exist before idle windows was ended
+ * long before the cutoff, so their retention is unchanged.
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
@@ -36,6 +43,7 @@ export async function runSoftPurge(
       SELECT instance_id::text AS instance_id, teammate_id::text AS teammate_id
       FROM instance_attestation
       WHERE ts_start < ${cutoffIso}::timestamptz
+        AND ts_actual_end IS NOT NULL
         AND ts_purged IS NULL
     `,
   )

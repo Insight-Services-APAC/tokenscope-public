@@ -4,7 +4,7 @@
  * task, we do NOT attempt a live-emit integration test).
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, chmodSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, chmodSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -18,8 +18,15 @@ import {
   buildOtlpLogsPayload,
   cwdProjectSlug,
   run,
+  withLaunchResourceAttrs,
 } from '../../../plugin/scripts/backfill.mjs'
-import { safeProcessEnv, REPO_UNTRUSTED_ENV_KEYS } from '../../../plugin/scripts/plugin-runtime.mjs'
+import {
+  safeProcessEnv,
+  REPO_UNTRUSTED_ENV_KEYS,
+  launchResourceAttrs,
+  readSettingsEnv,
+} from '../../../plugin/scripts/plugin-runtime.mjs'
+import { execFileSync } from 'node:child_process'
 
 
 /**
@@ -509,5 +516,147 @@ describe('safeProcessEnv — S1 fix 2: the hostile-repo fixture, mirrored from s
   it('an ordinary, non-credential key survives the spread untouched', () => {
     const safe = safeProcessEnv(hostileProcessEnv)
     expect(safe.PATH).toBe('/usr/bin')
+  })
+})
+
+describe('resource attrs in a Bash-tool shell (no OTEL_* inherited)', () => {
+  const GLOBAL = 'tokenscope.instance_id=9a1e0000-0000-4000-8000-000000000001,tool=claude-code'
+  const TAGGED = `${'tokenscope.instance_id=9a1e0000-0000-4000-8000-000000000001'},project.code_hash=${'c'.repeat(64)}`
+  let repo: string
+  beforeAll(() => {
+    repo = mkdtempSync(join(tmpdir(), 'bf-attrs-'))
+  })
+  afterAll(() => rmSync(repo, { recursive: true, force: true }))
+
+  it('an inherited value is DISCARDED: identity is always rebuilt from trusted state', () => {
+    const hostile = 'tokenscope.instance_id=9a1e0000-0000-4000-8000-00000000dead,tool=copilot-cli'
+    const env = withLaunchResourceAttrs({ OTEL_RESOURCE_ATTRIBUTES: hostile }, repo, () => GLOBAL)
+    expect(env.OTEL_RESOURCE_ATTRIBUTES).toBe(GLOBAL)
+  })
+
+  it('a missing value is resolved, so an enrolled device is not "not enrolled"', () => {
+    const env = withLaunchResourceAttrs({ TOKENSCOPE_BEARER_ENDPOINT: 'x' }, repo, () => GLOBAL)
+    expect(parseResourceAttrs(env.OTEL_RESOURCE_ATTRIBUTES)['tokenscope.instance_id']).toBe(
+      '9a1e0000-0000-4000-8000-000000000001',
+    )
+    expect(env.TOKENSCOPE_BEARER_ENDPOINT).toBe('x')
+  })
+
+  it('run from a SUBDIRECTORY, the tag is read at the repo root, where the tagger writes it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bf-root-'))
+    try {
+      const hash = 'd'.repeat(64)
+      mkdirSync(join(root, '.git'))
+      mkdirSync(join(root, '.claude'))
+      mkdirSync(join(root, 'packages', 'api'), { recursive: true })
+      writeFileSync(
+        join(root, '.claude', 'settings.local.json'),
+        JSON.stringify({ env: { OTEL_RESOURCE_ATTRIBUTES: `project.code_hash=${hash}` } }),
+      )
+      const env = withLaunchResourceAttrs({}, join(root, 'packages', 'api'), (dir: string) =>
+        launchResourceAttrs(dir, { OTEL_RESOURCE_ATTRIBUTES: GLOBAL }),
+      )
+      expect(parseResourceAttrs(env.OTEL_RESOURCE_ATTRIBUTES)['project.code_hash']).toBe(hash)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('launchResourceAttrs: the global enrolment when the repo has no tag', () => {
+    expect(launchResourceAttrs(repo, { OTEL_RESOURCE_ATTRIBUTES: GLOBAL })).toBe(GLOBAL)
+  })
+
+  it('launchResourceAttrs: a repo contributes ONLY a well-formed project.code_hash, never identity', () => {
+    const hash = 'a'.repeat(64)
+    mkdirSync(join(repo, '.claude'), { recursive: true })
+    writeFileSync(
+      join(repo, '.claude', 'settings.local.json'),
+      JSON.stringify({
+        env: {
+          OTEL_RESOURCE_ATTRIBUTES: `tokenscope.instance_id=9a1e0000-0000-4000-8000-00000000dead,tool=copilot-cli,project.code_hash=${hash}`,
+        },
+      }),
+    )
+    const attrs = parseResourceAttrs(launchResourceAttrs(repo, { OTEL_RESOURCE_ATTRIBUTES: GLOBAL }))
+    expect(attrs).toEqual({
+      'tokenscope.instance_id': '9a1e0000-0000-4000-8000-000000000001',
+      tool: 'claude-code',
+      'project.code_hash': hash,
+    })
+  })
+
+  it('launchResourceAttrs: a malformed repo tag is dropped, and the global tag does not leak through', () => {
+    writeFileSync(
+      join(repo, '.claude', 'settings.local.json'),
+      JSON.stringify({ env: { OTEL_RESOURCE_ATTRIBUTES: 'project.code_hash=not-a-hash,x=1' } }),
+    )
+    const attrs = parseResourceAttrs(
+      launchResourceAttrs(repo, { OTEL_RESOURCE_ATTRIBUTES: `${GLOBAL},project.code_hash=${'b'.repeat(64)}` }),
+    )
+    expect(attrs).toEqual({ 'tokenscope.instance_id': '9a1e0000-0000-4000-8000-000000000001', tool: 'claude-code' })
+  })
+
+  it('launchResourceAttrs: a repo with no attrs of its own inherits the global tag, as at launch', () => {
+    const bare = mkdtempSync(join(tmpdir(), 'bf-untagged-'))
+    try {
+      expect(launchResourceAttrs(bare, { OTEL_RESOURCE_ATTRIBUTES: TAGGED })).toBe(TAGGED)
+    } finally {
+      rmSync(bare, { recursive: true, force: true })
+    }
+  })
+
+  it('launchResourceAttrs: nothing enrolled anywhere → empty, never undefined', () => {
+    const bare = mkdtempSync(join(tmpdir(), 'bf-bare-'))
+    try {
+      expect(launchResourceAttrs(bare, {})).toBe('')
+    } finally {
+      rmSync(bare, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('readSettingsEnv: a repo-controlled path cannot hang or balloon the reader', () => {
+  let dir: string
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'rse-'))
+  })
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+
+  it('a FIFO is refused without blocking', () => {
+    const p = join(dir, 'fifo.json')
+    execFileSync('mkfifo', [p])
+    expect(readSettingsEnv(p)).toEqual({})
+  })
+
+  it('a symlink to /dev/zero is refused without reading it', () => {
+    const p = join(dir, 'zero.json')
+    symlinkSync('/dev/zero', p)
+    expect(readSettingsEnv(p)).toEqual({})
+  })
+
+  it('an oversize file is refused', () => {
+    const p = join(dir, 'big.json')
+    writeFileSync(p, JSON.stringify({ env: { A: '1' }, pad: 'x'.repeat(1024 * 1024) }))
+    expect(readSettingsEnv(p)).toEqual({})
+  })
+
+  it('a symlink to a regular settings file is still followed (dotfile managers)', () => {
+    const real = join(dir, 'real.json')
+    writeFileSync(real, JSON.stringify({ env: { A: '1' } }))
+    const link = join(dir, 'link.json')
+    symlinkSync(real, link)
+    expect(readSettingsEnv(link)).toEqual({ A: '1' })
+  })
+
+  it('backfill in a repo whose settings.local.json is a FIFO still resolves the trusted identity', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'rse-repo-'))
+    try {
+      mkdirSync(join(repo, '.claude'))
+      execFileSync('mkfifo', [join(repo, '.claude', 'settings.local.json')])
+      const global = 'tokenscope.instance_id=9a1e0000-0000-4000-8000-000000000001,tool=claude-code'
+      expect(launchResourceAttrs(repo, { OTEL_RESOURCE_ATTRIBUTES: global })).toBe(global)
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
   })
 })

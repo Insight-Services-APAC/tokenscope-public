@@ -131,7 +131,9 @@ flowchart LR
   `attribution_record → instance_attestation` FK stays valid across the much
   longer finance-audit horizon. Both halves are **[Current]**: the schema
   column, and the nightly `soft-purge` worker that enforces it (03:00 UTC,
-  12-month window, one `session-pii-purged` audit event per row).
+  12-month window, one `session-pii-purged` audit event per row). It purges
+  ENDED devices only: a device in use renews its life, and needs its identity
+  columns while it is live.
 - **Session tokens never stored raw** — only an HMAC-SHA-256 hash (Key-Vault
   service key), enabling en-masse invalidation via key rotation. **[Current]**
 - **k-anonymity suppression on the directory diagnostic.** The Region-rules

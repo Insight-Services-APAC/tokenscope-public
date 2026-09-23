@@ -7,6 +7,14 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-09-23 (snapshot cfd2e137)
+
+- Emitting devices no longer go red 90 days after setup ("Session ended") while
+  in use: a device and its credential now last as long as they keep being used,
+  and only go idle after 90 days without activity. Ending a device (revoke, admin,
+  idle cleanup) now revokes its credential immediately, everywhere. `/tokenscope:backfill` (plugin 0.1.38) now works
+  from inside a session instead of reporting "not enrolled".
+
 ## 2026-09-17 (snapshot 725be6e1)
 
 - The "attribution stall" alert no longer pages when the estate simply goes

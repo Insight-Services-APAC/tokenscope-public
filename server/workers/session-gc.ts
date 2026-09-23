@@ -6,13 +6,13 @@
  * `ts_actual_end = NOW()`, emit `audit_event` with `actor_system =
  * 'session-gc-worker'`.
  *
- * The expires-at column doesn't exist on instance_attestation (the spec
- * conceptually carries an expiry but the table only stores ts_start +
- * ts_expected_end + ts_actual_end + ts_purged). We use ts_expected_end
- * as the abandonment cue when populated; otherwise we fall back to
- * `ts_start + the durable-credential life` (refresh token, 90d). The old
- * `ts_start + 12h` fallback matched the DEAD session-token TTL and closed
- * still-emitting OAuth instances (the 2026-06-06 attribution outage).
+ * ABANDONED MEANS IDLE, NEVER OLD. `ts_expected_end` is the device's idle
+ * window: every /bearer mint and every re-provision renews it, so a device in
+ * use never reaches it. A device is closed only once BOTH that and its last
+ * mint (or enrolment, if it never minted) plus the same window have passed. Both earlier cues
+ * were ages and both closed working devices: `ts_start + 12h` (the 2026-06-06
+ * attribution outage), then a `ts_expected_end` fixed at enrolment + 90d (every
+ * device went red on its 90th day).
  *
  * Pure function: takes a Drizzle client + a "now" timestamp. Production
  * scheduling is BullMQ at Epic 10; the test calls runSessionGc() directly
@@ -24,10 +24,12 @@ import type * as schema from '../../drizzle/schema'
 import { recordAuditEvent } from '../db/audit'
 import { REFRESH_TOKEN_TTL_MS } from '../auth/oauth'
 
-// Fallback abandonment cue when ts_expected_end is NULL: the DURABLE credential
-// life (refresh token, 90d), NOT the dead 12h session-token TTL — a 12h cutoff
-// closed still-emitting OAuth instances (the 2026-06-06 outage).
+// The idle window, measured from the last mint (or enrolment).
 const DEFAULT_TTL_MS = REFRESH_TOKEN_TTL_MS
+// Devices closed per transaction, and the wall-clock budget for closing before
+// the run stops and leaves the rest to the next one (worker gateway ceiling ~120 s).
+export const CLOSE_CHUNK = 500
+const CLOSE_BUDGET_MS = 60_000
 
 /*
  * OAuth-lifecycle sweep bounds (AUTH-5). Nothing previously deleted
@@ -57,6 +59,8 @@ const ABANDONED_REGISTRATION_GRACE_HOURS = 1
 
 export interface SessionGcResult {
   closedSessionIds: string[]
+  /** True when the close budget ran out with idle devices still open. */
+  closeBacklog: boolean
   /** AUTH-5 sweep counts. */
   authCodesDeleted: number
   emitHandoffsDeleted: number
@@ -66,51 +70,80 @@ export interface SessionGcResult {
   abandonedClientsDeleted: number
 }
 
+/**
+ * Open and idle past its window: the LATER of ts_expected_end and last sign of
+ * life (last mint, else enrolment) + the window is in the past. Written as the
+ * equivalent conjunction, not GREATEST, so it can use the partial index on
+ * COALESCE(last_bearer_at, ts_start) over open rows (mig 0142); a
+ * `timestamptz + interval` expression is not indexable. Exported so a test can
+ * prove the plan uses that index.
+ */
+export function idleDevicePredicate(now: Date) {
+  const nowIso = now.toISOString()
+  const lastSignCutoff = new Date(now.getTime() - DEFAULT_TTL_MS).toISOString()
+  return sql`
+    ts_actual_end IS NULL
+    AND COALESCE(last_bearer_at, ts_start) < ${lastSignCutoff}::timestamptz
+    AND (ts_expected_end IS NULL OR ts_expected_end < ${nowIso}::timestamptz)`
+}
+
 export async function runSessionGc(
   db: PostgresJsDatabase<typeof schema>,
   now: Date = new Date(),
 ): Promise<SessionGcResult> {
-  const expiryFallback = new Date(now.getTime() - DEFAULT_TTL_MS).toISOString()
   const nowIso = now.toISOString()
 
-  // Find sessions that are open (ts_actual_end is NULL) and have either
-  // exceeded their declared ts_expected_end OR — if ts_expected_end was
-  // never set — exceeded the durable-credential life since ts_start.
+  // Open instances past their idle window: the LATER of ts_expected_end and the
+  // last sign of life (last mint, else enrolment) plus the window. The second
+  // term covers rows whose ts_expected_end predates renewal (fixed at enrolment)
+  // but which minted recently, and legacy rows with none.
+  //
+  // Closed in CHUNKS, each one transaction with its audit events (a failed audit
+  // rolls the chunk back for the next run, never a close nobody recorded). A
+  // cohort enrolled together goes idle together, and the caps admit tens of
+  // thousands of rows, so one all-or-nothing batch could outlive the worker
+  // gateway ceiling, roll back, and never make progress. The subquery's FOR
+  // UPDATE re-checks the predicate against each row's latest committed version
+  // (READ COMMITTED), and SKIP LOCKED steps over a row a /bearer renewal holds.
   //
   // Dates are bound as ISO strings + explicit ::timestamptz cast because
   // drizzle's sql tag + postgres-js doesn't auto-serialise Date over the
   // timestamptz wire type for ad-hoc execute() calls.
-  const candidates = await db.execute<{
-    instance_id: string
-    teammate_id: string
-  }>(
-    sql`
-      SELECT instance_id::text AS instance_id, teammate_id::text AS teammate_id
-      FROM instance_attestation
-      WHERE ts_actual_end IS NULL
-        AND (
-          (ts_expected_end IS NOT NULL AND ts_expected_end < ${nowIso}::timestamptz)
-          OR (ts_expected_end IS NULL AND ts_start < ${expiryFallback}::timestamptz)
-        )
-    `,
-  )
-
+  const idlePast = idleDevicePredicate(now)
   const closed: string[] = []
-  for (const row of candidates) {
-    await db.execute(sql`
-      UPDATE instance_attestation
-      SET ts_actual_end = ${nowIso}::timestamptz
-      WHERE instance_id = ${row.instance_id}::uuid AND ts_actual_end IS NULL
-    `)
-    await recordAuditEvent(db, {
-      eventType: 'session-gc-closed',
-      actorTeammateId: row.teammate_id,
-      actorSystem: 'session-gc-worker',
-      subjectKind: 'session',
-      subjectId: row.instance_id,
-      payload: { reason: 'abandoned', closedAt: now.toISOString() },
+  const deadline = Date.now() + CLOSE_BUDGET_MS
+  let closeBacklog = false
+  for (;;) {
+    const chunk = await db.transaction(async (tx) => {
+      const rows = await tx.execute<{ instance_id: string; teammate_id: string }>(sql`
+        UPDATE instance_attestation
+           SET ts_actual_end = ${nowIso}::timestamptz
+         WHERE instance_id IN (
+                 SELECT instance_id FROM instance_attestation
+                  WHERE ${idlePast}
+                  LIMIT ${CLOSE_CHUNK}
+                    FOR UPDATE SKIP LOCKED
+               )
+        RETURNING instance_id::text AS instance_id, teammate_id::text AS teammate_id
+      `)
+      for (const row of rows) {
+        await recordAuditEvent(tx, {
+          eventType: 'session-gc-closed',
+          actorTeammateId: row.teammate_id,
+          actorSystem: 'session-gc-worker',
+          subjectKind: 'session',
+          subjectId: row.instance_id,
+          payload: { reason: 'abandoned', closedAt: now.toISOString() },
+        })
+      }
+      return [...rows].map((row) => row.instance_id)
     })
-    closed.push(row.instance_id)
+    closed.push(...chunk)
+    if (chunk.length < CLOSE_CHUNK) break
+    if (Date.now() > deadline) {
+      closeBacklog = true // the next run continues; every closed chunk is committed
+      break
+    }
   }
 
   // ── AUTH-5: OAuth-lifecycle sweep ──────────────────────────────────────────
@@ -188,6 +221,7 @@ export async function runSessionGc(
 
   return {
     closedSessionIds: closed,
+    closeBacklog,
     authCodesDeleted: deadCodes.length,
     emitHandoffsDeleted: deadHandoffs.length,
     oauthTokensDeleted: deadTokens.length,

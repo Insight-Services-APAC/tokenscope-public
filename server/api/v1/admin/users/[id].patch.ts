@@ -40,6 +40,7 @@ import { evaluateRoleChange, canAssignRole, canModifyHolderOf } from '../../../.
 import { recordAuditEvent } from '../../../../db/audit'
 import { requireUuidParam } from '../../../../utils/require-uuid-param'
 import { ROLES, isRole, type Role } from '../../../../../shared/auth/roles'
+import { endLiveDevicesOf } from '../../../../utils/device-lifecycle'
 
 const Body = z.object({
   role: z.enum(ROLES),
@@ -208,10 +209,7 @@ export default defineEventHandler(async (event) => {
     `)
     // E2 (ADR-0005): role change bumps revoked_at, so eager-cascade-end the
     // teammate's emit instances too (scope changed → old credential must die).
-    await tx.execute(sql`
-      UPDATE instance_attestation SET ts_actual_end = NOW()
-      WHERE teammate_id = ${target.id}::uuid AND ts_actual_end IS NULL
-    `)
+    await endLiveDevicesOf(tx as never, target.id)
     // E2 (ADR-0005): role change ⇒ scope changed ⇒ the old OAuth emit credential
     // must die too. Eager-revoke the teammate's live oauth_token rows (access +
     // durable refresh) so they can no longer mint or present emit tokens.

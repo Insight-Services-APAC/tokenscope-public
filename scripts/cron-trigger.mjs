@@ -27,6 +27,7 @@
  */
 import { createHash, createHmac } from 'node:crypto'
 import { resolveTimeoutMs } from './lib/dispatch-timeout.mjs'
+import { classifyDispatchResponse } from './lib/dispatch-outcome.mjs'
 
 const name = process.env.WORKER_NAME
 const base = (process.env.TOKENSCOPE_BASE_URL ?? '').replace(/\/+$/, '')
@@ -72,8 +73,16 @@ try {
     signal: ac.signal,
   })
   const text = await res.text()
-  console.log(`[cron-trigger] ${name} -> HTTP ${res.status} ${text.slice(0, 400)}`)
-  process.exit(res.ok ? 0 : 1)
+  // A 409 worker-already-running is the ING-3 single-flight lock WORKING, not a
+  // failure: the previous run is still going (a catch-up outlasting its own cron
+  // interval) and this dispatch is a deliberate no-op. Reporting it as a FAILED
+  // execution made a healthy catch-up indistinguishable from a real outage in the
+  // job history. See scripts/lib/dispatch-outcome.mjs for why this matches the
+  // ProblemDetails type rather than the bare status.
+  const { exitCode, skipped } = classifyDispatchResponse(res.status, text)
+  const verdict = skipped ? 'SKIPPED (already running)' : exitCode === 0 ? 'ok' : 'FAILED'
+  console.log(`[cron-trigger] ${name} -> HTTP ${res.status} ${verdict} ${text.slice(0, 400)}`)
+  process.exit(exitCode)
 } catch (err) {
   console.error(`[cron-trigger] ${name} failed:`, err instanceof Error ? err.message : err)
   process.exit(1)

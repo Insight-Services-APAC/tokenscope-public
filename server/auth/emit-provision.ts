@@ -29,7 +29,7 @@ import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { hashSessionToken } from './hmac'
 import { advisoryGlobalCapLock, advisoryXactLock } from '../db/advisory-lock'
-import { REFRESH_TOKEN_TTL_MS } from './oauth'
+import { deviceIdleWindowEnd } from './oauth'
 import { getPublicRequestURL, assertTrustedPublicOrigin } from '../utils/public-url'
 import { currentServerDeployEnv } from '../../shared/env/deploy-env'
 // Reach the sibling's shape rather than redefining a second CapExceeded type
@@ -179,8 +179,9 @@ export function requireEmitTool(stored: string | null | undefined): EmitTool {
  * NULL, pre-0060) are treated as same-env and back-filled on reuse.
  *
  * The attestation is 'unassigned' — provision_emit derives identity from the
- * bearer, which has no project. ts_expected_end tracks the durable emit
- * credential's life (90d) like setup/exchange (session-gc + /bearer gate on it).
+ * bearer, which has no project. ts_expected_end is the device's idle window
+ * (`deviceIdleWindowEnd`, renewed by every /bearer mint and by reuse here);
+ * session-gc closes the device once it passes.
  *
  * @param deployEnv this deployment's environment label, classified from
  *   NUXT_DEPLOY_ENV via the canonical currentServerDeployEnv() (the same resolver
@@ -240,7 +241,9 @@ export async function locateOrCreateInstance(
        WHERE instance_id = ${instanceId}::uuid
          AND teammate_id = ${tm.teammateId}::uuid
          AND ts_actual_end IS NULL
+         AND ts_purged IS NULL
        LIMIT 1
+         FOR UPDATE
     `)
     const row = [...existing][0]
     if (row) {
@@ -308,6 +311,16 @@ export async function locateOrCreateInstance(
           statusMessage: `This device id has no readable tool binding, so re-provisioning it could revoke another CLI's credential; omit instance_id to mint a fresh device for '${tool}'.`,
         })
       }
+      // Re-provisioning is the owner explicitly renewing this device, and the
+      // caller is about to issue it a fresh credential: renew the device's idle
+      // window with it, or a device first enrolled 90 days ago is closed by
+      // session-gc under its brand-new credential. The SELECT's row lock keeps
+      // session-gc from ending the row between that check and this renewal.
+      await tx.execute(sql`
+        UPDATE instance_attestation
+           SET ts_expected_end = GREATEST(ts_expected_end, ${deviceIdleWindowEnd()})
+         WHERE instance_id = ${row.instance_id}::uuid
+      `)
       return { instanceId: row.instance_id, reused: true }
     }
   }
@@ -372,13 +385,12 @@ export async function locateOrCreateInstance(
   // Stamp deployment_env so a later re-provision against another environment
   // is detected (the cross-env guard above).
   const newId = randomUUID()
-  const tsExpectedEnd = new Date(Date.now() + REFRESH_TOKEN_TTL_MS)
   await tx.execute(sql`
     INSERT INTO instance_attestation
       (instance_id, principal_oid, principal_email, teammate_id, tool,
        ts_expected_end, region_id, org_unit_id, attestation_state, deployment_env)
     VALUES (${newId}::uuid, ${tm.principalOid}, ${tm.email}, ${tm.teammateId}::uuid, ${tool},
-            ${tsExpectedEnd.toISOString()}::timestamptz, ${tm.regionId}::uuid, ${tm.orgUnitId}::uuid,
+            ${deviceIdleWindowEnd()}, ${tm.regionId}::uuid, ${tm.orgUnitId}::uuid,
             'unassigned', ${currentEnv})
   `)
   return { instanceId: newId, reused: false }
@@ -434,9 +446,19 @@ export interface ConsumedHandoff {
  * null for an unknown / expired / already-used code.
  */
 export async function consumeEmitHandoff(db: Db, rawCode: string): Promise<ConsumedHandoff | null> {
+  const codeHash = hashSessionToken(rawCode)
+  // LOCK ORDER: device, then handoff, then oauth_token. Ending a device (mig
+  // 0141's trigger), provision_emit and the credential binder all take them in
+  // that order, so claim the device row the handoff names BEFORE the handoff.
+  // Claiming the handoff first deadlocks against a concurrent device end.
+  await db.execute(sql`
+    SELECT 1 FROM instance_attestation
+     WHERE instance_id = (SELECT instance_id FROM emit_handoff WHERE code_hash = ${codeHash})
+       FOR UPDATE
+  `)
   const rows = await db.execute<{ teammate_id: string; instance_id: string }>(sql`
     UPDATE emit_handoff SET consumed_at = now()
-     WHERE code_hash = ${hashSessionToken(rawCode)}
+     WHERE code_hash = ${codeHash}
        AND consumed_at IS NULL
        AND expires_at > now()
     RETURNING teammate_id::text AS teammate_id, instance_id::text AS instance_id
@@ -620,6 +642,24 @@ export async function issueInstanceEmitCredentialTx(
   ) => Promise<{ clientId: string; tokens: { refresh_token: string } }>,
 ): Promise<{ clientId: string; refreshToken: string }> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${instanceId}))`)
+  // A credential is bound only to a LIVE device of this teammate, under its row
+  // lock. Ending a device revokes what is bound to it (mig 0141), so binding
+  // after the end would mint a credential nothing ever revokes; the lock
+  // orders a concurrent end after this bind, whose revoke then covers it.
+  const live = await tx.execute(sql`
+    SELECT 1 FROM instance_attestation
+     WHERE instance_id = ${instanceId}::uuid
+       AND teammate_id = ${teammateId}::uuid
+       AND ts_actual_end IS NULL
+       AND ts_purged IS NULL
+       FOR UPDATE
+  `)
+  if ([...live].length === 0) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: 'This device has ended; run setup again to enrol a fresh device.',
+    })
+  }
   await tx.execute(sql`
     UPDATE oauth_token SET revoked_at = now()
      WHERE instance_id = ${instanceId}::uuid

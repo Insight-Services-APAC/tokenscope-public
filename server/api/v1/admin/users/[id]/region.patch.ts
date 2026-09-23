@@ -28,6 +28,7 @@ import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
 import { unplacedOrgUnitIdForRegion } from '../../../../../auth/placement-home'
+import { endLiveDevicesOf } from '../../../../../utils/device-lifecycle'
 
 const Body = z.object({
   region_id: z.string().uuid(),
@@ -95,10 +96,7 @@ export default defineEventHandler(async (event) => {
     // E2 (ADR-0005): region re-scope bumps revoked_at → eager-cascade-end the
     // teammate's emit instances (their region/scope changed; old instances must
     // stop emitting under the prior scope).
-    await tx.execute(sql`
-      UPDATE instance_attestation SET ts_actual_end = NOW()
-      WHERE teammate_id = ${target.id}::uuid AND ts_actual_end IS NULL
-    `)
+    await endLiveDevicesOf(tx as never, target.id)
     // E2 (ADR-0005): region re-scope ⇒ the old OAuth emit credential must die
     // too. Eager-revoke the teammate's live oauth_token rows so the old refresh
     // token can no longer mint access tokens under the prior scope.

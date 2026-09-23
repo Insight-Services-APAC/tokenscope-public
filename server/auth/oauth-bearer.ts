@@ -307,9 +307,9 @@ export async function requireOAuthBearer(
     legacyUnboundBearerHits += 1
     // Two more reasons a NULL binding can persist — worth carrying in the
     // same line so an operator watching this doesn't have to go dig:
-    //  (1) oauth_token.instance_id is ON DELETE SET NULL (mig 0031:47) —
-    //      deleting an instance_attestation silently de-binds a LIVE emit
-    //      credential back into this permissive branch;
+    //  (1) oauth_token.instance_id is ON DELETE SET NULL (mig 0031:47), but
+    //      deleting an instance_attestation REVOKES its credential first
+    //      (mig 0141), so a de-bound row arriving here is already revoked;
     //  (2) the rotate-on-reissue revoke (emit-provision.ts:386-391) filters
     //      WHERE instance_id = X, so a NULL-bound credential is never
     //      rotated out by a later re-provision of the SAME device.
