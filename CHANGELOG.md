@@ -7,6 +7,11 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-09-23 (snapshot 51ce6e22)
+
+- Security: `devalue` (used by Nuxt to serialise page payloads) updated to
+  5.9.4, fixing a denial-of-service on malformed input (GHSA-9rgm-9g3h-6x36).
+
 ## 2026-09-23 (snapshot cfd2e137)
 
 - Emitting devices no longer go red 90 days after setup ("Session ended") while
