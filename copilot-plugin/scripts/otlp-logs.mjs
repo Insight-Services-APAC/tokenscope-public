@@ -303,7 +303,7 @@ function getOperationName(span) {
  */
 const MAX_UINT64 = 18446744073709551615n
 
-function resolveTimeUnixNano(ts) {
+export function resolveTimeUnixNano(ts) {
   const nowNano = () => String(BigInt(Date.now()) * 1000000n)
   const fixed64OrNow = (v) => (v > 0n && v <= MAX_UINT64 ? String(v) : nowNano())
   if (ts == null) return nowNano()

@@ -12,10 +12,10 @@
  * function is injected).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 
 const dir = mkdtempSync(join(tmpdir(), 'ts-fwd-life-'))
 const pidFile = join(dir, 'copilot-forwarder.pid')
@@ -226,4 +226,91 @@ describe('unprovisioned host → graceful no-op exit 0 (Stop hook must not fail)
     expect(r.stderr).toContain('not provisioned')
     expect(r.stderr).toContain(join(stateDir, 'config.copilot-cli.json'))
   })
+})
+
+describe('lane: the forwarder decides by the span file, not the environment', () => {
+  // Copilot hides COPILOT_OTEL_FILE_EXPORTER_PATH from hooks (verified on CLI 1.0.88),
+  // so the forwarder must act on the span file Copilot writes for a legacy terminal.
+  const FWD = join(__dirname, '../../../plugin/scripts/copilot-forwarder.mjs')
+  function run(project: string, state: string, copilotHome = join(project, 'no-copilot-home')) {
+    const env = { ...process.env, TOKENSCOPE_STATE_DIR: state, COPILOT_HOME: copilotHome }
+    delete env.COPILOT_OTEL_FILE_EXPORTER_PATH
+    delete env.TOKENSCOPE_FWD_PID_FILE // pinned by this file for its in-process tests
+    delete env.TOKENSCOPE_FWD_OFFSET_FILE
+    return spawnSync(process.execPath, [FWD, 'stop'], { cwd: project, env, encoding: 'utf8', timeout: 30_000 })
+  }
+
+  // The gate only: that a present span file is FORWARDED is proven end to end by
+  // scripts/copilot-usage-e2e.mjs (legacy lane), which a unit test cannot stand in for.
+  it('no span file in the project: idle, exit 0; a span file (no variable visible): past the idle gate', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ts-fwd-lane-'))
+    try {
+      const state = join(root, 'state')
+      const project = join(root, 'project')
+      mkdirSync(state)
+      mkdirSync(project)
+      writeFileSync(join(state, 'config.copilot-cli.json'), JSON.stringify({ instance_id: 'i', logs_endpoint: 'https://127.0.0.1:9/v1/logs' }))
+      const idle = run(project, state)
+      expect(idle.status).toBe(0)
+      expect(idle.stderr).toMatch(/no span file in this project/)
+
+      mkdirSync(join(project, '.tokenscope.local'))
+      writeFileSync(join(project, '.tokenscope.local', 'copilot-otel.jsonl'), '')
+      const legacy = run(project, state)
+      expect(legacy.stderr).not.toMatch(/no span file in this project|forwarder idle/)
+
+      // A migrated device: idle even with a span file, which is left alone.
+      const ch = join(root, 'copilot-home')
+      mkdirSync(ch)
+      writeFileSync(join(ch, 'settings.json'), JSON.stringify({ enabledFeatureFlags: { EXTENSIONS: true } }))
+      const migrated = run(project, state, ch)
+      expect(migrated.status).toBe(0)
+      expect(migrated.stderr).toMatch(/extensions are enabled.*forwarder idle/)
+      expect(existsSync(join(project, '.tokenscope.local', 'copilot-otel.jsonl'))).toBe(true)
+      // ...and marked consumed to its end, so switching back does not replay it.
+      writeFileSync(join(project, '.tokenscope.local', 'copilot-otel.jsonl'), '{"type":"span"}\n')
+      run(project, state, ch)
+      const saved = JSON.parse(readFileSync(join(project, '.tokenscope.local', 'forwarder-offset'), 'utf8'))
+      expect(saved.offset).toBe('{"type":"span"}\n'.length)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('a forwarder daemon started before migration stops once setup migrates the device', () => {
+  const FWD = join(__dirname, '../../../plugin/scripts/copilot-forwarder.mjs')
+
+  it('exits on its next tick after extensions are enabled, removing its lock', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ts-fwd-migrate-'))
+    const state = join(root, 'state')
+    const project = join(root, 'project')
+    const ch = join(root, 'copilot-home')
+    for (const d of [state, ch, join(project, '.tokenscope.local')]) mkdirSync(d, { recursive: true })
+    writeFileSync(join(state, 'config.copilot-cli.json'), JSON.stringify({ instance_id: 'i', logs_endpoint: 'https://127.0.0.1:9/v1/logs' }))
+    writeFileSync(join(project, '.tokenscope.local', 'copilot-otel.jsonl'), '')
+    const env = { ...process.env, TOKENSCOPE_STATE_DIR: state, COPILOT_HOME: ch, TOKENSCOPE_FORWARD_INTERVAL_MS: '1000' }
+    // This file pins the lock/offset paths for its in-process tests; the daemon uses the project's.
+    delete env.COPILOT_OTEL_FILE_EXPORTER_PATH
+    delete env.TOKENSCOPE_FWD_PID_FILE
+    delete env.TOKENSCOPE_FWD_OFFSET_FILE
+    const child = spawn(process.execPath, [FWD, 'start'], { cwd: project, env, stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.on('data', (d) => (stderr += d))
+    const exited = new Promise<number | null>((r) => child.on('exit', (code) => r(code)))
+    try {
+      const pid = join(project, '.tokenscope.local', 'copilot-forwarder.pid')
+      for (let i = 0; i < 100 && !existsSync(pid); i++) await new Promise((r) => setTimeout(r, 100))
+      expect(existsSync(pid)).toBe(true) // running as the singleton
+
+      writeFileSync(join(ch, 'settings.json'), JSON.stringify({ enabledFeatureFlags: { EXTENSIONS: true } }))
+      const code = await Promise.race([exited, new Promise((r) => setTimeout(() => r('still running'), 8000))])
+      expect(code).toBe(0)
+      expect(stderr).toMatch(/forwarder exiting/)
+      expect(existsSync(pid)).toBe(false)
+    } finally {
+      child.kill('SIGKILL')
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 20_000)
 })

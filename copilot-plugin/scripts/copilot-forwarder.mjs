@@ -52,8 +52,6 @@
  * Uses only Node.js built-ins (no external deps — ships into user space).
  */
 import fs from 'node:fs'
-import https from 'node:https'
-import http from 'node:http'
 import { execFileSync } from 'node:child_process'
 import { trustedGitPath } from './trusted-git.mjs'
 import { join, dirname, resolve } from 'node:path'
@@ -65,63 +63,29 @@ import {
   buildCopilotOtlpPayload,
   encodeExportLogsServiceRequest,
 } from './otlp-logs.mjs'
-import { resolveRepoProjectCode, computeCodeHash } from './tokenscope-project.mjs'
-import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 import { detectManagedTelemetry } from './managed-telemetry.mjs'
 import { realHome } from './real-home.mjs'
-import { deviceStorePath, resolveStorePath } from './device-store.mjs'
+import { resolveStorePath } from './device-store.mjs'
+import {
+  TOKENSCOPE_DIR,
+  CONFIG_PATH,
+  configPathNow,
+  LEGACY_SPAN_PATH,
+  extensionsEnabled,
+  loadConfig,
+  mintBearer,
+  httpsPost,
+  postWithRetry,
+  parseGithubOrg,
+  gitRemoteOrgUrl,
+  resolveGithubOrg,
+  resolveProjectCodeHash,
+} from './copilot-emit.mjs'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
 
-// ── config ────────────────────────────────────────────────────────────────────
-// The account's home holds ONLY the device credential (instance/endpoints/oauth).
-// Everything else — span file, offset, lock — is PER-PROJECT (see projectLocalDir()).
-/**
- * The durable Copilot credential store, resolved the SAME way every other reader and
- * writer of it resolves it: an explicit `TOKENSCOPE_STATE_DIR` pin first, otherwise
- * the PASSWD home — never `$HOME`.
- *
- * A TRUST SINK, not merely a location. `config.copilot-cli.json` under this dir holds
- * `oauth_refresh_token`, and `mintBearer` below hands what it finds there to
- * `otel-headers-helper.sh` as BOTH the credential and the endpoint to spend it at.
- * `os.homedir()` consults `HOME` first, so a leaked or model-set `HOME` would choose
- * that file; `realHome()` reads the passwd entry, which an env var cannot move.
- *
- * It is equally an AVAILABILITY invariant. `copilot-redeem.mjs` WRITES this store and
- * anchors it on `realHome()`; `device-id.mjs` reads it on the same anchor. A reader on
- * a different anchor means redeem writes one file and the forwarder opens another —
- * and on a host with a leaked `HOME` (the incident recorded in `real-home.mjs`) that
- * is silent zero telemetry, not a visible error.
- *
- * The `TOKENSCOPE_STATE_DIR` pin comes first, matching the house form
- * (`plugin-runtime.mjs`'s `stateDir()`, `status.mjs`, `landed-check.mjs`,
- * `enroll.mjs`) — and matching `otel-headers-helper.sh`, which reads the same variable,
- * so a forwarder that ignored it would pin the helper to a directory it does not itself
- * read. Reading it here grants NO authority this lane had not already granted: the
- * helper this file SPAWNS, and the status probe beside it, both consult that variable
- * already, so anything able to set it for this process could already choose the store a
- * bearer is minted from. `HOME` is the different case, and the reason for the anchor
- * below — it is set ambiently and by accident (the leak incident), and on the Claude
- * lane a repository can name it, which is why `session-start.mjs` drops a repo-claimed
- * `HOME`/`TOKENSCOPE_STATE_DIR` before any of this runs.
- *
- * There is NO read-time fallback to a `$HOME`-derived path. A fallback would let a
- * moved `HOME` plant a store the moment the trusted one is absent — the bypass this
- * anchor exists to remove. `main()` names both paths out loud instead.
- */
-const TOKENSCOPE_DIR =
-  (process.env.TOKENSCOPE_STATE_DIR ?? '').trim() || join(realHome(), '.tokenscope')
-// This lane's own file, with no filesystem probe at import (an import-time
-// probe made this constant depend on the developer's ~/.tokenscope). The
-// legacy bridge lives in configPathNow(), where the file is actually read.
-const CONFIG_PATH = deviceStorePath('copilot-cli', TOKENSCOPE_DIR)
-/** Own store, else the pre-split one. Per call: a redeem can land mid-run. */
-const configPathNow = () => resolveStorePath('copilot-cli', TOKENSCOPE_DIR)
-// Exported so a test can assert the ANCHOR — that a moved `$HOME` does not move the
-// store, and that a `TOKENSCOPE_STATE_DIR` pin is honoured — without letting the
-// no-override path read or write the developer's own ~/.tokenscope. Same reason
-// copilot-redeem.mjs exports its TOKENSCOPE_DIR.
-export { TOKENSCOPE_DIR, CONFIG_PATH }
+// The account's home holds ONLY the device credential; span file, offset and lock
+// are PER-PROJECT (projectLocalDir()). Credential/emit primitives: copilot-emit.mjs.
+export { TOKENSCOPE_DIR, CONFIG_PATH, postWithRetry, parseGithubOrg, gitRemoteOrgUrl, resolveGithubOrg, resolveProjectCodeHash }
 /** The per-PROJECT telemetry/state dir name, resolved against the daemon's cwd. */
 const PROJECT_LOCAL_DIRNAME = '.tokenscope.local'
 
@@ -166,132 +130,6 @@ export function clampForwardIntervalMs(raw) {
 const FORWARD_INTERVAL_MS = clampForwardIntervalMs(process.env.TOKENSCOPE_FORWARD_INTERVAL_MS)
 /** A PID record older than this means the daemon died (2.5 missed heartbeats, min 150s). */
 const HEARTBEAT_STALE_MS = Math.max(2.5 * FORWARD_INTERVAL_MS, 150_000)
-/** HTTP timeout for the Azure Monitor POST — a hung request must never wedge a tick forever. */
-const HTTP_TIMEOUT_MS = 30_000
-
-// ── creds (read once at startup) ─────────────────────────────────────────────
-function loadConfig() {
-  // Per call: a redeem landing mid-run must be picked up on the next tick.
-  const path = configPathNow()
-  if (!fs.existsSync(path)) {
-    throw new Error(
-      `TokenScope config not found at ${path} — run the tokenscope-setup skill first.`,
-    )
-  }
-  return JSON.parse(fs.readFileSync(path, 'utf8'))
-}
-
-// ── bearer (via otel-headers-helper.sh) ───────────────────────────────────────
-// Bound to the endpoint it was minted for, like the on-disk cache: the store
-// can change under this daemon, and an unbound bearer would follow the new
-// endpoint until a 401.
-let cachedBearer = null
-
-// RESIDUAL, stated: the helper reads the live store itself (source 1), so the
-// bearer is NOT minted from forwardSpans' snapshot. A redeem landing mid-tick
-// can mismatch one batch; the server rejects it and the next batch is
-// consistent. Closing it would need the helper to trust a caller-supplied
-// bundle over its store, which is the channel the source list exists to close.
-function mintBearer(force = false) {
-  const cfg = loadConfig()
-  if (cachedBearer && !force && cachedBearer.bearerEndpoint === cfg.bearer_endpoint) {
-    return cachedBearer.token
-  }
-  const helperPath = join(__dirname, 'otel-headers-helper.sh')
-  // otel-headers-helper.sh reads the env it needs from TOKENSCOPE_* env vars.
-  // TOKENSCOPE_OAUTH_REFRESH_TOKEN is required by the helper (exits 1 if absent).
-  // It lives in config.copilot-cli.json (the stable store) — NOT in oauth-access.copilot-cli.json, which
-  // the helper overwrites with {access_token, expires_at} on every refresh (B2 fix).
-  const env = {
-    ...process.env,
-    TOKENSCOPE_BEARER_ENDPOINT: cfg.bearer_endpoint,
-    TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: cfg.oauth_token_endpoint,
-    TOKENSCOPE_OAUTH_CLIENT_ID: cfg.oauth_client_id,
-    TOKENSCOPE_OAUTH_REFRESH_TOKEN: cfg.oauth_refresh_token,
-  }
-  // The state dir travels as an ARGUMENT. The helper stopped reading
-  // TOKENSCOPE_STATE_DIR because Claude Code invokes it directly with a
-  // repo-merged environment (otel-headers-helper.sh's header, and the capture it
-  // cites), so the variable is no longer a channel this process can use to place
-  // the token cache. `/bin/sh` absolute for the same reason PATH is untrusted.
-  const out = execFileSync('/bin/sh', [helperPath, '--state-dir', TOKENSCOPE_DIR, '--tool', 'copilot-cli'], {
-    encoding: 'utf8',
-    env,
-    stdio: ['ignore', 'pipe', 'inherit'],
-  })
-  cachedBearer = { token: JSON.parse(out).Authorization, bearerEndpoint: cfg.bearer_endpoint }
-  return cachedBearer.token
-}
-
-// ── HTTP forward ───────────────────────────────────────────────────────────────
-/**
- * POST the protobuf batch to `urlStr`. The URL is validated via assertSafeEndpoint
- * (S2 — closes the Copilot leg of client-plugins:mitm:0003) BEFORE any request is
- * built: this used to pick `http` for ANY non-https URL with no complaint (the
- * "plain-http fallback"), which would silently downgrade a poisoned logs_endpoint
- * (or a MITM'd config.copilot-cli.json) into plaintext instead of refusing it — leaking the
- * batch (and, on retry, the Azure bearer) off-box unencrypted. allowLoopback:true
- * mirrors every other TokenScope-own-endpoint call site in this plugin
- * (plugin-runtime.mjs's httpsPostJson, otlp-forwarder.mjs's readDceEndpoint) — a
- * locally-running dev collector legitimately answers on 127.0.0.1/::1.
- */
-function httpsPost(urlStr, headers, body) {
-  return new Promise((resolve, reject) => {
-    let url
-    try {
-      url = assertSafeEndpoint(urlStr, { allowLoopback: true })
-    } catch (err) {
-      // Redact HERE, at the boundary, not at the caller. assertSafeEndpoint's
-      // message embeds the REJECTED endpoint, and this rejection is printed by
-      // the forwarder's generic retry handler with String(err), so rejecting
-      // the raw guard error puts a server-supplied endpoint on stderr in clear
-      // text (the CodeQL js/clear-text-logging class). Redacting at the throw
-      // site makes the property hold no matter which handler prints it, which
-      // is the same fix copilot-redeem.mjs's httpsPost already carries.
-      reject(unsafeEndpointError('OTLP endpoint', err))
-      return
-    }
-    const mod = url.protocol === 'https:' ? https : http
-    const h = {
-      ...headers,
-      'content-type': 'application/x-protobuf',
-      'content-length': body.length,
-    }
-    const req = mod.request(
-      {
-        method: 'POST',
-        hostname: url.hostname,
-        port: url.port || undefined,
-        path: url.pathname + url.search,
-        headers: h,
-      },
-      (res) => {
-        let b = ''
-        res.on('data', (c) => (b += c))
-        res.on('end', () => resolve({ status: res.statusCode, body: b.slice(0, 200) }))
-      },
-    )
-    req.setTimeout(HTTP_TIMEOUT_MS, () => {
-      req.destroy(new Error(`request timed out after ${HTTP_TIMEOUT_MS}ms`))
-    })
-    req.on('error', (e) => reject(e))
-    req.write(body)
-    req.end()
-  })
-}
-
-/**
- * POST the protobuf to the logs endpoint, re-minting the bearer ONCE on 401/403
- * (the Azure bearer can expire mid-session). `mint(force)` and `post(url, headers, body)`
- * are injected so this retry path is unit-testable without a live endpoint.
- */
-export async function postWithRetry(url, proto, mint, post) {
-  let result = await post(url, { authorization: mint(false) }, proto)
-  if (result.status === 401 || result.status === 403) {
-    result = await post(url, { authorization: mint(true) }, proto) // force a fresh bearer
-  }
-  return result
-}
 
 /** Parse `project.code_hash` out of an `OTEL_RESOURCE_ATTRIBUTES`-style CSV string. */
 export function extractCodeHash(attrString) {
@@ -335,131 +173,12 @@ export function repoFromSpan(span) {
   return t === '' ? null : t
 }
 
-/**
- * Parse the GitHub org out of a remote URL or an "org/repo" slug. Handles the common
- * GitHub remote forms:
- *   https://github.com/<org>/<repo>(.git)
- *   git@github.com:<org>/<repo>(.git)
- *   ssh://git@github.com/<org>/<repo>(.git)
- *   github.com/<org>/<repo>
- *   <org>/<repo>            (the span-attr fallback shape)
- * Returns the lowercased org, or null when nothing parseable. We deliberately accept
- * GitHub Enterprise hosts too (any "<host>[:/]<org>/<repo>") — the org is the key F2
- * uses to route to an enterprise; the host is not part of the key.
- */
-export function parseGithubOrg(remote) {
-  let s = String(remote || '').trim()
-  if (!s) return null
-  // 1. Strip a URL scheme (https://, ssh://, git://, ...).
-  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
-  // 2. Strip userinfo (`user@` or `user:pass@`) — URL and scp-like forms alike.
-  s = s.replace(/^[^/@\s]+@/, '')
-  // 3. Split host from path. scp form is `host:path`; URL form is `host/path`; a bare
-  //    "org/repo" slug (the github.copilot.git.repository span attr) has no host.
-  let path
-  const colon = s.indexOf(':')
-  const slash = s.indexOf('/')
-  if (colon !== -1 && (slash === -1 || colon < slash)) {
-    // host:path OR host:port/path — take everything after the first ':' and drop a
-    // leading numeric ":port/" (so github.com:443/org and a GHE host:2222/org work).
-    path = s.slice(colon + 1).replace(/^\d+\//, '')
-  } else if (slash !== -1) {
-    // host/path (de-schemed URL) OR a bare "org/repo". The first segment is a host
-    // only if it looks like one (has a dot, or is localhost); otherwise it IS the org,
-    // so a bare "org/repo" is not mistaken for host/path.
-    const head = s.slice(0, slash)
-    path = /\./.test(head) || head === 'localhost' ? s.slice(slash + 1) : s
-  } else {
-    return null
-  }
-  // 4. First path segment = org; require a following "/repo" so a lone token is rejected.
-  const m = path.match(/^([^/\s]+)\/[^\s]/)
-  if (!m) return null
-  return m[1].replace(/\.git$/, '').toLowerCase() || null
-}
-
 /** True if `cwd` is a git work tree root (a `.git` entry — dir or worktree file). */
 function isGitRepo(cwd = process.cwd()) {
   try {
     return fs.existsSync(join(cwd, '.git'))
   } catch {
     return false
-  }
-}
-
-/**
- * Read the project's git remote origin URL from the daemon's cwd. Returns the trimmed
- * URL or null (no git, no remote, or any failure — never throws). Deterministic and
- * the PRIMARY source of the org stamp: it reflects the actual repo the project lives
- * in, independent of any telemetry the spans happen to carry.
- */
-export function gitRemoteOrgUrl(cwd = process.cwd()) {
-  try {
-    const git = trustedGitPath()
-    if (!git) return null // no trusted git — degrade, never fall back to a name lookup
-    const out = execFileSync(git, ['config', '--get', 'remote.origin.url'], {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-    const url = out.trim()
-    return url || null
-  } catch {
-    return null // not a git repo / no origin remote / git absent
-  }
-}
-
-/**
- * Resolve the GitHub org to stamp on the emit (F2 org→enterprise keying). PRIMARY:
- * the project's git remote (deterministic, reflects the real repo). FALLBACK: the
- * batch's `invoke_agent` span `github.copilot.git.repository` (only that span carries
- * it). Null when neither yields an org (untagged-enterprise is acceptable — F2 keys
- * what it can and carries the rest forward). Pure-ish (git read injectable for tests).
- *
- * @param {object} [opts]
- *   @param {string} [opts.cwd] — daemon cwd / project root (defaults to process.cwd()).
- *   @param {string|null} [opts.spanRepo] — the "org/repo" from an invoke_agent span.
- *   @param {(cwd: string) => (string|null)} [opts.readRemote] — git-remote reader seam.
- * @returns {string|null} the lowercased org, or null.
- */
-export function resolveGithubOrg(opts = {}) {
-  const cwd = opts.cwd ?? process.cwd()
-  const readRemote = opts.readRemote ?? gitRemoteOrgUrl
-  const fromRemote = parseGithubOrg(readRemote(cwd))
-  if (fromRemote) return fromRemote
-  return parseGithubOrg(opts.spanRepo ?? null)
-}
-
-/**
- * Resolve the project.code_hash to stamp on this batch.
- *
- * The hash is derived from the committed `.tokenscope` in the daemon's cwd (= the
- * project root) via the SHARED resolver (resolveRepoProjectCode + computeCodeHash) so
- * Copilot + Claude hash an IDENTICAL repo to the same hash server-side (drift = split
- * attribution). Per-PROJECT means the daemon's cwd IS the project root and there is
- * exactly one repo in play — no cross-repo guard is needed (the old singleton-bleed
- * footgun is structurally impossible now).
- *
- * NOTE: the legacy `cfg.otel_resource_attributes` config-stamp is intentionally not
- * read here — redeem no longer writes a project hash there, and a host-wide config
- * hash is the very footgun the per-project model removes.
- *
- * @param {object} cfg — ~/.tokenscope/config.copilot-cli.json (unused for the hash; kept for
- *   signature stability).
- * @param {object} [opts]
- *   @param {string} [opts.cwd] — daemon cwd / project root (defaults to process.cwd()).
- * @returns {string|null} the code_hash to stamp, or null (untagged — honest, not error).
- */
-export function resolveProjectCodeHash(cfg, opts = {}) {
-  const cwd = opts.cwd ?? process.cwd()
-  // Derive the hash from the cwd `.tokenscope` (shared resolver). No .tokenscope /
-  // no project.code → untagged (resolveRepoProjectCode throws); that is the honest
-  // outcome, not an error.
-  try {
-    const { code } = resolveRepoProjectCode({ arg: '', cwd })
-    return computeCodeHash(code)
-  } catch {
-    return null
   }
 }
 
@@ -954,6 +673,13 @@ function startDaemonLoop(filePath, startedAt) {
   // fires every tick so liveness is never starved by a slow forward.
   let inFlight = false
   const timer = setInterval(async () => {
+    // Setup migrated this device while the daemon was running: the extension now sends
+    // every session, so forwarding another span would count it twice. Stop for good.
+    if (extensionsEnabled(process.env)) {
+      console.error('[tokenscope-fwd] Copilot extensions were enabled: the usage extension captures sessions now; forwarder exiting.')
+      removePidFile()
+      process.exit(0)
+    }
     writeHeartbeat(startedAt) // prove liveness every tick, before the async forward
     if (inFlight) return
     inFlight = true
@@ -1019,18 +745,34 @@ async function main() {
     process.exit(0)
   }
 
-  // Load config early to surface misconfiguration clearly.
-  const cfg = loadConfig()
-  // The span path is RELATIVE in the per-project model (`.tokenscope.local/copilot-otel.jsonl`)
-  // — both the COPILOT_OTEL_FILE_EXPORTER_PATH export and the config fallback resolve
-  // against the daemon's cwd (= the project root). `resolve()` makes a relative value
-  // explicit (and is a no-op on an already-absolute path or a test override).
-  const rawFilePath = process.env.COPILOT_OTEL_FILE_EXPORTER_PATH ?? cfg.copilot_otel_file_path
-  if (!rawFilePath) {
-    console.error('[tokenscope-fwd] COPILOT_OTEL_FILE_EXPORTER_PATH not set and not in config')
-    process.exit(1)
+  // A migrated device (setup turned on Copilot extensions): the usage extension sends
+  // every session, old terminals included, so the forwarder never runs; files a legacy
+  // session left behind are ignored (setup removes them once, at migration).
+  if (extensionsEnabled(process.env)) {
+    // Whatever an old terminal appended here meanwhile was sent by its extension: mark it
+    // consumed (never delete), so switching back to the forwarder cannot replay it.
+    const spanFile = resolve(process.cwd(), LEGACY_SPAN_PATH)
+    try {
+      offset = fs.statSync(spanFile).size
+      persistOffset(spanFile)
+    } catch {
+      /* no span file here */
+    }
+    console.error('[tokenscope-fwd] Copilot extensions are enabled: the usage extension captures this session; forwarder idle.')
+    return
   }
+  // Not migrated. Copilot hides COPILOT_OTEL_FILE_EXPORTER_PATH from hooks, so read what
+  // this process CAN see: Copilot writes the project's span file only for a session
+  // started with that variable. None here: nothing to forward. The variable, when
+  // visible (a test), names the file instead of the default.
+  const rawFilePath = (process.env.COPILOT_OTEL_FILE_EXPORTER_PATH ?? '').trim() || LEGACY_SPAN_PATH
   const filePath = resolve(process.cwd(), rawFilePath)
+  if (!fs.existsSync(filePath)) {
+    console.error('[tokenscope-fwd] no span file in this project; forwarder idle.')
+    return
+  }
+  // Load config early to surface misconfiguration clearly.
+  loadConfig()
 
   if (mode === '--final-forward') {
     await finalForward(filePath)

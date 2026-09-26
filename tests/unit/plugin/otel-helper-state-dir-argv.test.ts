@@ -109,7 +109,7 @@ function run(args: string[], env: Record<string, string> = {}) {
   })
 }
 
-const sentinel = (dir: string) => join(dir, 'emit-failure.json')
+const sentinel = (dir: string) => join(dir, 'emit-failure.claude-code.json')
 
 describe('the state dir comes from argv', () => {
   it('--state-dir places the sentinel and token cache', () => {
@@ -136,15 +136,15 @@ describe('the state dir comes from argv', () => {
     // implementation that resolved somewhere else entirely — or nowhere — would
     // satisfy the negative on its own. This is the pair that pins the default,
     // and it can be positive precisely because the passwd lookup is stubbed.
-    expect(existsSync(join(passwdHome, '.tokenscope', 'emit-failure.json'))).toBe(true)
+    expect(existsSync(join(passwdHome, '.tokenscope', 'emit-failure.claude-code.json'))).toBe(true)
     // It ran the emit path rather than refusing to start.
     expect(r.status).not.toBe(2)
   })
 
   it('IGNORES a moved $HOME, which is equally repo-settable', () => {
     run([], { HOME: envDir })
-    expect(existsSync(join(envDir, '.tokenscope', 'emit-failure.json'))).toBe(false)
-    expect(existsSync(join(passwdHome, '.tokenscope', 'emit-failure.json'))).toBe(true)
+    expect(existsSync(join(envDir, '.tokenscope', 'emit-failure.claude-code.json'))).toBe(false)
+    expect(existsSync(join(passwdHome, '.tokenscope', 'emit-failure.claude-code.json'))).toBe(true)
   })
 })
 
@@ -239,8 +239,8 @@ describe('argv is validated, not merely read', () => {
       },
     })
 
-    expect(existsSync(join(dsclHome, '.tokenscope', 'emit-failure.json'))).toBe(true)
-    expect(existsSync(join(envDir, '.tokenscope', 'emit-failure.json'))).toBe(false)
+    expect(existsSync(join(dsclHome, '.tokenscope', 'emit-failure.claude-code.json'))).toBe(true)
+    expect(existsSync(join(envDir, '.tokenscope', 'emit-failure.claude-code.json'))).toBe(false)
     // No fallback happened, so no degradation warning either.
     expect(r.stderr).not.toMatch(/no passwd entry/)
   })
@@ -277,7 +277,7 @@ describe('argv is validated, not merely read', () => {
 
     expect(r.stderr).toMatch(/no passwd entry/)
     // …and it really did fall back there, so the warning is not decoration.
-    expect(existsSync(join(envDir, '.tokenscope', 'emit-failure.json'))).toBe(true)
+    expect(existsSync(join(envDir, '.tokenscope', 'emit-failure.claude-code.json'))).toBe(true)
   })
 
   it.each([

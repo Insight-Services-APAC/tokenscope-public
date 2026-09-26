@@ -4,8 +4,9 @@
  * §Flows 1). The Copilot analogue of plugin/scripts/enroll.mjs (the Claude half).
  *
  * On a FRESH install of the real (publish-injected) plugin, the SessionStart hook
- * (forwarder-lifecycle.mjs `start`) calls enrollIfNeeded() so this very session can
- * start emitting WITHOUT any login: the plugin presents its bundled enrollment
+ * (forwarder-lifecycle.mjs `start`) calls enrollIfNeeded() so the device emits
+ * WITHOUT any login (the Copilot App from this session; the CLI from its next launch,
+ * since it reads the EXTENSIONS feature only at start): the plugin presents its bundled enrollment
  * secret + a claimed email to POST /api/v1/setup/enroll, and writes the returned
  * emit-only credential + the forwarder's config into ~/.tokenscope/config.copilot-cli.json
  * (mode 0600, atomic temp+rename) using the SAME on-disk shape the redeem flow
@@ -68,9 +69,9 @@ import { resolveEnrollmentSecret } from './enrollment-secret.mjs'
 // own redeem path uses (both write onto the identical ~/.tokenscope/config.copilot-cli.json
 // contract, so they must agree on what "safe" means).
 import {
-  armOtelExporterRc,
+  armUsageExtension,
+  copilotSettingsPath,
   detectShellRcTargets,
-  PROJECT_LOCAL_DIR,
   assertSafeRedeemBundle,
 } from './copilot-redeem.mjs'
 // endpoint-guard.mjs (S1/S2) — the ONE endpoint validator, vendored verbatim (see
@@ -90,7 +91,6 @@ import { discoverMcpOrigin } from './mcp-origin.mjs'
 // managed-telemetry.mjs (Workstream D §10.1) — best-effort post-enrol check: a
 // hostile enterprise-managed telemetry setting can silently kill the file exporter
 // this very enrolment just armed. Vendored verbatim like the two above.
-import { detectManagedTelemetry } from './managed-telemetry.mjs'
 
 // Bound the enroll POST so a network blackhole can't hang session startup (the
 // SessionStart hook has a 15s budget shared with the forwarder spawn).
@@ -366,9 +366,7 @@ function writeFileAtomic(path, content, mode, { exclusive = false } = {}) {
  * endpoints + an OTEL_RESOURCE_ATTRIBUTES that ALREADY says tool=copilot-cli) instead
  * of a claude bundle the client had to regex-rewrite. We map those fields onto the
  * forwarder's config shape — the SAME mapping copilot-redeem.mjs's writeTokenscopeConfig
- * uses (the exact keys copilot-forwarder.mjs's loadConfig + mintBearer read). The span
- * file path is a RELATIVE per-project value (PROJECT_LOCAL_DIR) resolved by Copilot
- * against its launch cwd — matching copilot-redeem (never a server-sent ~/... value).
+ * uses (the exact keys copilot-emit.mjs's loadConfig + mintBearer read).
  * Throws if the attribution-critical fields are missing (so we never write a
  * half-config the forwarder would silently fail on). Exported for unit testing.
  */
@@ -426,11 +424,6 @@ export function buildCopilotConfig(resp) {
     oauth_token_endpoint: tokenEndpoint,
     oauth_client_id: clientId,
     oauth_refresh_token: refreshToken,
-    // RELATIVE per-project path — must match copilot-redeem's contract so emit-on-install
-    // and a later manual redeem agree. Copilot resolves it against its launch cwd (=
-    // project root) → each project writes its own <project>/.tokenscope.local/ span file;
-    // the forwarder's config-fallback resolves the same relative value against ITS cwd.
-    copilot_otel_file_path: join(PROJECT_LOCAL_DIR, 'copilot-otel.jsonl'),
     otel_resource_attributes: attrs,
   }
   // Same rule the helper refuses on. enrollIfNeeded treats a throw here as a
@@ -475,7 +468,7 @@ export function writeTokenscopeConfig(config, targetDir = stateDir(), { exclusiv
  *   timeoutMs?: number,
  *   post?: typeof httpsPostJson,
  *   writeConfig?: typeof writeTokenscopeConfig,
- *   checkManagedTelemetry?: typeof detectManagedTelemetry,
+ *   env?: NodeJS.ProcessEnv,
  *   cwd?: string,
  *   home?: string,
  * }} [opts]
@@ -489,12 +482,17 @@ export async function enrollIfNeeded({
   timeoutMs = ENROLL_TIMEOUT_MS,
   post = httpsPostJson,
   writeConfig = writeTokenscopeConfig,
+  // The Copilot process's environment: picks the lane and where Copilot's settings live.
+  env = process.env,
   // Arms span emission for future copilot launches (the shell-rc export). Injectable so
   // unit tests don't touch the real ~/.bashrc; defaults to the real relative-path arming.
-  armRc = (h) => armOtelExporterRc(detectShellRcTargets(undefined, h)),
-  // Workstream D §10.1 — injectable so unit tests don't touch the real filesystem/
-  // registry; defaults to the real detector.
-  checkManagedTelemetry = detectManagedTelemetry,
+  // Its messages (including the hand-enable guidance when settings.json cannot be
+  // updated) go to stderr beside the managed-telemetry warning below.
+  armRc = (h) =>
+    armUsageExtension(detectShellRcTargets(undefined, h), {
+      settingsPath: copilotSettingsPath(env, h),
+      log: (m) => console.error(m),
+    }),
   cwd = process.cwd(),
   home = homedir(),
 } = {}) {
@@ -566,34 +564,20 @@ export async function enrollIfNeeded({
       if (err && err.code === 'EEXIST') return { enrolled: false, reason: 'already-enrolled' }
       throw err
     }
-    // Arm span emission for FUTURE copilot launches (parity with Claude's settings.json
-    // emit-on-install). Copilot reads COPILOT_OTEL_FILE_EXPORTER_PATH at launch, so this
-    // takes effect on the next shell that sources the rc — same next-launch contract as
-    // Claude. Best-effort: a failed rc write must not fail the enrol (fail-open).
+    // Arm usage capture for FUTURE copilot launches (parity with Claude's settings.json
+    // emit-on-install): enable the EXTENSIONS feature so the usage extension loads, and
+    // remove any old shell-rc exporter block. Copilot reads both at launch, so this
+    // takes effect next launch. Best-effort: a failed write must not fail the enrol.
+    let extensions = 'failed'
     try {
-      armRc(home)
-    } catch {
-      /* rc arming is best-effort */
+      extensions = armRc(home)?.extensions ?? 'failed'
+    } catch (err) {
+      console.error(`[tokenscope-enroll] could not enable usage capture: ${err?.code ?? err?.message ?? err}`)
     }
-    // Workstream D §10.1 — best-effort, NEVER blocks/fails the enrol: a hostile
-    // enterprise-managed telemetry setting would otherwise silently strand this
-    // FRESH device with a valid credential and zero delivered spans, discoverable
-    // only much later via silence. Surface it immediately (forwarder-lifecycle.mjs
-    // redirects this process's stderr to ~/.tokenscope/forwarder.log) and echo the
-    // classification in the return value so a caller that inspects it can act.
-    let managedTelemetry
-    try {
-      const managed = await checkManagedTelemetry()
-      managedTelemetry = managed.classification
-      if (managed.classification === 'hostile') {
-        console.error(
-          `[tokenscope-enroll] WARNING: an enterprise-managed Copilot telemetry setting (source: ${managed.source}) is HOSTILE to the file exporter — this device's credential is now valid, but Copilot itself may never write a span. Run the tokenscope-status skill for detail; this is a policy block, not a credential problem.`,
-        )
-      }
-    } catch {
-      managedTelemetry = 'unknown'
-    }
-    return { enrolled: true, instanceId: config.instance_id, managedTelemetry }
+    // No managed-telemetry check here: that policy only reaches the legacy span
+    // exporter, and a fresh install is on the usage-extension lane (setup never
+    // exports the span variable any more). The status reports the policy regardless.
+    return { enrolled: true, instanceId: config.instance_id, extensions }
   } catch {
     return { enrolled: false, reason: 'write-failed' }
   }

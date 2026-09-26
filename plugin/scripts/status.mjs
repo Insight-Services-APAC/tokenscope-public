@@ -221,6 +221,7 @@ async function main() {
   const env = safeProcessEnv()
   const probe = probeEmissionAuth(env)
   const sentinel = readEmitSentinel(env)
+  const otherLaneFailure = readEmitSentinel(env, undefined, 'copilot-cli')
   const mcpAuthed = probeMcpAuth()
   const project = await projectBlock(env)
 
@@ -234,6 +235,11 @@ async function main() {
         },
         project,
         last_failure: sentinel,
+        // The Copilot lane's own failure on this host, reported, never merged into
+        // this lane's verdict: its fix is a Copilot setup, not a Claude one.
+        ...(otherLaneFailure
+          ? { copilot_lane_failure: { ...otherLaneFailure, fix: 'Run TokenScope setup in a Copilot CLI session.' } }
+          : {}),
         mcp_authed: mcpAuthed,
       },
       null,

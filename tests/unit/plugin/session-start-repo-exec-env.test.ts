@@ -16,8 +16,8 @@
  *
  *   - `PATH` chooses the `sh` that runs `otel-headers-helper.sh` — a process
  *     handed `TOKENSCOPE_OAUTH_REFRESH_TOKEN`, the durable emit credential.
- *   - `NODE_OPTIONS=--require <file>` executes attacker code inside the OTLP
- *     forwarder before its first line runs.
+ *   - `NODE_OPTIONS=--require <file>` would execute attacker code inside any
+ *     Node child the hook spawned (it spawns only `/bin/sh` and `git` today).
  *
  * `safeProcessEnv()` cannot reach either: it enumerates the `TOKENSCOPE_*`/
  * `OTEL_*` keys whose VALUES carry credentials and restores them from the global

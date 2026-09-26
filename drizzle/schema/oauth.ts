@@ -58,6 +58,9 @@ export const oauthAuthCode = pgTable('oauth_auth_code', {
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   // Single-use marker. NULL = unconsumed; set atomically on exchange.
   consumedAt: timestamp('consumed_at', { withTimezone: true }),
+  // Set only when the exchange issued a token (mig 0145); consumed_at is also
+  // set by a failed exchange.
+  tokenIssuedAt: timestamp('token_issued_at', { withTimezone: true }),
 })
 
 export const oauthToken = pgTable('oauth_token', {

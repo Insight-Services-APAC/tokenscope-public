@@ -91,20 +91,48 @@ Read the two headline signals and give the user a one-line verdict, then detail:
 **1. Emission auth** (`emitting` + `probe.message`):
 
 - `emitting: true` → **Emitting.** The credential is valid; sessions will attribute —
-  UNLESS a hostile managed telemetry setting is blocking export (see below). This
-  proves the credential works, not that a record has landed (that's the next check).
+  UNLESS usage capture is off or reporting a problem (1.4 below). This proves the
+  credential works, not that a record has landed (that's the next check).
 - `emitting: false` → **NOT emitting — telemetry is being DROPPED.** Surface
   `probe.message` verbatim; it carries the precise reason (HTTP 401/403/404 →
   re-provision via `tokenscope-setup`; HTTP 0 / network → likely transient, re-run;
   "not configured" → run `tokenscope-setup` first). Show `last_failure` if present.
 
-**1.5. Managed telemetry** (`managed_telemetry` + `emission_healthy`) — **a
-credential-valid probe is NEVER proof of delivery on its own:**
+**1.4. Usage capture** (`usage_capture` + `emission_healthy`) — read this FIRST, it
+decides which of the checks below applies. **A credential-valid probe is NEVER proof
+of delivery on its own:**
+
+- `usage_capture.lane: "extension"` (the normal case) → the TokenScope usage extension
+  captures this session. `enabled: false` → **the usage extension does not load**:
+  only sessions from a terminal that still exports the old variable are captured (by
+  the legacy forwarder, which this script cannot see from inside Copilot). The cause is
+  Copilot extensions off, `extension_mode: "disabled"`, TokenScope's extension switched
+  off in `/extensions`, or keys in Copilot's `config.json` overriding its settings:
+  re-run `tokenscope-setup`, which fixes it or says exactly what to change by hand,
+  then restart copilot. Managed telemetry (1.5) does NOT affect this lane — do not
+  report it as a cause.
+- `usage_capture.backlog.error` set → the usage spool directory cannot be read
+  (permissions): its records can be neither checked nor sent.
+- `usage_capture.lane: "forwarder"` → the script was run directly in a terminal that
+  still exports `COPILOT_OTEL_FILE_EXPORTER_PATH`, on a device setup has not migrated
+  (inside Copilot the lane always reads `"extension"`: Copilot hides that variable from
+  tools). Tell the user to re-run setup. Managed telemetry (1.5) applies to the legacy
+  forwarder only.
+- `usage_capture.drift` set → usage on this device may be missing or double counted
+  (`kind`: `shortfall` = calls missed, `excess` = recorded twice, `contract` = the
+  event format changed or a token count was unusable, `persist` = a record could not
+  be written to the spool, `poison` = spooled records that could not be encoded were
+  dropped). `sessions` is how many sessions report one. Report it; it is a TokenScope
+  bug, not a user fix.
+- `usage_capture.backlog.oldest_age_ms` over 24h → records are not reaching the ingest
+  endpoint; check network access.
+
+**1.5. Managed telemetry** (`managed_telemetry`) — **forwarder lane only**:
 
 - `managed_telemetry.state: "hostile"` → **An enterprise policy is blocking Copilot's
   own telemetry export** (`enabled: false`, or an `endpoint`/`headers` override that
-  discards the file exporter) — regardless of `emitting`. `emission_healthy` reads
-  `false` even if `emitting` is `true`. This is a **policy problem, not a credential
+  discards the file exporter). On the forwarder lane `emission_healthy` reads `false`
+  even if `emitting` is `true`; on the extension lane it is not a cause. This is a **policy problem, not a credential
   problem** — re-provisioning via `tokenscope-setup` will NOT fix it. Tell the user to
   raise it with their GitHub enterprise/IT admin (mention the `source`:
   native-mdm/file-based). Never print the managed setting's raw endpoint/header

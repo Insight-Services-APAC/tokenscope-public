@@ -135,14 +135,17 @@ It makes a direct process→server HTTP call, redeems the handoff code, and:
    (preserving any unrelated keys); on a **cross-environment** move (the bearer host
    changed) it writes a clean config and prints a one-line `Environment changed:
 old → new` note so the old deployment's credentials/endpoints don't linger.
-2. Adds a `# >>> TokenScope >>>` block to your shell rc (`~/.bashrc`, `~/.zshrc`)
-   exporting **only** `COPILOT_OTEL_FILE_EXPORTER_PATH` — the one var Copilot needs to
-   emit. Attribution (instance/project/tool) is stamped by the forwarder from
-   `config.copilot-cli.json`, not the shell, so nothing else is exported.
+2. Turns on Copilot's extensions feature (`enabledFeatureFlags.EXTENSIONS` in Copilot's
+   `settings.json`, with `extensions.mode: load_only` unless the user chose a mode: the
+   helper prints the mode in effect), so the plugin's usage extension loads and
+   captures each model call's usage. Tell the user plainly: with the feature on, a
+   repository they trust in Copilot can also run its own Copilot extensions, as it can
+   already run repository hooks. It also removes the
+   `# >>> TokenScope >>>` block an earlier setup wrote into your shell rc, and the old
+   forwarder's files from your projects: nothing is written into your shell or your
+   repositories any more.
 
-The forwarder lifecycle hooks (`SessionStart`/`Stop`) come from the plugin's
-`hooks.json`, not the redeem helper — nothing extra to register. **Do not** ask for,
-print, or store the durable credential in this conversation.
+**Do not** ask for, print, or store the durable credential in this conversation.
 
 ### Step 5: Confirm
 
@@ -150,28 +153,26 @@ Call `my_usage` again to confirm the MCP connection still answers. Then tell the
 
 - **Connected** — read/tag tools authorised for your TokenScope account.
 - **Emitting provisioned** — this device's TokenScope credential store holds the
-  forwarder credential; `COPILOT_OTEL_FILE_EXPORTER_PATH` is in your shell rc.
-- **Restart your terminal** (or `source ~/.bashrc`) so Copilot picks it up next launch.
+  emit credential, and Copilot extensions are enabled. If the helper said it could
+  not update Copilot's settings, relay its one-line instruction.
+- **Restart copilot**, so the next session loads the usage extension.
 - **`my_usage` confirms the credential, not delivery.** A successful `my_usage`
   call (and a healthy status line) means the emit credential can mint an ingest
   bearer — the emission path is _configured and authorised_. It does **not** prove
-  any record physically landed. Span forwarding plus Azure Monitor OTLP ingest is
-  ~minutes downstream and is **not observable client-side**, so don't read a clean
-  setup as "telemetry arrived".
+  any record physically landed. Azure Monitor OTLP ingest is ~minutes downstream and
+  is **not observable client-side**, so don't read a clean setup as "telemetry
+  arrived".
 - **Confirm actual landing out-of-band.** After a few minutes of real `copilot`
   usage, run `my_usage` (or open the dashboard) and look for this device's spend.
   That — not the setup output — is what tells you records are being attributed.
-- **A valid credential is not proof of delivery either.** If your organisation
-  deploys an enterprise-managed Copilot `telemetry` setting (server-managed / MDM /
-  a distributed file), it can silently disable telemetry or reroute it away from the
-  file exporter this whole loop depends on — while the credential above still mints a
-  healthy bearer. Run the `tokenscope-status` skill and read `emission_healthy` (not
-  `emitting` alone) and `managed_telemetry.state`: `"hostile"` means a policy is
-  blocking export — that is a GitHub-enterprise/IT-admin conversation, not something
-  re-running setup fixes; `"unknown"` means the check could not confirm either way
-  (server-managed settings in particular cannot be read from a local script at all).
-- **Next:** commit a `.tokenscope` per repo via the `tokenscope-project` skill. (Copilot
-  project tagging isn't wired yet — spend lands untagged until tagged with `tag_session`.)
+- **A valid credential is not proof of capture either.** Run the `tokenscope-status`
+  skill and read `emission_healthy` (not `emitting` alone) and `usage_capture`:
+  `enabled: false` means Copilot extensions are off: only sessions from a terminal
+  that still exports the old `COPILOT_OTEL_FILE_EXPORTER_PATH` are captured (by the
+  legacy forwarder), and nothing else is. Re-run setup.
+- **Next:** commit a `.tokenscope` per repo via the `tokenscope-project` skill. Copilot
+  spend in a repo with one is tagged to that project; elsewhere it lands untagged until
+  tagged with `tag_session`.
 
 ## Troubleshooting
 
@@ -180,6 +181,4 @@ Call `my_usage` again to confirm the MCP connection still answers. Then tell the
 | `my_usage` says "Not authenticated"               | Let the browser OAuth consent finish, then retry.                                                                                                                      |
 | `provision_emit` handoff expired before redeem    | Handoff codes are ~5 min single-use — re-run `provision_emit` for a fresh one.                                                                                         |
 | Redeem helper reports a network error (not a 401) | Check network connectivity to the TokenScope server. If the base resolved wrongly, register the server in `~/.copilot/mcp-config.json` and re-run — the helper only accepts an origin it can already see, so neither `--api-base` nor `TOKENSCOPE_API_BASE` can introduce a host from this chat. |
-| Sessions not appearing in TokenScope              | Check `echo $COPILOT_OTEL_FILE_EXPORTER_PATH` is set; if empty, re-source your shell rc or restart.                                                                    |
-| Forwarder not starting                            | Run `node "$(ls -d "$HOME"/.copilot/installed-plugins/*/tokenscope-copilot/scripts/copilot-forwarder.mjs                                                               | sort -V | tail -n1)" start` manually to see errors. |
-| Sessions still not appearing DESPITE a valid credential | Run the `tokenscope-status` skill and check `managed_telemetry.state`. `"hostile"` means an enterprise-managed Copilot telemetry setting is blocking export at the CLI level — a GitHub-enterprise/IT-admin issue, not a re-provisioning issue. |
+| Sessions not appearing in TokenScope              | Run the `tokenscope-status` skill. `usage_capture.enabled: false`: re-run setup, which enables Copilot extensions or says exactly what to change by hand (extension mode `disabled`, TokenScope's extension switched off in `/extensions`, or keys in Copilot's `config.json`), then restart copilot. `usage_capture.drift` set: Copilot's own totals and the recorded calls disagree, so report it. `usage_capture.backlog` over 24h old: records are not reaching the ingest endpoint (network); `usage_capture.backlog.error`: the spool directory cannot be read (check its permissions). |

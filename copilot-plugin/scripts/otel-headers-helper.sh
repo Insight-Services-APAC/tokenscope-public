@@ -209,7 +209,7 @@ while [ $# -gt 0 ]; do
     --state-dir)
       [ $# -ge 2 ] || { echo "otel-headers-helper: --state-dir requires a value" >&2; exit 2; }
       # ABSOLUTE and non-empty. An empty value would make every path below start
-      # at `/` (STATE_DIR="" → "/emit-failure.json"); a relative one would place
+      # at `/` (STATE_DIR="" → "/emit-failure.<tool>.json"); a relative one would place
       # the token cache under whatever cwd this happened to be spawned in — which
       # for a Claude Code hook is the repository; and a leading `-` turns into an
       # option for the `mkdir`/`rm` that follow, despite the quoting. None is a
@@ -247,7 +247,9 @@ done
 # No --state-dir ⇒ the passwd-home default. Resolved here, after argv, so the
 # tools passwd_home() needs are resolved through the PATH argv just set up.
 [ -n "$STATE_DIR" ] || STATE_DIR="$(passwd_home)/.tokenscope"
-SENTINEL="${STATE_DIR}/emit-failure.json"
+# Per-tool like the store: the Claude statusline and status read only their own
+# lane, so a failing Copilot lane cannot paint a healthy Claude session red.
+SENTINEL="${STATE_DIR}/emit-failure.${TOOL}.json"
 # Per-tool, both of them: each lane has its own enrolment, and a shared cache
 # would present one lane's token to the other's endpoint.
 # docs/design/device-store-per-tool-sections.md
@@ -686,12 +688,12 @@ detect_plugin_version() {
   return 0
 }
 
-# Version of the Claude Code CLI that launched this session. Same two signals and
-# same precedence as otlp-shim-policy.mjs::detectCliVersion.
+# Version of the Claude Code CLI that launched this session, from two signals in
+# precedence: CLAUDE_CODE_EXECPATH's versions/X.Y.Z, else AI_AGENT.
 #
 # HONESTY NOTE — what is and is not verified here. Those signals are proven in the
-# HOOK environment (the shim policy reads them there to decide whether to run the
-# forwarder, and that decision has been correct in production). What is NOT
+# HOOK environment (the since-removed OTLP shim relied on them there in
+# production). What is NOT
 # verified is whether Claude Code exports them into the environment of the
 # otelHeadersHelper subprocess it spawns for the ~29-minute refresh; that
 # inheritance has not been captured, and this project's standing rule is not to

@@ -7,6 +7,35 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-09-26 (snapshot 678cdc99)
+
+- Claude Code 2.1.283 warned at every startup that it ignores telemetry settings
+  in a repository's `.claude/settings.local.json`. TokenScope's project tag no
+  longer copies them there; they already apply from your user settings, and
+  project attribution is unchanged. The local OTLP forwarder that worked around
+  the chunked-upload bug in Claude Code 2.1.191-2.1.211 is removed; those
+  versions are long superseded. Claude plugin 0.1.41.
+- Copilot usage is now captured by a Copilot extension that reads Copilot's own
+  per-call usage events, in both Copilot CLI and the GitHub Copilot App (which
+  was not captured at all before). Setup no longer adds anything to your shell
+  rc files (it removes the block earlier versions added) or writes span files
+  into your repositories. Re-run TokenScope setup in Copilot once to switch over:
+  from then on every session is captured by the extension, and setup removes the
+  old forwarder's files from your projects. Installing or setting up the plugin
+  turns on Copilot's extensions feature (in `load_only` mode unless you chose one);
+  with it on, a repository you trust in Copilot can also run its own Copilot
+  extensions, as it can already run repository hooks.
+  Until then, capture carries on through
+  the old forwarder. Copilot plugin 0.1.18.
+- A failing Copilot CLI emitter no longer turns every Claude Code statusline on
+  the same machine red (and vice versa): each tool reports its own emission
+  health, and `/tokenscope:status` names the other tool's failure separately.
+  Plugins 0.1.39 (Claude Code) and 0.1.17 (Copilot CLI).
+- OAuth sign-in: approving access now hands the sign-in to desktop MCP clients
+  such as the GitHub Copilot App automatically, instead of asking you to copy
+  and paste a URL. If the client can't be reached (for example, it runs in a
+  container) the page notices and offers the Copy URL fallback.
+
 ## 2026-09-23 (snapshot 51ce6e22)
 
 - Security: `devalue` (used by Nuxt to serialise page payloads) updated to

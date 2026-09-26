@@ -244,7 +244,7 @@ describe('buildCopilotConfig — response → config.json mapping', () => {
     expect(cfg.oauth_refresh_token).toBe('rt_provisional_secret')
     // RELATIVE per-project span path (matches copilot-redeem) — resolved by Copilot
     // against its launch cwd (= project root), NOT an absolute HOME path.
-    expect(cfg.copilot_otel_file_path).toBe(join('.tokenscope.local', 'copilot-otel.jsonl'))
+    expect(cfg).not.toHaveProperty('copilot_otel_file_path') // the extension needs no span path
     // tool=copilot-cli comes baked from the server bundle — consumed verbatim, no rewrite.
     expect(cfg.otel_resource_attributes).toBe('tokenscope.instance_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,tool=copilot-cli')
   })
@@ -575,7 +575,7 @@ describe('enrollIfNeeded — decision logic', () => {
     expect(existsSync(join(dir, 'oauth-access.copilot-cli.json'))).toBe(false)
     const written = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
     expect(written.oauth_refresh_token).toBe('rt_provisional_secret')
-    expect(written.copilot_otel_file_path).toBe(join('.tokenscope.local', 'copilot-otel.jsonl'))
+    expect(written).not.toHaveProperty('copilot_otel_file_path')
   })
 
   it('arms span emission on a successful enrol (emit-on-install parity)', async () => {
@@ -590,39 +590,52 @@ describe('enrollIfNeeded — decision logic', () => {
     expect(armRc).toHaveBeenCalledWith('/tmp/fake-home')
   })
 
-  it('Workstream D §10.1 — a successful enrol runs the managed-telemetry check and echoes the classification', async () => {
+  it('never runs a managed-telemetry check: a fresh install is on the usage-extension lane', async () => {
     const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
-    const writeConfig = vi.fn()
-    const checkManagedTelemetry = vi.fn().mockResolvedValue({ classification: 'benign', source: 'file-based', checkedPaths: [], serverManagedNote: '' })
-    const r = await enrollIfNeeded({ ...baseOpts(), post, writeConfig, checkManagedTelemetry })
-    expect(r.enrolled).toBe(true)
-    expect(r.managedTelemetry).toBe('benign')
-    expect(checkManagedTelemetry).toHaveBeenCalledTimes(1)
+    const r = await enrollIfNeeded({ ...baseOpts(), post, writeConfig: vi.fn() })
+    expect(r).toEqual({ enrolled: true, instanceId: expect.any(String), extensions: expect.any(String) })
   })
 
-  it('Workstream D §10.1 — a HOSTILE managed telemetry setting is logged loudly but NEVER fails the enrol', async () => {
+  it("reports usage-capture arming: 'manual' is surfaced, a throwing arm is 'failed' and logged, never an enrol failure", async () => {
     const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
-    const writeConfig = vi.fn()
-    const checkManagedTelemetry = vi.fn().mockResolvedValue({ classification: 'hostile', source: 'native-mdm', checkedPaths: [], serverManagedNote: '' })
+    const manual = await enrollIfNeeded({ ...baseOpts(), post, writeConfig: vi.fn(), armRc: () => ({ rcCleaned: [], extensions: 'manual' }), env: {} })
+    expect(manual).toMatchObject({ enrolled: true, extensions: 'manual' })
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
-      const r = await enrollIfNeeded({ ...baseOpts(), post, writeConfig, checkManagedTelemetry })
-      expect(r.enrolled).toBe(true) // never blocked by a hostile finding
-      expect(r.managedTelemetry).toBe('hostile')
-      expect(errSpy).toHaveBeenCalled()
-      expect(String(errSpy.mock.calls.flat())).toMatch(/HOSTILE/)
+      const thrown = await enrollIfNeeded({
+        ...baseOpts(),
+        post,
+        writeConfig: vi.fn(),
+        armRc: () => {
+          throw Object.assign(new Error('x'), { code: 'EACCES' })
+        },
+        env: {},
+      })
+      expect(thrown).toMatchObject({ enrolled: true, extensions: 'failed' })
+      expect(String(errSpy.mock.calls.flat())).toMatch(/EACCES/)
     } finally {
       errSpy.mockRestore()
     }
   })
 
-  it('Workstream D §10.1 — a throwing managed-telemetry check degrades to "unknown", never fails the enrol', async () => {
-    const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
-    const writeConfig = vi.fn()
-    const checkManagedTelemetry = vi.fn().mockRejectedValue(new Error('boom'))
-    const r = await enrollIfNeeded({ ...baseOpts(), post, writeConfig, checkManagedTelemetry })
-    expect(r.enrolled).toBe(true)
-    expect(r.managedTelemetry).toBe('unknown')
+  it('the default arming logs to stderr, so the hand-enable guidance is not silent', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ts-enroll-arm-'))
+    try {
+      mkdirSync(join(home, '.copilot'))
+      writeFileSync(join(home, '.copilot', 'settings.json'), '// jsonc\n{}')
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const opts = { ...(baseOpts() as Record<string, unknown>) }
+        delete opts.armRc // the DEFAULT arming is under test
+        const r = await enrollIfNeeded({ ...opts, post: vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE), writeConfig: vi.fn(), home, env: {} })
+        expect(r).toMatchObject({ enrolled: true, extensions: 'manual' })
+        expect(String(errSpy.mock.calls.flat())).toMatch(/"EXTENSIONS": true/)
+      } finally {
+        errSpy.mockRestore()
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   it('stays silent and writes NOTHING when the POST fails', async () => {

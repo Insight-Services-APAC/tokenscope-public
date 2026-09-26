@@ -59,7 +59,7 @@ project:
 ```
 
 Use your own file-writing tool — the MCP server never writes the user's disk. The
-indented `project:` / `  code:` form is required: the forwarder's reader takes the
+indented `project:` / `  code:` form is required: TokenScope's reader takes the
 code ONLY from an indented `code:` line under `project:`. A bare one-line file
 (just the code) parses to **no** project code and the repo lands **untagged** — and
 worse, a Claude Code repo with the same one-liner would derive a different result,
@@ -75,10 +75,7 @@ Tell the user:
 - The repo is now bound to budget **{code}** ({display_name}).
 - **Commit `.tokenscope`** so teammates attribute to the same budget — it holds
   only a non-secret project code.
-- The TokenScope forwarder reads this committed `.tokenscope` and tags this repo's
-  Copilot spend to the budget automatically. Tagging applies to the **next** Copilot
-  session started in this repo (the forwarder reads the file on session start).
-- One repo per host: the forwarder is a single shared process and tags from the repo
-  it was started in. If you run Copilot in **two different repos on the same host at
-  once**, it will not tag either (it refuses to mis-attribute) — run them on separate
-  hosts, or tag those sessions explicitly with `tag_session`.
+- TokenScope reads this committed `.tokenscope` and tags this repo's Copilot spend to
+  the budget automatically, from the **next** Copilot session started in this repo.
+- Each Copilot session is tagged from its own working directory, so repos open at the
+  same time on one host are tagged independently.

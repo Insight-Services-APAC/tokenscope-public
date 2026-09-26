@@ -150,6 +150,17 @@ export const authorizeBodySchema = authorizeQuerySchema.extend({
 })
 export type AuthorizeBody = z.infer<typeof authorizeBodySchema>
 
+/** POST /api/v1/oauth/authorize JSON response. `outcome` is authoritative; never parse `redirect_url`. */
+export type AuthorizeResult =
+  | { redirect_url: string; outcome: 'code'; code: string }
+  | { redirect_url: string; outcome: 'denied' }
+  | { redirect_url: string; outcome: 'error'; error: string; error_description: string }
+
+/** POST /api/v1/oauth/code-status — the consent page asks whether its code was exchanged. */
+export const codeStatusBodySchema = z.object({
+  code: z.string().regex(/^[0-9a-f]{64}$/, { message: 'code must be the 64-hex authorization code' }),
+})
+
 /** POST /api/v1/oauth/token */
 export const tokenRequestSchema = z.object({
   grant_type: z.string().min(1),

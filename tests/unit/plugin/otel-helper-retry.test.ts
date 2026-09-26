@@ -84,7 +84,7 @@ function seedBogusCache(bearerEndpoint: string = BEARER_EP) {
     JSON.stringify({ access_token: 'BOGUS', expires_at: 9999999999, bearer_endpoint: bearerEndpoint }),
   )
 }
-const sentinelExists = () => existsSync(join(stateDir, 'emit-failure.json'))
+const sentinelExists = () => existsSync(join(stateDir, 'emit-failure.claude-code.json'))
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'ts-helper-'))
@@ -133,7 +133,7 @@ describe('otel-headers-helper retry-once-on-401', () => {
     expect(r.status).toBe(1)
     expect(bearerCalls()).toBe(2) // tried cache, retried once, then gave up
     expect(sentinelExists()).toBe(true)
-    expect(JSON.parse(readFileSync(join(stateDir, 'emit-failure.json'), 'utf8')).http_status).toBe(401)
+    expect(JSON.parse(readFileSync(join(stateDir, 'emit-failure.claude-code.json'), 'utf8')).http_status).toBe(401)
   })
 
   it('a failed refresh exits before ever calling /bearer (no retry loop on a dead refresh)', () => {

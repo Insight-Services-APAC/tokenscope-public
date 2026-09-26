@@ -17,7 +17,8 @@
  * Also pins basic shell-RC block idempotency for completeness.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, readdirSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, readdirSync, statSync, symlinkSync, chmodSync, lstatSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readBoundAccessToken } from '../../../plugin/scripts/device-store.mjs'
@@ -37,7 +38,7 @@ import { readBoundAccessToken } from '../../../plugin/scripts/device-store.mjs'
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — mjs import resolved by Vitest
 const {
-  writeTokenscopeConfig, removeBlock, upsertBlock, detectShellRcTargets, detectEnvChange, emitEnvLabel,
+  writeTokenscopeConfig, removeBlock, armUsageExtension, enableExtensionsFeature, copilotSettingsPath, legacyProjectDirs, detectShellRcTargets, detectEnvChange, emitEnvLabel,
   assertSafeRedeemBundle,
 } = await import('../../../plugin/scripts/copilot-redeem.mjs')
 
@@ -125,19 +126,13 @@ describe('writeTokenscopeConfig — credential separation', () => {
     expect(existsSync(join(dir, 'oauth-access.copilot-cli.json'))).toBe(false)
   })
 
-  it('copilot_otel_file_path is PER-PROJECT and RELATIVE, not the server-sent value', () => {
-    // Per-project re-architecture: telemetry lives WITH the project, so config stores a
-    // RELATIVE path (`.tokenscope.local/copilot-otel.jsonl`) the forwarder resolves
-    // against ITS cwd (= the project root) — NOT a HOME-absolute path (which would drag
-    // the forwarder back to the old per-HOME model) and NOT the server-sent value (the
-    // server bakes its own container $HOME, which never exists on the client).
+  it('the store carries no span path: the usage extension needs none, and a re-redeem drops an old one', () => {
+    writeFileSync(join(dir, 'config.copilot-cli.json'), JSON.stringify({ copilot_otel_file_path: '.tokenscope.local/copilot-otel.jsonl' }))
     writeTokenscopeConfig(FAKE_BUNDLE, 'rt', 'client-abc', dir)
     const config = JSON.parse(readFileSync(join(dir, 'config.copilot-cli.json'), 'utf8'))
-    expect(config.copilot_otel_file_path).toBe(join('.tokenscope.local', 'copilot-otel.jsonl'))
-    expect(config.copilot_otel_file_path).not.toBe(FAKE_BUNDLE.COPILOT_OTEL_FILE_EXPORTER_PATH)
-    // Relative — never an absolute path (would re-pin to HOME).
-    expect(config.copilot_otel_file_path.startsWith('/')).toBe(false)
+    expect(config).not.toHaveProperty('copilot_otel_file_path')
   })
+
 
   it('both files are created even when the dir already exists', () => {
     // First write
@@ -382,7 +377,7 @@ describe('emitEnvLabel — host classification (mirrors statusline)', () => {
   })
 })
 
-describe('removeBlock / upsertBlock idempotency', () => {
+describe('removeBlock idempotency', () => {
   const BLOCK_START = '# >>> TokenScope >>>'
   const BLOCK_END   = '# <<< TokenScope <<<'
 
@@ -398,65 +393,304 @@ describe('removeBlock / upsertBlock idempotency', () => {
     const content = `${BLOCK_START}\nexport X=1\n${BLOCK_END}\n`
     expect(removeBlock(removeBlock(content))).toBe(removeBlock(content))
   })
+})
 
-  it('upsertBlock replaces existing block (idempotent re-provision)', () => {
-    const old = `existing content\n${BLOCK_START}\nexport OLD=yes\n${BLOCK_END}\n`
-    const updated = upsertBlock(old, ['export NEW=yes'])
-    expect(updated).not.toContain('OLD=yes')
-    expect(updated).toContain('NEW=yes')
-    // Only one block after upsert.
-    expect((updated.match(new RegExp(BLOCK_START, 'g')) ?? []).length).toBe(1)
+describe('cutover to the usage extension (armUsageExtension)', () => {
+  const BLOCK_START = '# >>> TokenScope >>>'
+  const BLOCK_END = '# <<< TokenScope <<<'
+  let home: string
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'ts-cutover-'))
+  })
+  afterEach(() => rmSync(home, { recursive: true, force: true }))
+
+  it('removes the old exporter block from every rc that carries it, leaves the rest of each file, and touches no other rc', () => {
+    const withBlock = join(home, '.bashrc')
+    writeFileSync(withBlock, `# mine\n${BLOCK_START}\nexport COPILOT_OTEL_FILE_EXPORTER_PATH=".tokenscope.local/copilot-otel.jsonl"\n${BLOCK_END}\nalias ll='ls -l'\n`)
+    const without = join(home, '.profile')
+    writeFileSync(without, '# untouched\n')
+    const before = statSync(without).mtimeMs
+    const settingsPath = join(home, '.copilot', 'settings.json')
+
+    const r = armUsageExtension([withBlock, without, join(home, '.zshrc')], { settingsPath })
+    expect(r.rcCleaned).toEqual([withBlock])
+    const cleaned = readFileSync(withBlock, 'utf8')
+    expect(cleaned).not.toContain('COPILOT_OTEL_FILE_EXPORTER_PATH')
+    expect(cleaned).toContain('# mine')
+    expect(cleaned).toContain("alias ll='ls -l'")
+    expect(statSync(without).mtimeMs).toBe(before)
+    expect(existsSync(join(home, '.zshrc'))).toBe(false) // never creates an rc
+    expect(JSON.parse(readFileSync(settingsPath, 'utf8'))).toEqual({ enabledFeatureFlags: { EXTENSIONS: true }, extensions: { mode: 'load_only' } })
+    expect(statSync(settingsPath).mode & 0o777).toBe(0o600)
   })
 
-  it('upsertBlock appends a new block when none exists', () => {
-    const content = 'export PATH=$PATH:/usr/local/bin\n'
-    const result = upsertBlock(content, ['export TOKENSCOPE=1'])
-    expect(result).toContain(BLOCK_START)
-    expect(result).toContain('TOKENSCOPE=1')
-    expect(result).toContain(BLOCK_END)
+  it("finds Copilot's settings the way Copilot does: $COPILOT_HOME, else $HOME (not the passwd home)", () => {
+    const saved = process.env.HOME
+    process.env.HOME = home
+    try {
+      expect(copilotSettingsPath({})).toBe(join(home, '.copilot', 'settings.json'))
+      expect(copilotSettingsPath({ COPILOT_HOME: '/opt/ch' })).toBe('/opt/ch/settings.json')
+    } finally {
+      process.env.HOME = saved
+    }
+  })
+
+  it("merges the flag into Copilot's existing settings without losing other keys or flags", () => {
+    const settingsPath = join(home, 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({ theme: 'dark', enabledFeatureFlags: { AUTO_APPROVAL: true } }))
+    expect(enableExtensionsFeature(settingsPath)).toBe('enabled')
+    expect(JSON.parse(readFileSync(settingsPath, 'utf8'))).toEqual({
+      theme: 'dark',
+      enabledFeatureFlags: { AUTO_APPROVAL: true, EXTENSIONS: true },
+      extensions: { mode: 'load_only' },
+    })
+    expect(enableExtensionsFeature(settingsPath)).toBe('already')
+  })
+
+  it("sets load_only (the agent cannot create or load extensions) unless the user chose a mode, and never overrides 'disabled'", () => {
+    const settingsPath = join(home, 'settings.json')
+    // Already enabled, no mode: tightened to load_only.
+    writeFileSync(settingsPath, JSON.stringify({ enabledFeatureFlags: { EXTENSIONS: true } }))
+    expect(enableExtensionsFeature(settingsPath)).toBe('enabled')
+    expect(JSON.parse(readFileSync(settingsPath, 'utf8')).extensions).toEqual({ mode: 'load_only' })
+    // A mode the user chose is kept.
+    writeFileSync(settingsPath, JSON.stringify({ enabledFeatureFlags: { EXTENSIONS: true }, extensions: { mode: 'load_and_augment' } }))
+    expect(enableExtensionsFeature(settingsPath)).toBe('already')
+    expect(JSON.parse(readFileSync(settingsPath, 'utf8')).extensions.mode).toBe('load_and_augment')
+    // 'disabled' is the user's choice and capture needs extensions: manual, file untouched.
+    const off = JSON.stringify({ enabledFeatureFlags: { EXTENSIONS: true }, extensions: { mode: 'disabled' } })
+    writeFileSync(settingsPath, off)
+    expect(enableExtensionsFeature(settingsPath)).toBe('manual')
+    expect(readFileSync(settingsPath, 'utf8')).toBe(off)
+  })
+
+  it("Copilot's legacy config.json wins over settings.json: a mode or flags there are respected, never silently overridden", () => {
+    const settingsPath = join(home, 'settings.json')
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ extensions: { mode: 'disabled' } }))
+    const logs: string[] = []
+    expect(enableExtensionsFeature(settingsPath, { log: (m: string) => logs.push(m) })).toBe('manual')
+    expect(existsSync(settingsPath)).toBe(false) // nothing written that config.json would shadow
+    expect(logs.join(' ')).toMatch(/config\.json defines/)
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ enabledFeatureFlags: { EXTENSIONS: true } }))
+    expect(enableExtensionsFeature(settingsPath)).toBe('already')
+  })
+
+  it('logs the extension mode actually in effect, never a mode it did not set', () => {
+    const settingsPath = join(home, 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({ extensions: { mode: 'load_and_augment' } }))
+    const logs: string[] = []
+    expect(enableExtensionsFeature(settingsPath, { log: (m: string) => logs.push(m) })).toBe('enabled')
+    expect(logs.join(' ')).toMatch(/extension mode: load_and_augment/)
+    expect(logs.join(' ')).not.toMatch(/load_only/)
+    // A symlinked file with the flag on and no mode: 'already', and it says the mode is the default.
+    const target = join(home, 'linked.json')
+    writeFileSync(target, JSON.stringify({ enabledFeatureFlags: { EXTENSIONS: true } }))
+    const linked = join(home, 'linked-settings.json')
+    symlinkSync(target, linked)
+    const l2: string[] = []
+    expect(enableExtensionsFeature(linked, { log: (m: string) => l2.push(m) })).toBe('already')
+    expect(l2.join(' ')).toMatch(/mode is the default/)
+  })
+
+  it('a hand-written JSONC settings file is read (so a flag enabled by hand counts) but never rewritten', () => {
+    const settingsPath = join(home, 'settings.json')
+    const on = '// mine\n{\n  "enabledFeatureFlags": { "EXTENSIONS": true, },\n}\n'
+    writeFileSync(settingsPath, on)
+    expect(enableExtensionsFeature(settingsPath)).toBe('already')
+    expect(readFileSync(settingsPath, 'utf8')).toBe(on)
+    const offJsonc = '// mine\n{ "theme": "dark", }\n'
+    writeFileSync(settingsPath, offJsonc)
+    const logs: string[] = []
+    expect(enableExtensionsFeature(settingsPath, { log: (m: string) => logs.push(m) })).toBe('manual')
+    expect(readFileSync(settingsPath, 'utf8')).toBe(offJsonc)
+    expect(logs.join(' ')).toMatch(/edit it by hand/)
+  })
+
+  it("never quotes the settings file in its message (through a symlink it could be any file)", () => {
+    const secret = join(home, 'private.txt')
+    writeFileSync(secret, 'TOP-SECRET-VALUE not json')
+    const settingsPath = join(home, 'settings.json')
+    symlinkSync(secret, settingsPath)
+    const logs: string[] = []
+    expect(enableExtensionsFeature(settingsPath, { log: (m: string) => logs.push(m) })).toBe('manual')
+    expect(logs.join(' ')).not.toMatch(/TOP-SECRET/)
+    expect(logs.join(' ')).toMatch(/syntax TokenScope cannot read/)
+  })
+
+  it("never rewrites a settings file it cannot parse (Copilot's own format), and says how to enable it", () => {
+    const settingsPath = join(home, 'settings.json')
+    const jsonc = '// copilot settings\n{ "theme": "dark", }\n'
+    writeFileSync(settingsPath, jsonc)
+    const logs: string[] = []
+    expect(enableExtensionsFeature(settingsPath, { log: (m: string) => logs.push(m) })).toBe('manual')
+    expect(readFileSync(settingsPath, 'utf8')).toBe(jsonc)
+    expect(logs.join(' ')).toMatch(/"EXTENSIONS": true/)
+  })
+
+  it('a settings file that cannot be written is the manual path, with the same guidance, never a throw', () => {
+    const blocker = join(home, 'not-a-dir')
+    writeFileSync(blocker, 'x') // the settings "directory" is a file, so mkdir fails
+    const logs: string[] = []
+    expect(enableExtensionsFeature(join(blocker, 'settings.json'), { log: (m: string) => logs.push(m) })).toBe('manual')
+    expect(logs.join(' ')).toMatch(/"EXTENSIONS": true/)
+  })
+
+  it('never writes through a symlinked settings file, but reads one: enabled by hand is recognised', () => {
+    const target = join(home, 'elsewhere.json')
+    writeFileSync(target, '{}')
+    const settingsPath = join(home, 'settings.json')
+    symlinkSync(target, settingsPath)
+    expect(enableExtensionsFeature(settingsPath)).toBe('manual')
+    expect(readFileSync(target, 'utf8')).toBe('{}')
+    writeFileSync(target, JSON.stringify({ enabledFeatureFlags: { EXTENSIONS: true } }))
+    expect(enableExtensionsFeature(settingsPath)).toBe('already')
+    expect(lstatSync(settingsPath).isSymbolicLink()).toBe(true)
+  })
+
+  const legacyRc = `# mine\n${BLOCK_START}\nexport COPILOT_OTEL_FILE_EXPORTER_PATH="x"\n${BLOCK_END}\n`
+
+  it('make before break: when the feature cannot be enabled, the old exporter block stays', () => {
+    const rc = join(home, '.bashrc')
+    writeFileSync(rc, legacyRc)
+    const settingsPath = join(home, 'settings.json')
+    writeFileSync(settingsPath, '// jsonc\n{}')
+    const r = armUsageExtension([rc], { settingsPath })
+    expect(r).toEqual({ rcCleaned: [], extensions: 'manual', projectsCleaned: [] })
+    expect(readFileSync(rc, 'utf8')).toBe(legacyRc)
+  })
+
+  it('keeps the rc file mode, and reports a symlinked rc instead of replacing the link', () => {
+    const rc = join(home, '.bashrc')
+    writeFileSync(rc, legacyRc)
+    chmodSync(rc, 0o600)
+    const real = join(home, 'dotfiles-zshrc')
+    writeFileSync(real, legacyRc)
+    const link = join(home, '.zshrc')
+    symlinkSync(real, link)
+    const logs: string[] = []
+    const r = armUsageExtension([rc, link], { settingsPath: join(home, 'settings.json'), log: (m: string) => logs.push(m) })
+    expect(r.rcCleaned).toEqual([rc])
+    expect(statSync(rc).mode & 0o777).toBe(0o600)
+    expect(lstatSync(link).isSymbolicLink()).toBe(true)
+    expect(readFileSync(real, 'utf8')).toBe(legacyRc)
+    expect(logs.join(' ')).toMatch(/symlink/)
+  })
+
+  it('an rc that cannot be read is reported and skipped; the other rc files are still cleaned', () => {
+    const broken = join(home, '.profile')
+    mkdirSync(broken) // EISDIR on read
+    const rc = join(home, '.bashrc')
+    writeFileSync(rc, legacyRc)
+    const logs: string[] = []
+    const r = armUsageExtension([broken, rc], { settingsPath: join(home, 'settings.json'), log: (m: string) => logs.push(m) })
+    expect(r.rcCleaned).toEqual([rc])
+    expect(logs.join(' ')).toMatch(/Could not clean .*\.profile/)
+  })
+
+  it('at migration, removes the legacy forwarder files from each project once, and nothing else there', () => {
+    const p1 = join(home, 'repo1')
+    const p2 = join(home, 'repo2')
+    for (const p of [p1, p2]) mkdirSync(join(p, '.tokenscope.local'), { recursive: true })
+    for (const f of ['copilot-otel.jsonl', 'forwarder-offset', 'copilot-forwarder.pid']) writeFileSync(join(p1, '.tokenscope.local', f), 'x')
+    writeFileSync(join(p2, '.tokenscope.local', 'copilot-otel.jsonl'), 'x')
+    writeFileSync(join(p2, '.tokenscope.local', 'user-notes.txt'), 'keep me')
+    writeFileSync(join(p1, '.tokenscope'), 'committed project code')
+    const r = armUsageExtension([], { settingsPath: join(home, 'settings.json'), projectDirs: [p1, p2, p1, 'relative/dir'] })
+    expect(r.projectsCleaned.sort()).toEqual([p1, p2].sort())
+    expect(existsSync(join(p1, '.tokenscope.local'))).toBe(false)
+    expect(existsSync(join(p1, '.tokenscope'))).toBe(true)
+    expect(existsSync(join(p2, '.tokenscope.local', 'copilot-otel.jsonl'))).toBe(false)
+    expect(readFileSync(join(p2, '.tokenscope.local', 'user-notes.txt'), 'utf8')).toBe('keep me')
+  })
+
+  it('does not remove them when the migration could not enable extensions (the forwarder still needs them)', () => {
+    const p1 = join(home, 'repo1')
+    mkdirSync(join(p1, '.tokenscope.local'), { recursive: true })
+    writeFileSync(join(p1, '.tokenscope.local', 'copilot-otel.jsonl'), 'x')
+    const settingsPath = join(home, 'settings.json')
+    writeFileSync(settingsPath, '// jsonc\n{}')
+    expect(armUsageExtension([], { settingsPath, projectDirs: [p1] }).projectsCleaned).toEqual([])
+    expect(existsSync(join(p1, '.tokenscope.local', 'copilot-otel.jsonl'))).toBe(true)
+  })
+
+  it("finds the projects to clean: the current one plus Copilot's trusted folders (config read, never written)", () => {
+    const ch = join(home, 'ch')
+    mkdirSync(ch)
+    const cfg = '{"trustedFolders":["/a/repo","/b/repo"],"other":1}'
+    writeFileSync(join(ch, 'config.json'), cfg)
+    expect(legacyProjectDirs('/cwd/repo', join(ch, 'settings.json'))).toEqual(['/cwd/repo', '/a/repo', '/b/repo'])
+    expect(readFileSync(join(ch, 'config.json'), 'utf8')).toBe(cfg)
+    expect(legacyProjectDirs('/cwd/repo', join(home, 'none', 'settings.json'))).toEqual(['/cwd/repo'])
+    // Read the way every other reader reads Copilot's files: comments and trailing commas tolerated.
+    writeFileSync(join(ch, 'config.json'), '// mine\n{ "trustedFolders": ["/a/repo",], }\n')
+    expect(legacyProjectDirs('/cwd/repo', join(ch, 'settings.json'))).toEqual(['/cwd/repo', '/a/repo'])
+  })
+
+  it('a start marker with no end marker leaves the file alone (never deletes to end of file)', () => {
+    const torn = `# mine\n${BLOCK_START}\nexport X=1\nalias ll='ls -l'\n`
+    expect(removeBlock(torn)).toBe(torn)
+    const nested = `${BLOCK_START}\nexport A=1\n# user line\n${BLOCK_START}\nexport B=2\n${BLOCK_END}\n`
+    expect(removeBlock(nested)).toBe(nested)
+    const twoBlocks = `${BLOCK_START}\nexport A=1\n${BLOCK_END}\n# keep\n${BLOCK_START}\nexport B=2\n${BLOCK_END}\n`
+    expect(removeBlock(twoBlocks)).toBe('# keep\n')
+    const rc = join(home, '.bashrc')
+    writeFileSync(rc, torn)
+    expect(armUsageExtension([rc], { settingsPath: join(home, 'settings.json') }).rcCleaned).toEqual([])
+    expect(readFileSync(rc, 'utf8')).toBe(torn)
   })
 })
 
-describe('detectShellRcTargets — login + non-login coverage (the .bashrc-only bug fix)', () => {
-  // Regression: writing only ~/.bashrc left COPILOT_OTEL_FILE_EXPORTER_PATH unset on
-  // LOGIN-shell launches (SSH, tmux, many terminals) — they read ~/.profile /
-  // ~/.bash_profile, not ~/.bashrc — so Copilot emitted nothing.
-  it('bash without ~/.bash_profile → ~/.bashrc AND ~/.profile', () => {
-    expect(detectShellRcTargets(undefined, dir, '/bin/bash')).toEqual([
-      join(dir, '.bashrc'),
-      join(dir, '.profile'),
-    ])
+describe('--remove (uninstall) cleans rc files the same way migration does', () => {
+  it('removes the block from every rc, keeps each file mode, and never replaces a symlinked rc', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ts-remove-'))
+    try {
+      const block = `# mine\n# >>> TokenScope >>>\nexport COPILOT_OTEL_FILE_EXPORTER_PATH="x"\n# <<< TokenScope <<<\n`
+      writeFileSync(join(home, '.bashrc'), block)
+      chmodSync(join(home, '.bashrc'), 0o600)
+      writeFileSync(join(home, '.zshrc'), block) // written under another shell
+      writeFileSync(join(home, 'dotfiles-profile'), block)
+      symlinkSync(join(home, 'dotfiles-profile'), join(home, '.profile'))
+      const r = spawnSync(process.execPath, [join(__dirname, '../../../plugin/scripts/copilot-redeem.mjs'), '--remove'], {
+        env: { ...process.env, HOME: home, SHELL: '/bin/bash' },
+        encoding: 'utf8',
+      })
+      expect(r.status).toBe(0)
+      for (const f of ['.bashrc', '.zshrc']) expect(readFileSync(join(home, f), 'utf8')).toBe('# mine\n')
+      expect(statSync(join(home, '.bashrc')).mode & 0o777).toBe(0o600)
+      expect(lstatSync(join(home, '.profile')).isSymbolicLink()).toBe(true)
+      expect(r.stdout).toMatch(/\.profile is a symlink/)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
-  it('bash WITH ~/.bash_profile → also writes it (it shadows ~/.profile for login bash)', () => {
-    writeFileSync(join(dir, '.bash_profile'), '# x\n')
-    expect(detectShellRcTargets(undefined, dir, '/bin/bash')).toEqual([
-      join(dir, '.bashrc'),
-      join(dir, '.profile'),
-      join(dir, '.bash_profile'),
-    ])
+  it('a block left only in a symlinked rc is reported, not "nothing to remove"', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ts-remove-link-'))
+    try {
+      writeFileSync(join(home, 'dotfiles-profile'), '# >>> TokenScope >>>\nexport X=1\n# <<< TokenScope <<<\n')
+      symlinkSync(join(home, 'dotfiles-profile'), join(home, '.profile'))
+      const r = spawnSync(process.execPath, [join(__dirname, '../../../plugin/scripts/copilot-redeem.mjs'), '--remove'], {
+        env: { ...process.env, HOME: home },
+        encoding: 'utf8',
+      })
+      expect(r.stdout).toMatch(/\.profile is a symlink/)
+      expect(r.stdout).not.toMatch(/nothing to remove/)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('detectShellRcTargets — cleanup reaches every rc an earlier setup may have written', () => {
+  it('every supported rc that exists, whatever the current shell (a bash block survives a switch to zsh)', () => {
+    expect(detectShellRcTargets(undefined, dir)).toEqual([])
+    for (const f of ['.bashrc', '.profile', '.zshrc', '.zshenv']) writeFileSync(join(dir, f), '# x\n')
+    writeFileSync(join(dir, '.not-an-rc'), '# x\n')
+    expect(detectShellRcTargets(undefined, dir).sort()).toEqual(['.bashrc', '.profile', '.zshenv', '.zshrc'].map((f) => join(dir, f)).sort())
   })
 
-  it('bash WITH ~/.bash_login (no ~/.bash_profile) → also writes it', () => {
-    writeFileSync(join(dir, '.bash_login'), '# x\n')
-    expect(detectShellRcTargets(undefined, dir, '/bin/bash')).toEqual([
-      join(dir, '.bashrc'),
-      join(dir, '.profile'),
-      join(dir, '.bash_login'),
-    ])
-  })
-
-  it('zsh → ~/.zshrc, plus ~/.zprofile/~/.zshenv only when they already exist', () => {
-    expect(detectShellRcTargets(undefined, dir, '/bin/zsh')).toEqual([join(dir, '.zshrc')])
-    writeFileSync(join(dir, '.zshenv'), '# x\n')
-    expect(detectShellRcTargets(undefined, dir, '/usr/bin/zsh')).toEqual([
-      join(dir, '.zshrc'),
-      join(dir, '.zshenv'),
-    ])
-  })
-
-  it('explicit --shell-rc overrides detection (single target)', () => {
-    expect(detectShellRcTargets('/custom/rc', dir, '/bin/bash')).toEqual(['/custom/rc'])
+  it('explicit --shell-rc names the one file', () => {
+    expect(detectShellRcTargets('/custom/rc', dir)).toEqual(['/custom/rc'])
   })
 })
 
@@ -507,9 +741,8 @@ describe('the durable credential store does not follow a moved $HOME', () => {
     // The other direction, so the anchor change is not over-applied: an rc file
     // is executed by the user's SHELL, which finds it through $HOME. Only the
     // credential moved to the passwd home.
-    expect(detectShellRcTargets(undefined, dir, '/bin/bash')).toEqual([
-      join(dir, '.bashrc'),
-      join(dir, '.profile'),
-    ])
+    writeFileSync(join(dir, '.bashrc'), '# x\n')
+    writeFileSync(join(dir, '.profile'), '# x\n')
+    expect(detectShellRcTargets(undefined, dir)).toEqual([join(dir, '.bashrc'), join(dir, '.profile')])
   })
 })

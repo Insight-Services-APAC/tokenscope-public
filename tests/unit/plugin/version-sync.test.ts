@@ -124,7 +124,7 @@ describe('distribution manifest — S1: every file under plugin/scripts/ must be
   // omitted — each is referenced only INDIRECTLY (a dynamic join, not a
   // static import), which is exactly the shape the heuristic above must not
   // miss.
-  it.each(['statusline.mjs', 'statusline-toggle.mjs', 'tokenscope-reader.mjs', 'otlp-shim-policy.mjs', 'otlp-logs.mjs'])(
+  it.each(['statusline.mjs', 'statusline-toggle.mjs', 'tokenscope-reader.mjs', 'otlp-logs.mjs'])(
     '%s is present and reachable',
     (name) => {
       expect(scriptFiles).toContain(name)

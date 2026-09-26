@@ -82,9 +82,11 @@ const isDirectRun = !!process.argv[1] && resolve(process.argv[1]) === fileURLToP
 
 if (isDirectRun && (action === 'start' || action === '--start')) {
   // EMIT-ON-INSTALL: on a FRESH install of the real (publish-injected) plugin,
-  // enrol now — BEFORE spawning the forwarder — so this very session emits with no
-  // login. enrollIfNeeded writes ~/.tokenscope/config.copilot-cli.json, which the forwarder
-  // then reads (loadConfig) on spawn, so the order matters on a fresh install. It
+  // enrol now, with no login. The Copilot App captures this very session (it loads the
+  // usage extension by default, and the extension checks enrolment per record); the
+  // CLI from its next launch, because enrolment enables its EXTENSIONS feature and the
+  // CLI reads that only at process start. enrollIfNeeded writes the store before the
+  // forwarder spawns, which a legacy-exporter session still needs. It
   // is a strict NO-OP when already enrolled or when no bundled secret is configured
   // (dev), and is bounded by its own ~4s timeout. Fail-OPEN + fast: any failure (or
   // a slow network) must NEVER block the forwarder spawn or break the session, so

@@ -129,18 +129,17 @@ you pick one, and it:
 
 - writes a committable `./.tokenscope` (`project.code: <code>`, preserving any
   existing fields) so the tag travels with the repo, then
-- writes the **repo-local** `./.claude/settings.local.json` (mode 0600): a FULL
-  copy of the device's current global `env`, with `OTEL_RESOURCE_ATTRIBUTES`
+- writes the **repo-local** `./.claude/settings.local.json` (mode 0600): a copy
+  of the device's current global `env`, with `OTEL_RESOURCE_ATTRIBUTES`
   overridden to
-  `tokenscope.instance_id=<DEVICE_SID>,project.code_hash=<sha256(code)>,tool=claude-code`.
-  The full copy is **not** required by the merge semantics: Claude Code merges
-  the blocks **per key**, with the repo-local value winning a conflict (captured
-  against 2.1.232 —
-  [`env-precedence-capture.md`](../docs/security-sprint/env-precedence-capture.md);
-  ADR-0006 §2 previously claimed replacement and is amended). A narrowed block
-  would inherit the endpoint/bearer rather than drop them. The copy is kept
-  because only one client version has been measured and a device on a build that
-  behaved otherwise would silently stop emitting.
+  `tokenscope.instance_id=<DEVICE_SID>,project.code_hash=<sha256(code)>,tool=claude-code`,
+  and WITHOUT the telemetry-enabling keys (`CLAUDE_CODE_ENABLE_TELEMETRY`, the OTel
+  exporters, the logs endpoint and protocol). Claude Code merges the blocks **per
+  key** (captured on 2.1.232,
+  [`env-precedence-capture.md`](../docs/security-sprint/env-precedence-capture.md)),
+  so those apply from the user settings; from 2.1.283 it refuses them from a
+  project file anyway, while the project tag still applies
+  ([`env-precedence-capture-2.1.283.md`](../docs/security-sprint/env-precedence-capture-2.1.283.md)).
   The durable OAuth **refresh token** specifically is excluded
   from the copy — the one credential a hostile repo could otherwise exfiltrate
   merely by being cloned and opened — and `otel-headers-helper.sh` falls back to

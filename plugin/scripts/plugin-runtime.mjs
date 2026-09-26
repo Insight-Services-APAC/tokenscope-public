@@ -229,7 +229,7 @@ export function resolveHelperPath() {
 /**
  * The TokenScope state dir (TOKENSCOPE_STATE_DIR or ~/.tokenscope), anchored on
  * the passwd home so it is stable across a leaked `HOME`. This dir is
- * plugin-owned (forwarder stash/log/pid, landed state) — it is NOT `~/.claude`,
+ * plugin-owned (token cache, failure sentinels, landed state) — it is NOT `~/.claude`,
  * which stays on `homedir()` to match Claude Code's own settings resolution.
  *
  * The `env` parameter is accepted but deliberately UNUSED (kept only for
@@ -688,12 +688,21 @@ export function safeProcessEnv(env = process.env) {
  * drops TOKENSCOPE_STATE_DIR) or a dir they resolved themselves are already
  * safe; a caller reading ambient process.env must pass trustedStateDir().
  */
-export function readEmitSentinel(env = process.env, dir = stateDir(env)) {
+export function readEmitSentinel(env = process.env, dir = stateDir(env), tool = 'claude-code') {
   try {
-    return JSON.parse(readFileSync(join(dir, 'emit-failure.json'), 'utf8'))
+    return JSON.parse(readFileSync(join(dir, emitSentinelName(tool)), 'utf8'))
   } catch {
     return null
   }
+}
+
+/**
+ * The helper's failure sentinel for one emit lane (`otel-headers-helper.sh`
+ * SENTINEL). Per tool, like the store, so one lane's failure never reads as
+ * another's.
+ */
+export function emitSentinelName(tool) {
+  return `emit-failure.${tool}.json`
 }
 
 /**

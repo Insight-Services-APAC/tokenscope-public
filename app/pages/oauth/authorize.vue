@@ -1,14 +1,16 @@
 <script setup lang="ts">
 /*
- * OAuth consent page. The GET /api/v1/oauth/authorize endpoint gates the Entra
- * session + validates the client, then 302s the browser here with the OAuth
- * params. We show the requested scopes + Approve/Deny and POST the decision to
- * /api/v1/oauth/authorize with Accept: application/json — the server returns the
- * callback URL as DATA (not a 302), so we can render a Copy button. That is the
- * paste-back path for containerized clients whose loopback redirect can never be
- * reached; clients that CAN receive it just "open" the callback. (Mirrors the
- * production-proven a sibling project flow.)
+ * OAuth consent page. GET /api/v1/oauth/authorize validates the session + client
+ * and 302s here; Approve/Deny POSTs back with Accept: application/json and gets
+ * the callback URL as DATA. An approved LOOPBACK callback (RFC 8252 native app)
+ * is delivered in a tab opened on the Approve click (a navigation, so Local
+ * Network Access does not block it), and this page stays put. It polls
+ * /api/v1/oauth/code-status: redeemed → connected; not redeemed within
+ * UNDELIVERED_AFTER_MS → the loopback is unreachable (e.g. a containerized
+ * client), so it leads with the Copy-URL paste-back.
  */
+import { isAllowedCallbackScheme, isLoopbackCallback } from '#shared/oauth-callback'
+import type { AuthorizeResult } from '#shared/schemas/oauth'
 // Shared with the server grant-review UIs so consent + review read the same words.
 import { oauthScopeLabel as scopeLabel } from '#shared/oauth-scopes'
 
@@ -94,16 +96,131 @@ const submitError = ref<string | null>(null)
 const copied = ref(false)
 const submitAction = ref<'approve' | 'deny' | null>(null)
 
+// Fast while the client should be answering, then slow for a manual paste: ~35
+// requests per consent, inside the per-IP 150/5 min limiter the rest of the app
+// shares. A failed poll (429, 5xx, timeout) waits the slow interval.
+const FAST_POLL_MS = 1000
+const SLOW_POLL_MS = 5000
+const UNDELIVERED_AFTER_MS = 8000
+const POLL_UNTIL_MS = 2 * 60 * 1000
+// A stalled request must not freeze polling, the deadline, or the consent itself.
+const STATUS_TIMEOUT_MS = 4000
+const AUTHORIZE_TIMEOUT_MS = 15_000
+const delivery = ref<'none' | 'delivering' | 'delivered' | 'undelivered'>('none')
+// Only closable while still same-origin about:blank: once it navigates, COOP
+// same-origin (nuxt-security default) severs this handle.
+let blankTab: Window | null = null
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let undeliveredTimer: ReturnType<typeof setTimeout> | null = null
+let statusAbort: AbortController | null = null
+let authorizeAbort: AbortController | null = null
+let unmounted = false
+// A deny/error callback for the waiting client, for every scheme the guard
+// allows. Nothing can confirm a client received it (there is no code to poll),
+// so Copy URL stays even after it was sent: an unreachable (e.g. containerized)
+// client can only get it by paste. Open is a click, a user gesture that popup
+// blockers allow.
+const handoffUrl = ref<string | null>(null)
+const handoffSent = ref(false)
+
+onBeforeUnmount(() => {
+  unmounted = true
+  if (pollTimer) clearTimeout(pollTimer)
+  if (undeliveredTimer) clearTimeout(undeliveredTimer)
+  statusAbort?.abort()
+  authorizeAbort?.abort()
+})
+
+/** The pre-opened tab, if the user has not closed it; navigating a closed one is silently ignored. */
+function takeBlankTab(): Window | null {
+  const tab = blankTab && !blankTab.closed ? blankTab : null
+  blankTab = null
+  return tab
+}
+
+/** Navigate `tab` to `url`; false if it could not be done. */
+function navigate(tab: Window | null, url: string): boolean {
+  if (!tab) return false
+  try {
+    tab.location.href = url
+    return true
+  } catch {
+    return false
+  }
+}
+
+function pollRedeemed(code: string, startedAt: number, lastFailed = false) {
+  const elapsedNow = Date.now() - startedAt
+  const wait = lastFailed || elapsedNow >= UNDELIVERED_AFTER_MS ? SLOW_POLL_MS : FAST_POLL_MS
+  pollTimer = setTimeout(async () => {
+    pollTimer = null
+    if (unmounted || Date.now() - startedAt >= POLL_UNTIL_MS) return
+    const abort = (statusAbort = new AbortController())
+    const timeout = setTimeout(() => abort.abort(), STATUS_TIMEOUT_MS)
+    let failed = false
+    try {
+      const res = await $fetch<{ redeemed: boolean }>('/api/v1/oauth/code-status', {
+        method: 'POST',
+        body: { code },
+        signal: abort.signal,
+      })
+      if (res.redeemed && !unmounted) {
+        if (undeliveredTimer) clearTimeout(undeliveredTimer)
+        delivery.value = 'delivered'
+        return
+      }
+    } catch {
+      failed = true // rate-limited, errored or timed out: unknown, not "not redeemed"
+    } finally {
+      clearTimeout(timeout)
+      statusAbort = null
+    }
+    if (unmounted) return
+    if (Date.now() - startedAt < POLL_UNTIL_MS) pollRedeemed(code, startedAt, failed)
+  }, wait)
+}
+
+/** Loopback only. `code` is null for a deny / error callback: hand it over so the client stops waiting, nothing to watch. */
+function startDelivery(url: string, code: string | null) {
+  if (unmounted) return
+  const delivered = navigate(takeBlankTab(), url)
+  if (!code) {
+    handoffSent.value = delivered
+    return
+  }
+  if (delivered) {
+    delivery.value = 'delivering'
+    undeliveredTimer = setTimeout(() => {
+      undeliveredTimer = null
+      if (delivery.value === 'delivering') delivery.value = 'undelivered'
+    }, UNDELIVERED_AFTER_MS)
+  } else {
+    delivery.value = 'undelivered'
+  }
+  pollRedeemed(code, Date.now())
+}
+
 async function handleSubmit(action: 'approve' | 'deny') {
   submitting.value = true
   submitError.value = null
+  handoffUrl.value = null
+  handoffSent.value = false
   submitAction.value = action
+  // Opened synchronously inside the click so popup blockers allow it; it is
+  // navigated only once the callback URL passes the scheme guard.
+  if (isLoopbackCallback(redirectUri.value)) {
+    blankTab = window.open('', '_blank')
+    if (blankTab) blankTab.opener = null
+  }
+  const abort = (authorizeAbort = new AbortController())
+  const timeout = setTimeout(() => abort.abort(), AUTHORIZE_TIMEOUT_MS)
   try {
-    const body = await $fetch<{ redirect_url?: string; error?: string; error_description?: string }>(
+    const body = await $fetch<AuthorizeResult>(
       '/api/v1/oauth/authorize',
       {
         method: 'POST',
         headers: { Accept: 'application/json' },
+        signal: abort.signal,
         body: {
           response_type: responseType.value || 'code',
           client_id: clientId.value,
@@ -116,40 +233,55 @@ async function handleSubmit(action: 'approve' | 'deny') {
         },
       },
     )
-    if (body.redirect_url) {
-      callbackUrl.value = body.redirect_url
-    } else {
-      submitError.value = body.error_description || body.error || 'Unexpected response from server'
+    if (unmounted) return
+    if (body.outcome !== 'code' && isAllowedCallbackScheme(body.redirect_url, window.location.origin)) {
+      handoffUrl.value = body.redirect_url
     }
+    if (isLoopbackCallback(body.redirect_url)) {
+      startDelivery(body.redirect_url, body.outcome === 'code' ? body.code : null)
+    }
+    if (body.outcome === 'error') submitError.value = body.error_description
+    else callbackUrl.value = body.redirect_url
   } catch (err) {
+    if (unmounted) return
     const e = err as { data?: { error_description?: string; error?: string }; message?: string }
-    submitError.value = e?.data?.error_description || e?.data?.error || e?.message || 'Request failed'
+    submitError.value = abort.signal.aborted
+      ? 'The request took too long. Please try again.'
+      : e?.data?.error_description || e?.data?.error || e?.message || 'Request failed'
   } finally {
+    clearTimeout(timeout)
+    authorizeAbort = null
     submitting.value = false
+    blankTab?.close()
+    blankTab = null
   }
 }
 
-/*
- * Validate the callback URL's scheme before opening (port of a sibling project's guard).
- * The redirect_uri is already validated server-side against the registered client
- * (loopback-only per RFC 8252), but defence-in-depth: never window.open a
- * javascript:/data:/file: URL rendered into the address bar.
- */
-function isAllowedCallbackScheme(url: string): boolean {
+function handOffToClient() {
+  const url = handoffUrl.value
+  if (!url || !isAllowedCallbackScheme(url, window.location.origin)) return
+  // No 'noopener' feature: with it window.open always returns null, so a block
+  // could not be told apart. The opener is severed before the tab runs script.
+  const tab = window.open(url, '_blank')
+  if (!tab) return
+  tab.opener = null
+  handoffSent.value = true
+}
+
+async function copyHandoffUrl() {
+  if (!handoffUrl.value) return
   try {
-    const parsed = new URL(url, window.location.origin)
-    if (parsed.protocol === 'https:') return true
-    const host = parsed.hostname.replace(/^\[|\]$/g, '')
-    if (parsed.protocol === 'http:' && /^(?:localhost|127\.\d+\.\d+\.\d+|::1)$/.test(host)) return true
-    return false
+    await navigator.clipboard.writeText(handoffUrl.value)
+    copied.value = true
+    setTimeout(() => (copied.value = false), 2000)
   } catch {
-    return false
+    /* clipboard unavailable — the URL is selectable in the box */
   }
 }
 
 function openCallback() {
   if (!callbackUrl.value) return
-  if (!isAllowedCallbackScheme(callbackUrl.value)) {
+  if (!isAllowedCallbackScheme(callbackUrl.value, window.location.origin)) {
     submitError.value = 'Refusing to open callback URL with a disallowed scheme.'
     return
   }
@@ -214,19 +346,32 @@ async function copyCallbackUrl() {
         {{ submitError }}
       </div>
 
-      <!-- Approved → show callback URL (Copy + try-open) -->
+      <!-- Approved + redeemed: the client has its token -->
+      <div v-else-if="callbackUrl && submitAction === 'approve' && delivery === 'delivered'" class="rounded-lg border border-rag-green/30 bg-rag-green/5 p-3" data-testid="authorize-delivered">
+        <p class="text-sm font-semibold text-rag-green">Connected</p>
+        <p class="mt-1 text-xs text-carbon-2">Your MCP client is signed in. You may close this window and the client's tab.</p>
+      </div>
+
+      <!-- Approved → callback URL; Copy URL is the paste-back path when delivery fails or is not attempted -->
       <div v-else-if="callbackUrl && submitAction === 'approve'" class="space-y-3" data-testid="authorize-approved">
         <div class="rounded-lg border border-rag-green/30 bg-rag-green/5 p-3">
           <p class="text-sm font-semibold text-rag-green">Authorization approved</p>
-          <p class="mt-1 text-xs text-carbon-2">Copy the URL below and paste it into your MCP client when prompted.</p>
+          <p v-if="delivery === 'delivering'" class="mt-1 text-xs text-carbon-2" data-testid="authorize-delivering">
+            Sending the sign-in to your MCP client…
+          </p>
+          <p v-else-if="delivery === 'undelivered'" class="mt-1 text-xs text-carbon-2" data-testid="authorize-undelivered">
+            We couldn't confirm that your MCP client received this. If it runs in a container, the other tab shows a
+            connection error (close it): copy the URL below and paste it into your client when prompted.
+          </p>
+          <p v-else class="mt-1 text-xs text-carbon-2">Copy the URL below and paste it into your MCP client when prompted.</p>
         </div>
         <div class="relative rounded-lg border border-calm-2 bg-calm p-3">
           <button class="absolute right-2 top-2 rounded px-2 py-0.5 text-[11px] font-medium bg-calm-2 text-carbon-2 hover:bg-calm-3" data-testid="authorize-copy" @click="copyCallbackUrl">
             {{ copied ? 'Copied!' : 'Copy URL' }}
           </button>
-          <p class="break-all pr-16 text-xs font-mono text-carbon-2">{{ callbackUrl }}</p>
+          <p class="break-all pr-16 text-xs font-mono text-carbon-2" data-testid="authorize-callback-url">{{ callbackUrl }}</p>
         </div>
-        <button class="block w-full text-center text-[11px] text-carbon-3 hover:text-carbon-2" @click="openCallback">
+        <button v-if="delivery !== 'delivering'" class="block w-full text-center text-[11px] text-carbon-3 hover:text-carbon-2" data-testid="authorize-open" @click="openCallback">
           Or try opening the callback in a new tab
         </button>
       </div>
@@ -237,8 +382,25 @@ async function copyCallbackUrl() {
         <p class="mt-1 text-xs text-carbon-2">You may close this window.</p>
       </div>
 
-      <!-- Consent buttons -->
-      <div v-else class="flex gap-3">
+      <!-- Deny / error callback: kept, since nothing can confirm the client received it -->
+      <div v-if="handoffUrl" class="mt-3 space-y-2" data-testid="authorize-handoff">
+        <p v-if="handoffSent" class="text-xs text-carbon-2" data-testid="authorize-handoff-sent">
+          Sent to your MCP client. If it didn't get it (for example, it runs in a container), copy the URL and paste it into the client.
+        </p>
+        <p v-else class="text-xs text-carbon-2">Your MCP client is still waiting for this answer. Open it, or copy the URL and paste it into the client.</p>
+        <div class="flex gap-2">
+          <button class="rounded px-2 py-1 text-xs font-medium bg-calm-2 text-carbon-2 hover:bg-calm-3" data-testid="authorize-handoff-open" @click="handOffToClient">
+            Open in a new tab
+          </button>
+          <button class="rounded px-2 py-1 text-xs font-medium bg-calm-2 text-carbon-2 hover:bg-calm-3" data-testid="authorize-handoff-copy" @click="copyHandoffUrl">
+            {{ copied ? 'Copied!' : 'Copy URL' }}
+          </button>
+        </div>
+        <p class="break-all rounded border border-calm-2 bg-calm p-2 text-xs font-mono text-carbon-2" data-testid="authorize-handoff-url">{{ handoffUrl }}</p>
+      </div>
+
+      <!-- Consent buttons: also after a failed request, so the user can retry -->
+      <div v-if="!paramError && !clientInfoError && !callbackUrl && !handoffUrl" class="flex gap-3">
         <UiButton kind="ghost" class="flex-1" :disabled="submitting" data-testid="authorize-deny" @click="handleSubmit('deny')">Deny</UiButton>
         <UiButton kind="primary" class="flex-1" :disabled="submitting" data-testid="authorize-approve" @click="handleSubmit('approve')">
           {{ submitting ? 'Authorizing…' : 'Approve' }}

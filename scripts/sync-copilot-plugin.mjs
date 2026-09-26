@@ -32,8 +32,8 @@ const FILES = [
   // un-gated extracted module drifts silently → split attribution (P0-2).
   { name: 'tokenscope-project.mjs', type: 'js' },
   { name: 'otel-headers-helper.sh', type: 'sh' },
-  // endpoint-guard.mjs (S1) — the ONE endpoint validator (assertSafeEndpoint /
-  // isUsableDce). Dependency-free by design so it vendors verbatim; MUST stay
+  // endpoint-guard.mjs (S1) — the ONE endpoint validator (assertSafeEndpoint).
+  // Dependency-free by design so it vendors verbatim; MUST stay
   // gated the same way tokenscope-project.mjs is — a second, un-gated guard
   // is exactly what this epic's opening principle forbids.
   { name: 'endpoint-guard.mjs', type: 'js' },
@@ -82,6 +82,10 @@ const FILES = [
   // resolves a bare command name from the cwd before PATH. A drifted copy here
   // is a repository executing its own git.exe on one client only.
   { name: 'trusted-git.mjs', type: 'js' },
+  // copilot-emit.mjs — the ONE credential/bearer/POST path, shared by the file
+  // forwarder and the usage extension. copilot-usage.mjs — the extension core.
+  { name: 'copilot-emit.mjs', type: 'js' },
+  { name: 'copilot-usage.mjs', type: 'js' },
 ]
 
 // Single-line SYNC NOTE markers — the parity check strips lines starting with these.

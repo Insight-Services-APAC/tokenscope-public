@@ -428,7 +428,7 @@ describe('run — S1 fix 3: the ingest endpoint is validated BEFORE any network 
     ).rejects.toThrow(/-/)
   })
 
-  it('a loopback http endpoint (the CC #72671 local forwarder) PASSES validation — fails at the next gate instead', async () => {
+  it('a loopback http endpoint (a local ingest stub) PASSES validation — fails at the next gate instead', async () => {
     // Can't drive a full emit in a unit test (no real helper/network); what
     // matters here is that it does NOT fail at the endpoint-validation step.
     // It fails at the NEXT gate (missing otel-headers-helper.sh), proving

@@ -31,6 +31,8 @@
     "format": "prettier --write .",
     "sync:copilot-plugin": "node scripts/sync-copilot-plugin.mjs",
     "check:copilot-plugin-sync": "node scripts/check-copilot-plugin-sync.mjs",
+    "check:copilot-extension-isolation": "node scripts/copilot-extension-isolation-check.mjs",
+    "check:copilot-usage-e2e": "node scripts/copilot-usage-e2e.mjs",
     "sync:skill-prompts": "node scripts/sync-skill-prompts.mjs",
     "check:skill-prompts-sync": "node scripts/check-skill-prompts-sync.mjs",
     "check:prototype-inventory": "node scripts/emit-prototype-inventory.mjs --check",

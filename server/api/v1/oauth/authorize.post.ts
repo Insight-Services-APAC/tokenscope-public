@@ -3,9 +3,9 @@
  *
  * The browser consent page (app/pages/oauth/authorize.vue) submits the user's
  * Approve/Deny here on their Entra session. With `Accept: application/json` it
- * returns `{ redirect_url }` as DATA (so the page can show a Copy button — the
- * paste-back path for containerized clients that can't receive a loopback
- * redirect); a normal request 302s.
+ * returns an AuthorizeResult as DATA — the callback URL plus the explicit
+ * outcome, because a registered redirect_uri may carry any query params and the
+ * page must never infer the outcome from the URL; a normal request 302s.
  *
  * This is the ONE OAuth endpoint that runs on the browser cookie, so it
  * `assertSameOrigin` (the token/register/revoke endpoints are cookieless CLI
@@ -29,7 +29,7 @@ import { assertSameOrigin } from '../../../auth/csrf'
 import { getClient, issueAuthCode, computeGrantedScopes, INTERACTIVE_GRANTABLE_SCOPES } from '../../../auth/oauth'
 import { recordAuditEvent } from '../../../db/audit'
 import { withRequestRls } from '../../../db/request-rls'
-import { authorizeBodySchema } from '../../../../shared/schemas/oauth'
+import { authorizeBodySchema, type AuthorizeResult } from '../../../../shared/schemas/oauth'
 
 function jsonError(event: H3Event, code: string, detail: string, status = 400) {
   setResponseHeaders(event, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
@@ -39,10 +39,12 @@ function jsonError(event: H3Event, code: string, detail: string, status = 400) {
 function wantsJson(event: H3Event): boolean {
   return (getRequestHeader(event, 'accept') || '').includes('application/json')
 }
-function redirectResult(event: H3Event, url: string) {
+type Outcome = AuthorizeResult extends infer R ? (R extends AuthorizeResult ? Omit<R, 'redirect_url'> : never) : never
+function redirectResult(event: H3Event, url: string, result: Outcome) {
   if (wantsJson(event)) {
     setResponseHeaders(event, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    return { redirect_url: url }
+    const body: AuthorizeResult = { redirect_url: url, ...result }
+    return body
   }
   return sendRedirect(event, url, 302)
 }
@@ -107,7 +109,7 @@ export default defineEventHandler(async (event) => {
     url.searchParams.set('error_description', 'The user denied the authorization request')
     url.searchParams.set('state', body.state)
     consola.info('[oauth:authorize.post] denied', { clientId: client.clientId, teammateId: session.teammateId })
-    return redirectResult(event, url.toString())
+    return redirectResult(event, url.toString(), { outcome: 'denied' })
   }
 
   // Approve. Filter requested scopes to the INTERACTIVE-grantable set (read+tag) —
@@ -119,10 +121,11 @@ export default defineEventHandler(async (event) => {
   const granted = computeGrantedScopes(body.scope)
   if (granted.length === 0) {
     const url = new URL(body.redirect_uri)
+    const description = `At least one valid scope is required (one of: ${INTERACTIVE_GRANTABLE_SCOPES.join(', ')})`
     url.searchParams.set('error', 'invalid_scope')
-    url.searchParams.set('error_description', `At least one valid scope is required (one of: ${INTERACTIVE_GRANTABLE_SCOPES.join(', ')})`)
+    url.searchParams.set('error_description', description)
     url.searchParams.set('state', body.state)
-    return redirectResult(event, url.toString())
+    return redirectResult(event, url.toString(), { outcome: 'error', error: 'invalid_scope', error_description: description })
   }
 
   // Code issue + audit in ONE RLS-bearing transaction: the audit row used to be
@@ -151,5 +154,5 @@ export default defineEventHandler(async (event) => {
   const url = new URL(body.redirect_uri)
   url.searchParams.set('code', code)
   url.searchParams.set('state', body.state)
-  return redirectResult(event, url.toString())
+  return redirectResult(event, url.toString(), { outcome: 'code', code })
 })

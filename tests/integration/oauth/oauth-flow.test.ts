@@ -32,6 +32,7 @@ import { refreshAccessToken, MAX_OAUTH_CLIENTS, SOURCE_REGISTRATION_LIMIT } from
 import { issueEmitCredential } from '../../../server/auth/emit-credential'
 import tokenHandler from '../../../server/api/v1/oauth/token.post'
 import revokeHandler from '../../../server/api/v1/oauth/revoke.post'
+import codeStatusHandler from '../../../server/api/v1/oauth/code-status.post'
 import { OAUTH_SCOPE_LABELS } from '../../../shared/oauth-scopes'
 
 let t: TestDb
@@ -285,6 +286,129 @@ describe('OAuth happy path', () => {
     })
     const afterRes = await call<{ error: string }>(tokenHandler, afterRevoke)
     expect(afterRes.error).toBe('invalid_grant')
+  })
+})
+
+describe('POST /oauth/authorize JSON result carries an explicit outcome', () => {
+  async function post(redirectUri: string, action: 'approve' | 'deny', scope = 'tokenscope.read') {
+    const client = await call<{ client_id: string }>(
+      registerHandler,
+      ev({ body: { client_name: 'Outcome MCP', redirect_uris: [redirectUri] } }),
+    )
+    const e = ev({
+      method: 'POST',
+      headers: { accept: 'application/json' },
+      body: {
+        response_type: 'code',
+        client_id: client.client_id,
+        redirect_uri: redirectUri,
+        code_challenge: makePkce().challenge,
+        code_challenge_method: 'S256',
+        scope,
+        state: randomBytes(16).toString('hex'),
+        action,
+      },
+      session: userSession(),
+    })
+    return call<Record<string, string>>(authorizePostHandler, e)
+  }
+
+  it('approve → outcome code, even when the registered redirect_uri carries its own `error` param', async () => {
+    const res = await post('http://127.0.0.1:43118/cb?error=registered', 'approve')
+    expect(res.outcome).toBe('code')
+    expect(new URL(res.redirect_url!).searchParams.get('code')).toBe(res.code)
+  })
+
+  it('deny → outcome denied; approve with no grantable scope → outcome error', async () => {
+    expect((await post('http://127.0.0.1:43118/cb?code=registered', 'deny')).outcome).toBe('denied')
+    const bad = await post('http://127.0.0.1:43118/cb', 'approve', 'tokenscope.emit')
+    expect(bad).toMatchObject({ outcome: 'error', error: 'invalid_scope' })
+    expect(bad.code).toBeUndefined()
+  })
+})
+
+describe('POST /oauth/code-status — consent-page delivery detection', () => {
+  const status = (code: string, opts: { session?: Session; headers?: Record<string, string> } = {}) =>
+    call<{ redeemed: boolean }>(codeStatusHandler, ev({ body: { code }, session: opts.session ?? userSession(), headers: opts.headers }))
+
+  it('reads false until the client exchanges the code, then true', async () => {
+    const client = await registerClient()
+    const { verifier, challenge } = makePkce()
+    const { code } = await authorizeForCode(client.client_id, challenge)
+    expect(await status(code)).toEqual({ redeemed: false })
+
+    await call(
+      tokenHandler,
+      ev({
+        body: {
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: REDIRECT_URI,
+          code_verifier: verifier,
+          client_id: client.client_id,
+          client_secret: client.client_secret,
+        },
+      }),
+    )
+    expect(await status(code)).toEqual({ redeemed: true })
+  })
+
+  it('a FAILED exchange (wrong PKCE verifier) burns the code but still reads false', async () => {
+    const client = await registerClient()
+    const { challenge } = makePkce()
+    const { code } = await authorizeForCode(client.client_id, challenge)
+    const res = await call<{ error: string }>(
+      tokenHandler,
+      ev({
+        body: {
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: REDIRECT_URI,
+          code_verifier: randomBytes(48).toString('base64url'),
+          client_id: client.client_id,
+          client_secret: client.client_secret,
+        },
+      }),
+    )
+    expect(res.error).toBe('invalid_grant')
+    const [row] = await t.db.execute<{ consumed_at: Date | null }>(
+      sql`SELECT consumed_at FROM oauth_auth_code WHERE code_hash = ${hashSessionToken(code)}`,
+    )
+    expect(row!.consumed_at).not.toBeNull()
+    expect(await status(code)).toEqual({ redeemed: false })
+  })
+
+  it("another teammate's redeemed code, and an unknown code, both read false", async () => {
+    const client = await registerClient()
+    const { verifier, challenge } = makePkce()
+    const { code } = await authorizeForCode(client.client_id, challenge)
+    await call(
+      tokenHandler,
+      ev({
+        body: {
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: REDIRECT_URI,
+          code_verifier: verifier,
+          client_id: client.client_id,
+          client_secret: client.client_secret,
+        },
+      }),
+    )
+    const [other] = await t.db
+      .insert(schema.teammate)
+      .values({ entraOid: 'oa-oid-status', email: 'status-other@example.com', displayName: 'Other', role: 'developer', regionId, orgUnitId: ouId })
+      .returning()
+    const otherSession = { ...userSession(), teammateId: other!.id, email: 'status-other@example.com' } as Session
+    expect(await status(code, { session: otherSession })).toEqual({ redeemed: false })
+    expect(await status(randomBytes(32).toString('hex'))).toEqual({ redeemed: false })
+  })
+
+  it('requires a session, same origin, and a well-formed code', async () => {
+    const code = randomBytes(32).toString('hex')
+    await expect(call(codeStatusHandler, ev({ body: { code } }))).rejects.toMatchObject({ statusCode: 401 })
+    await expect(status(code, { headers: { origin: 'https://evil.example.com' } })).rejects.toMatchObject({ statusCode: 403 })
+    await expect(status('not-a-code')).rejects.toMatchObject({ statusCode: 400 })
   })
 })
 

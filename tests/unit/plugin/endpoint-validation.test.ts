@@ -1,5 +1,5 @@
 /*
- * endpoint-guard — assertSafeEndpoint / isUsableDce (S1 fix 3).
+ * endpoint-guard — assertSafeEndpoint (S1 fix 3).
  *
  * The ONE endpoint validator every credential-bearing network call in the
  * plugin routes through (directly, or via plugin-runtime.mjs's re-export).
@@ -13,7 +13,6 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   assertSafeEndpoint,
-  isUsableDce,
   unsafeEndpointError,
 } from '../../../plugin/scripts/endpoint-guard.mjs'
 
@@ -106,37 +105,6 @@ describe('assertSafeEndpoint — table', () => {
     expect(() => assertSafeEndpoint(null)).toThrow()
     // @ts-expect-error deliberately testing a non-string input
     expect(() => assertSafeEndpoint(undefined)).toThrow()
-  })
-})
-
-describe('isUsableDce — a usable "real DCE" value (loopback rejected UNCONDITIONALLY)', () => {
-  it('accepts a well-formed https, non-loopback URL', () => {
-    expect(
-      isUsableDce('https://dce-tokenscope-dev.westus3-1.ingest.monitor.azure.com/streams/x'),
-    ).toBe(true)
-  })
-
-  it('rejects a plaintext http off-box URL', () => {
-    expect(isUsableDce('http://dce-tokenscope-dev.example.com/streams/x')).toBe(false)
-  })
-
-  it('rejects loopback even under https — the proxy address must never masquerade as the DCE', () => {
-    expect(isUsableDce('https://127.0.0.1:14318/v1/logs')).toBe(false)
-    expect(isUsableDce('http://127.0.0.1:14318/v1/logs')).toBe(false)
-    expect(isUsableDce('https://localhost/v1/logs')).toBe(false)
-  })
-
-  it('rejects garbage / empty / non-string input', () => {
-    expect(isUsableDce('')).toBe(false)
-    expect(isUsableDce('   ')).toBe(false)
-    expect(isUsableDce('not a url')).toBe(false)
-    expect(isUsableDce(null)).toBe(false)
-    expect(isUsableDce(undefined)).toBe(false)
-    expect(isUsableDce(42)).toBe(false)
-  })
-
-  it('rejects a leading-dash value', () => {
-    expect(isUsableDce('-https://example.com')).toBe(false)
   })
 })
 
@@ -284,7 +252,7 @@ describe('endpoint-guard call sites', () => {
     // The known consumers must be among them; a rename that drops one should
     // fail here rather than quietly shrink the pinned set.
     expect(CONSUMERS).toEqual(
-      expect.arrayContaining(['claude-redeem.mjs', 'copilot-redeem.mjs', 'copilot-forwarder.mjs']),
+      expect.arrayContaining(['claude-redeem.mjs', 'copilot-redeem.mjs', 'copilot-emit.mjs']),
     )
   })
 

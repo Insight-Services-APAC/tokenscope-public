@@ -107,10 +107,18 @@ describe('readEmitSentinel', () => {
     process.env.TOKENSCOPE_STATE_DIR = join(tmp, '.tokenscope')
   })
 
-  it('reads emit-failure.json from the state dir', () => {
+  it('reads emit-failure.claude-code.json from the state dir', () => {
     mkdirSync(join(tmp, '.tokenscope'), { recursive: true })
-    writeFileSync(join(tmp, '.tokenscope', 'emit-failure.json'), JSON.stringify({ http_status: 401, message: 'x' }))
+    writeFileSync(join(tmp, '.tokenscope', 'emit-failure.claude-code.json'), JSON.stringify({ http_status: 401, message: 'x' }))
     expect(readEmitSentinel({})).toEqual({ http_status: 401, message: 'x' })
+  })
+
+  it("never reads another lane's sentinel as this one's (a failing Copilot lane is not a Claude failure)", () => {
+    mkdirSync(join(tmp, '.tokenscope'), { recursive: true })
+    writeFileSync(join(tmp, '.tokenscope', 'emit-failure.copilot-cli.json'), JSON.stringify({ http_status: 0, message: 'c' }))
+    writeFileSync(join(tmp, '.tokenscope', 'emit-failure.json'), JSON.stringify({ http_status: 0, message: 'legacy' }))
+    expect(readEmitSentinel({})).toBeNull()
+    expect(readEmitSentinel({}, undefined, 'copilot-cli')).toEqual({ http_status: 0, message: 'c' })
   })
   it('returns null when no sentinel', () => {
     expect(readEmitSentinel({})).toBeNull()
@@ -132,7 +140,7 @@ describe('readEmitSentinel', () => {
     const decoy = join(tmp, 'repo-decoy')
     mkdirSync(trusted, { recursive: true })
     mkdirSync(decoy, { recursive: true })
-    writeFileSync(join(trusted, 'emit-failure.json'), JSON.stringify({ http_status: 401, message: 'real' }))
+    writeFileSync(join(trusted, 'emit-failure.claude-code.json'), JSON.stringify({ http_status: 401, message: 'real' }))
     process.env.TOKENSCOPE_STATE_DIR = decoy
 
     expect(

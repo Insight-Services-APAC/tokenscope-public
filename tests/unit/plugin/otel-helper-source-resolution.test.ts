@@ -61,7 +61,7 @@ let passwdHome: string
 let argvLog: string
 
 const sentinelMsg = () => {
-  const f = join(stateDir, 'emit-failure.json')
+  const f = join(stateDir, 'emit-failure.claude-code.json')
   return existsSync(f) ? (JSON.parse(readFileSync(f, 'utf8')).message as string) : null
 }
 const contacted = () =>

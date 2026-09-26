@@ -76,8 +76,9 @@ flowchart TD
   resolves it and injects `project.code_hash = sha256(code)` (with the DEVICE_SID)
   into the **repo-local** settings, so the project rides along with the repo
   across every ephemeral session — no per-repo token, no re-provision. The
-  repo-local block is written with the endpoints and exporter config the device
-  needs but **without the durable OAuth refresh token** — the emit helper reads
+  repo-local block carries the bearer and OAuth destinations but **neither the
+  telemetry-enabling keys** (they apply from user settings; see "Project tag in the
+  repo file" below) **nor the durable OAuth refresh token** — the emit helper reads
   that from the device's own store first (`~/.tokenscope/config.claude-code.json`,
   0600 in a 0700 dir; `~/.claude/settings.json` only while no store exists), so
   the durable credential is not planted in every tagged working tree.
@@ -142,8 +143,8 @@ sparse-checks-out only those two dirs but requires the standalone `claude` CLI.
 | Command                            | What it does                                                                                                                                                                                                                                                                                             | Backing                                                                  |
 | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `/tokenscope:setup`                | Set up TokenScope on this device — connect + provision emitting in one OAuth consent. The **local counterpart** to the `tokenscope-setup` MCP prompt: it calls `provision_emit`/`my_usage` and runs the local redeem helper, so the durable emit credential is redeemed process→process, never via chat. | `provision_emit` + `my_usage` (MCP) + local `device-id.mjs` and `claude-redeem.mjs` |
-| `/tokenscope:status`               | Report whether your sessions are emitting **and** whether the MCP is connected — the 3-state verdict (🟢 emit+MCP / 🟡 emit-only / 🔴 not emitting).                                                                                                                                                     | local emit probe (`otel-headers-helper.sh` → `/bearer`) + MCP-auth probe |
-| `/tokenscope:statusline [on\|off]` | Install/remove the status line (emission health + MCP-connection state + session id).                                                                                                                                                                                                                    | local-only                                                               |
+| `/tokenscope:status`               | Report whether your sessions are emitting **and** whether the MCP is connected — the 3-state verdict (🟢 emit+MCP / 🟡 emit-only / 🔴 not emitting). A Copilot CLI emission failure on the same machine is reported separately (`copilot_lane_failure`), never as a Claude one.                                                                                                                                                     | local emit probe (`otel-headers-helper.sh` → `/bearer`) + MCP-auth probe |
+| `/tokenscope:statusline [on\|off]` | Install/remove the status line (Claude Code's own emission health + MCP-connection state + session id; a failing Copilot CLI emitter on the same machine never turns it red).                                                                                                                                                                                                                    | local-only                                                               |
 | `/tokenscope:backfill`             | Re-emit recent local Claude usage that may have been dropped (short emission-gap catch-up).                                                                                                                                                                                                              | local-only                                                               |
 
 Each script resolves the API base via `api-base.mjs`, most explicit first: the
@@ -229,19 +230,15 @@ looking untouched.
   value, or removed so the state dir falls back to `~/.tokenscope` on the passwd
   home. A repo that says nothing about the key leaves a genuine process-level pin
   untouched. It matters because that directory is where the bearer helper caches
-  the freshly minted emit access token and where the forwarder reads the stash
-  naming its upstream. Every state-dir read in the hook goes through this, and
+  the freshly minted emit access token. Every state-dir read in the hook goes through this, and
   anything the hook spawns is pinned to its result.
 - **One endpoint validator, shared.** `assertSafeEndpoint()` in
   `endpoint-guard.mjs` is the single validator every credential-bearing call
   routes through — redeem, enrol, status, backfill, the landed check, the project
-  check, the bearer helper and the OTLP forwarder. It requires an absolute
+  check and the bearer helper. It requires an absolute
   `https:` URL for any off-box host (loopback is exempt only when the caller
-  explicitly opts in, for the local dev override and the forwarder's own on-box
-  relay) and rejects a value beginning with `-`, which a shell interpolation would
-  otherwise read as a flag. `isUsableDce()` lives beside it and rejects loopback
-  unconditionally, so the forwarder's own address can never masquerade as the real
-  DCE. The file is dependency-free precisely so it can be vendored verbatim into
+  explicitly opts in, for the local dev override and local ingest stubs) and rejects a value beginning with `-`, which a shell interpolation would
+  otherwise read as a flag. The file is dependency-free precisely so it can be vendored verbatim into
   the Copilot plugin rather than reimplemented there.
 - **One argv validator, shared — because the ARGV is repo-steerable too.** A
   slash command's `allowed-tools` entry is a **prefix** grant
@@ -312,28 +309,19 @@ v2.1.158 (2026-06-01). Full recipe:
   latency is **~4–5 min**. `server/azure/reader.ts` (`LogAnalyticsReader`)
   reads it via KQL.
 
-### Version-aware Content-Length shim (CC #72671)
+### Project tag in the repo file
 
-Some Claude Code CLI versions shipped a regression that streamed the OTLP request
-**chunked**, so Azure Monitor rejected it with `400 MissingContentLengthHeader` and
-telemetry silently vanished. The plugin ships a **local Content-Length forwarder** to
-work around it — but it is **off by default** and **version-aware AUTO**, so a healthy
-fleet emits **directly** with no forwarder in the path:
+The repo tag (`writeRepoTag`) copies the device env into a tagged repo's
+`.claude/settings.local.json` with `OTEL_RESOURCE_ATTRIBUTES` carrying
+`project.code_hash`, **minus** the telemetry-enabling keys
+(`CLAUDE_CODE_ENABLE_TELEMETRY`, the OTel exporters, the logs endpoint and protocol).
+Claude Code 2.1.283 refuses those from a project settings file and warns at startup;
+they apply from `~/.claude/settings.json`. The project tag still applies from the repo
+file ([captured on 2.1.283](../security-sprint/env-precedence-capture-2.1.283.md)). Supported CLI builds are roughly the last 4-6 weeks
+(ADR-0006, amended 2026-09-26).
 
-- `SessionStart` resolves the shim policy (`plugin/scripts/otlp-shim-policy.mjs`). The
-  forwarder is spawned (and the global/repo logs endpoint re-pointed at it) **only**
-  when the session's CLI version falls in a known-broken range
-  (`OTLP_BROKEN_RANGES`, currently `[2.1.191, 2.1.212)`); on any other version it stays
-  dormant and emission goes direct.
-- The regression was **fixed in CLI 2.1.212** — on a fixed CLI the shim is off, and a
-  session that started under a stale/wedged forwarder self-heals the endpoint back to
-  the direct DCE.
-- Manual override `TOKENSCOPE_OTLP_PROXY`: `1` forces the forwarder on (a suspected
-  regression not yet listed), `0` forces it off, unset/other = AUTO. A future
-  re-regression is handled by appending one range to `OTLP_BROKEN_RANGES`.
-- The spawn/self-heal is fail-open (never breaks session start), and on an
-  auto-activated broken CLI the hook surfaces an informational note explaining the
-  forwarder is running and that upgrading the CLI retires it.
+The Content-Length forwarder that worked around the chunked-OTLP regression in CLI
+2.1.191-2.1.211 (fixed in 2.1.212) was removed in Claude plugin 0.1.41.
 
 ### Why restart, and where to verify
 
@@ -348,14 +336,12 @@ fleet emits **directly** with no forwarder in the path:
   (`PATH`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
   `NODE_PATH`) on the same provenance test, because a repo-set `PATH` chooses the
   `sh` that runs the emit helper and a repo-set `NODE_OPTIONS=--require` runs code
-  inside the forwarder. **Neither repair reaches the ~29-minute
+  inside any Node child it spawns. **Neither repair reaches the ~29-minute
   `otelHeadersHelper` refresh** — Claude Code invokes that one directly, which is
   why the helper's own state dir moved to argv (above) rather than being fixed
   here. It also **emit-on-install auto-enrols** (`enrollIfNeeded`, a no-op unless a
   bundled secret is present and the device is not yet enrolled), **self-heals** the
-  plugin script paths and the global OTLP logs endpoint (CC #72671), spawns the
-  version-aware Content-Length forwarder when needed, and surfaces one-line warnings —
-  emission health, the OTLP-stash wedge, the auto-shim note, and a
+  plugin script paths, and surfaces one-line warnings: emission health, a
   project-not-billable-here warning, and a superseded-instance-pin warning. Every
   step is fail-open, so a failure never breaks session start.
 - `/tokenscope:status` showing not-emitting right after setup usually means the

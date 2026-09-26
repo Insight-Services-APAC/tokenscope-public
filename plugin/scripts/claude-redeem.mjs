@@ -75,7 +75,7 @@ import {
   legacyStorePath,
   casWriteFile,
 } from './plugin-runtime.mjs'
-import { mergeClaudeSettings, applyOtlpProxyRepoint } from './env-builder.mjs'
+import { mergeClaudeSettings } from './env-builder.mjs'
 import { emitEnvLabel } from './statusline.mjs'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 
@@ -645,9 +645,6 @@ async function main() {
   }
 
   const envBlock = buildClaudeDeviceEnv(claude, oauth)
-  // Re-point the logs endpoint at the local Content-Length forwarder (CC #72671)
-  // and stash the real DCE URL for it. Kill-switch: TOKENSCOPE_OTLP_PROXY=0.
-  applyOtlpProxyRepoint(envBlock)
   const helperPath = resolveHelperPath()
   // The durable emit credential lands in this file, which makes the path a
   // trust sink and not merely a location. os.homedir() trusts $HOME, so a

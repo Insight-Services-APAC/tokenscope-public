@@ -517,9 +517,8 @@ async function run(opts, env, now = new Date()) {
       'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT not set — provision emit via the tokenscope-setup MCP prompt and bind the repo via the project MCP prompt first.',
     )
   }
-  // S1 fix 3: validate BEFORE the first POST. Loopback is allowed — the
-  // CC #72671 local Content-Length forwarder legitimately pins this endpoint
-  // to http://127.0.0.1:<port>/v1/logs while active.
+  // S1 fix 3: validate BEFORE the first POST. Loopback is allowed (a local
+  // ingest stub in development).
   try {
     assertSafeEndpoint(endpoint, { allowLoopback: true })
   } catch (err) {

@@ -387,6 +387,7 @@ export async function issueAuthCode(
 }
 
 export interface ConsumedAuthCode {
+  id: string
   clientId: string
   teammateId: string
   redirectUri: string
@@ -419,6 +420,7 @@ export interface ConsumedAuthCode {
 export async function consumeAuthCode(db: Db, rawCode: string): Promise<ConsumedAuthCode | null> {
   const codeHash = hashSessionToken(rawCode)
   const rows = await db.execute<{
+    id: string
     client_id: string
     teammate_id: string
     redirect_uri: string
@@ -436,7 +438,8 @@ export async function consumeAuthCode(db: Db, rawCode: string): Promise<Consumed
               WHERE tm.id = oauth_auth_code.teammate_id
                 AND tm.is_active IS TRUE
            )
-    RETURNING client_id::text AS client_id,
+    RETURNING id::text AS id,
+              client_id::text AS client_id,
               teammate_id::text AS teammate_id,
               redirect_uri,
               scope,
@@ -446,6 +449,7 @@ export async function consumeAuthCode(db: Db, rawCode: string): Promise<Consumed
   const row = [...rows][0]
   if (!row) return null
   return {
+    id: row.id,
     clientId: row.client_id,
     teammateId: row.teammate_id,
     redirectUri: row.redirect_uri,
@@ -453,6 +457,24 @@ export async function consumeAuthCode(db: Db, rawCode: string): Promise<Consumed
     codeChallenge: row.code_challenge,
     codeChallengeMethod: row.code_challenge_method,
   }
+}
+
+/** Call in the exchange transaction, after issueTokens succeeds. */
+export async function markAuthCodeTokenIssued(db: Db, authCodeId: string): Promise<void> {
+  await db.update(oauthAuthCode).set({ tokenIssuedAt: sql`now()` }).where(eq(oauthAuthCode.id, authCodeId))
+}
+
+/**
+ * Did `teammateId`'s code yield a token? Not `consumed_at`: a failed exchange
+ * sets that too. Unknown / another teammate's code → `false` (no oracle).
+ */
+export async function isAuthCodeRedeemed(db: Db, rawCode: string, teammateId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ tokenIssuedAt: oauthAuthCode.tokenIssuedAt })
+    .from(oauthAuthCode)
+    .where(and(eq(oauthAuthCode.codeHash, hashSessionToken(rawCode)), eq(oauthAuthCode.teammateId, teammateId)))
+    .limit(1)
+  return !!row?.tokenIssuedAt
 }
 
 // ── Tokens ──────────────────────────────────────────────────────────────────

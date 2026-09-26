@@ -1,5 +1,5 @@
 {
-  "description": "TokenScope Copilot forwarder lifecycle — start/stop the singleton per-container file-forwarder that transcodes Copilot OTEL spans and emits them to Azure Monitor.",
+  "description": "TokenScope Copilot session hooks — emit-on-install enrolment, and the legacy per-project file forwarder, which runs only for a project with a span file (sessions from a terminal that still exports COPILOT_OTEL_FILE_EXPORTER_PATH).",
   "hooks": {
     "SessionStart": [
       {

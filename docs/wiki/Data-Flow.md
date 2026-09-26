@@ -515,7 +515,6 @@ What each hop does when it breaks, and what a reader sees as a result.
 
 | hop | failure | behaviour | visible as |
 |---|---|---|---|
-| Client emit | CLI in `[2.1.191, 2.1.212)` sends chunked; Azure DCE 400s it | loopback forwarder adds `Content-Length` (header added at `plugin/scripts/otlp-forwarder.mjs:205-207`; affected range at `otlp-shim-policy.mjs:21-23`) | silent total telemetry loss if the shim is bypassed |
 | LAW → joiner | event lands late | absorbed only within a **5-minute** watermark overlap; older events need the ~24 h deep rescan or an operator `telemetry-recovery` run | spend appears hours late, then reconciles |
 | Joiner | no rate line for any token type | whole span total lands on one carrier row | token-type split distorted; total correct |
 | Joiner | rung 3 — no provider cost, no card | **span not written at all** | usage silently missing from OTel; the API residual absorbs it |

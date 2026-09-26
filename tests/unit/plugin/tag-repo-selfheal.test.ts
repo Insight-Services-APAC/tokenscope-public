@@ -56,8 +56,11 @@ function enrolment({ instance = 'inst-A', helper = pinned('0.1.3'), env } = {}) 
     sessionId: instance,
     helperPath: helper,
     env: env ?? {
+      // The real redeem env (claude-redeem.mjs buildClaudeDeviceEnv).
       CLAUDE_CODE_ENABLE_TELEMETRY: '1',
       OTEL_LOGS_EXPORTER: 'otlp',
+      OTEL_METRICS_EXPORTER: 'none',
+      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/protobuf',
       OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://dce/logs',
       OTEL_RESOURCE_ATTRIBUTES: `tokenscope.instance_id=${instance},tool=claude-code`,
       TOKENSCOPE_BEARER_ENDPOINT: `https://api/api/v1/instances/${instance}/bearer`,
@@ -88,6 +91,16 @@ afterEach(() => {
 
 // --- writeRepoTag: change-detection -------------------------------------
 
+// Literal, not the module's own list: trimming that list must fail these tests.
+const REFUSED = [
+  'CLAUDE_CODE_ENABLE_TELEMETRY',
+  'OTEL_LOGS_EXPORTER',
+  'OTEL_METRICS_EXPORTER',
+  'OTEL_TRACES_EXPORTER',
+  'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_LOGS_PROTOCOL',
+]
+
 describe('writeRepoTag change-detection', () => {
   // The active-version helper resolution reads process.env.CLAUDE_PLUGIN_ROOT.
   // Neutralise it here so these tests deterministically exercise the
@@ -102,6 +115,22 @@ describe('writeRepoTag change-detection', () => {
     else process.env.CLAUDE_PLUGIN_ROOT = savedPluginRoot
   })
 
+  it("never copies the removed forwarder's saved endpoint into a repo file", () => {
+    const e = enrolment()
+    writeRepoTag({ cwd, enrolment: { ...e, env: { ...e.env, TOKENSCOPE_DCE_LOGS_ENDPOINT: 'https://dce/logs' } }, codeHash: CODE_HASH })
+    expect(readRepo(cwd).env).not.toHaveProperty('TOKENSCOPE_DCE_LOGS_ENDPOINT')
+  })
+
+  it('a narrowed rewrite evicts the refused keys an earlier full copy left in the repo file', () => {
+    // A repo file written by an earlier plugin, with the full env copy.
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ env: { ...enrolment().env } }))
+    expect(readRepo(cwd).env.OTEL_LOGS_EXPORTER).toBe('otlp')
+    const r = writeRepoTag({ cwd, enrolment: enrolment(), codeHash: CODE_HASH })
+    expect(r.changed).toBe(true)
+    for (const k of REFUSED) expect(readRepo(cwd).env).not.toHaveProperty(k)
+  })
+
   it('writes on first call (changed=true, no prior pin to heal)', () => {
     const r = writeRepoTag({ cwd, enrolment: enrolment(), codeHash: CODE_HASH })
     expect(r.changed).toBe(true)
@@ -110,13 +139,11 @@ describe('writeRepoTag change-detection', () => {
     expect(s.env.OTEL_RESOURCE_ATTRIBUTES).toBe(
       `tokenscope.instance_id=inst-A,project.code_hash=${CODE_HASH},tool=claude-code`,
     )
-    // Self-contained: the full device env is copied, not just the resource
-    // attrs (ADR-0006 §2 — replacement, not key-merge, so a narrowed block
-    // would drop these). This is the regression pin: asserting "exactly one
-    // key" here would certify the fleet-wide emission stop the story warns
-    // against, so the endpoint/exporter/bearer keys are asserted PRESENT.
+    // The device env is copied (bearer/OAuth destinations stay), EXCEPT the
+    // telemetry-enabling keys Claude Code refuses from a project file (2.1.283+):
+    // those apply from the user-level file, and a repo copy only drew a warning.
     expect(s.env.TOKENSCOPE_BEARER_ENDPOINT).toBe('https://api/api/v1/instances/inst-A/bearer')
-    expect(s.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe('https://dce/logs')
+    for (const k of REFUSED) expect(s.env).not.toHaveProperty(k)
     expect(s.env.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT).toBe('https://login/token')
     expect(s.env.TOKENSCOPE_OAUTH_CLIENT_ID).toBe('cid')
     // S1 fix 4: the durable OAuth REFRESH token specifically is stripped — the
@@ -466,10 +493,8 @@ function runHook(home: string, repo: string, pluginRoot: string = join(home, 'no
     TOKENSCOPE_STATE_DIR: join(home, '.tokenscope'),
     CLAUDE_PLUGIN_ROOT: pluginRoot,
   }
-  // These emission-health tests assert a SILENT hook. Strip the host CLI's
-  // version signal so the shim policy sees a fixed/unknown CLI and does not add
-  // its auto-enabled note (the host runs an affected 2.1.x during CI). Tests that
-  // want the shim active set CLAUDE_CODE_EXECPATH explicitly.
+  // These emission-health tests assert a SILENT hook: run it without the host
+  // CLI's version signals, so nothing version-dependent reaches its output.
   delete env.CLAUDE_CODE_EXECPATH
   delete env.AI_AGENT
   return execFileSync(process.execPath, [installedHook], {
@@ -516,6 +541,27 @@ describe('session-start hook (end-to-end)', () => {
     expect(readRepo(repo).otelHeadersHelper).toContain('0.1.3') // healed, not skipped
   })
 
+  it('the real hook writes the repo tag without the telemetry-enabling keys', () => {
+    writeGlobal(home, {})
+    runHook(home, repo)
+    const env = readRepo(repo).env
+    expect(env.OTEL_RESOURCE_ATTRIBUTES).toContain('project.code_hash=')
+    for (const k of REFUSED) expect(env).not.toHaveProperty(k)
+  })
+
+  it('the real hook moves a device off the removed OTLP forwarder (one-release migration)', () => {
+    writeGlobal(home, {})
+    const gp = join(home, '.claude', 'settings.json')
+    const g = JSON.parse(readFileSync(gp, 'utf8'))
+    g.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = 'http://127.0.0.1:14318/v1/logs'
+    g.env.TOKENSCOPE_DCE_LOGS_ENDPOINT = 'https://dce/logs'
+    writeFileSync(gp, JSON.stringify(g))
+    runHook(home, repo)
+    const after = JSON.parse(readFileSync(gp, 'utf8')).env
+    expect(after.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe('https://dce/logs')
+    expect(after).not.toHaveProperty('TOKENSCOPE_DCE_LOGS_ENDPOINT')
+  })
+
   it('REWRITES when the global instance changed (re-enrol), project.code_hash unchanged', () => {
     writeGlobal(home, { instance: 'inst-OLD' })
     runHook(home, repo)
@@ -554,7 +600,7 @@ describe('session-start hook (end-to-end)', () => {
     const stub = stubHelperRoot(
       join(home, 'fail-plugin'),
       `mkdir -p "$HOME/.tokenscope"
-printf '{"ts":"t","http_status":401,"message":"revoked"}' > "$HOME/.tokenscope/emit-failure.json"
+printf '{"ts":"t","http_status":401,"message":"revoked"}' > "$HOME/.tokenscope/emit-failure.claude-code.json"
 exit 1
 `,
     )
@@ -569,7 +615,7 @@ exit 1
     writeGlobal(home)
     // A pre-existing 401 sentinel (stale)…
     mkdirSync(join(home, '.tokenscope'), { recursive: true })
-    writeFileSync(join(home, '.tokenscope', 'emit-failure.json'), JSON.stringify({ ts: 't', http_status: 401, message: 'stale' }))
+    writeFileSync(join(home, '.tokenscope', 'emit-failure.claude-code.json'), JSON.stringify({ ts: 't', http_status: 401, message: 'stale' }))
     // …but a HEALTHY helper that does NOT clear the sentinel → the hook must stay
     // SILENT via the exit-0 status gate, NOT by reading (and ignoring) the sentinel.
     const stub = stubHelperRoot(
@@ -585,7 +631,7 @@ exit 0
   it('emission-health: exit-0 with NO bearer + a stale sentinel still stays SILENT (status gate, not the sentinel)', () => {
     writeGlobal(home)
     mkdirSync(join(home, '.tokenscope'), { recursive: true })
-    writeFileSync(join(home, '.tokenscope', 'emit-failure.json'), JSON.stringify({ ts: 't', http_status: 401, message: 'stale' }))
+    writeFileSync(join(home, '.tokenscope', 'emit-failure.claude-code.json'), JSON.stringify({ ts: 't', http_status: 401, message: 'stale' }))
     // Degenerate helper: exits 0 but prints no Authorization and does NOT clear the
     // sentinel. The hook treats exit-0 as healthy and never reads the stale sentinel
     // (adversarial R MEDIUM-1 — would warn under the old `status===0 && hasAuth` gate).

@@ -14,7 +14,7 @@
  * the consent PAGE (`app/pages/oauth/authorize.vue`) — it no longer auto-issues a
  * code. The page shows the requested scopes + Approve/Deny and POSTs to
  * `authorize.post` (which issues the teammate-bound, PKCE-carried code and returns
- * `{ redirect_url }` for the loopback/paste-back delivery). The auto-approve +
+ * `{ redirect_url, outcome }` for the loopback/paste-back delivery). The auto-approve +
  * direct-302-with-code path is GONE — consent is now explicit (the headless
  * integration tests drive `authorize.post` with `action:approve`).
  *

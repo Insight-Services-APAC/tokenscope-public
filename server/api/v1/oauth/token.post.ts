@@ -31,6 +31,7 @@ import { consola } from 'consola'
 import {
   validateClientCredentials,
   consumeAuthCode,
+  markAuthCodeTokenIssued,
   validatePkce,
   issueTokens,
   refreshAccessToken,
@@ -165,6 +166,7 @@ async function handleAuthorizationCode(
       clientId: body.client_id,
       scope: authCode.scope,
     })
+    await markAuthCodeTokenIssued(tx as never, authCode.id)
 
     await recordAuditEvent(tx as never, {
       eventType: 'oauth_token_issue',

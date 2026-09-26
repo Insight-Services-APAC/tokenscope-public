@@ -31,14 +31,12 @@
  * `systemMessage` is shown to the developer; `additionalContext` goes to the
  * model). No credential/token material is ever written to stdout or stderr.
  */
-import { existsSync, readFileSync, chmodSync, mkdirSync, appendFileSync, realpathSync } from 'node:fs'
+import { existsSync, realpathSync, readFileSync, rmSync, chmodSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawn } from 'node:child_process'
-import http from 'node:http'
 import { resolveRepoProjectCode, computeCodeHash, readGlobalEnrolment, writeRepoTag, resolveRepoRoot } from '../scripts/tag-repo.mjs'
-import { reconcilePluginPaths, applyOtlpProxyRepoint, otlpForwarderPath, mergeClaudeSettings, otlpProxyStashMissing, isLoopbackHost, OTLP_DCE_ENV_KEY } from '../scripts/env-builder.mjs'
+import { reconcilePluginPaths } from '../scripts/env-builder.mjs'
 import {
   readSettingsEnv,
   readEmitSentinel,
@@ -51,10 +49,10 @@ import {
   migrateStoredEndpoints,
   casWriteFile,
 } from '../scripts/plugin-runtime.mjs'
-import { resolveShim, shimActive } from '../scripts/otlp-shim-policy.mjs'
 import { refreshLanded } from '../scripts/landed-check.mjs'
 import { checkRepoProjectBillable } from '../scripts/project-check.mjs'
 import { enrollIfNeeded } from '../scripts/enroll.mjs'
+import { assertSafeEndpoint, isLoopbackHostname } from '../scripts/endpoint-guard.mjs'
 
 // This hook always runs at the ACTIVE plugin version (its command uses
 // ${CLAUDE_PLUGIN_ROOT}), so its own dir locates the active scripts.
@@ -67,7 +65,7 @@ const PROBE_TIMEOUT_MS = 4000
  * The env the NEXT launch in `cwd` will actually use — GLOBAL settings, with
  * ONLY `OTEL_RESOURCE_ATTRIBUTES` taken from the repo-local tag (S1 fix 1,
  * `repoTagEnv` in plugin-runtime.mjs). Every credential-bearing read in this
- * hook (the emit-health probe, the forwarder spawn env, the enrol/landed/
+ * hook (the emit-health probe, the enrol/landed/
  * project-billability calls) MUST go through this — never a raw
  * `{...global, ...repo}` spread, which lets a repo committed into any cloned
  * repository override the endpoint a credential gets POSTed to while the
@@ -94,7 +92,7 @@ const STATE_DIR_KEY = 'TOKENSCOPE_STATE_DIR'
  * file `globalSettingsEnv()` opens — and that file is this hook's trust anchor
  * three times over: it is what `hookStateDir` restores a repo-claimed state dir
  * FROM, what `safeProcessEnv()` restores every credential-steering key from, and
- * what `repoAwareEnv()` builds the emit-probe and forwarder-spawn env out of.
+ * what `repoAwareEnv()` builds the emit-probe env out of.
  * They are also the one class `hookStateDir`'s restore-from-global trick cannot
  * settle by itself: the global file's own LOCATION is what they decide.
  */
@@ -248,7 +246,7 @@ function repoClaims(cwd, key) {
  * the emit helper then caches its freshly minted access token wherever that
  * planted file says. `safeProcessEnv()` cannot help: it restores the keys it
  * strips FROM `globalSettingsEnv()`, so under a moved `HOME` it hands the
- * forwarder child the attacker's ingest endpoint with a live bearer attached.
+ * emit helper the attacker's endpoints with a live credential attached.
  *
  * WHY THE PASSWD ENTRY, AND NOT THE GLOBAL SETTINGS FILE. The restore-from-global
  * shape used for `TOKENSCOPE_STATE_DIR` is circular here — reading the global
@@ -295,8 +293,8 @@ export function neutraliseRepoHome(cwd = process.cwd()) {
  * token).
  *
  *   - `PATH`        — chooses the `sh`, `curl`, `git`… any child resolves by name.
- *   - `NODE_OPTIONS`— `--require <file>` executes attacker code inside the
- *                     forwarder this hook spawns, before its first line runs.
+ *   - `NODE_OPTIONS`— `--require <file>` executes attacker code inside any
+ *                     Node child this hook spawns, before its first line runs.
  *   - `BASH_ENV` / `ENV`        — sourced by a non-interactive shell at startup.
  *   - `LD_PRELOAD` / `LD_LIBRARY_PATH` — inject a shared object into any child.
  *   - `NODE_PATH`   — re-points bare `require`/`import` resolution.
@@ -326,8 +324,8 @@ export function neutraliseRepoHome(cwd = process.cwd()) {
  * has already started, so a repo-set `NODE_OPTIONS=--require` has ALREADY
  * executed its module and a repo-set `PATH` already chose which `node` we are.
  * Nothing running inside the compromised process can undo that. What the repair
- * buys is that everything spawned FROM here — the emit helper, the OTLP
- * forwarder, `git` — inherits a repaired environment instead of the hostile one.
+ * buys is that everything spawned FROM here — the emit helper, `git` —
+ * inherits a repaired environment instead of the hostile one.
  * Closing the startup half needs the hook to be launched through a trusted
  * interpreter with an allowlisted environment, which is not ours to change: the
  * hook command lives in `hooks.json` and Claude Code expands and spawns it.
@@ -400,8 +398,7 @@ export function neutraliseRepoExecEnv(cwd = process.cwd()) {
  * REPLACEMENT — the fact `tag-repo.mjs:236-240` builds the whole self-contained
  * repo env copy around), so that one variable can also be repo-supplied. The
  * state dir is where `otel-headers-helper.sh` caches the freshly minted emit
- * ACCESS TOKEN (`oauth-access.<tool>.json`) and where the OTLP forwarder reads the
- * stash naming its upstream — both credential-bearing, so a repository must not
+ * ACCESS TOKEN (`oauth-access.<tool>.json`) — credential-bearing, so a repository must not
  * get to choose it.
  *
  * `safeProcessEnv()` cannot settle this one: it strips the key from a COPY,
@@ -428,7 +425,7 @@ export function neutraliseRepoExecEnv(cwd = process.cwd()) {
  *
  * Mutates `process.env` (idempotent) rather than only returning a value,
  * because consumers we do not call directly — `stateDir()` inside
- * `readEmitSentinel`, and the forwarder child — resolve the dir by that same
+ * `readEmitSentinel` — resolve the dir by that same
  * live read.
  */
 export function hookStateDir(cwd = process.cwd()) {
@@ -518,20 +515,6 @@ function selfHealRepoTag() {
   if (resolved.source !== 'tokenscope') return
 
   const codeHash = computeCodeHash(resolved.code)
-  // EXISTING enrolments self-heal onto the local Content-Length forwarder (CC
-  // #72671) on next session without a re-redeem: re-point the enrolment's logs
-  // endpoint (and record the real DCE URL, stash + durable env copy) before it's
-  // copied into the repo tag. Idempotent + kill-switch-gated
-  // (TOKENSCOPE_OTLP_PROXY=0). Fail-open: the try here makes the long-standing
-  // "writeRepoTag still runs on the (unchanged) env if the re-point throws"
-  // guarantee actually true — previously a repoint throw skipped the tag write.
-  if (enrolment.env) {
-    try {
-      applyOtlpProxyRepoint(enrolment.env)
-    } catch {
-      /* tag the repo with the unchanged env */
-    }
-  }
   // SELF-HEAL (ADR-0006): always re-derive from the CURRENT global enrolment.
   // writeRepoTag is change-detecting, so a true no-op leaves the file untouched.
   // The result is RETURNED, not discarded: when it reports `instanceDrifted` this
@@ -567,290 +550,6 @@ export function staleInstancePinWarning(repoTagResult) {
     'start, so THIS session keeps emitting under the old instance and its usage will',
     'not appear against this device. Restart `claude` to pick up the current enrolment.',
   ].join(' ')
-}
-
-const OTLP_PORT = Number(process.env.TOKENSCOPE_OTLP_PROXY_PORT) || 14318
-
-/**
- * PURE self-heal decision (extracted for tests). Given the /healthz probe outcome and
- * the stateDir THIS session expects, decide what to do with whatever holds the port:
- *   - probe `'refused'`  → nothing listening → spawn.
- *   - probe `'hung'`     → bound but not answering /healthz → kill the pidfile owner + spawn.
- *   - probe `{ok,dirMatches,ready}` → answering: if `dirMatches` it is healthy (leave it);
- *     otherwise it is a STALE forwarder (a prior run under a leaked HOME resolving a
- *     different stateDir/config — the recurring silent-drop) → kill the pidfile owner + spawn.
- * The old port-bind-only guard could not tell "listening" from "listening but broken",
- * so a wedged forwarder kept the port forever and every export 502'd unnoticed.
- *
- * S1 fix (6): the forwarder no longer reports a raw `pid` in /healthz (an
- * unauthenticated local HTTP response is untrusted input — trusting a
- * network-supplied pid for a SIGTERM target would let anything able to bind
- * or answer on the port choose what this hook kills). Every kill decision now
- * goes through the PIDFILE (killForwarderPidfile), which reads from inside
- * our own 0700 state dir — filesystem-trusted, not network-trusted. `dir` (the
- * raw absolute path) is likewise replaced by the boolean `dirMatches`, which
- * the SERVER computes against a caller-supplied `?dir=` — see probeForwarder.
- * LEGACY TOLERANCE (unchanged principle, extended to the new fields): a
- * pre-hardening forwarder mid-upgrade still answers with the OLD shape
- * (`{ok,pid,dir,ready}`, no `dirMatches`) — fall back to comparing `dir`
- * directly so an in-flight upgrade isn't treated as unconditionally stale.
- */
-export function decideForwarderAction(probe, expectedDir) {
-  if (probe === 'refused') return { action: 'spawn' }
-  if (probe === 'hung') return { action: 'spawn', killPidfile: true }
-  if (!probe || !probe.ok) return { action: 'spawn' } // malformed response → best-effort respawn
-  const dirOk = typeof probe.dirMatches === 'boolean' ? probe.dirMatches : probe.dir === expectedDir
-  if (dirOk && probe.ready !== false) return { action: 'healthy' }
-  return { action: 'spawn', killPidfile: true }
-}
-
-/**
- * GET /healthz?dir=<expectedDir> → the forwarder's `{ok,dirMatches,ready}`, or
- * `'refused'` / `'hung'`. Bounded. Passing OUR expected dir lets the server
- * compute `dirMatches` itself rather than handing back the raw absolute path.
- */
-function probeForwarder(port, expectedDir) {
-  return new Promise((resolve) => {
-    const path = `/healthz?dir=${encodeURIComponent(expectedDir ?? '')}`
-    const req = http.get({ host: '127.0.0.1', port, path, timeout: 700 }, (res) => {
-      const chunks = []
-      res.on('data', (c) => chunks.push(c))
-      res.on('end', () => {
-        try {
-          const j = JSON.parse(Buffer.concat(chunks).toString())
-          resolve(j && j.ok ? j : 'hung')
-        } catch {
-          resolve('hung')
-        }
-      })
-    })
-    req.on('timeout', () => {
-      req.destroy()
-      resolve('hung')
-    })
-    req.on('error', (e) => resolve(e && e.code === 'ECONNREFUSED' ? 'refused' : 'hung'))
-  })
-}
-
-/**
- * Best-effort append to `<state>/otlp-forwarder.log` (S1 fix 6 — eviction
- * must be LOUD). Never throws; a logging failure must not compound a kill
- * failure into a session-start crash.
- */
-function logForwarderEvent(msg) {
-  try {
-    const dir = hookStateDir()
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    appendFileSync(join(dir, 'otlp-forwarder.log'), `${new Date().toISOString()} ${msg}\n`)
-  } catch {
-    /* best-effort */
-  }
-}
-
-function killPid(pid) {
-  try {
-    process.kill(pid, 'SIGTERM')
-  } catch (err) {
-    // ESRCH ("already gone") is the ROUTINE case on every self-heal — logging
-    // it every session would be noise, not signal. EPERM (another user's
-    // process) means eviction genuinely did NOT take effect: a wedged/stale
-    // forwarder then keeps answering forever with nothing telling anyone why
-    // the self-heal never converged. That must be loud, not silently swallowed.
-    if (err && err.code === 'EPERM') logForwarderEvent(`killPid(${pid}) EPERM — could not evict (owned by another user?)`)
-  }
-}
-
-/**
- * Confirm a pid is ACTUALLY a forwarder before we SIGTERM it (Linux /proc). A stale
- * pidfile could otherwise point at a recycled pid; without /proc we can't verify, so
- * we fail SAFE (return false → do not kill). The dir-mismatch path never needs this —
- * there the pid came straight from the forwarder's own /healthz response.
- */
-function isLikelyForwarder(pid) {
-  try {
-    return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('otlp-forwarder')
-  } catch {
-    return false
-  }
-}
-
-/** Kill the forwarder whose pidfile sits in `dir` (the hung-instance path — no /healthz). */
-function killForwarderPidfile(dir) {
-  try {
-    const pid = Number(readFileSync(join(dir, 'otlp-forwarder.pid'), 'utf8').trim())
-    if (pid > 0 && isLikelyForwarder(pid)) killPid(pid)
-  } catch {
-    /* no pidfile → nothing we can safely target; the spawn below EADDRINUSE-exits */
-  }
-}
-
-/**
- * Env for the detached forwarder spawn: the hook's own process env PLUS an
- * EXPLICIT durable-DCE handoff read fresh from the merged settings env, so the
- * forwarder's fallback does not depend on the shape of that merge.
- *
- * THE INHERITANCE LINK IS NOW VERIFIED, and this comment used to say the
- * opposite. It read "that inheritance link is unverified" while, sixty lines
- * above, `hookStateDir`/`neutraliseRepoHome` were being built on the premise
- * that it exists — two comments in one file taking opposite positions on the
- * same load-bearing fact. It was settled by capture rather than by argument
- * (docs/security-sprint/repo-env-inheritance-capture.md): against Claude Code
- * 2.1.232, a repository's `.claude/settings.json` `env` block IS merged into the
- * environment a hook inherits. Keeping the explicit handoff regardless is still
- * right — it costs one line and does not depend on an upstream detail that can
- * change under us — but nobody should re-derive the premise from this sentence.
- *
- * Exported for tests.
- */
-export function forwarderSpawnEnv(baseEnv, settingsEnv) {
-  const v = settingsEnv && typeof settingsEnv[OTLP_DCE_ENV_KEY] === 'string' ? settingsEnv[OTLP_DCE_ENV_KEY].trim() : ''
-  return v ? { ...baseEnv, [OTLP_DCE_ENV_KEY]: v } : { ...baseEnv }
-}
-
-/**
- * (b) Ensure a HEALTHY local OTLP Content-Length forwarder (CC #72671) is running.
- * Detached + unref'd so it outlives the hook. SELF-HEALING: probes /healthz and, unless
- * the forwarder answers AND resolved OUR stateDir, replaces it (killing a wedged/stale
- * owner first) — the port bind alone can't distinguish a working forwarder from a
- * bound-but-broken one, which is how telemetry silently vanished. Kill-switch:
- * TOKENSCOPE_OTLP_PROXY=0. Only runs when enrolled. Fail-open (never breaks session start).
- */
-async function spawnOtlpForwarder() {
-  // Version-aware AUTO since CC #72671 was fixed in CLI 2.1.212 — spawn the
-  // forwarder ONLY on a CLI in a known-broken range (or a forced =1); direct
-  // emission otherwise. See plugin/scripts/otlp-shim-policy.mjs + README.
-  if (!shimActive()) return
-  if (!readGlobalEnrolment()) return // not enrolled — nothing to forward
-  const dir = hookStateDir()
-  // Lock the state dir owner-only EVERY enrolled session (mkdirSync(mode) is ignored on
-  // an existing dir; this tightens installs that predate the mode arg).
-  try {
-    chmodSync(dir, 0o700)
-  } catch {
-    /* best-effort */
-  }
-  const scriptsDir = resolve(HOOK_DIR, '..', 'scripts')
-  const scriptPath = otlpForwarderPath(scriptsDir)
-  if (!existsSync(scriptPath)) return // partial install — never spawn a phantom path
-
-  const decision = decideForwarderAction(await probeForwarder(OTLP_PORT, dir), dir)
-  if (decision.action === 'healthy') return
-  if (decision.killPidfile) killForwarderPidfile(dir)
-  // Let a killed owner release the port before the fresh one binds.
-  if (decision.killPidfile) await new Promise((r) => setTimeout(r, 250))
-
-  // Hand the durable DCE copy to the forwarder EXPLICITLY (merged settings env,
-  // read from disk AFTER the self-heals above may have backfilled it) so its
-  // stash-lost fallback works deterministically.
-  const settingsEnv = repoAwareEnv(process.cwd())
-  // The forwarder relays every export — with the emit bearer attached — to
-  // whatever endpoint its own env and stash resolve to, so its env is
-  // credential-steering input: base it on safeProcessEnv() (a repo-supplied
-  // TOKENSCOPE_DCE_LOGS_ENDPOINT et al. dropped, restored from the global file
-  // where that has them) rather than raw process.env, and pin its state dir to
-  // the one WE resolved so parent and child cannot disagree about `dirMatches`.
-  const child = spawn(process.execPath, [scriptPath], {
-    detached: true,
-    stdio: 'ignore',
-    env: { ...forwarderSpawnEnv(safeProcessEnv(), settingsEnv), TOKENSCOPE_STATE_DIR: dir },
-  })
-  child.on('error', () => {}) // fail-open: never break session start over a spawn error
-  child.unref()
-}
-
-/**
- * Re-point the GLOBAL ~/.claude/settings.json logs endpoint onto the local
- * forwarder (CC #72671). The repo-tag self-heal only reaches TAGGED repos;
- * UNTAGGED repos read the global env directly, so without this they'd keep the
- * raw DCE endpoint → chunked → still broken. applyOtlpProxyRepoint is reversible,
- * so the kill-switch (TOKENSCOPE_OTLP_PROXY=0) restores the global back to the
- * direct DCE here too. IDEMPOTENT: writes ONLY when the env actually changed
- * (never churns the global every session). Atomic temp+rename, 0600 (the file
- * carries the emit credential); fail-OPEN. Returns nothing.
- */
-export async function selfHealGlobalOtlpEndpoint({
-  settingsPath = join(homedir(), '.claude', 'settings.json'),
-  forwarderProbe, // test seam: inject a probeForwarder() result instead of probing
-} = {}) {
-  if (!existsSync(settingsPath)) return
-  let raw
-  try {
-    raw = readFileSync(settingsPath, 'utf8')
-  } catch {
-    return
-  }
-  let settings
-  try {
-    settings = JSON.parse(raw)
-  } catch {
-    return // unparseable — NEVER clobber (would wipe the emit credential)
-  }
-  const before = settings?.env?.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
-  if (typeof before !== 'string' || !before.trim()) return // not enrolled — nothing to re-point
-  // Shared-host guard: this hook mutates the ONE ~/.claude/settings.json that all
-  // CWs on this host share (they can run different CLI versions). Keep a proxy
-  // endpoint in place ONLY when the forwarder is CONFIRMED HEALTHY — a broken-CLI
-  // sibling is then likely using it and reverting would silently drop that
-  // sibling's telemetry. "Healthy" MUST mean exactly what spawnOtlpForwarder means
-  // by it — answering /healthz AND resolving OUR stateDir AND ready — so a
-  // 'refused' (not running), 'hung' (wedged), or STALE forwarder (a leaked-HOME
-  // instance answering with a mismatched dir → wrong DCE relay, the recurring
-  // silent-drop) all revert to the direct DCE. Reuse decideForwarderAction so the
-  // two definitions can't drift; on a fixed-CLI fleet spawnOtlpForwarder no-ops,
-  // so this is the ONLY place that catches a stale/wedged instance. A broken
-  // sibling that truly needs the forwarder re-spawns it via its own SessionStart.
-  // Note: TOKENSCOPE_OTLP_PROXY=0 (forced-off) also takes this branch; on a shared
-  // host with a healthy sibling forwarder it stays on the (working) proxy rather
-  // than risk dropping the sibling — the safe-for-the-fleet reading of "off".
-  let revertWhenDormant = true
-  if (isLoopbackHost(before) && !shimActive()) {
-    const dir = hookStateDir()
-    const probe = forwarderProbe ?? (await probeForwarder(OTLP_PORT, dir))
-    const healthy = decideForwarderAction(probe, dir).action === 'healthy'
-    revertWhenDormant = !healthy
-  }
-  // The async probe above is independent of the file; the read-modify-write
-  // below goes through casWriteFile so a retry re-derives from CURRENT settings.
-  casWriteFile(settingsPath, (currentRaw) => {
-    if (currentRaw === null) return null
-    let current
-    try {
-      current = JSON.parse(currentRaw)
-    } catch {
-      return null // unparseable — NEVER clobber (would wipe the emit credential)
-    }
-    // The probe above judged `before`. A retry can hand us settings another
-    // session wrote meanwhile; applying a stale decision to a NEW endpoint could
-    // undo a healthy pin. Abort and let the next session re-probe.
-    if (current?.env?.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT !== before) return null
-    // Reconcile a COPY of the env so we can compare and skip a no-op write. The
-    // comparison covers the WHOLE env block, not just the endpoint: the reconcile
-    // can also add the durable DCE copy (backfilling a legacy pin) or remove it
-    // (after a revert), and both must reach disk.
-    const envBefore = JSON.stringify(current.env ?? {})
-    const nextEnv = applyOtlpProxyRepoint({ ...current.env }, { revertWhenDormant })
-    if (JSON.stringify(nextEnv) === envBefore) return null // no change — do not churn
-    // REPLACE the env block with the reconciled copy: it started as a full copy so
-    // nothing is lost, and replace makes a key REMOVAL (the durable DCE copy after
-    // a revert) actually stick where an additive merge would resurrect it. All
-    // top-level keys (permissions, otelHeadersHelper, statusLine) are preserved.
-    const next = mergeClaudeSettings(current, null, nextEnv, { replaceEnv: true })
-    return `${JSON.stringify(next, null, 2)}\n`
-  })
-}
-
-/**
- * Informational note when the OTLP Content-Length forwarder auto-activated
- * because the running CLI is in a known-broken range (CC #72671 family). Not an
- * error — telemetry IS landing (the shim fixes it) — but the user should know
- * why the forwarder is running and that upgrading the CLI retires it. Silent on
- * a fixed CLI (dormant) and on a manual override. Returns a note or null.
- */
-function otlpShimAutoNote(env = process.env) {
-  const r = resolveShim(env)
-  if (r.reason !== 'auto-affected') return null
-  const v = Array.isArray(r.version) ? r.version.join('.') : 'unknown'
-  return `ℹ TokenScope: your Claude Code CLI ${v} has the OTLP chunked-export bug (${r.range.issue}) that would otherwise drop telemetry at the ingest endpoint — the local Content-Length forwarder was auto-enabled to keep spend landing this session. Upgrade the CLI (≥ 2.1.212) to retire it automatically.`
 }
 
 /** HTTP status from a sentinel, or null. */
@@ -952,33 +651,122 @@ function projectBillabilityWarning(result) {
 }
 
 /**
- * CC #72671 durability warning: when the logs endpoint is pinned to the local
- * forwarder and NEITHER copy of the real DCE survives — no state-dir stash AND no
- * durable copy in the settings env (a legacy pin whose ephemeral ~/.tokenscope was
- * wiped before the durable copy existed). The forwarder 502s on every export and
- * the revert has nothing to restore, so this fail-open design must fail LOUD.
- * Pins made at 0.1.26+ carry the durable copy and self-heal instead of reaching
- * here. Returns a warning string, or null when healthy / not pinned / healable.
- * Reads the SAME merged env Claude will use — AFTER the self-heals above ran, so
- * a recovered state never warns.
+ * ONE-RELEASE MIGRATION — delete in the release after Claude plugin 0.1.41.
+ * 0.1.41 removed the local OTLP forwarder (the CLI 2.1.191-2.1.211 chunked-export
+ * workaround). A device whose USER-LEVEL logs endpoint still points at it would send
+ * telemetry, emit bearer attached, to a local port nothing will own after a reboot.
+ * Restore the real endpoint from the copy the forwarder kept (the settings env, else
+ * its state-dir stash) and drop both copies; with neither, warn to re-run setup. A
+ * tagged repo whose own file still names the forwarder is rewritten by the repo tag,
+ * which only takes effect next launch, so that gets the relaunch note too. The
+ * forwarder's leftover files, and a stale copy on an already-direct device, are
+ * removed. Returns a message string or null.
  */
-function otlpForwarderStashWarning() {
-  const cwd = process.cwd()
-  const env = repoAwareEnv(cwd)
-  if (!otlpProxyStashMissing(env)) return null
-  return `⚠ TokenScope: telemetry is routed through the local OTLP forwarder but the real ingest endpoint is unrecoverable (no DCE stash in ~/.tokenscope and no durable copy in settings.json) — emission is failing this session and cannot self-revert. Re-provision emit via the tokenscope-setup MCP prompt to restore it.`
+export function migrateOffForwarderEndpoint({
+  settingsPath = join(homedir(), '.claude', 'settings.json'),
+  dir = hookStateDir(),
+  repoSettingsPath = null,
+} = {}) {
+  const port = String(Number(process.env.TOKENSCOPE_OTLP_PROXY_PORT) || 14318)
+  const forwarderUrl = (v) => {
+    try {
+      // The only URL the forwarder ever wrote; a user's own local collector is left alone.
+      const u = new URL(String(v ?? ''))
+      return u.protocol === 'http:' && u.hostname === '127.0.0.1' && u.port === port && u.pathname === '/v1/logs'
+    } catch {
+      return false
+    }
+  }
+  const realDce = (v) => {
+    const t = typeof v === 'string' ? v.trim() : ''
+    try {
+      return t && !isLoopbackHostname(assertSafeEndpoint(t, { allowLoopback: false }).hostname) ? t : null
+    } catch {
+      return null
+    }
+  }
+  const endpointOf = (path) => {
+    try {
+      return JSON.parse(readFileSync(path, 'utf8'))?.env ?? null
+    } catch {
+      return null
+    }
+  }
+  const relaunch =
+    'ℹ TokenScope: moved your Claude telemetry off the removed local OTLP forwarder. Restart `claude` so new sessions send directly (this one keeps the old address until it exits).'
+  const stashPath = join(dir, 'otlp-forward.json')
+  const dropLeftovers = () => {
+    for (const f of ['otlp-forward.json', 'otlp-forwarder.pid', 'otlp-forwarder.log']) {
+      try {
+        rmSync(join(dir, f), { force: true })
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+  const repoPinned = repoSettingsPath ? forwarderUrl(endpointOf(repoSettingsPath)?.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT) : false
+  const env = endpointOf(settingsPath)
+  if (!env) return repoPinned ? relaunch : null
+  const before = env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+  if (!forwarderUrl(before)) {
+    // Already direct: clear what the forwarder left behind, then only the repo pin matters.
+    dropLeftovers()
+    if ('TOKENSCOPE_DCE_LOGS_ENDPOINT' in env) {
+      casWriteFile(settingsPath, (raw) => {
+        try {
+          const s = JSON.parse(raw)
+          if (!s?.env || !('TOKENSCOPE_DCE_LOGS_ENDPOINT' in s.env) || forwarderUrl(s.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT)) return null
+          const next = { ...s.env }
+          delete next.TOKENSCOPE_DCE_LOGS_ENDPOINT
+          return `${JSON.stringify({ ...s, env: next }, null, 2)}\n`
+        } catch {
+          return null // never clobber a file we cannot read back
+        }
+      })
+    }
+    return repoPinned ? relaunch : null
+  }
+  let stashed = null
+  try {
+    stashed = JSON.parse(readFileSync(stashPath, 'utf8')).dceLogsEndpoint
+  } catch {
+    /* no stash */
+  }
+  const result = casWriteFile(settingsPath, (raw) => {
+    let s
+    try {
+      s = JSON.parse(raw)
+    } catch {
+      return null // never clobber a file we cannot read back
+    }
+    if (s?.env?.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT !== before) return null
+    const real = realDce(s.env.TOKENSCOPE_DCE_LOGS_ENDPOINT) ?? realDce(stashed)
+    if (!real) return null
+    const next = { ...s.env, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: real }
+    delete next.TOKENSCOPE_DCE_LOGS_ENDPOINT
+    return `${JSON.stringify({ ...s, env: next }, null, 2)}\n`
+  })
+  // Judge by the file, not the attempt: a lost compare-and-swap is not a restore, and
+  // another session may have restored it meanwhile.
+  if (result?.changed || !forwarderUrl(endpointOf(settingsPath)?.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT)) {
+    dropLeftovers()
+    return relaunch
+  }
+  return '⚠ TokenScope: your Claude telemetry endpoint still points at the removed local OTLP forwarder and the real endpoint cannot be recovered, so telemetry will not be delivered once the old forwarder stops. Re-run /tokenscope:setup to restore it.'
 }
 
 async function main() {
   // FIRST: neutralise a repo-supplied TOKENSCOPE_STATE_DIR — and a repo-supplied
   // HOME — on this process's env, before anything resolves a state dir or opens
   // the global settings file. The jobs below reach modules that call
-  // `stateDir()` and `homedir()` themselves — env-builder.mjs reads and writes
-  // the OTLP DCE stash, selfHealPluginPaths/tag-repo/enroll open
+  // `stateDir()` and `homedir()` themselves — selfHealPluginPaths/tag-repo/enroll open
   // `~/.claude/settings.json` — and those reads are of the live `process.env`,
   // so this one call is what keeps them off a path the repository chose.
   try {
-    hookStateDir()
+    // It holds the emit access-token cache and failure sentinels: owner-only, every
+    // session (mkdirSync's mode is ignored on a directory that already exists).
+    const dir = hookStateDir()
+    if (existsSync(dir)) chmodSync(dir, 0o700)
   } catch {
     /* fail-open */
   }
@@ -993,23 +781,20 @@ async function main() {
     /* fail-open */
   }
 
+  // One-release migration off the removed OTLP forwarder (see the function).
+  let forwarderWarning = null
+  try {
+    const root = resolveRepoRoot(process.cwd())
+    forwarderWarning = migrateOffForwarderEndpoint({ repoSettingsPath: root ? join(root, '.claude', 'settings.local.json') : null })
+  } catch {
+    /* fail-open */
+  }
+
   // Captured, not discarded: `instanceDrifted` is the only in-process evidence
   // that THIS session's frozen resource attrs name a superseded instance.
   let repoTagResult = null
   try {
     repoTagResult = selfHealRepoTag()
-  } catch {
-    /* fail-open */
-  }
-
-  try {
-    await selfHealGlobalOtlpEndpoint() // CC #72671: cover UNTAGGED repos (global env)
-  } catch {
-    /* fail-open */
-  }
-
-  try {
-    await spawnOtlpForwarder() // CC #72671 Content-Length workaround (self-healing)
   } catch {
     /* fail-open */
   }
@@ -1042,25 +827,13 @@ async function main() {
     /* fail-open: never warn on our own error */
   }
 
+  if (forwarderWarning) lines.push(forwarderWarning)
+
   try {
     const w = emissionHealthWarning() // also runs the emit helper → refreshes the token
     if (w) lines.push(w)
   } catch {
     /* fail-open: never warn on our own error */
-  }
-
-  try {
-    const w = otlpForwarderStashWarning() // CC #72671: pinned-but-stash-missing wedge
-    if (w) lines.push(w)
-  } catch {
-    /* fail-open */
-  }
-
-  try {
-    const w = otlpShimAutoNote() // CC #72671: forwarder auto-enabled for a broken CLI
-    if (w) lines.push(w)
-  } catch {
-    /* fail-open */
   }
 
   // With the emit token now fresh, refresh the landed cache (for the statusline's

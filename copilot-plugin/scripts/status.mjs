@@ -60,7 +60,7 @@
  *                         Absent / non-numeric → attribution reported UNKNOWN (the skill
  *                         must check my_usage). 0 → landed-AND-attributed (healthy).
  */
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { resolveStorePath } from './device-store.mjs'
 import { fileURLToPath } from 'node:url'
@@ -70,6 +70,9 @@ import { spawnSync } from 'node:child_process'
 // could drift onto a different home anchor from the one refreshLanded() reads.
 import { refreshLanded, stateDir } from './landed-check.mjs'
 import { detectManagedTelemetry } from './managed-telemetry.mjs'
+import { legacyForwarderActive, effectiveCopilotSettings, extensionsOn } from './copilot-emit.mjs'
+import { copilotSettingsPath } from './copilot-redeem.mjs'
+import { readUsageDrift, SPOOL_DIRNAME } from './copilot-usage.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -81,9 +84,12 @@ function readJson(p) {
   }
 }
 
-/** Read the helper's emit-failure sentinel (or null). */
-function readEmitSentinel(stateD) {
-  return readJson(join(stateD, 'emit-failure.json'))
+/**
+ * Read one lane's emit-failure sentinel (or null). Per tool, like the store
+ * (otel-headers-helper.sh SENTINEL): this lane's verdict reads only its own.
+ */
+function readEmitSentinel(stateD, tool = 'copilot-cli') {
+  return readJson(join(stateD, `emit-failure.${tool}.json`))
 }
 
 /**
@@ -366,7 +372,94 @@ function probeEmissionAuth(stateD) {
  * to 'unknown' (never silently assumes 'none') so `emission_healthy` never reads
  * healthy on absent information.
  */
-export function composeStatus({ probe, landed, attribution, sentinel, managedTelemetry }) {
+/** Spool files older than this were not delivered by any later session: stuck. */
+export const BACKLOG_STUCK_MS = 24 * 3600 * 1000
+
+/**
+ * Unsent spool files and the oldest one's age; null when there is no spool. A spool
+ * that exists but cannot be listed is `{ error }`: its records can be neither seen
+ * nor sent, so it is not "no backlog".
+ */
+export function readSpoolBacklog(stateD, now = Date.now()) {
+  const dir = join(stateD, SPOOL_DIRNAME)
+  let names
+  try {
+    names = readdirSync(dir)
+  } catch (err) {
+    return err?.code === 'ENOENT' ? null : { files: null, oldest_age_ms: null, error: String(err?.code ?? 'unreadable') }
+  }
+  let files = 0
+  let oldest = null
+  for (const n of names) {
+    if (!n.endsWith('.jsonl')) continue
+    try {
+      const m = statSync(join(dir, n)).mtimeMs
+      files += 1
+      oldest = oldest == null ? m : Math.min(oldest, m)
+    } catch {
+      /* raced with a send */
+    }
+  }
+  return { files, oldest_age_ms: oldest == null ? null : Math.max(0, now - oldest) }
+}
+
+/**
+ * Which lane captures usage, and whether it can. The file forwarder owns a session
+ * started with the legacy exporter env; otherwise the usage extension does, which the
+ * Copilot App loads by default and the CLI only with the EXTENSIONS feature on.
+ * Copilot hides that variable from the tools it runs, so inside Copilot this always
+ * reads as the extension lane; `lane: 'forwarder'` appears only when the script is
+ * run directly from a terminal that exports it. `enabled` says the extension WILL load, not that it did. `drift` is the
+ * extension's shortfall/excess/contract sentinel; `backlog` its unsent spool. Either
+ * one means usage is missing from TokenScope, so `healthy` is false.
+ */
+export function interpretUsageCapture({ env = {}, settings = null, drift = null, backlog = null } = {}) {
+  // Drift and backlog belong to the device's extension sessions (the App, new
+  // terminals), so they are reported on either lane.
+  const stuck = (backlog?.oldest_age_ms ?? 0) > BACKLOG_STUCK_MS || Boolean(backlog?.error)
+  if (legacyForwarderActive(env)) {
+    return {
+      lane: 'forwarder',
+      enabled: true,
+      healthy: !drift && !stuck,
+      drift,
+      backlog,
+      message:
+        'Legacy file forwarder (this session was started with COPILOT_OTEL_FILE_EXPORTER_PATH). Re-run setup to move to the usage extension.' +
+        (drift ? ` Usage extension sessions on this device reported drift (${drift.kind}).` : '') +
+        (backlog?.error
+          ? ` The usage spool cannot be read (${backlog.error}).`
+          : stuck
+            ? ` ${backlog.files} usage spool file(s) have been waiting over 24h to send.`
+            : ''),
+    }
+  }
+  const app = env.AI_AGENT === 'github_copilot_app_agent'
+  const flagOn = settings?.enabledFeatureFlags?.EXTENSIONS === true
+  // The App loads extensions without the feature flag; the mode and the per-extension
+  // switch apply to both.
+  const enabled = extensionsOn(app ? { ...settings, enabledFeatureFlags: { ...(settings?.enabledFeatureFlags ?? {}), EXTENSIONS: true } } : settings)
+  return {
+    lane: 'extension',
+    enabled,
+    healthy: enabled && !drift && !stuck,
+    extensions_feature: app ? 'app-default' : flagOn ? 'on' : 'off',
+    extension_mode: settings?.extensions?.mode ?? 'default',
+    drift,
+    backlog,
+    message: !enabled
+      ? 'The TokenScope usage extension does not load (Copilot extensions are off, extension mode is disabled, or it is switched off in /extensions): sessions are captured only from a terminal that still exports the old COPILOT_OTEL_FILE_EXPORTER_PATH (the legacy forwarder), and nothing else is. Re-run TokenScope setup (it says what to change by hand when it cannot), then restart copilot.'
+      : drift
+        ? `Usage extension reported drift (${drift.kind}) at ${drift.ts}: Copilot's own usage totals and the recorded calls disagree, so some usage may be missing or counted twice.`
+        : backlog?.error
+          ? `The usage spool cannot be read (${backlog.error}): its records can be neither checked nor sent.`
+          : stuck
+            ? `${backlog.files} usage spool file(s) have been waiting over 24h to send: check network access to the TokenScope ingest endpoint.`
+          : 'Usage extension enabled; nothing reported missing.',
+  }
+}
+
+export function composeStatus({ probe, landed, attribution, sentinel, managedTelemetry, usageCapture }) {
   const attr = attribution || interpretAttribution({ landed, needsTaggingCount: null })
   const managed = managedTelemetry || { hostile: null, state: 'unknown', source: 'unknown', message: 'Managed-telemetry check was not run.' }
   return {
@@ -379,7 +472,15 @@ export function composeStatus({ probe, landed, attribution, sentinel, managedTel
     // an operator should actually read: true only when the credential is valid AND no
     // hostile managed setting was found. False when either half fails; the two
     // sub-fields (`emitting`, `managed_telemetry`) say WHICH.
-    emission_healthy: probe.emitting === true && managed.hostile !== true,
+    // The managed-telemetry block only reaches the file forwarder's span exporter; the
+    // usage extension instead needs to be enabled with nothing reported missing
+    // (usage_capture.healthy).
+    emission_healthy:
+      probe.emitting === true &&
+      (usageCapture?.lane === 'extension'
+        ? usageCapture.healthy === true
+        : managed.hostile !== true && usageCapture?.healthy !== false),
+    usage_capture: usageCapture ?? null,
     managed_telemetry: {
       state: managed.state,
       source: managed.source,
@@ -423,6 +524,13 @@ async function main() {
   }
   const landed = interpretLanded(landedResult)
   const sentinel = readEmitSentinel(stateD)
+  const otherLaneFailure = readEmitSentinel(stateD, 'claude-code')
+  const usageCapture = interpretUsageCapture({
+    env: process.env,
+    settings: effectiveCopilotSettings(copilotSettingsPath(process.env)),
+    drift: readUsageDrift(stateD),
+    backlog: readSpoolBacklog(stateD),
+  })
 
   // The unbound/untagged signal comes from `my_usage` (MCP) which this local script
   // cannot call — the skill orchestrator passes it via TOKENSCOPE_NEEDS_TAGGING_COUNT.
@@ -440,7 +548,13 @@ async function main() {
     managedTelemetry = { hostile: null, state: 'unknown', source: 'unknown', message: `managed-telemetry check failed: ${String(err)}` }
   }
 
-  console.log(JSON.stringify(composeStatus({ probe, landed, attribution, sentinel, managedTelemetry }), null, 2))
+  const status = composeStatus({ probe, landed, attribution, sentinel, managedTelemetry, usageCapture })
+  // The Claude lane's own failure on this host, reported, never merged into this
+  // lane's verdict: its fix is a Claude setup, not a Copilot one.
+  if (otherLaneFailure) {
+    status.claude_lane_failure = { ...otherLaneFailure, fix: 'Run /tokenscope:setup in a Claude Code session.' }
+  }
+  console.log(JSON.stringify(status, null, 2))
 }
 
 // CLI entry guard so tests can import the pure helpers without running the probe.

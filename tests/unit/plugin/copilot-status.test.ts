@@ -14,10 +14,13 @@
  * No helper spawn, no network — these are pure over their inputs.
  */
 import { describe, it, expect } from 'vitest'
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — mjs import resolved by Vitest
-const { interpretEmissionProbe, interpretLanded, parseNeedsTaggingCount, interpretAttribution, interpretManagedTelemetry, composeStatus } =
+const { interpretEmissionProbe, interpretLanded, parseNeedsTaggingCount, interpretAttribution, interpretManagedTelemetry, composeStatus, interpretUsageCapture, readSpoolBacklog, BACKLOG_STUCK_MS } =
   await import('../../../copilot-plugin/scripts/status.mjs')
 
 describe('interpretEmissionProbe', () => {
@@ -326,5 +329,103 @@ describe('composeStatus — emission_healthy (credential-valid is NEVER emission
     const out = composeStatus({ probe: { emitting: true, probe_status: 200, message: 'ok' }, landed, sentinel: null })
     expect(out.managed_telemetry.state).toBe('unknown')
     expect(out.emission_healthy).toBe(true) // unknown ≠ hostile, so the credential signal still stands
+  })
+})
+
+describe('usage capture lane (after the cutover to the usage extension)', () => {
+  const probe = { emitting: true, probe_status: 200, message: 'ok' }
+  const landed = { landed: true, state: 'landed', last_emission: 't', message: 'landed' }
+  const LEGACY = { COPILOT_OTEL_FILE_EXPORTER_PATH: '.tokenscope.local/copilot-otel.jsonl', COPILOT_HOME: '/nonexistent/ts-copilot-home' }
+  const FLAG_ON = { enabledFeatureFlags: { EXTENSIONS: true } }
+
+  it('a session started with the legacy env is the forwarder lane', () => {
+    expect(interpretUsageCapture({ env: LEGACY, settings: FLAG_ON })).toMatchObject({ lane: 'forwarder', enabled: true })
+  })
+
+  it('CLI without the EXTENSIONS feature captures NOTHING: status says so and is not healthy', () => {
+    const uc = interpretUsageCapture({ env: {}, settings: {} })
+    expect(uc).toMatchObject({ lane: 'extension', enabled: false, healthy: false, extensions_feature: 'off' })
+    expect(uc.message).toMatch(/does not load.*nothing else is/)
+    expect(composeStatus({ probe, landed, sentinel: null, usageCapture: uc }).emission_healthy).toBe(false)
+  })
+
+  it('CLI with the feature on, or the Copilot App (loads extensions by default), is capturing', () => {
+    expect(interpretUsageCapture({ env: {}, settings: FLAG_ON })).toMatchObject({ enabled: true, healthy: true, extensions_feature: 'on' })
+    expect(interpretUsageCapture({ env: { AI_AGENT: 'github_copilot_app_agent' }, settings: null })).toMatchObject({
+      enabled: true,
+      extensions_feature: 'app-default',
+    })
+  })
+
+  it('a hostile managed-telemetry setting only degrades the FORWARDER lane (the extension does not use the exporter)', () => {
+    const managedTelemetry = { hostile: true, state: 'hostile', source: 'file', message: 'm' }
+    const ext = interpretUsageCapture({ env: {}, settings: FLAG_ON })
+    const fwd = interpretUsageCapture({ env: LEGACY })
+    expect(composeStatus({ probe, landed, sentinel: null, managedTelemetry, usageCapture: ext }).emission_healthy).toBe(true)
+    expect(composeStatus({ probe, landed, sentinel: null, managedTelemetry, usageCapture: fwd }).emission_healthy).toBe(false)
+  })
+
+  it('surfaces the extension drift sentinel', () => {
+    const drift = { ts: '2026-09-25T00:00:00Z', kind: 'shortfall', expected_nano_aiu: 10, recorded_nano_aiu: 4 }
+    const uc = interpretUsageCapture({ env: {}, settings: FLAG_ON, drift })
+    expect(uc.drift).toEqual(drift)
+    expect(uc.message).toMatch(/drift \(shortfall\)/)
+    expect(uc.healthy).toBe(false)
+    expect(composeStatus({ probe, landed, sentinel: null, usageCapture: uc }).emission_healthy).toBe(false)
+  })
+
+  it("the forwarder lane still reports the device's extension drift and stuck backlog", () => {
+    const drift = { ts: 't', kind: 'excess' }
+    const uc = interpretUsageCapture({ env: LEGACY, drift, backlog: { files: 1, oldest_age_ms: BACKLOG_STUCK_MS + 1 } })
+    expect(uc).toMatchObject({ lane: 'forwarder', healthy: false, drift, backlog: { files: 1 } })
+    expect(uc.message).toMatch(/drift \(excess\)/)
+    expect(composeStatus({ probe, landed, sentinel: null, usageCapture: uc }).emission_healthy).toBe(false)
+    expect(interpretUsageCapture({ env: LEGACY }).healthy).toBe(true)
+  })
+
+  it('a spool backlog over 24h old is stuck delivery: not healthy; a fresh one is normal', () => {
+    const stuck = interpretUsageCapture({ env: {}, settings: FLAG_ON, backlog: { files: 2, oldest_age_ms: BACKLOG_STUCK_MS + 1 } })
+    expect(stuck.healthy).toBe(false)
+    expect(stuck.message).toMatch(/waiting over 24h/)
+    expect(composeStatus({ probe, landed, sentinel: null, usageCapture: stuck }).emission_healthy).toBe(false)
+    const fresh = interpretUsageCapture({ env: {}, settings: FLAG_ON, backlog: { files: 1, oldest_age_ms: 60_000 } })
+    expect(fresh.healthy).toBe(true)
+  })
+
+  it('a spool that exists but cannot be listed is not "no backlog": unhealthy, and says so', () => {
+    const uc = interpretUsageCapture({ env: {}, settings: FLAG_ON, backlog: { files: null, oldest_age_ms: null, error: 'EACCES' } })
+    expect(uc.healthy).toBe(false)
+    expect(uc.message).toMatch(/cannot be read \(EACCES\)/)
+    const d = mkdtempSync(join(tmpdir(), 'ts-backlog-err-'))
+    try {
+      writeFileSync(join(d, 'copilot-usage-spool'), 'x') // a file, not a dir: ENOTDIR
+      expect(readSpoolBacklog(d)).toMatchObject({ error: 'ENOTDIR' })
+    } finally {
+      rmSync(d, { recursive: true, force: true })
+    }
+  })
+
+  it("extension mode 'disabled' means the extension does not load, in the CLI and the App", () => {
+    const off = { enabledFeatureFlags: { EXTENSIONS: true }, extensions: { mode: 'disabled' } }
+    expect(interpretUsageCapture({ env: {}, settings: off })).toMatchObject({ enabled: false })
+    expect(interpretUsageCapture({ env: { AI_AGENT: 'github_copilot_app_agent' }, settings: off })).toMatchObject({ enabled: false })
+  })
+
+  it('readSpoolBacklog counts spool files (not heartbeats) and ages the oldest', () => {
+    const d = mkdtempSync(join(tmpdir(), 'ts-backlog-'))
+    try {
+      expect(readSpoolBacklog(d)).toBeNull()
+      const sd = join(d, 'copilot-usage-spool')
+      mkdirSync(sd)
+      writeFileSync(join(sd, 's1.wa0001.jsonl'), '{}\n')
+      writeFileSync(join(sd, '.hb-wa0001'), '')
+      const old = new Date(Date.now() - 3 * 3600 * 1000)
+      utimesSync(join(sd, 's1.wa0001.jsonl'), old, old)
+      const b = readSpoolBacklog(d)
+      expect(b.files).toBe(1)
+      expect(b.oldest_age_ms).toBeGreaterThanOrEqual(3 * 3600 * 1000 - 5000)
+    } finally {
+      rmSync(d, { recursive: true, force: true })
+    }
   })
 })

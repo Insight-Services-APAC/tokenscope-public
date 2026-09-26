@@ -9,11 +9,8 @@
  * exists, the fix is to reach it — not to write a second one beside it"),
  * and only a vendored copy of ONE file can't drift from it.
  *
- * Modelled on the two correct siblings this codebase already had (promoted
- * into one place instead of re-implemented a third time):
- *   - otlp-forwarder.mjs's https-off-box refusal + self-loop guard (readDceEndpoint)
- *   - env-builder.mjs's isUsableDce — promoted here VERBATIM (env-builder.mjs
- *     now imports it rather than keeping a private module-scoped copy).
+ * Promoted into one place from the siblings that had each re-implemented it,
+ * so the rule cannot drift between them.
  */
 
 /**
@@ -45,8 +42,8 @@ export function isLoopbackHostname(hostname) {
  *   - must be https:// for an off-box host; a loopback host (127.0.0.1 /
  *     localhost / ::1) is exempted from that requirement ONLY when the
  *     caller opts in via `allowLoopback` — the explicit dev exception
- *     (api-base.mjs's local :3450 override, and the CC #72671 forwarder's
- *     own on-box relay). Every other destination is refused in plaintext.
+ *     (api-base.mjs's local :3450 override, and a local ingest stub).
+ *     Every other destination is refused in plaintext.
  *
  * @param {string} urlStr
  * @param {{ allowLoopback?: boolean }} [opts]
@@ -79,7 +76,7 @@ function endpointError(reason, message) {
  *     edge; a comment at the call site asserted the opposite, which is worse
  *     than no comment because it stops a reviewer checking. Verified against
  *     Node's actual printer, not assumed.)
- *  2. otlp-forwarder.mjs interpolated `err.message` — which DOES carry the
+ *  2. a caller (the since-removed OTLP forwarder) interpolated `err.message`, which DOES carry the
  *     value — straight into the outer message, violating this module's own
  *     documented contract for server-supplied input.
  *
@@ -126,28 +123,4 @@ export function assertSafeEndpoint(urlStr, { allowLoopback = false } = {}) {
     )
   }
   return parsed
-}
-
-/**
- * A usable "real DCE" value: a parseable, https, NON-loopback URL. Promoted
- * from env-builder.mjs (was module-private `isUsableDce`) so the OTLP
- * forwarder's stash validation and the repoint/reconcile logic share ONE
- * definition instead of two hand-maintained copies. Loopback is rejected
- * UNCONDITIONALLY here (not merely "off by default") — the proxy's own
- * address must never masquerade as the real DCE, which `assertSafeEndpoint`'s
- * `allowLoopback` flag alone would not prevent for an (unusual but possible)
- * `https://127.0.0.1/...` value.
- *
- * @param {unknown} v
- * @returns {boolean}
- */
-export function isUsableDce(v) {
-  if (typeof v !== 'string' || !v.trim()) return false
-  let parsed
-  try {
-    parsed = assertSafeEndpoint(v, { allowLoopback: false })
-  } catch {
-    return false
-  }
-  return !isLoopbackHostname(parsed.hostname)
 }

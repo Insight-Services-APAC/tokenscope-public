@@ -240,6 +240,21 @@ function ensureRepoTagGitignored(root) {
 }
 
 /**
+ * The telemetry-enabling keys Claude Code refuses from a project settings file
+ * (verified on 2.1.283; the project tag in OTEL_RESOURCE_ATTRIBUTES still applies).
+ * The repo tag leaves them out: they apply from the user-level file (per-key env
+ * merge, measured on 2.1.232; superseded CLI versions are not supported).
+ */
+export const REPO_REFUSED_TELEMETRY_KEYS = [
+  'CLAUDE_CODE_ENABLE_TELEMETRY',
+  'OTEL_LOGS_EXPORTER',
+  'OTEL_METRICS_EXPORTER',
+  'OTEL_TRACES_EXPORTER',
+  'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_LOGS_PROTOCOL',
+]
+
+/**
  * Write the repo-local ./.claude/settings.local.json, overriding
  * OTEL_RESOURCE_ATTRIBUTES with the device session id + the repo's code_hash.
  *
@@ -251,23 +266,10 @@ function ensureRepoTagGitignored(root) {
  * reach a pinned repo on its next launch instead of leaving it on a stale,
  * silently-expiring credential.
  *
- * The repo-local block stays SELF-CONTAINED (full env copy, helper restated) and
- * the self-heal is achieved by copying the *current* global env each launch,
- * not by trimming the block.
- *
- * This comment used to justify that with "Claude applies the highest-precedence
- * `env` by REPLACEMENT (not key-merge), so a block carrying only the resource
- * attrs would drop the endpoint/bearer". THAT IS FALSE — captured against Claude
- * Code 2.1.232, the blocks are merged PER KEY and the repo-local value wins a
- * conflict, so a narrowed block would inherit the endpoint/bearer rather than
- * drop them (docs/security-sprint/env-precedence-capture.md; ADR-0006 §2 is
- * amended to match). The full copy is kept anyway, and is still correct under
- * merge semantics — replacing with a superset yields the same effective env, and
- * it additionally evicts keys the global has stopped emitting. What blocks
- * narrowing now is FLEET VERSION SPREAD: only 2.1.232 was measured, and on a
- * build where replacement were the behaviour a narrowed block would silently
- * stop that device emitting. Do not narrow this without establishing the
- * minimum enrolled client version first.
+ * The repo-local block copies the *current* global env each launch (helper
+ * restated), except the telemetry-enabling keys in REPO_REFUSED_TELEMETRY_KEYS:
+ * they apply from the user-level file, and from 2.1.283 Claude Code refuses them
+ * from a project file anyway, warning at every startup (ADR-0006, amended).
  *
  * Idempotent + change-detecting: computes the target settings, compares against
  * the existing file's content, and writes ONLY when they differ (so a true
@@ -390,10 +392,8 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   //
   // S1 fix (4): ALSO strip the durable OAuth REFRESH token specifically — the
   // long-lived credential a hostile repo could otherwise exfiltrate merely by
-  // being cloned and opened (every OTHER key, including the bearer endpoint
-  // and OAuth client id, stays; see the "Must not break" note on ADR-0006 §2 —
-  // narrowing the block itself would silently drop the endpoint/bearer
-  // fleet-wide, which is exactly what this must NOT do). This walks the
+  // being cloned and opened (the bearer endpoint and OAuth client id stay:
+  // the helper needs them). This walks the
   // SAME sibling path the two deletes above already established for the
   // retired read credential — one design, three keys.
   // otel-headers-helper.sh reads the credential from the device's own 0700
@@ -404,6 +404,11 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   delete deviceEnv.TOKENSCOPE_READ_REFRESH_TOKEN
   delete deviceEnv.TOKENSCOPE_READ_CLIENT_ID
   delete deviceEnv.TOKENSCOPE_OAUTH_REFRESH_TOKEN
+  // Telemetry-ENABLING keys: Claude Code (2.1.283+) refuses them from a project
+  // settings file and warns at every startup; they apply from the user-level file.
+  for (const k of REPO_REFUSED_TELEMETRY_KEYS) delete deviceEnv[k]
+  // The removed OTLP forwarder's saved copy of the real endpoint: never repo-scoped.
+  delete deviceEnv.TOKENSCOPE_DCE_LOGS_ENDPOINT
   const fullEnv = {
     ...deviceEnv,
     OTEL_RESOURCE_ATTRIBUTES: buildRepoResourceAttrs(enrolment.sessionId, codeHash),

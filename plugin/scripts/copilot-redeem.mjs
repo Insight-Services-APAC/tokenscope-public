@@ -6,17 +6,15 @@
  * MCP/chat), so the durable emit credential never enters the LLM's context.
  *
  * Writes (1 + 2 under the account's PASSWD home, which `$HOME` cannot move —
- * see TOKENSCOPE_DIR; 3 under `$HOME`, because a shell resolves its rc files
- * that way):
+ * see TOKENSCOPE_DIR):
  *   1. ~/.tokenscope/config.copilot-cli.json — durable emit creds + endpoints (mode 0600).
  *   2. ~/.tokenscope/oauth-access.copilot-cli.json — OAuth creds (mode 0600). (same shape
  *      as otel-headers-helper.sh expects)
- *   3. Shell RC files (login AND non-login: ~/.bashrc + ~/.profile [+ ~/.bash_profile
- *      if present]; or ~/.zshrc [+ ~/.zprofile/~/.zshenv]) — a DELIMITED REMOVABLE
- *      BLOCK (`# >>> TokenScope >>> … # <<< TokenScope <<<`), idempotent by markers.
- *      Exports only COPILOT_OTEL_FILE_EXPORTER_PATH (attribution is config-driven).
- *   4. The Copilot plugin hooks.json provides sessionStart/Stop lifecycle —
- *      no ~/.copilot/config.json write needed here.
+ *   3. Copilot's settings.json: enabledFeatureFlags.EXTENSIONS (and extensions.mode
+ *      load_only unless the user chose one), so the CLI loads the plugin's usage
+ *      extension (armUsageExtension). Nothing is written into a shell
+ *      rc any more; a TokenScope block an earlier setup wrote (`# >>> TokenScope >>>
+ *      … # <<< TokenScope <<<`, login AND non-login rc files) is removed.
  *
  * Usage (both forms accepted):
  *   node copilot-redeem.mjs <handoff_code> [--api-base <base>] [--shell-rc <path>]
@@ -46,14 +44,17 @@ import {
   chmodSync,
   renameSync,
   rmSync,
+  rmdirSync,
+  lstatSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname, isAbsolute } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import https from 'node:https'
 import http from 'node:http'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
+import { copilotSettingsPath, readCopilotSettings, extensionsOn, legacyConfigOverrides } from './copilot-emit.mjs'
 import { discoverMcpOrigin } from './mcp-origin.mjs'
 import { realHome } from './real-home.mjs'
 import { deviceStorePath, assertStoreConsistent } from './device-store.mjs'
@@ -88,13 +89,9 @@ const BLOCK_END = '# <<< TokenScope <<<'
  */
 const TOKENSCOPE_DIR = join(realHome(), '.tokenscope')
 /**
- * Per-PROJECT telemetry dir, RELATIVE to the project root (= Copilot's launch cwd).
- * The span file, byte-offset, and singleton lock all live here so telemetry travels
- * with the PROJECT, never HOME (Copilot runs container-per-project; only the device
- * credential — ~/.tokenscope/config.copilot-cli.json — stays in HOME). NOT an absolute path: the
- * shell-rc export below is deliberately relative so Copilot's file exporter resolves
- * it against the project root, and config.copilot-cli.json carries the same relative value as the
- * fallback the forwarder resolves against ITS cwd (the project root).
+ * Per-PROJECT dir of the legacy file forwarder, RELATIVE to the project root: its
+ * span file, byte-offset and singleton lock. Used only while a shell that still
+ * exports the old variable is open (copilot-forwarder.mjs).
  */
 const PROJECT_LOCAL_DIR = '.tokenscope.local'
 /** Network timeout for the redeem POST — a black-holed endpoint must fail loud, not hang. */
@@ -290,36 +287,31 @@ function httpsPost(urlStr, body) {
 }
 
 // ── shell-rc block helpers ────────────────────────────────────────────────────
-// Copilot may launch from a NON-LOGIN shell (reads ~/.bashrc) OR a LOGIN shell
-// (reads ~/.bash_profile / ~/.profile, and skips ~/.bashrc). SSH, tmux, and many
-// terminals open login shells — so writing only ~/.bashrc (the old behaviour) left
-// `COPILOT_OTEL_FILE_EXPORTER_PATH` unset on those launches and Copilot emitted
-// nothing. Write the block to ALL relevant init files so the export loads either way.
-export function detectShellRcTargets(explicit, home = homedir(), shell = process.env.SHELL ?? '') {
+// Earlier setups WROTE a block exporting COPILOT_OTEL_FILE_EXPORTER_PATH into the
+// login and non-login init files of the user's shell. Setup now only REMOVES it.
+export function detectShellRcTargets(explicit, home = homedir()) {
+  // Cleanup only (setup no longer writes an rc): an explicit --shell-rc names the one
+  // file; otherwise every supported rc that exists, whatever $SHELL is now, since an
+  // earlier setup may have written them under a shell the user has since changed.
   if (explicit) return [explicit]
-  if (shell.toLowerCase().includes('zsh')) {
-    // zsh: ~/.zshrc (interactive, incl. interactive-login); + ~/.zprofile (login) and
-    // ~/.zshenv (read by ALL zsh, incl. non-interactive) when they already exist.
-    const t = [join(home, '.zshrc')]
-    for (const f of ['.zprofile', '.zshenv']) if (existsSync(join(home, f))) t.push(join(home, f))
-    return t
-  }
-  // bash / sh. Non-login bash reads ~/.bashrc; login bash reads the FIRST of
-  // ~/.bash_profile, ~/.bash_login, ~/.profile; sh/dash login reads ~/.profile.
-  // ~/.bashrc + ~/.profile cover non-login + the common login path; also write
-  // ~/.bash_profile / ~/.bash_login when they exist (each shadows ~/.profile for
-  // login bash). We never CREATE those two — creating one would itself change
-  // bash-login resolution (it would stop falling back to ~/.profile).
-  const t = [join(home, '.bashrc'), join(home, '.profile')]
-  for (const f of ['.bash_profile', '.bash_login']) {
-    if (existsSync(join(home, f))) t.push(join(home, f))
-  }
-  return t
+  return SHELL_RC_BASENAMES.map((b) => join(home, b)).filter((p) => existsSync(p))
 }
 
-/** Remove the TokenScope block (between markers, inclusive) from content. */
+/**
+ * Remove the TokenScope block (between markers, inclusive) from content. Unless the
+ * markers strictly alternate start, end, start, end, the file is left alone: a
+ * nested or unmatched marker would take user lines with it.
+ */
 function removeBlock(content) {
   const lines = content.split('\n')
+  let open = false
+  for (const line of lines) {
+    const t = line.trim()
+    if (t !== BLOCK_START && t !== BLOCK_END) continue
+    if ((t === BLOCK_START) === open) return content
+    open = !open
+  }
+  if (open) return content
   const out = []
   let inBlock = false
   for (const line of lines) {
@@ -338,38 +330,194 @@ function removeBlock(content) {
   return content.endsWith('\n') ? joined.replace(/\n+$/, '') + '\n' : joined
 }
 
-/** Replace or insert the TokenScope block idempotently. */
-function upsertBlock(content, envLines) {
-  const stripped = removeBlock(content)
-  const block = [BLOCK_START, ...envLines, BLOCK_END].join('\n')
-  // Append with a separator blank line.
-  const base = stripped.endsWith('\n') ? stripped : stripped + '\n'
-  return base + '\n' + block + '\n'
+export { copilotSettingsPath }
+
+/**
+ * Turn on Copilot's EXTENSIONS feature so the CLI loads the plugin's usage extension,
+ * with extension mode load_only unless the user chose a mode. settings.json is
+ * Copilot's file, not ours: merge those keys into a plain JSON object (creating it
+ * when absent); a symlinked or hand-written JSONC file is read but never rewritten;
+ * a user's mode 'disabled', or keys in Copilot's legacy config.json (which override
+ * settings.json), are never worked around. Otherwise say how to do it by hand.
+ * Returns 'enabled' | 'already' | 'manual'.
+ */
+export function enableExtensionsFeature(path = copilotSettingsPath(), { log } = {}) {
+  const HAND_EDIT = 'add "enabledFeatureFlags": { "EXTENSIONS": true } and "extensions": { "mode": "load_only" } to it'
+  const manual = (why) => {
+    log?.(`[tokenscope] Could not update ${path} (${why}). Enable Copilot extensions yourself: ${HAND_EDIT}, then re-run setup.`)
+    return 'manual'
+  }
+  let settings = {}
+  let link = false
+  let jsonc = false
+  if (existsSync(path)) {
+    try {
+      link = lstatSync(path).isSymbolicLink()
+      ;({ settings, jsonc } = readCopilotSettings(path))
+    } catch (err) {
+      // A fixed reason, never err.message: a parse error quotes the file, and through a
+      // symlink that could be any file, printed into the conversation.
+      return manual(err instanceof SyntaxError ? 'it has syntax TokenScope cannot read' : String(err.code ?? 'unreadable'))
+    }
+  }
+  // Copilot also reads these keys from its legacy config.json, and that file wins, so a
+  // value there would silently override whatever we write here.
+  const over = legacyConfigOverrides(path)
+  if (Object.keys(over).length) {
+    if (extensionsOn({ ...settings, ...over })) return 'already'
+    return manual("Copilot's config.json defines enabledFeatureFlags or extensions, which override settings.json; move them into settings.json")
+  }
+  const mode = settings.extensions?.mode
+  // 'disabled' is the user's own choice, and capture needs extensions loaded: never override it.
+  if (mode === 'disabled') return manual('extensions are disabled in it')
+  const on = extensionsOn(settings)
+  const modeNote = (m) =>
+    m === undefined
+      ? ` Extension mode is the default (the agent can create and load extensions); for load_only, ${HAND_EDIT.replace(/^add .* and /, 'add ')}.`
+      : ` Extension mode is ${m}, as you set it.`
+  // Read through a symlink or a hand-written JSONC file; never rewrite either.
+  if (link || jsonc) {
+    if (!on) return manual(link ? 'symlink' : 'it has comments; edit it by hand')
+    log?.(`[tokenscope] Copilot extensions are already enabled in ${path}.${modeNote(mode)}`)
+    return 'already'
+  }
+  // load_only (extensions load, but the agent cannot create or reload its own in the
+  // session) is set when the user has not chosen a mode; a mode they chose is kept.
+  const wantMode = mode === undefined
+  if (on && !wantMode) return 'already'
+  const flags = settings.enabledFeatureFlags
+  settings.enabledFeatureFlags = { ...(flags && typeof flags === 'object' && !Array.isArray(flags) ? flags : {}), EXTENSIONS: true }
+  if (wantMode) {
+    const ext = settings.extensions
+    settings.extensions = { ...(ext && typeof ext === 'object' && !Array.isArray(ext) ? ext : {}), mode: 'load_only' }
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+    writeFileAtomic(path, JSON.stringify(settings, null, 2) + '\n', 0o600)
+  } catch (err) {
+    // Already on: the migration stands; only the tightening could not be written.
+    if (on) {
+      log?.(`[tokenscope] Copilot extensions are already enabled; could not set load_only in ${path} (${err.code ?? 'unwritable'}).`)
+      return 'already'
+    }
+    return manual(err.code ?? err.message)
+  }
+  log?.(`[tokenscope] Enabled Copilot extensions in ${path} (extension mode: ${settings.extensions?.mode ?? 'default'}).`)
+  return 'enabled'
 }
 
 /**
- * Arm Copilot span emission: write the RELATIVE `COPILOT_OTEL_FILE_EXPORTER_PATH`
- * export into each shell-rc target (idempotent per file). This is the ONLY trigger
- * Copilot's file exporter honours, so both the manual redeem AND emit-on-install enroll
- * must call it — otherwise Copilot writes spans nowhere and the forwarder tails an empty
- * file. The path is deliberately relative so each project's Copilot resolves it against
- * its own launch cwd (= project root); see the DOGFOOD-VERIFY note in main().
+ * Arm Copilot usage capture: the plugin's usage extension replaces the shell-rc span
+ * exporter + forwarder (docs/design/copilot-usage-extension.md §Cutover). Removes the
+ * TokenScope block a previous setup wrote into each shell rc (only files that carry
+ * it are rewritten, atomically, keeping their mode; a symlinked rc is reported, not
+ * replaced), once the EXTENSIONS feature is on: if it cannot be enabled, the old block
+ * stays so capture is never left with neither lane. Once on, it also removes the
+ * legacy forwarder's files from `projectDirs`; from then on the extension captures
+ * every session, old shells included (docs/design/copilot-usage-extension.md
+ * §Coexistence).
  *
- * @param {string[]} rcTargets — shell-rc files to write (from detectShellRcTargets).
- * @param {{ log?: (msg: string) => void }} [opts]
- * @returns {string[]} the rcTargets written (for caller logging).
+ * @param {string[]} rcTargets — shell-rc files a previous setup may have written.
+ * @returns {{ rcCleaned: string[], extensions: 'enabled' | 'already' | 'manual', projectsCleaned: string[] }}
  */
-export function armOtelExporterRc(rcTargets, { log } = {}) {
-  const otelFilePath = join(PROJECT_LOCAL_DIR, 'copilot-otel.jsonl')
-  const envLines = [`export COPILOT_OTEL_FILE_EXPORTER_PATH=${JSON.stringify(otelFilePath)}`]
-  // Write to EVERY target (login + non-login init files) so the export loads no
-  // matter how Copilot's shell is launched. upsertBlock is idempotent per file.
+export function armUsageExtension(rcTargets, { log, settingsPath = copilotSettingsPath(), projectDirs = [] } = {}) {
+  const rcCleaned = []
+  // Make before break: without the feature the extension does not load, so the old
+  // exporter stays until the user enables it.
+  const extensions = enableExtensionsFeature(settingsPath, { log })
+  if (extensions === 'manual') return { rcCleaned, extensions, projectsCleaned: [] }
+  const projectsCleaned = removeLegacyForwarderFiles(projectDirs)
+  if (projectsCleaned.length) log?.(`[tokenscope] Removed the old Copilot forwarder files from ${projectsCleaned.length} project(s).`)
+  rcCleaned.push(...removeRcBlocks(rcTargets, { log }).cleaned)
+  return { rcCleaned, extensions, projectsCleaned }
+}
+
+/**
+ * Remove the TokenScope block from each rc that carries one: atomically, keeping the
+ * file's mode; a symlinked rc is reported, not replaced; one that cannot be read or
+ * rewritten is reported and skipped. Shared by migration and `--remove`.
+ */
+export function removeRcBlocks(rcTargets, { log } = {}) {
+  const rcCleaned = []
+  const skipped = []
   for (const rcPath of rcTargets) {
-    const rcContent = existsSync(rcPath) ? readFileSync(rcPath, 'utf8') : ''
-    writeFileAtomic(rcPath, upsertBlock(rcContent, envLines)) // never truncate an RC file on a crash mid-write
-    if (log) log(`[tokenscope] Wrote env var to ${rcPath}`)
+    // One rc that cannot be read or rewritten keeps its block and is reported; it never
+    // aborts the caller (for setup, after the credentials have landed).
+    try {
+      if (!existsSync(rcPath)) continue
+      const st = lstatSync(rcPath)
+      const content = readFileSync(rcPath, 'utf8')
+      const cleaned = removeBlock(content)
+      if (cleaned === content) continue
+      if (st.isSymbolicLink()) {
+        // Replacing a link with a file would break a dotfile manager's checkout.
+        log?.(`[tokenscope] ${rcPath} is a symlink: remove the "${BLOCK_START}" block from it yourself.`)
+        skipped.push(rcPath)
+        continue
+      }
+      writeFileAtomic(rcPath, cleaned, st.mode & 0o7777) // never truncate an RC file on a crash mid-write
+      rcCleaned.push(rcPath)
+      log?.(`[tokenscope] Removed the old TokenScope block from ${rcPath}`)
+    } catch (err) {
+      log?.(`[tokenscope] Could not clean ${rcPath} (${err.code ?? err.message}): remove the "${BLOCK_START}" block from it yourself.`)
+      skipped.push(rcPath)
+    }
   }
-  return rcTargets
+  return { cleaned: rcCleaned, skipped }
+}
+
+// The legacy forwarder's per-project files, and nothing else in that directory.
+const LEGACY_FORWARDER_FILES = ['copilot-otel.jsonl', 'forwarder-offset', 'copilot-forwarder.pid']
+
+/**
+ * Once, at migration: delete the legacy forwarder's files from each project (its span
+ * file, offset and lock) and the directory if that leaves it empty. A migrated device
+ * never reads them again; spans a still-open old terminal writes meanwhile are lost,
+ * which is accepted. Best-effort per project. Returns the projects cleaned.
+ */
+export function removeLegacyForwarderFiles(projectDirs) {
+  const cleaned = []
+  for (const project of new Set(projectDirs)) {
+    if (typeof project !== 'string' || !isAbsolute(project)) continue
+    const dir = join(project, PROJECT_LOCAL_DIR)
+    try {
+      if (lstatSync(dir).isSymbolicLink()) continue
+    } catch {
+      continue
+    }
+    let removed = false
+    for (const f of LEGACY_FORWARDER_FILES) {
+      try {
+        rmSync(join(dir, f))
+        removed = true
+      } catch {
+        /* absent */
+      }
+    }
+    try {
+      rmdirSync(dir) // only if now empty
+    } catch {
+      /* not empty, or gone */
+    }
+    if (removed) cleaned.push(project)
+  }
+  return cleaned
+}
+
+/**
+ * The projects to clean at migration: the one setup runs in, and the folders Copilot
+ * lists as trusted (where the user has run it). Copilot's config.json is read, never
+ * written; if it cannot be parsed, only the current project is cleaned.
+ */
+export function legacyProjectDirs(cwd = process.cwd(), settingsPath = copilotSettingsPath()) {
+  const dirs = [cwd]
+  try {
+    const cfg = readCopilotSettings(join(dirname(settingsPath), 'config.json')).settings
+    if (Array.isArray(cfg?.trustedFolders)) dirs.push(...cfg.trustedFolders.filter((d) => typeof d === 'string'))
+  } catch {
+    /* current project only */
+  }
+  return dirs
 }
 
 // ── env-change detection + label classification ───────────────────────────────
@@ -495,15 +643,6 @@ function writeTokenscopeConfig(bundle, oauthRefreshToken, oauthClientId, overrid
     oauth_token_endpoint: bundle.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT,
     oauth_client_id: oauthClientId,
     oauth_refresh_token: oauthRefreshToken,
-    // PER-PROJECT, RELATIVE telemetry path. Telemetry + forwarder state live with the
-    // PROJECT (`<project-root>/.tokenscope.local/`), NOT in HOME — Copilot runs
-    // container-per-project, so the span file belongs to the project; only this
-    // config.copilot-cli.json (the device credential) stays in HOME. We store the RELATIVE value
-    // (not join(targetDir, …)) so the forwarder's fallback resolves it against ITS cwd
-    // (= the project root). A HOME-absolute fallback would silently drag the forwarder
-    // back to the old per-HOME model on a host where COPILOT_OTEL_FILE_EXPORTER_PATH
-    // was somehow unset.
-    copilot_otel_file_path: join(PROJECT_LOCAL_DIR, 'copilot-otel.jsonl'),
     otel_resource_attributes: bundle.OTEL_RESOURCE_ATTRIBUTES,
   }
 
@@ -581,18 +720,8 @@ async function main() {
   const rcTargets = detectShellRcTargets(args.shellRc)
 
   if (args.remove) {
-    let removed = 0
-    for (const rcPath of rcTargets) {
-      if (!existsSync(rcPath)) continue
-      const content = readFileSync(rcPath, 'utf8')
-      const stripped = removeBlock(content)
-      if (stripped !== content) {
-        writeFileAtomic(rcPath, stripped) // never truncate an RC file on a crash mid-write
-        console.log(`[tokenscope] Removed TokenScope env block from ${rcPath}`)
-        removed++
-      }
-    }
-    if (removed === 0) console.log('[tokenscope] No TokenScope env block found — nothing to remove')
+    const { cleaned, skipped } = removeRcBlocks(rcTargets, { log: (m) => console.log(m) })
+    if (!cleaned.length && !skipped.length) console.log('[tokenscope] No TokenScope env block found — nothing to remove')
     return
   }
 
@@ -728,46 +857,23 @@ async function main() {
   }
   console.log(`[tokenscope] Wrote credentials to ${TOKENSCOPE_DIR}`)
 
-  // 2. Write shell-rc env block (idempotent).
-  // ONLY the file-exporter path goes in the shell rc — and deliberately so:
-  //   - It is the single var Copilot genuinely needs to emit (its file exporter
-  //     activates on COPILOT_OTEL_FILE_EXPORTER_PATH; Copilot has no config-file
-  //     way to set it). It has no hash to corrupt, and Claude Code ignores it — so
-  //     it cannot collide with a co-installed Claude.
-  //   - OTEL_RESOURCE_ATTRIBUTES is intentionally NOT exported. It is a SHARED
-  //     OTel var: exporting Copilot's value would clobber Claude Code's (and vice
-  //     versa) in any shell that launches both, silently mis-attributing one to
-  //     the other. Attribution (instance / project / tool) is instead stamped by
-  //     the forwarder from ~/.tokenscope/config.copilot-cli.json (see copilot-forwarder.mjs),
-  //     so plain `copilot` Just Works with no per-tool OTel env in the shell.
-  //
-  // PER-PROJECT, RELATIVE path (`.tokenscope.local/copilot-otel.jsonl`). Copilot runs
-  // container-per-project; telemetry must land WITH the project, not in HOME. A
-  // relative value is resolved by Copilot's file exporter against the LAUNCH cwd (=
-  // the project root), so a single shell-rc export Just Works across every project the
-  // dev opens — each writes its own `<project>/.tokenscope.local/copilot-otel.jsonl`
-  // and the per-project forwarder tails the one in ITS cwd.
-  //
-  // ⚠️ DOGFOOD-VERIFY — the ONE unverified item in this re-architecture: that Copilot's
-  // OTEL file exporter resolves a RELATIVE COPILOT_OTEL_FILE_EXPORTER_PATH against the
-  // process launch cwd (not against $HOME or a Copilot-internal dir). If a dogfood run
-  // shows Copilot writes the relative path somewhere other than the project root, the
-  // fallback (NOT built unless trivial) is a tiny `copilot` shell wrapper/alias that
-  // exports an ABSOLUTE `COPILOT_OTEL_FILE_EXPORTER_PATH="$PWD/.tokenscope.local/copilot-otel.jsonl"`
-  // immediately before exec'ing the real `copilot` — documented in
-  // docs/build/copilot-followups.md, do not build it speculatively.
-  armOtelExporterRc(rcTargets, { log: (m) => console.log(m) })
+  // 2. Usage capture: the plugin's usage extension (docs/design/copilot-usage-extension.md).
+  // Enables Copilot's EXTENSIONS feature, then removes the shell-rc exporter block a
+  // previous setup wrote; nothing new is written into the shell or the repository.
+  const armed = armUsageExtension(rcTargets, { log: (m) => console.log(m), projectDirs: legacyProjectDirs() })
 
   // 3. (hooks handled by copilot-plugin/hooks/hooks.json — the canonical plugin mechanism.
   //    copilot-redeem.mjs no longer writes ~/.copilot/config.json hooks to avoid a
   //    competing wiring with inconsistent casing/args — B3 fix.)
 
   console.log('')
-  console.log('[tokenscope] ✓ Copilot CLI enrolled successfully.')
+  console.log('[tokenscope] ✓ Copilot enrolled successfully.')
   console.log(`[tokenscope]   Instance ID: ${bundle.instance_id}`)
-  console.log('[tokenscope]   Restart your terminal (or run: source ' + rcTargets[0] + ')')
-  console.log('[tokenscope]   The Copilot plugin hooks.json provides sessionStart/Stop lifecycle.')
-  console.log('[tokenscope]   Start a new `copilot` session — spans will forward automatically.')
+  if (armed.extensions === 'manual') {
+    console.log('[tokenscope]   Usage capture needs Copilot extensions enabled (see the message above). Until then only a')
+    console.log('[tokenscope]   terminal that still exports the old variable is captured. Re-run setup once they are enabled.')
+  }
+  console.log('[tokenscope]   Restart copilot: usage is captured by the TokenScope usage extension from the next session.')
 }
 
 // Only run main() when executed directly (not when imported as a module for testing).
@@ -781,4 +887,4 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 // Named exports for unit testing only — not part of the public API.
 // TOKENSCOPE_DIR is exported so a test can assert the ANCHOR (that a moved $HOME
 // does not move the credential store) without writing to the real one.
-export { writeTokenscopeConfig, removeBlock, upsertBlock, PROJECT_LOCAL_DIR, parseArgs, TOKENSCOPE_DIR }
+export { writeTokenscopeConfig, removeBlock, PROJECT_LOCAL_DIR, parseArgs, TOKENSCOPE_DIR }

@@ -52,7 +52,7 @@ function writeTrustedSettings(env: Record<string, string>) {
   writeFileSync(join(passwdHome, '.claude', 'settings.json'), JSON.stringify({ env }, null, 2))
 }
 
-const sentinel = () => join(stateDir, 'emit-failure.json')
+const sentinel = () => join(stateDir, 'emit-failure.claude-code.json')
 const sentinelMessage = () =>
   existsSync(sentinel()) ? (JSON.parse(readFileSync(sentinel(), 'utf8')).message as string) : null
 /** Every URL the stub curl was asked for, in order. */
@@ -194,6 +194,23 @@ describe('a legacy shared store is claimed only by the lane that can prove it', 
     expect(curlTargets().join(' ')).toContain(bearerFor(CLAUDE_INSTANCE))
     expect(curlTargets().join(' ')).not.toContain('evil.example')
     expect(curlTargets().join(' ')).not.toContain(bearerFor(COPILOT_INSTANCE))
+  })
+
+  it("a failing COPILOT lane writes only its own sentinel; the Claude lane's success leaves it, and vice versa", () => {
+    // The 2026-09-24 shape: the legacy store has no credential, so the Copilot lane
+    // refuses, while the Claude lane has its own healthy store.
+    writeFileSync(join(stateDir, 'config.json'), v2('copilot-cli', COPILOT_INSTANCE, { oauth_refresh_token: '' }))
+    writeFileSync(join(stateDir, 'config.claude-code.json'), v2('claude-code', CLAUDE_INSTANCE))
+    const copilotSentinel = join(stateDir, 'emit-failure.copilot-cli.json')
+    const claudeSentinel = join(stateDir, 'emit-failure.claude-code.json')
+
+    expect(run('copilot-cli').status).not.toBe(0)
+    expect(JSON.parse(readFileSync(copilotSentinel, 'utf8')).message).toBe('legacy store present but incomplete')
+    expect(existsSync(claudeSentinel)).toBe(false)
+
+    expect(run('claude-code').status).toBe(0)
+    expect(existsSync(claudeSentinel)).toBe(false)
+    expect(existsSync(copilotSentinel)).toBe(true) // not the Claude lane's to clear
   })
 
   it('the copilot lane still reads a legacy store, so an un-migrated device keeps emitting', () => {

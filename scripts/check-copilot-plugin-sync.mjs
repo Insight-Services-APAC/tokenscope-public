@@ -27,6 +27,10 @@ const root = resolve(__dir, '..')
 
 const FILES = [
   'copilot-forwarder.mjs',
+  // copilot-emit.mjs / copilot-usage.mjs — the shared emit primitives and the
+  // usage-extension core; both carry the credential and endpoint guards.
+  'copilot-emit.mjs',
+  'copilot-usage.mjs',
   'otlp-logs.mjs',
   'copilot-redeem.mjs',
   // tokenscope-project.mjs — extracted client-neutral resolver/hasher (P0-2).

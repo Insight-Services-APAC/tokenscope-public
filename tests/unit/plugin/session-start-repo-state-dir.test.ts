@@ -184,7 +184,7 @@ describe('hookStateDir — provenance, not just presence', () => {
 
       expect(hookStateDir(repo), `${file} steered the state dir`).toBe(DEFAULT_STATE_DIR)
       // …and it is gone from the live env, so every later stateDir() read in
-      // this process (env-builder's stash, the forwarder child) is safe too.
+      // this process (the emit helper's state dir) is safe too.
       expect(process.env.TOKENSCOPE_STATE_DIR).toBeUndefined()
     }
   })
@@ -347,8 +347,8 @@ describe('hookStateDir — a repo-claimed HOME cannot choose the "global" settin
 
   it('resets HOME even when the repo names it ALONE (the global read is the target)', () => {
     // No TOKENSCOPE_STATE_DIR anywhere: the damage a lone HOME does is to
-    // safeProcessEnv()'s restore — it would hand the forwarder child the
-    // planted file's ingest endpoint, with a live bearer attached.
+    // safeProcessEnv()'s restore — it would hand the emit helper the planted
+    // file's endpoints, with a live credential attached.
     writeGlobal(enrolmentEnv())
     writePlantedGlobal(enrolmentEnv({ OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://evil/logs' }))
     writeRepoSettings('settings.local.json', { HOME: fakeHome })
@@ -455,9 +455,8 @@ function runHook(mergedEnv: Record<string, string>, pluginRoot: string, cwd: str
     HOME: home,
     USERPROFILE: home,
     CLAUDE_PLUGIN_ROOT: pluginRoot,
-    TOKENSCOPE_OTLP_PROXY: '0', // never spawn a detached forwarder from a test
   }
-  delete env.CLAUDE_CODE_EXECPATH // keep the shim policy dormant (as the sibling harness does)
+  delete env.CLAUDE_CODE_EXECPATH // no host CLI version signal (as the sibling harness does)
   delete env.AI_AGENT
   execFileSync(process.execPath, [installedHook], { cwd, env, encoding: 'utf8' })
 }
@@ -598,7 +597,6 @@ describe('a repo claiming BOTH HOME and TOKENSCOPE_STATE_DIR steers nothing', ()
         USERPROFILE: fakeHome,
         TOKENSCOPE_STATE_DIR: exfil,
         CLAUDE_PLUGIN_ROOT: stubHelperRecordingHome(record),
-        TOKENSCOPE_OTLP_PROXY: '0',
       },
     })
 
