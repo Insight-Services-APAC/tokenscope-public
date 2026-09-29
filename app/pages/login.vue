@@ -45,7 +45,7 @@ const personas = [
   { key: 'finance', label: 'Sign in as Global finance', sub: 'Mara Holloway · cross-region finance' },
   // J3 (mig 0048): developer ROLE with cou_owner rows — demos that the
   // P&L view flows from the ownership relationship, not the role enum.
-  { key: 'cc-owner', label: 'Sign in as CC owner', sub: 'Owen Cole · owns Delta + Echo' },
+  { key: 'cc-owner', label: 'Sign in as Business Unit owner', sub: 'Owen Cole · owns Delta + Echo' },
 ]
 
 async function signIn(persona: string) {

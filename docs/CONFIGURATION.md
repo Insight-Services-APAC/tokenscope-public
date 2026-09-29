@@ -1,7 +1,7 @@
 # Configuration
 
 TokenScope is configured entirely by environment variables (no secrets in the
-tree). Locally they live in `.env.local` (copy `.env.example`); in Azure they are
+tree). Locally they live in `.env` (copy `.env.example`); in Azure they are
 container-app env vars, with secrets sourced from Key Vault. This page groups the
 variables by concern. **Required-to-boot** variables are marked ⛔.
 
@@ -30,7 +30,7 @@ Optional during first bring-up (dev mode); required for real sign-in.
 | `NUXT_OIDC_PROVIDERS_ENTRA_CLIENT_ID` / `_CLIENT_SECRET` / `_REDIRECT_URI` / `_AUTHORIZATION_URL` / `_TOKEN_URL` / `_TENANT_ID` / `_LOGOUT_URL` / `_LOGOUT_REDIRECT_URI` | Entra OIDC app registration wiring.                                                                      |
 | `NUXT_OIDC_SESSION_SECRET` / `NUXT_OIDC_AUTH_SESSION_SECRET` / `NUXT_OIDC_TOKEN_KEY`                                                                                     | OIDC module encryption keys — **must stay stable across revisions** or every session breaks on redeploy. |
 | `NUXT_ALLOW_PERSONA_OVERRIDE`                                                                                                                                            | Demo persona impersonation gate. **Must be `false` in production.**                                      |
-| `NUXT_BOOTSTRAP_ADMIN_EMAIL`                                                                                                                                             | First matching Entra sign-in becomes `admin` on JIT creation.                                            |
+| `NUXT_BOOTSTRAP_ADMIN_EMAIL`                                                                                                                                             | First matching Entra sign-in becomes `platform-admin` on JIT creation.                                    |
 | `NUXT_OAUTH_CLIENT_ID` / `NUXT_ENROLLMENT_SECRET`                                                                                                                        | MCP OAuth + device-enrolment.                                                                            |
 
 ## Telemetry read path (Azure Log Analytics)

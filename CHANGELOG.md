@@ -7,6 +7,13 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-09-29 (snapshot 0bc69c1f)
+
+- Running locally and deploying to Azure now work as documented: the local
+  stack is reachable from your machine and accepts real Claude Code telemetry,
+  and the sandbox and VNet parameter files deploy, with a step-by-step guide
+  covering the Entra app registration and every other prerequisite.
+
 ## 2026-09-26 (snapshot 678cdc99)
 
 - Claude Code 2.1.283 warned at every startup that it ignores telemetry settings

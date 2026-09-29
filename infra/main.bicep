@@ -39,7 +39,7 @@ targetScope = 'resourceGroup'
 
 // ── Parameters ────────────────────────────────────────────────────
 
-@description('Environment name. Drives every SKU / capacity / retention choice across the modules. `dev` is the Insight-corporate first-customer environment (private networking + AFD; per dev.bicepparam).')
+@description('Environment name. Drives every SKU / capacity / retention choice across the modules. Only `production` gets the production SKUs; `sandbox` is the only deployed env that may enable persona override. See infra/parameters/example-*.bicepparam.')
 @allowed(['sandbox', 'dev', 'staging', 'production'])
 param env string
 
@@ -174,7 +174,7 @@ param mcpAllowedHosts string = ''
 @description('Allow admin / platform-admin users to override their session into a demo persona (dev-login route). MUST be false in production. Sandbox = true; staging starts false (flip only when audit pattern is stakeholder-accepted).')
 param allowPersonaOverride bool = false
 
-@description('Bootstrap admin email — the first Entra sign-in matching this address gets `admin` role on JIT teammate creation. Empty = no bootstrap (all JIT-created teammates default to `developer`).')
+@description('Bootstrap admin email — the first Entra sign-in matching this address gets the `platform-admin` role on JIT teammate creation. Empty = no bootstrap (all JIT-created teammates default to `developer`).')
 param bootstrapAdminEmail string = ''
 
 // ── External-API + app secrets ───────────────────────────────────────
@@ -183,7 +183,7 @@ param bootstrapAdminEmail string = ''
 @secure()
 param anthropicApiKey string = ''
 
-@description('Whether the anthropic-admin-api-key KV secret exists (read by the app as NUXT_ANTHROPIC_KEY_MAIN). Set true once the secret is in Key Vault — independent of anthropicApiKey, so a manually-placed secret can be referenced.')
+@description('Whether the anthropic-admin-api-key KV secret exists (read by the app as NUXT_ANTHROPIC_KEY_MAIN). Set true when the secret was placed in Key Vault out-of-band; a non-empty anthropicApiKey implies it.')
 param hasAnthropicKey bool = false
 
 @description('log_min_duration_statement (ms) forwarded to the PG module — the per-environment slow-statement threshold (docs/design/performance-observability-baseline.md O2/dr-M9).')
@@ -320,8 +320,8 @@ param deployAzureMonitorWorkspace bool = true
 // bicepparam (e.g. a quick `az deployment group create` test) will skip
 // every role assignment. The expected failure mode in that case: the
 // container app's first revision can't pull from ACR (401) and can't
-// resolve KV-ref secrets (403). All three bicepparam files override
-// this to `true`; do not bare-apply main.bicep.
+// resolve KV-ref secrets (403). Every parameter file in
+// infra/parameters/ sets it true; do not bare-apply main.bicep.
 param deployRbac bool = false
 
 // ── Wave-II Front Door ──────────────────────────────────────────────
@@ -358,7 +358,7 @@ param afdOriginResponseTimeoutSeconds int = 60
 @description('Azure Front Door instance ID (Wave-II). Default empty — phase-1 + phase-2 deploys leave this empty. Phase 3 sets it to the value emitted by `frontDoorInstanceId` from the phase-2 apply, which flips the container-app revision into FDID-enforced mode.')
 param frontDoorId string = ''
 
-@description('Public base URL the scheduled worker jobs call (the Front Door host, NOT the CA FQDN). Empty = skip the worker-jobs module (phase-1). Operator passes the AFD endpoint once known, e.g. https://ep-...azurefd.net')
+@description('Base URL the scheduled worker jobs call. Empty = no worker jobs (nothing joins telemetry or rolls up). With Front Door enforced (frontDoorId set) it must be the Front Door endpoint, because the app rejects direct calls; otherwise the Container App FQDN (https://<containerAppUrl output>), which for internal ingress is the only address the jobs can reach.')
 param workerBaseUrl string = ''
 
 // ── Tags ────────────────────────────────────────────────────────────
@@ -648,7 +648,7 @@ module containerApp 'modules/container-app.bicep' = {
     // read-path ingest-coverage probe (NUXT_AZURE_DCR_RESOURCE_ID). Needs
     // Monitoring Reader on the DCR (granted in monitoring.bicep).
     dcrResourceId: monitoring.outputs.dcrResourceId
-    hasAnthropicKey: hasAnthropicKey
+    hasAnthropicKey: hasAnthropicKey || !empty(anthropicApiKey)
     // F2 GitHub Copilot reconciliation PATs (GATED OFF; flags false until provided).
     hasGithubPatPartnerDemo: !empty(githubPatPartnerDemo)
     hasGithubPatProduction: !empty(githubPatProduction)

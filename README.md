@@ -93,9 +93,10 @@ and GitHub today, others to come.
 ```bash
 git clone https://github.com/Insight-Services-APAC/tokenscope-public.git
 cd tokenscope-public
-cp .env.example .env.local        # fill in the placeholders
 npm install
-npm run dev:stack                 # Postgres + Redis + local OTel + fakes
+cp .env.example .env              # then generate the three secrets (see RUN-LOCALLY.md)
+npm run dev:stack                 # Postgres + a local telemetry store + fakes
+npm run db:migrate && npm run db:seed
 npm run dev                       # the app on http://localhost:3450
 ```
 
@@ -108,7 +109,7 @@ Two modular, documented modes — pick per environment:
 - **Sandbox** — public networking, optional Azure Front Door + WAF. Fast to
   stand up for a pilot.
 - **Fully VNet-integrated** — private endpoints on every data plane, internal
-  ingress, private Log Analytics query.
+  ingress behind your own WAF, optional private Log Analytics query.
 
 Both from the same Bicep, selected by two independent switches
 (`enablePrivateNetworking`, `enableFrontDoor`). See

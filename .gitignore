@@ -30,6 +30,8 @@ dist/
 # Generalised (S12) from `.azure-*-secrets.env`: same reasoning applies to
 # any `*secrets.env` file, not just the azure-prefixed one.
 *secrets.env
+# Personal copies of the example parameter files (docs/DEPLOY-AZURE.md).
+infra/parameters/my*.bicepparam
 
 # ── Test artefacts ───────────────────────────────────────────────────
 coverage/

@@ -79,16 +79,23 @@ async function main() {
     if (existsSync(cfg)) copyFileSync(cfg, join(chome, '.claude.json'))
 
     console.warn('[spike] running real claude -p with emit-config → store…')
+    // cwd outside any repo: a TokenScope-tagged repo's .claude/settings.local.json
+    // sets OTEL_RESOURCE_ATTRIBUTES, and settings env beats process env, so the
+    // turn would be stamped with that repo's real instance instead of this one.
     const res = spawnSync('claude', ['-p', 'Reply with exactly the word: ok', '--output-format', 'text'], {
+      cwd: chome,
       env: {
         ...process.env,
+        // A set CLAUDE_CONFIG_DIR would load the caller's real enrolment settings.
+        CLAUDE_CONFIG_DIR: join(chome, '.claude'),
         HOME: chome,
+        // The emit bundle's exporter shape (server/auth/emit-provision.ts buildOtelBundle):
+        // logs only, http/protobuf, sent to the store's /v1/logs.
         CLAUDE_CODE_ENABLE_TELEMETRY: '1',
-        OTEL_METRICS_EXPORTER: 'otlp',
+        OTEL_METRICS_EXPORTER: 'none',
         OTEL_LOGS_EXPORTER: 'otlp',
-        OTEL_EXPORTER_OTLP_PROTOCOL: 'http/json', // store parses JSON
-        OTEL_EXPORTER_OTLP_ENDPOINT: store,
-        OTEL_METRIC_EXPORT_INTERVAL: '2000',
+        OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/protobuf',
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `${store}/v1/logs`,
         OTEL_LOGS_EXPORT_INTERVAL: '2000',
         OTEL_LOG_USER_PROMPTS: '0',
         OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer spike-${sid}`,

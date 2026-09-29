@@ -7,8 +7,8 @@
 // read joiner. See docs/development/claude-code-telemetry-contract.md.
 //
 // Endpoints:
-//   GET  /                              — health
-//   POST /v1/logs                       — OTLP/HTTP logs (Claude api_request events) [REAL path]
+//   GET  /, /v1/health                  — health (the reader's probe hits /v1/health)
+//   POST /v1/logs                       — OTLP/HTTP logs, protobuf or JSON, optionally gzip [REAL path]
 //   POST /v1/metrics, /v1/traces        — accepted + ignored (events are the source of truth)
 //   POST /admin/ingest                  — simulated UsageRecords {session_id, usage|spans:[...]}
 //   GET  /v1/sessions/:sid/usage        — UsageRecords for a session (the reader's query)
@@ -16,6 +16,8 @@
 //
 // In-memory; survives process lifetime only.
 import { createServer } from 'node:http'
+import { gunzipSync } from 'node:zlib'
+import { decodeExportLogsServiceRequest } from './otlp-protobuf.js'
 
 const port = Number(process.env.PORT || 8080)
 
@@ -159,7 +161,7 @@ const server = createServer(async (req, res) => {
   if (req.headers['authorization'])
     lastBearerSeen = String(req.headers['authorization']).slice(0, 24)
 
-  if (method === 'GET' && url.pathname === '/') {
+  if (method === 'GET' && (url.pathname === '/' || url.pathname === '/v1/health')) {
     return send(res, 200, {
       service: 'fake-azure-monitor',
       status: 'ok',
@@ -171,8 +173,14 @@ const server = createServer(async (req, res) => {
   // ── REAL path: OTLP/HTTP from Claude Code (or a collector) ──────────
   if (method === 'POST' && url.pathname === '/v1/logs') {
     try {
-      const body = await readBody(req)
-      const payload = body.length ? JSON.parse(body.toString('utf8')) : {}
+      let body = await readBody(req)
+      if (String(req.headers['content-encoding'] ?? '').includes('gzip')) body = gunzipSync(body)
+      const type = String(req.headers['content-type'] ?? '')
+      const payload = !body.length
+        ? {}
+        : type.includes('protobuf')
+          ? decodeExportLogsServiceRequest(body)
+          : JSON.parse(body.toString('utf8'))
       const n = ingestOtlpLogs(payload)
       return send(res, 200, { partialSuccess: {}, records_normalised: n })
     } catch (err) {

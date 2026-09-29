@@ -1,0 +1,23 @@
+# cw override — applied by scripts/dev-stack.sh when CW_NETWORK is set.
+#
+# Inside a cw container the stack runs as host siblings through the mounted
+# socket, so published ports would land on the HOST (and collide across cw
+# workers). Instead nothing is published and every service joins the cw
+# network, where the app reaches it as ${CW_WORKER_NAME}-<service>.
+
+services:
+  postgres:
+    ports: !reset []
+  redis:
+    ports: !reset []
+  azurite:
+    ports: !reset []
+  fake-azure-monitor:
+    ports: !reset []
+  synthetic-anthropic-api:
+    ports: !reset []
+
+networks:
+  default:
+    name: ${CW_NETWORK:?CW_NETWORK must be set for the cw override}
+    external: true

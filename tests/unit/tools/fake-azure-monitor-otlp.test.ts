@@ -17,6 +17,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
+import { gzipSync } from 'node:zlib'
+import { encodeExportLogsServiceRequest } from '../../../plugin/scripts/otlp-logs.mjs'
 
 const SERVER = fileURLToPath(
   new URL('../../../tools/fake-azure-monitor/server.js', import.meta.url),
@@ -152,6 +154,53 @@ describe('fake-azure-monitor POST /v1/logs (the real OTLP path)', () => {
     )
     expect(status).toBe(200)
     expect(body.records_normalised).toBe(0)
+  })
+
+  // Clients send http/protobuf (the emit bundle pins OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
+  // and the Copilot extension encodes with the plugin encoder), so this is the
+  // shape real local traffic arrives in.
+  it('normalises the same envelope sent as http/protobuf, gzipped or not', async () => {
+    for (const [id, gzip] of [['inst-proto', false], ['inst-proto-gz', true]] as const) {
+      const payload = otlpPayload('tokenscope.instance_id', id, `conv-${id}`)
+      // A fixed instant: a broken fixed64 decode falls back to "now", which a
+      // Date.now() fixture could not tell apart.
+      payload.resourceLogs[0].scopeLogs[0].logRecords[0].timeUnixNano = '1700000000123000000'
+      const raw = encodeExportLogsServiceRequest(payload)
+      const res = await fetch(`${base}/v1/logs`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-protobuf',
+          ...(gzip ? { 'content-encoding': 'gzip' } : {}),
+        },
+        body: gzip ? gzipSync(raw) : raw,
+      })
+      expect(res.status).toBe(200)
+      expect(((await res.json()) as { records_normalised: number }).records_normalised).toBe(2)
+      const usage = (await fetch(`${base}/v1/sessions/${id}/usage`).then((r) => r.json())) as {
+        usage: Array<{ tokens: number; tokenType: string; tsEvent: string; claudeSessionId: string; projectCodeHash: string; lawCostUsd: number }>
+      }
+      const byType = Object.fromEntries(usage.usage.map((u) => [u.tokenType, u]))
+      expect(byType.input.tokens).toBe(1200)
+      expect(byType.output.tokens).toBe(340)
+      expect(byType.input.claudeSessionId).toBe(`conv-${id}`)
+      expect(byType.input.projectCodeHash).toBe('abc123')
+      expect(byType.input.lawCostUsd).toBeCloseTo(0.042)
+      expect(byType.input.tsEvent).toBe('2023-11-14T22:13:20.123Z')
+    }
+  })
+
+  it('answers the reader health probe', async () => {
+    expect((await fetch(`${base}/v1/health`)).status).toBe(200)
+  })
+
+  it('rejects a truncated protobuf body with a 400', async () => {
+    const raw = encodeExportLogsServiceRequest(otlpPayload('tokenscope.instance_id', 'inst-trunc', 'c'))
+    const res = await fetch(`${base}/v1/logs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-protobuf' },
+      body: raw.subarray(0, raw.length - 5),
+    })
+    expect(res.status).toBe(400)
   })
 
   it('rejects a malformed body without echoing internals back to the caller', async () => {

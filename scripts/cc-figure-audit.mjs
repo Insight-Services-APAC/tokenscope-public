@@ -73,7 +73,7 @@ async function main() {
   }
 
   try {
-    await signIn(page, 'CC owner')
+    await signIn(page, 'Business Unit owner')
     await page.goto(`${APP}/reporting?scope=cost-centre`, { waitUntil: 'domcontentloaded', timeout: 90000 })
     await page.waitForLoadState('networkidle', { timeout: 90000 }).catch(() => {})
     await page.waitForTimeout(4000)

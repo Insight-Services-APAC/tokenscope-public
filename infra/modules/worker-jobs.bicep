@@ -48,7 +48,7 @@ param acrLoginServer string
 @description('Container image (registry/repo:tag) — same image as the web app.')
 param image string
 
-@description('Public base URL the worker calls (Front Door host, NOT the CA FQDN).')
+@description('Base URL the worker jobs call: the Front Door endpoint when Front Door is enforced, otherwise the Container App FQDN (see main.bicep workerBaseUrl).')
 param tokenscopeBaseUrl string
 
 @description('Key Vault URL of the internal-worker HMAC key secret.')

@@ -7,7 +7,7 @@ FROM node:24-slim
 WORKDIR /app
 RUN groupadd --system app && useradd --system --gid app --create-home app \
  && chown -R app:app /app
-COPY --chown=app:app package.json server.js ./
+COPY --chown=app:app package.json server.js otlp-protobuf.js ./
 USER app
 EXPOSE 8080
 CMD ["node", "server.js"]

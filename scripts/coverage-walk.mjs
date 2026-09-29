@@ -202,7 +202,7 @@ async function main() {
   mkdirSync(OUT, { recursive: true })
   mkdirSync(`${OUT}/text`, { recursive: true })
   const expect = existsSync(EXPECT) ? JSON.parse(readFileSync(EXPECT, 'utf8')) : { expectations: [] }
-  const personas = process.env.PERSONAS?.split(',') ?? ['Developer', 'CC owner', 'Region admin', 'Global finance', 'Manager']
+  const personas = process.env.PERSONAS?.split(',') ?? ['Developer', 'Business Unit owner', 'Region admin', 'Global finance', 'Manager']
   const browser = await chromium.launch({
     executablePath: process.env.CH,
     args: ['--no-sandbox', '--disable-dev-shm-usage'],

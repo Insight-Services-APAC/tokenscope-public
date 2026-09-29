@@ -43,7 +43,7 @@ const DEV_PERSONAS = [
   { key: 'admin', label: 'Admin', sub: 'Lena Park' },
   { key: 'finance', label: 'Finance', sub: 'Mara Holloway' },
   // J3 (mig 0048): keep in sync with login.vue's grid + DEMO_PERSONAS.
-  { key: 'cc-owner', label: 'CC owner', sub: 'Owen Cole' },
+  { key: 'cc-owner', label: 'Business Unit owner', sub: 'Owen Cole' },
 ] as const
 
 const switching = ref<string | null>(null)

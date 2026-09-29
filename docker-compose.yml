@@ -1,25 +1,16 @@
-# TokenScope local dev stack — 5 sibling containers on the cw worker network.
+# TokenScope local dev stack. The Nuxt app runs on the host (`npm run dev`,
+# :3450); these services back it. Every port is bound to 127.0.0.1 only, and
+# each host port is overridable for machines where the default is taken.
 #
-# Per docs/build/mvp-lite-epic.md §Local dev stack. The Nuxt app itself runs
-# on the cw worker (`npm run dev` → 0.0.0.0:3450) — only :3450 is published
-# to the host (via .devcontainer/devcontainer.json forwardPorts).
+#   postgres                 127.0.0.1:${TS_PG_PORT:-5432}
+#   redis                    127.0.0.1:${TS_REDIS_PORT:-6379}
+#   azurite (blob)           127.0.0.1:${TS_AZURITE_PORT:-10000}
+#   fake-azure-monitor       127.0.0.1:${TS_AZMON_PORT:-4318}   (OTLP /v1/logs + reader API)
+#   synthetic-anthropic-api  127.0.0.1:${TS_ANTHROPIC_PORT:-8090}
+#   otel-collector           not published (raw OTLP debug sink, see RUN-LOCALLY.md)
 #
-# Sibling services are NOT published to the host. The worker reaches them
-# via container DNS on the shared cw network:
-#   postgres           → ${CW_WORKER_NAME}-postgres:5432
-#   redis              → ${CW_WORKER_NAME}-redis:6379
-#   azurite            → ${CW_WORKER_NAME}-azurite:10000
-#   otel-collector     → ${CW_WORKER_NAME}-otel-collector:4318
-#   fake-azure-monitor → ${CW_WORKER_NAME}-fake-azure-monitor:8080
-#
-# (Per AGENTS.md §Environment: the cw worker already owns ports 3450-3455
-# on the host, so re-publishing those from sibling containers conflicts.
-# Dev tooling that needs host access connects via `docker exec` into the
-# target container, not through a published port.)
-#
-# Brought up via `npm run dev:stack` (scripts/dev-stack.sh wraps
-# `docker compose up -d`). Verify:
-#   docker compose ps
+# Inside a cw container, scripts/dev-stack.sh layers docker-compose.cw.yml on
+# top: no published ports, services joined to the cw network by container name.
 
 name: tokenscope
 
@@ -27,6 +18,7 @@ services:
   postgres:
     image: postgres:16
     container_name: ${CW_WORKER_NAME:-tokenscope}-postgres
+    ports: ['127.0.0.1:${TS_PG_PORT:-5432}:5432']
     environment:
       POSTGRES_USER: tokenscope
       POSTGRES_PASSWORD: tokenscope
@@ -40,6 +32,7 @@ services:
   redis:
     image: redis:7
     container_name: ${CW_WORKER_NAME:-tokenscope}-redis
+    ports: ['127.0.0.1:${TS_REDIS_PORT:-6379}:6379']
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
@@ -49,6 +42,7 @@ services:
   azurite:
     image: mcr.microsoft.com/azure-storage/azurite:latest
     container_name: ${CW_WORKER_NAME:-tokenscope}-azurite
+    ports: ['127.0.0.1:${TS_AZURITE_PORT:-10000}:10000']
     command:
       - azurite
       - --blobHost
@@ -73,6 +67,7 @@ services:
     build:
       context: ./tools/fake-azure-monitor
     container_name: ${CW_WORKER_NAME:-tokenscope}-fake-azure-monitor
+    ports: ['127.0.0.1:${TS_AZMON_PORT:-4318}:8080']
     environment:
       PORT: '8080'
     depends_on:
@@ -82,6 +77,7 @@ services:
     build:
       context: ./tools/synthetic-anthropic-api
     container_name: ${CW_WORKER_NAME:-tokenscope}-synthetic-anthropic-api
+    ports: ['127.0.0.1:${TS_ANTHROPIC_PORT:-8090}:8080']
     environment:
       PORT: '8080'
 
@@ -121,12 +117,3 @@ configs:
             receivers: [otlp]
             processors: [batch]
             exporters: [debug, file]
-
-# Attach all sibling containers to the cw worker network so the Nuxt app
-# (running on the worker itself) can reach them via container DNS names.
-# `external: true` means compose will NOT create the network — it must
-# already exist, which it always does inside a cw worker.
-networks:
-  default:
-    name: ${CW_NETWORK:-bridge}
-    external: true

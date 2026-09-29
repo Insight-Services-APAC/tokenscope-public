@@ -51,7 +51,7 @@ param mcpAllowedHosts string = ''
 @description('Whether admin users can override their session into a demo persona via /api/v1/auth/dev-login. Production MUST be false.')
 param allowPersonaOverride bool = false
 
-@description('Bootstrap admin email — the first Entra sign-in matching this address gets `admin` role on JIT teammate creation.')
+@description('Bootstrap admin email — the first Entra sign-in matching this address gets the `platform-admin` role on JIT teammate creation.')
 param bootstrapAdminEmail string = ''
 
 // ── VNet Integration (Wave-III) ─────────────────────────────────────

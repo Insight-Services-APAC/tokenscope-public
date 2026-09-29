@@ -82,6 +82,12 @@ flowchart TB
 
 ## Deploy pipeline
 
+The GitHub workflows `infra.yml` (Bicep) and `deploy.yml` (image roll) deploy the
+maintainers' `dev` environment only: `dev` is the one selectable environment, and
+neither workflow ships in the public repository. Any other deployment uses the
+`az` walkthrough in [DEPLOY-AZURE.md](../DEPLOY-AZURE.md), which covers the same
+build, roll and health steps by hand.
+
 Infra (Bicep) and image rolls are separate cycles. Bicep is applied once per infra
 change; the deploy below rolls a new image on every code change. The pipeline has
 **two shapes**, selected by environment: a public-ACR **cloud build**
@@ -143,33 +149,38 @@ flowchart LR
 
 ### Resource naming
 
-Child resources follow `{kind}-tokenscope-{env}-{regionShort}`. `regionShort` is
-**derived from `location`** in `main.bicep`. ACR is the exception — alphanumeric
-only, hyphens stripped: `crtokenscope{env}{region}`.
+Child resources follow `{kind}-{projectName}-{env}-{regionShort}` (`projectName`
+defaults to `tokenscope`). `regionShort` is **derived from `location`** in
+`main.bicep`. ACR is the exception — alphanumeric only, hyphens stripped:
+`cr{projectName}{env}{region}`. The scheduled worker jobs are named
+`caj-ts-{worker}` regardless of project or env, so one resource group holds one
+deployment.
 
 | Kind | Pattern |
 |---|---|
 | Resource group | Passed at `-g` (may follow an org naming standard set by IT) |
-| Container App | `ca-tokenscope-{env}-{region}` |
-| Container Registry | `crtokenscope{env}{region}` (Premium, private) |
-| Key Vault | `kv-tokenscope-{env}-{region}` |
-| Managed Identity | `id-tokenscope-{env}-{region}` |
+| Container App | `ca-{projectName}-{env}-{region}` |
+| Container Registry | `cr{projectName}{env}{region}` (Premium when private, else Basic/Standard) |
+| Key Vault | `kv-{projectName}-{env}-{region}` (truncated to 24 characters) |
+| Managed Identity | `id-{projectName}-{env}-{region}` |
 
 Only the child resources follow the `{kind}-...` scheme; the RG name is passed at
 `-g` and may follow an org standard.
 
 ### Parameters
 
-The per-env contract lives in an `infra/parameters/{env}.bicepparam`
-(`using ../main.bicep`). Key switches: `env`, `location`,
+The per-env contract lives in a `.bicepparam` file (`using ../main.bicep`):
+`dev.bicepparam` for the maintainers' environment, and the
+`example-sandbox` / `example-vnetted` templates for everyone else. Key switches: `env`, `location`,
 `enablePrivateNetworking` (VNet + internal ingress + private endpoints),
 `deployRbac` (MI role assignments), `enableFrontDoor` (per-app AFD — off in the
 VNet-integrated mode), `monitorQueryPrivateOnly` (private Log Analytics query).
 The VNet `/26` and its `/27` (Container Apps) + `/28` (private endpoints) + optional
 `/28` (AMPLS) subnets are sized to the Azure minimum; the `10.0.0.0` base is a
 placeholder IT replaces with its IPAM-assigned `/26` (keep the masks and the
-offsets). All `@secure()` params (DB, session/HMAC keys, OIDC secrets) are passed
-at apply time by the workflow from `secrets.*` — never hardcoded.
+offsets). `@secure()` params (DB, session/HMAC keys, OIDC secrets) are never
+hardcoded: `infra.yml` passes them from `secrets.*`, and the example files read
+them from environment variables (`readEnvironmentVariable`).
 
 ### Configurable options & IT coordination
 

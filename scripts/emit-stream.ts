@@ -2,9 +2,9 @@
  * Synthetic-data stream emitter — continuous loop.
  *
  * Usage:
- *   DATABASE_URL=...   \
- *   NUXT_AZURE_MONITOR_ENDPOINT=http://tokenscope-fake-azure-monitor:8080 \
- *   tsx scripts/emit-stream.ts [intervalSeconds]
+ *   (npm run reads .env; or set DATABASE_URL and NUXT_AZURE_MONITOR_ENDPOINT, e.g.
+ *   NUXT_AZURE_MONITOR_ENDPOINT=http://127.0.0.1:4318)
+ *   npm run emit:stream -- [intervalSeconds]
  *
  * Reuses scripts/emit-data.ts emitTick() — pinning a session_id per
  * (teammate, project) pair across ticks so the at-speed path looks like

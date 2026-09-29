@@ -2,9 +2,9 @@
  * Synthetic-data emitter — one-shot bulk.
  *
  * Usage:
- *   DATABASE_URL=...   \
- *   NUXT_AZURE_MONITOR_ENDPOINT=http://tokenscope-fake-azure-monitor:8080 \
- *   tsx scripts/emit-data.ts
+ *   (npm run reads .env; or set DATABASE_URL and NUXT_AZURE_MONITOR_ENDPOINT, e.g.
+ *   NUXT_AZURE_MONITOR_ENDPOINT=http://127.0.0.1:4318)
+ *   npm run emit:data
  *
  * What it does:
  *   1. Reads existing teammates + project_assignment rows (seed must have run).
