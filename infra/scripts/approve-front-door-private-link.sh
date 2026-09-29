@@ -12,7 +12,9 @@
 #   infra/scripts/approve-front-door-private-link.sh "$RG"
 #
 # Exits 0 when the deployment succeeded, non-zero (with the error) when it did
-# not, and 3 when the only failure is a never-started Container App's missing
+# not; 4 when the only failures were worker jobs whose creation hit the
+# platform's "--msi" secret, which it deletes so that applying again creates
+# them; and 3 when the only failure is a never-started Container App's missing
 # image (MANIFEST_UNKNOWN): the expected end of a first apply, before any image
 # has been pushed. Resources that depend on the app were skipped, so the next
 # apply after the image exists creates them. With Private Link it then waits for the Front Door endpoint to serve the
@@ -28,6 +30,7 @@ RG="${1:?usage: $0 <resource-group> [deployment-name]}"
 DEPLOYMENT="${2:-main}"
 API=2025-07-01
 TIMEOUT_MIN=90
+STARTED=$(( $(date -u +%s) - 120 ))   # operations older than this belong to an earlier apply
 
 # Deployment state; empty while it does not exist yet. Any other CLI error
 # (expired login, throttling, missing permission) is shown, not swallowed.
@@ -123,6 +126,28 @@ first_apply_without_image() {
   [ -z "$ready" ]
 }
 
+# Worker jobs that failed to be CREATED on the platform's own
+# "caj-ts-<job>--msi" secret, when those are the only failures. Such a job
+# stays broken (applying again fails on it again); deleting it lets the next
+# apply create it cleanly. Only a job that failed in THIS apply, is in state
+# Failed and has never run qualifies, so a job that has been working is never
+# deleted.
+broken_jobs() {
+  local leaves name ts runs
+  leaves=$(failed_leaves "$DEPLOYMENT")
+  [ -n "$leaves" ] || return 1
+  printf '%s\n' "$leaves" | awk -F'\t' '$1 != "Microsoft.App/jobs" || $3 !~ /caj-ts-[a-z0-9-]+--msi[^ ]* not found/ { bad = 1 } END { exit bad }' || return 1
+  for name in $(printf '%s\n' "$leaves" | cut -f2); do
+    ts=$(az deployment operation group list -g "$RG" -n worker-jobs \
+      --query "[?properties.provisioningState=='Failed' && properties.targetResource.resourceName=='$name'] | [0].properties.timestamp" -o tsv) || return 1
+    [ -n "$ts" ] && [ "$(date -d "$ts" +%s)" -ge "$STARTED" ] || return 1
+    [ "$(az containerapp job show -g "$RG" -n "$name" --query properties.provisioningState -o tsv 2>/dev/null)" = Failed ] || return 1
+    runs=$(az containerapp job execution list -g "$RG" -n "$name" --query "length(@)" -o tsv 2>/dev/null || echo 0)
+    [ "${runs:-0}" = 0 ] || return 1
+  done
+  printf '%s\n' "$leaves" | cut -f2
+}
+
 approved=0
 errors=0
 sent=" "   # requests already approved; the listing can lag an approval by minutes
@@ -173,6 +198,15 @@ while :; do
       if [ "$s" = Failed ] && first_apply_without_image; then
         echo "Deployment $DEPLOYMENT stopped at the Container App: the registry has no image yet (MANIFEST_UNKNOWN). Expected on the first apply. Build and roll the image, then apply again: the resources that depend on the app (alerts, worker jobs, Front Door) are created by that apply." >&2
         exit 3
+      fi
+      if [ "$s" = Failed ] && jobs=$(broken_jobs); then
+        for j in $jobs; do
+          az containerapp job delete -g "$RG" -n "$j" --yes -o none \
+            || { echo "Deployment $DEPLOYMENT failed creating worker job $j, and deleting it failed too; delete it by hand, then apply again." >&2; exit 1; }
+          echo "Deleted worker job $j: its creation failed on the platform's --msi secret" >&2
+        done
+        echo "Deployment $DEPLOYMENT failed only on creating worker jobs ($(echo $jobs)); they were deleted. Apply again to create them." >&2
+        exit 4
       fi
       echo "Deployment $DEPLOYMENT $s:" >&2
       az deployment group show -g "$RG" -n "$DEPLOYMENT" --query properties.error -o json >&2 || true

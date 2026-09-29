@@ -7,7 +7,7 @@
 > and data domains see [Network Architecture](Network-Architecture.md) and
 > [Data Protection](Data-Protection.md).
 
-> **Status: 1.0.0-rc.1 — release candidate.** Claude Code is the primary client;
+> **Status: released.** Claude Code is the primary client;
 > the **MCP/OAuth surface** and a **GitHub Copilot** lane (the plugin's usage
 > extension reads Copilot's `assistant.usage` events and sends OTLP logs) are
 > built and running. The tenant OTLP bridge and
@@ -184,8 +184,8 @@ and clients connect through an **MCP-first OAuth 2.1** backbone.
 
 ## Risk register (current — accepted residuals)
 
-Honest, precise list of known-and-accepted gaps as-built. None blocking for
-1.0.0-rc.1; each has a documented disposition.
+Honest, precise list of known-and-accepted gaps as-built. None blocks the
+release; each has a documented disposition.
 
 | # | Residual | Why accepted today | Closes |
 |---|---|---|---|

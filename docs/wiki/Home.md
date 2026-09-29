@@ -5,7 +5,8 @@ maintainers, and operators. For _why_ the system is shaped this way see
 [ARCHITECTURE.md](../ARCHITECTURE.md) and [PRINCIPLES.md](../PRINCIPLES.md); this
 wiki is _what is actually running_.
 
-> **Status: 1.0.0-rc.1 — release candidate.** TokenScope runs end to end on Azure
+> **Status: released.** The running version is on `/api/v1/meta/build`; release
+> notes are in `CHANGELOG.md`. TokenScope runs end to end on Azure
 > ([DEPLOY-AZURE.md](../DEPLOY-AZURE.md)). **Claude Code and GitHub Copilot are
 > both supported clients**, on a shared MCP server + OAuth 2.1 backbone.
 > Usage is reconciled against the provider APIs on both lanes — Anthropic's

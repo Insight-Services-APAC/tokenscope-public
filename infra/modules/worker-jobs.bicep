@@ -169,9 +169,11 @@ var workers = [
   { name: 'ops-alert', cron: '9,24,39,54 * * * *' }
 ]
 
-// Eight at a time: each job's image is validated against the registry on
-// create, and 32 at once through a private endpoint had some refused.
-@batchSize(8)
+// One at a time. Created eight at a time, one job in a fresh environment
+// regularly failed on the platform's own "caj-ts-<job>--msi" secret while its
+// siblings on the same identity succeeded (and 32 at once had some refused
+// by the registry through a private endpoint).
+@batchSize(1)
 resource jobs 'Microsoft.App/jobs@2024-03-01' = [
   for w in workers: {
     // ACA job names are capped at 32 chars, but a WORKER_NAME can be longer

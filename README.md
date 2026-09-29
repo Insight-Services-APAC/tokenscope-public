@@ -116,6 +116,11 @@ TokenScope service is reachable from the internet except through Front Door's
 WAF. Your own WAF or application gateway in front of the internal app is the
 supported alternative.
 
+- Deploy a **release**, not `main`: each
+  [release](https://github.com/Insight-Services-APAC/tokenscope-public/releases)
+  is a tag (`git checkout v<version>`) whose notes say what changed, what to do
+  before upgrading, and which deployments it passed. A major version means the
+  upgrade needs action; minor and patch releases are a redeploy.
 - Walkthrough and prerequisites (Entra app registration, secrets, providers):
   **[docs/DEPLOY-AZURE.md](docs/DEPLOY-AZURE.md)**
 - Tested GitHub Actions workflows (infra what-if/apply, build, roll, verify,
@@ -132,8 +137,9 @@ full statement of intent so you know exactly what you're adopting.
 
 ## Status
 
-Beta. Claude Code + Copilot CLI emit and attribute on a live sandbox; some
-connectors and provider-billing reconciliation paths are on the roadmap. Built
+Released: versioned releases. Each release's notes say which deployment
+postures it passed on Azure, following these docs, before it was tagged. Claude Code and Copilot CLI both emit and attribute; some connectors and
+provider-billing reconciliation paths are on the roadmap. Built
 and open-sourced by [Insight Services APAC](https://github.com/Insight-Services-APAC).
 
 ## Contributing & security

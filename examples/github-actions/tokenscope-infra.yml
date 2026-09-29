@@ -22,7 +22,7 @@ on:
         description: Parameter file; empty = the environment's TOKENSCOPE_PARAMS
         required: false
         default: ''
-  # Lets another workflow run this one (a pipeline, or a scheduled validation).
+  # Lets another workflow run this one (a pipeline, or a validation run).
   workflow_call:
     inputs:
       environment:
@@ -109,10 +109,19 @@ jobs:
         # origin does not finish until it is approved. For any other posture
         # the script just waits for the deployment and reports its result.
         run: |
-          az deployment group create --resource-group "$RG" \
-            --template-file infra/main.bicep --parameters "$PARAMS" --no-wait
+          apply() {
+            az deployment group create --resource-group "$RG" \
+              --template-file infra/main.bicep --parameters "$PARAMS" --no-wait || return $?
+            bash infra/scripts/approve-front-door-private-link.sh "$RG"
+          }
           rc=0
-          bash infra/scripts/approve-front-door-private-link.sh "$RG" || rc=$?
+          apply || rc=$?
+          if [ "$rc" = 4 ]; then
+            # Worker jobs whose creation failed were deleted; create them again.
+            echo "::warning::Worker job creation failed on the platform's --msi secret; applying again"
+            rc=0
+            apply || rc=$?
+          fi
           if [ "$rc" = 3 ]; then
             echo "::notice::First apply: the Container App waits for its image. Run TokenScope deploy, then apply again to create what depends on the app (alerts, worker jobs, Front Door)."
             exit 0

@@ -27,7 +27,7 @@ on:
         description: Runner label; a self-hosted runner inside the network for docker builds
         required: true
         default: ubuntu-latest
-  # Lets another workflow run this one (a pipeline, or a scheduled validation).
+  # Lets another workflow run this one (a pipeline, or a validation run).
   workflow_call:
     inputs:
       environment:
