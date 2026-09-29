@@ -16,6 +16,7 @@ same. This page covers only what GitHub adds.
 ## 1. Commit your parameter file
 
 Copy an example and commit it, for example as
+<!-- docs-check: ignore (a file you create) -->
 `infra/parameters/sandbox.bicepparam` (names starting `my` are gitignored). It
 holds no secrets: the example files read those from environment variables.
 
@@ -72,6 +73,7 @@ credential), then add:
   ```
 - **Variables**
   - `AZURE_RESOURCE_GROUP`: the resource group
+  <!-- docs-check: ignore -->
   - `TOKENSCOPE_PARAMS`: the parameter file path, e.g. `infra/parameters/sandbox.bicepparam`
   - VNet only: `TOKENSCOPE_ACR_AGENT_POOL` (for `acr-agent-pool` builds)
   - Optional: `TOKENSCOPE_HEALTH_URL`, to check deploys at an address other
@@ -88,11 +90,15 @@ against it.
 The order matches DEPLOY-AZURE.md, because the first apply cannot start the app
 before an image exists:
 
-1. **TokenScope infra**, mode `apply`. Creates everything; the Container App
-   fails with `MANIFEST_UNKNOWN` (no image yet), so this run fails.
+1. **TokenScope infra**, mode `apply`. Stops at the Container App, which
+   waits for its image (`MANIFEST_UNKNOWN`); the resources that depend on it
+   (alerts, worker jobs, Front Door) come with the next apply. The run
+   succeeds with a notice saying so; any other failure fails it.
 2. **TokenScope deploy**: build `acr-task` (sandbox), or `docker` /
    `acr-agent-pool` (VNet). Builds the image and rolls the app, which brings up
-   the Container App from step 1.
+   the Container App from step 1. `prebuilt` skips the build, for an image your
+   own pipeline has already pushed as `tokenscope:<first 12 characters of the
+   commit SHA>`.
 3. Sandbox: set `appPublicOrigin`, `entraIdRedirectUri` and `workerBaseUrl` in
    the parameter file (DEPLOY-AZURE.md §3 step 5), commit, and run
    **TokenScope infra** `apply` again.
@@ -103,6 +109,15 @@ before an image exists:
    `frontDoorId` and the three host values on the Front Door endpoint, commit,
    and apply again (DEPLOY-AZURE.md §4 steps 4 and 5). Set
    `TOKENSCOPE_HEALTH_URL` to the Front Door host.
+
+   VNet with your own WAF: create the environment's DNS zone, set
+   `workerBaseUrl`, commit, and apply again (DEPLOY-AZURE.md §4, "Steps (your
+   own WAF)").
+
+Both workflows can also be called from another workflow (`workflow_call`,
+with the same inputs and `secrets: inherit`). The infra workflow takes an
+optional `params` input to apply a different parameter file than the
+environment's `TOKENSCOPE_PARAMS`.
 
 After that, run **TokenScope deploy** for each new version and **TokenScope
 infra** when the parameter file or the templates change. `what-if` mode

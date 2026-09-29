@@ -35,6 +35,7 @@
     "check:claude-emission-local": "tsx --env-file-if-exists=.env tests/e2e/real-claude-spike.ts",
     "check:copilot-usage-e2e": "node scripts/copilot-usage-e2e.mjs",
     "sync:skill-prompts": "node scripts/sync-skill-prompts.mjs",
+    "check:docs-references": "node scripts/check-docs-references.mjs",
     "check:skill-prompts-sync": "node scripts/check-skill-prompts-sync.mjs",
     "check:prototype-inventory": "node scripts/emit-prototype-inventory.mjs --check",
     "check:prototype-frozen": "node scripts/check-prototype-frozen.mjs",

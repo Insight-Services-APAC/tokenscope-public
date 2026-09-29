@@ -162,7 +162,7 @@ and clients connect through an **MCP-first OAuth 2.1** backbone.
   `@hono/node-server: ^2.0.5` — which forces the major only inside the SDK's
   subtree rather than repo-wide.
   The SDK's only use of the package is `getRequestListener` in
-  `server/streamableHttp.js`; that export and its `{ overrideGlobalObjects }`
+  `@modelcontextprotocol/sdk/server/streamableHttp.js`; that export and its `{ overrideGlobalObjects }`
   option are unchanged in v2, and the override was runtime-verified by driving a
   real MCP `initialize` over a real `node:http` server (200 + SSE handshake) —
   this is the live path behind `server/api/v1/mcp/[...].ts`.

@@ -198,6 +198,35 @@ jobs:
         # a stray true for dev/staging/production even though the code allowlist
         # already neutralizes it at runtime.
         run: node scripts/check-persona-override-params.mjs
+      - name: Check user-facing docs reference things that exist
+        run: npm run check:docs-references
+      - name: Compile the example parameter files
+        # The examples read secrets with readEnvironmentVariable, so they only
+        # compile with those variables set; placeholder values are enough.
+        env:
+          PG_ADMIN_LOGIN: x
+          PG_ADMIN_PASSWORD: x
+          SESSION_SECRET: x
+          HMAC_SESSION_KEY: x
+          INTERNAL_WORKER_HMAC_KEY: x
+          OIDC_SESSION_SECRET: x
+          OIDC_AUTH_SESSION_SECRET: x
+          OIDC_TOKEN_KEY: x
+          ENTRA_CLIENT_SECRET: x
+        run: |
+          for f in infra/parameters/example-*.bicepparam; do
+            az bicep build-params --file "$f" --stdout > /dev/null
+            echo "compiled $f"
+          done
+      - name: Lint the example GitHub Actions workflows
+        # Pinned release, checksum-verified (no "latest", no unverified binary).
+        run: |
+          v=1.7.12
+          curl -sSL -o /tmp/actionlint.tgz \
+            "https://github.com/rhysd/actionlint/releases/download/v${v}/actionlint_${v}_linux_amd64.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tgz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tgz -C /tmp actionlint
+          /tmp/actionlint -shellcheck= examples/github-actions/*.yml
 
   unit:
     name: Unit (vitest)
@@ -245,6 +274,21 @@ jobs:
           # apply — the helper checks CW_NETWORK and falls back to bridge.
           CW_NETWORK: bridge
         run: npm run test:integration
+
+  local-stack:
+    name: Local stack (RUN-LOCALLY end to end)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Follow docs/RUN-LOCALLY.md and prove the emit → attribute loop
+        run: bash scripts/ci/local-stack-smoke.sh
 
   smoke:
     name: Smoke (playwright-cli)

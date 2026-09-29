@@ -203,9 +203,11 @@ resource slowStatementLog 'Microsoft.DBforPostgreSQL/flexibleServers/configurati
     value: slowStatementLogMs
     source: 'user-override'
   }
-  // After the Query Store pair (condition-false on Burstable, then a no-op
-  // dependency); see the chain note on statStatementsTrack.
-  dependsOn: [queryStorePlans]
+  // After the Query Store pair, and after allowedExtensions directly: on
+  // Burstable the pair is condition-false, and ARM starts a resource whose
+  // dependency is skipped at once, so without it this write races the
+  // extensions write. See the chain note on statStatementsTrack.
+  dependsOn: [queryStorePlans, allowedExtensions]
 }
 
 // ── shared_preload_libraries — pg_stat_statements ────────────────────────────
@@ -305,6 +307,8 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (e
   name: 'pe-pg-${name}'
   location: location
   tags: tags
+  // Its connection is a write on the server too: last in the serial chain.
+  dependsOn: [database]
   properties: {
     subnet: {
       id: privateEndpointSubnetId

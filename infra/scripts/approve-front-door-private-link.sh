@@ -12,7 +12,10 @@
 #   infra/scripts/approve-front-door-private-link.sh "$RG"
 #
 # Exits 0 when the deployment succeeded, non-zero (with the error) when it did
-# not. With Private Link it then waits for the Front Door endpoint to serve the
+# not, and 3 when the only failure is a never-started Container App's missing
+# image (MANIFEST_UNKNOWN): the expected end of a first apply, before any image
+# has been pushed. Resources that depend on the app were skipped, so the next
+# apply after the image exists creates them. With Private Link it then waits for the Front Door endpoint to serve the
 # app, and fails if it never does. A deployment without Front Door Premium on a
 # VNet just waits. Front Door
 # can file more than one request; every pending one carrying this deployment's
@@ -87,6 +90,39 @@ wait_for_endpoint() {
   return 1
 }
 
+# Every failed operation below the deployment, recursing into modules, as
+# "<resource type>\t<resource name>\t<status message>". A failed module with
+# no failed operation of its own is reported as itself, and an unreadable
+# operation list as "unreadable", so neither can pass for a missing image.
+failed_leaves() {
+  local out type name msg found=0
+  if ! out=$(az deployment operation group list -g "$RG" -n "$1" \
+      --query "[?properties.provisioningState=='Failed'].[properties.targetResource.resourceType, properties.targetResource.resourceName, to_string(properties.statusMessage)]" \
+      -o tsv 2>&1); then
+    printf 'unreadable\t%s\t%s\n' "$1" "$out"; return
+  fi
+  while IFS=$'\t' read -r type name msg; do
+    [ -n "$type$name" ] || continue
+    found=1
+    if [ "$type" = Microsoft.Resources/deployments ]; then failed_leaves "$name"
+    else printf '%s\t%s\t%s\n' "$type" "$name" "$msg"; fi
+  done <<< "$out"
+  [ "$found" = 1 ] || printf 'deployment\t%s\tfailed with no failed operation\n' "$1"
+}
+
+# The expected end of a first apply: the ONLY failure is the Container App
+# not finding its image, and that app has never had a ready revision. An app
+# that has served before and now cannot find its image is a real failure.
+first_apply_without_image() {
+  local leaves app ready
+  leaves=$(failed_leaves "$DEPLOYMENT")
+  [ "$(printf '%s\n' "$leaves" | grep -c .)" = 1 ] || return 1
+  IFS=$'\t' read -r type app msg <<< "$leaves"
+  [ "$type" = Microsoft.App/containerApps ] && [[ "$msg" == *MANIFEST_UNKNOWN* ]] || return 1
+  ready=$(az containerapp show -g "$RG" -n "$app" --query properties.latestReadyRevisionName -o tsv) || return 1
+  [ -z "$ready" ]
+}
+
 approved=0
 errors=0
 sent=" "   # requests already approved; the listing can lag an approval by minutes
@@ -134,6 +170,10 @@ while :; do
       errors=$((errors + 1))
       [ "$errors" -lt 10 ] || { echo "Giving up after repeated errors reading the deployment" >&2; exit 1; } ;;
     Failed|Canceled)
+      if [ "$s" = Failed ] && first_apply_without_image; then
+        echo "Deployment $DEPLOYMENT stopped at the Container App: the registry has no image yet (MANIFEST_UNKNOWN). Expected on the first apply. Build and roll the image, then apply again: the resources that depend on the app (alerts, worker jobs, Front Door) are created by that apply." >&2
+        exit 3
+      fi
       echo "Deployment $DEPLOYMENT $s:" >&2
       az deployment group show -g "$RG" -n "$DEPLOYMENT" --query properties.error -o json >&2 || true
       exit 1 ;;

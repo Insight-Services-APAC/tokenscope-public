@@ -18,6 +18,22 @@ on:
         type: choice
         options: [what-if, apply]
         default: what-if
+      params:
+        description: Parameter file; empty = the environment's TOKENSCOPE_PARAMS
+        required: false
+        default: ''
+  # Lets another workflow run this one (a pipeline, or a scheduled validation).
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      mode:
+        type: string
+        default: what-if
+      params:
+        type: string
+        default: ''
 
 permissions:
   id-token: write
@@ -35,7 +51,7 @@ jobs:
     environment: ${{ inputs.environment }}
     env:
       RG: ${{ vars.AZURE_RESOURCE_GROUP }}
-      PARAMS: ${{ vars.TOKENSCOPE_PARAMS }}
+      PARAMS: ${{ inputs.params || vars.TOKENSCOPE_PARAMS }}
       # Required by the example parameter files.
       PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
       PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
@@ -95,6 +111,12 @@ jobs:
         run: |
           az deployment group create --resource-group "$RG" \
             --template-file infra/main.bicep --parameters "$PARAMS" --no-wait
-          bash infra/scripts/approve-front-door-private-link.sh "$RG"
+          rc=0
+          bash infra/scripts/approve-front-door-private-link.sh "$RG" || rc=$?
+          if [ "$rc" = 3 ]; then
+            echo "::notice::First apply: the Container App waits for its image. Run TokenScope deploy, then apply again to create what depends on the app (alerts, worker jobs, Front Door)."
+            exit 0
+          fi
+          [ "$rc" = 0 ] || exit "$rc"
           echo "::notice::containerAppUrl = $(az deployment group show -g "$RG" -n main \
             --query properties.outputs.containerAppUrl.value -o tsv)"

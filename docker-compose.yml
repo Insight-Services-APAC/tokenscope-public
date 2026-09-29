@@ -57,6 +57,10 @@ services:
     image: otel/opentelemetry-collector-contrib:0.110.0
     container_name: ${CW_WORKER_NAME:-tokenscope}-otel-collector
     command: ['--config=/etc/otel-collector-config.yaml']
+    # The image runs as a non-root user, and Docker creates the otel-data
+    # volume root-owned, so the file exporter cannot open its file and the
+    # collector exits. Local dev stack only.
+    user: '0:0'
     configs:
       - source: otel_config
         target: /etc/otel-collector-config.yaml

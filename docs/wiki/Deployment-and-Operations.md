@@ -108,19 +108,22 @@ Infra (Bicep) and image rolls are separate cycles:
   `what-if`, and in `apply` mode starts `az deployment group create --no-wait`
   and runs `infra/scripts/approve-front-door-private-link.sh`, which approves
   Front Door Premium's Private Link request while the apply runs (for any other
-  posture it just waits for the deployment). The parameter file reads every
-  secret from environment variables, which the workflow maps from the GitHub
-  environment's secrets.
+  posture it just waits for the deployment). A first apply, which stops at the
+  Container App because no image exists yet, ends green with a notice; any
+  other failure fails the run. The parameter file reads every secret from
+  environment variables, which the workflow maps from the GitHub environment's
+  secrets.
 - **`tokenscope-deploy.yml`** builds the image under the commit tag, rolls the
   Container App, verifies the new build, and only then moves `latest`.
 
 ```mermaid
 flowchart LR
-  start([workflow_dispatch]) --> oidc[Azure login<br/>OIDC federated]
+  start([workflow_dispatch<br/>or workflow_call]) --> oidc[Azure login<br/>OIDC federated]
   oidc --> build{"build input"}
   build -->|acr-task| cloud["az acr build<br/>(public registry: sandbox)"]
   build -->|docker| dbuild["docker build + push<br/>(self-hosted runner in the network)"]
   build -->|acr-agent-pool| pool["ACR Tasks agent pool<br/>(in snet-build)"]
+  build -->|prebuilt| roll
   cloud --> roll["az containerapp update<br/>--image :commit"]
   dbuild --> roll
   pool --> roll

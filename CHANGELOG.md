@@ -7,6 +7,19 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-09-29 (snapshot 3d47ef59)
+
+- `npm run dev:stack` no longer fails on a stock Docker host: the local
+  telemetry collector could not write to its volume and exited.
+- A Burstable Postgres apply no longer fails intermittently with
+  `ServerIsBusy`: its configuration writes now always run one at a time.
+- The example GitHub Actions workflows can be called from another workflow,
+  take a parameter-file override and a `prebuilt` build mode for images pushed
+  by your own pipeline, and a first apply now ends green with a notice instead
+  of failing on the not-yet-built image. Several docs references were
+  corrected (helper script paths, a removed setting) and are now checked on
+  every change.
+
 ## 2026-09-29 (snapshot cba982b4)
 
 - The deploy guide names the Anthropic credential the published template

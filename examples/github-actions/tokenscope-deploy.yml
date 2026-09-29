@@ -18,13 +18,26 @@ on:
         description: >-
           acr-task = build in Azure (public registry: sandbox);
           docker = docker build + push on the runner below (private registry, runner inside the network);
-          acr-agent-pool = build in a registry agent pool inside the network (private registry)
+          acr-agent-pool = build in a registry agent pool inside the network (private registry);
+          prebuilt = no build, your own pipeline already pushed tokenscope:<12-character commit SHA>
         type: choice
-        options: [acr-task, docker, acr-agent-pool]
+        options: [acr-task, docker, acr-agent-pool, prebuilt]
         default: acr-task
       runner:
         description: Runner label; a self-hosted runner inside the network for docker builds
         required: true
+        default: ubuntu-latest
+  # Lets another workflow run this one (a pipeline, or a scheduled validation).
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      build:
+        type: string
+        default: acr-task
+      runner:
+        type: string
         default: ubuntu-latest
 
 permissions:
@@ -56,8 +69,14 @@ jobs:
 
       - name: Resolve resources
         id: res
+        env:
+          BUILD: ${{ inputs.build }}
         run: |
           [ -n "$RG" ] || { echo "::error::AZURE_RESOURCE_GROUP is not set"; exit 1; }
+          case "$BUILD" in
+            acr-task|docker|acr-agent-pool|prebuilt) ;;
+            *) echo "::error::Unknown build '$BUILD'"; exit 1 ;;
+          esac
           ACR=$(az acr list -g "$RG" --query "[0].name" -o tsv)
           APP=$(az containerapp list -g "$RG" --query "[0].name" -o tsv)
           [ -n "$ACR" ] && [ -n "$APP" ] || { echo "::error::No registry or Container App in $RG: run the infra workflow first"; exit 1; }

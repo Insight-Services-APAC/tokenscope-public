@@ -171,8 +171,7 @@ that discovered nothing can only accept loopback values.
 `status` (emission probe) invokes the real emit path
 (`otel-headers-helper.sh`). Reads and tagging are now over MCP and authenticate
 with the connection's **`tokenscope.read`/`tag` OAuth** grant — a client
-authenticates as itself, never via a borrowed browser cookie. The old
-`TOKENSCOPE_AUTH_COOKIE` crutch is gone.
+authenticates as itself, never via a borrowed browser cookie.
 
 The published versions are declared in three places that must move
 together, and this page deliberately does NOT restate the numbers. Read them from `.claude-plugin/marketplace.json` (both entries) and each plugin's own
@@ -302,7 +301,7 @@ The load-bearing detail. Claude Code emits OTLP **directly** to Azure Monitor �
   `https://monitor.azure.com/.default`. It is refreshed dynamically by
   `otelHeadersHelper` (configured in settings, **not** an env var — there is no
   `OTEL_*_HEADERS_HELPER` env). Claude runs the helper at startup and every
-  ~29 min; `scripts/otel-headers-helper.sh` mints a short-lived OAuth
+  ~29 min; `plugin/scripts/otel-headers-helper.sh` mints a short-lived OAuth
   `tokenscope.emit` access token and presents it to `TOKENSCOPE_BEARER_ENDPOINT`
   (`/api/v1/instances/{instanceId}/bearer`) to mint the Azure token. grpc cannot use the helper.
   **The helper takes its state dir as an argument (`--state-dir`), never from

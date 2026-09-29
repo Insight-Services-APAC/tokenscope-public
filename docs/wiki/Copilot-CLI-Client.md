@@ -21,7 +21,7 @@ See also: [Architecture](Architecture.md) · [Claude Code Client](Claude-Code-Cl
 `copilot-plugin/extensions/tokenscope-usage/extension.mjs` is loaded by the
 Copilot runtime: the **Copilot App** always, and the **terminal CLI** when
 Copilot's `EXTENSIONS` feature is on (setup turns it on). The extension file is
-wiring only; the logic is `scripts/copilot-usage.mjs`. It registers no hooks,
+wiring only; the logic is `copilot-plugin/scripts/copilot-usage.mjs`. It registers no hooks,
 tools or permission handlers, so the runtime never asks for an
 extension-permission grant.
 
@@ -44,7 +44,7 @@ extension-permission grant.
    a host and its containers, whose pid namespaces differ); a writer silent past
    the stale threshold is dead and its files are adopted. Spooled records older
    than 7 days are dropped.
-5. Sending goes through `scripts/copilot-emit.mjs`: the per-tool credential
+5. Sending goes through `copilot-plugin/scripts/copilot-emit.mjs`: the per-tool credential
    store, the bearer mint (`otel-headers-helper.sh`) and a guarded HTTPS POST of
    OTLP-logs **protobuf** to the Azure Monitor DCE.
 6. A per-checkpoint comparison of Copilot's own cost total against the recorded
@@ -207,13 +207,13 @@ Claude Code prompts; `tokenscope-setup` passes `tool: 'copilot-cli'` to
 GitHub Copilot CLI honours an enterprise-managed `telemetry` setting
 (`managed-settings.json` — file-based / native-MDM / server-managed) that can
 disable or reroute telemetry **while a valid TokenScope credential still mints a
-healthy bearer**. `scripts/managed-telemetry.mjs` checks every locally-readable
+healthy bearer**. `copilot-plugin/scripts/managed-telemetry.mjs` checks every locally-readable
 channel (the per-OS file path; best-effort Windows registry / macOS managed
 preferences) and classifies `hostile` / `benign` / `none` / `unknown`, never
 printing header/endpoint values and never guessing at server-managed settings
-(not locally readable). `scripts/status.mjs` reports it as `emission_healthy`
+(not locally readable). `copilot-plugin/scripts/status.mjs` reports it as `emission_healthy`
 (distinct from `emitting`: `true` only when the credential is valid AND no
-hostile setting was found), and `scripts/enroll.mjs` runs it as a best-effort
+hostile setting was found), and `copilot-plugin/scripts/enroll.mjs` runs it as a best-effort
 post-enrol check.
 
 ---
@@ -241,6 +241,7 @@ reports `usage_capture.enabled: false` when the extension would not load.
 Ingestion takes ~4–5 min.
 
 **Enterprise-managed (Business/Enterprise):** in your organisation's
+<!-- docs-check: ignore (a path in your organisation's repository, not this one) -->
 `.github-private` repository, add `.github/copilot/settings.json` naming your
 repository as a known marketplace and enabling the plugin, for example:
 
@@ -298,7 +299,7 @@ because a cloned repository can set it. Either:
 ## Legacy lane (removed next release)
 
 Before the usage extension, the plugin shipped a per-project **file forwarder**
-(`scripts/copilot-forwarder.mjs`, started by the SessionStart hook): Copilot CLI
+(`copilot-plugin/scripts/copilot-forwarder.mjs`, started by the SessionStart hook): Copilot CLI
 wrote spans to a file named by `COPILOT_OTEL_FILE_EXPORTER_PATH`, and the
 forwarder transcoded `chat` spans into the same `api_request` records and sent
 them. It remains in the plugin for one release, for devices not yet migrated.
