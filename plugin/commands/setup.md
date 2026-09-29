@@ -1,6 +1,6 @@
 ---
 description: Set up TokenScope on this device — connect + provision emitting (one OAuth consent; the durable credential is redeemed locally, never via chat)
-allowed-tools: mcp__tokenscope__provision_emit, mcp__tokenscope__my_usage, Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/device-id.mjs":*), Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/claude-redeem.mjs":*)
+allowed-tools: mcp__plugin_tokenscope_tokenscope__provision_emit, mcp__plugin_tokenscope_tokenscope__my_usage, mcp__tokenscope__provision_emit, mcp__tokenscope__my_usage, Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/device-id.mjs":*), Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/claude-redeem.mjs":*)
 ---
 
 Connect Claude Code to TokenScope and turn on token attribution for this device.
@@ -55,19 +55,15 @@ nothing else. Use `instance_id` only when `enrolled` is `true`; anything else
 > HTTP 409 before any rotation, but pass the right id, or none.
 
 **Re-provisioning against a DIFFERENT deployment? Do NOT reuse the old id.** When
-you are moving this device from one TokenScope deployment to another (Sandbox→Dev,
-later Dev→Production), **omit** the existing `instance_id` so a fresh instance is
-minted under the new environment — passing the old id would try to rotate an
-instance that belongs to the _other_ deployment. Tell which environment you're on
-two ways:
+you are moving this device from one TokenScope deployment to another (for example
+from a sandbox to production), **omit** the existing `instance_id` so a fresh
+instance is minted under the new deployment — passing the old id would try to
+rotate an instance that belongs to the _other_ deployment. To tell, compare the
+**`bearer_host`** the device-id helper printed in step 2 with the host of the
+deployment you are provisioning against (the host of the TokenScope MCP server
+this session is connected to).
 
-- The **`(Env)` label** in the TokenScope status line (e.g. `… (Sandbox)` vs
-  `… (Dev)`), if the status line is enabled.
-- The **`bearer_host`** the device-id helper printed in step 2 (it carries
-  `tokenscope-<env>`).
-
-If that environment differs from the deployment you're now provisioning against,
-this is a cross-environment transition: omit the old id. (The local redeem helper
+If the hosts differ, this is a cross-environment transition: omit the old id. (The local redeem helper
 also detects the change from the bearer host and **replaces** the env block, so the
 old environment's credentials and endpoints are dropped rather than left at rest.)
 
@@ -122,7 +118,7 @@ user:
 - **Confirm actual landing out-of-band.** After a few minutes of real usage, run
   `my_usage` (or open the dashboard) and look for this session's spend. That — not
   `/tokenscope:status` — is what tells you records are actually being attributed.
-- **Next:** tag each repo with `/tokenscope-project` (writes a `.tokenscope`
+- **Next:** tag each repo with the `project` MCP prompt (writes a `.tokenscope`
   file) so its sessions attribute to a budget instead of landing as untagged.
 
 ## Troubleshooting

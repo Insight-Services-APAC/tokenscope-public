@@ -3,13 +3,16 @@ description: Turn the TokenScope status line (emission health + session id) on o
 allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/statusline-toggle.mjs":*)
 ---
 
-TokenScope installs a status line ON by default showing, every refresh, a
-**landing-driven** health plus the session id. The primary signal is whether your
+TokenScope's status line is OFF until the developer turns it on with this
+command. When on, it shows, every refresh, a **landing-driven** health plus the
+session id. The primary signal is whether your
 usage is actually LANDING server-side (confirmed attributed), not merely whether
 emit auth works — so a "dead export" (auth fine, but nothing landing) reads as a
 clear not-working state, never a benign colour:
 
 - **health** (highest-priority first):
+  - `TokenScope · not configured` (dim) — this device has no emit configuration
+    yet (run `/tokenscope:setup`);
   - `TokenScope ✓ landed` (green) — delivery CONFIRMED (a recent record landed +
     was attributed) AND the MCP connection is authed (can query/tag);
   - `TokenScope ⚠ landed · emit-only` (yellow) — delivery confirmed, but the MCP
@@ -32,8 +35,9 @@ clear not-working state, never a benign colour:
     fallback, distinct from the green "landed". It is deliberately time-limited:
     an enrolment that goes on never landing stops reading neutral and becomes
     `✗ not landing`;
-- the current **session id** (`#65d2c64f`) — same "Conversation" id as the
-  TokenScope web dashboard, so you can tell which row you're in.
+- the current **session id** (`#65d2c64f`, the first 8 characters of Claude's
+  session id), so you can tell which session in the TokenScope dashboard is this
+  one.
 
 The landing state comes from the per-instance server `/health` endpoint, polled at
 most once every ~5 minutes and cached; the always-on status line renders from the

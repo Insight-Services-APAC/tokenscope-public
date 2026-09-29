@@ -6,22 +6,10 @@
 // server/workers/registry.ts (recommendedCron); this module materialises the
 // subset that should run on the deployed env.
 //
-// History: the original 6 jobs were created ad-hoc via `az` (outside IaC). This
-// module captures them PLUS the two ADR-0005 observability workers
-// (went-silent, reconciliation-gap), so the cron surface is finally codified.
-// On a sandbox with no GitHub deploy workflow, mirror with `az containerapp job
-// create` (see the deploy runbook).
-//
-// FIRST-APPLY WARNING — HISTORICAL, resolved 2026-06. This used to warn that a full
-// apply would converge the 6 originally-ad-hoc-created jobs (cron, replicaTimeout,
-// retry limit, resources, env) and overwrite any live drift. That convergence has
-// since happened: infra.yml has been applied to Dev repeatedly (most recently
-// 2026-07-02), so the values declared here ARE the live values, and a re-apply is
-// an ordinary converging apply rather than a first-time reconciliation.
-// Kept rather than deleted because the stale warning caused real over-caution when
-// scheduling the workers in PR #186 — if you are weighing an apply, check the
-// infra.yml run history instead of trusting a comment about the state of the world.
-// infra.yml previews with `az deployment group what-if` before it applies.
+// A re-apply converges every job declared here (cron, replicaTimeout, retry
+// limit, resources, env) and overwrites any drift made outside IaC; preview with
+// `az deployment group what-if` first (the example workflow
+// examples/github-actions/tokenscope-infra.yml does).
 //
 // NOT every registered worker is scheduled on this env (intentional). Exactly ONE
 // registered worker is DELIBERATELY left unscheduled here (enforced by
@@ -65,7 +53,7 @@ var workers = [
   { name: 'reconciliation', cron: '0 */1 * * *' }
   { name: 'session-gc', cron: '0 2 * * *' }
   { name: 'soft-purge', cron: '0 3 * * *' }
-  // ADR-0005 §4 observability safety nets (the two new jobs):
+  // Observability safety nets:
   { name: 'went-silent', cron: '0 */1 * * *' }
   { name: 'reconciliation-gap', cron: '0 */6 * * *' }
   // Reconciliation engine (Phase 0 foundation). Clean no-op until adapters register
@@ -73,7 +61,7 @@ var workers = [
   { name: 'reconciliation-sync', cron: '0 */1 * * *' }
   { name: 'identity-sync', cron: '0 3 * * *' }
   // §A usage completeness: per-(teammate, day) API-vs-OTel reconciliation (unaccounted +
-  // over-emission). See docs/design/provider-billing-attribution-model.md §A.
+  // over-emission).
   { name: 'usage-reconciliation', cron: '0 */2 * * *' }
   // On-demand backfill queue (mig 0074): drain admin-requested historical pulls, one per tick.
   { name: 'reconciliation-backfill', cron: '*/15 * * * *' }
@@ -86,45 +74,42 @@ var workers = [
   { name: 'telemetry-recovery', cron: '*/5 * * * *' }
   // Reporting-consolidation Wave 0: read the enterprise billing usage report → write the POOLED
   // Copilot chargeback (copilot_pool_bill), homed org→CoU. A reader, not a calculator
-  // (provider-billing-attribution-model.md §B). Month-grain + slow-settling → daily. WITHOUT
+  // (§B). Month-grain + slow-settling → daily. WITHOUT
   // this scheduled, the Copilot chargeback lane is empty and the Finance Σ=bill check has no
   // Copilot term (the silent-no-op trap).
   { name: 'copilot-pool-bill', cron: '0 5 * * *' }
-  // Consumption-dashboard read path (night sprint): materialises
+  // Consumption-dashboard read path: materialises
   // attribution_aggregate; self-bootstraps a 90-day backfill on first run.
   { name: 'aggregate-rollup', cron: '*/15 * * * *' }
   // Region-reporting read path: materialises usage_rollup_daily from
-  // v_complete_usage; full-history backfill resumes across runs
-  // (docs/design/usage-rollup-lane.md). Minutes ≡ 2 (mod 5) avoid simultaneous
-  // STARTS with the */5 and */15 pollers — starts only, NOT overlap: dispatches
-  // can run ~200 s (performance-observability-baseline.md O5, dr-M6).
+  // v_complete_usage; full-history backfill resumes across runs. Minutes ≡ 2
+  // (mod 5) avoid simultaneous STARTS with the */5 and */15 pollers — starts
+  // only, NOT overlap: dispatches can run ~200 s.
   { name: 'usage-rollup', cron: '7,22,37,52 * * * *' }
-  // Read-path outage detector (ADR-0005 safety-net sibling of went-silent):
+  // Read-path outage detector (safety-net sibling of went-silent):
   // scans the worker_run ledger and inbox-alerts platform-admins when the
   // azure-monitor-read gatherer is silently failing (rows not landing while
   // emissions still arrive). went-silent catches emit/WRITE silence; this
-  // catches READ-path failure — the gap behind the 2026-06 ~5.5-day outage.
+  // catches READ-path failure.
   { name: 'read-path-health', cron: '*/15 * * * *' }
   // PER-INSTANCE counterpart to read-path-health. That worker gates on FLEET-wide
   // signals (a zero-write streak, MAX(last_bearer_at) across every instance), so a
-  // SINGLE starved device never moves it — which is why the 2026-07-24 dead-zone
-  // outage (one instance emitting, its spend attributing nowhere) stayed invisible
-  // for 19 days. This alerts on the gap between a device's last bearer mint and its
+  // SINGLE starved device (one instance emitting, its spend attributing nowhere)
+  // never moves it. This alerts on the gap between a device's last bearer mint and its
   // last attributed spend. WITHOUT this scheduled there is NO detector for that
   // outage class at all (the silent-no-op trap).
   { name: 'attribution-gap', cron: '*/30 * * * *' }
-  // Bill-driven placement pipeline (ADR-0010 rule 1 — "a user in a provider bill is
-  // provisioned, not skipped"). analytics-poll ENQUEUES owed bills for provider-billed
+  // Bill-driven placement pipeline ("a user in a provider bill is provisioned, not
+  // skipped"). analytics-poll ENQUEUES owed bills for provider-billed
   // users who have no teammate yet → placement-sync DRAINS pending_placement, mints
   // source='bill' teammates (provisionAndPlace; falls back to __unassigned__ if directory
   // is unwired) + replays into actual_spend → region-reenrichment homes them by
-  // directory/cost-centre → pending-placement-gc prunes the drained queue. WITHOUT
+  // directory attributes → pending-placement-gc prunes the drained queue. WITHOUT
   // placement-sync scheduled, the queue never drains, NO bill teammates are minted, and
-  // reconciliation-sync records ONLY pre-existing teammates (the Dev "only Phil" defect).
+  // reconciliation-sync records ONLY pre-existing teammates.
   { name: 'placement-sync', cron: '*/30 * * * *' }
   { name: 'region-reenrichment', cron: '0 */6 * * *' }
-  // ── Stranded workers scheduled 2026-07-24 (never previously wired; see
-  //    docs/design/stranded-workers-lifecycle.md) ──
+  // ── Lifecycle and governance workers ──
   // Proactive "your project ends in N days — re-tag" warning (D3). Reachable via
   // the admin PATCH end_date API (a future value = a planned end); near-no-op
   // until a project has a future end_date set.
@@ -133,20 +118,16 @@ var workers = [
   // the only detector for stuck/un-placed owed spend; reads the live table
   // analytics-poll feeds. Also emits sync-conflict (dormant: seed-only source).
   { name: 'connector-health', cron: '*/30 * * * *' }
-  // Cross-instance-spoof early-warning (ADR-0008 detect leg; claude-only — Copilot
+  // Cross-instance-spoof early-warning (detect leg; claude-only — Copilot
   // spoof-defense is §A reconciliation). Informational quarantine badges; never revokes.
-  // PRE-DEPLOY GATE: this worker has never run anywhere, so its false-positive rate
-  // against real data is unmeasured, and /tokenscope:backfill re-emits with ORIGINAL
-  // timestamps (which read as uncovered if they predate the current enrolment). Run
-  // the read-only count in docs/design/stranded-workers-lifecycle.md before the first
-  // deploy that activates this — do not let the pilot fleet's homepages be the first
-  // measurement.
+  // Note: /tokenscope:backfill re-emits with ORIGINAL timestamps, which read as
+  // uncovered if they predate the current enrolment.
   { name: 'heartbeat-coverage', cron: '*/30 * * * *' }
   // Retroactive directory-exclusion enforcement. REPORT-ONLY from cron (destructive
   // apply is signed-HMAC-body-only + UI-excluded); single-query no-op until a
   // directory_exclusion_pattern is configured.
   { name: 'privileged-identity-cleanup', cron: '30 4 * * *', jobName: 'priv-identity-cleanup' }
-  // Over-budget pages to PMs/CoU owners. Reads §A COMPLETE spend (v_complete_usage)
+  // Over-budget pages to PMs/Business Unit owners. Reads §A COMPLETE spend (v_complete_usage)
   // so a Copilot-funded project trips its budget — reading raw attribution_record
   // made it silently blind to Copilot, which is why it stayed unscheduled.
   { name: 'budget-alert', cron: '0 * * * *' }
@@ -172,8 +153,7 @@ var workers = [
   // tick never flips the UI to "unknown". Read-mostly + idempotent — also
   // UI-triggerable (shared/workers/ui-triggerable.ts).
   { name: 'github-coverage-sweep', cron: '0 * * * *' }
-  // Target-state data architecture T0 (docs/design/target-state-data-architecture.md
-  // §6): derive the BILLED lane (provider_usage_fact) at teammate/day/tool/MODEL/
+  // Target-state data architecture T0: derive the API lane (provider_usage_fact) at teammate/day/tool/MODEL/
   // cost_type grain from actual_spend.raw_payload. T0 is INERT — nothing reads the
   // table yet — but it must still RUN: T2 repoints the model axis at it, and an
   // unscheduled derive would hand T2 an empty table (the silent-no-op trap). Hourly,
@@ -181,14 +161,17 @@ var workers = [
   // 30-day revision window the poller re-polls. Money-adjacent bulk derive, so
   // cron/HMAC-only — never UI-triggerable.
   { name: 'provider-transform', cron: '0 * * * *' }
-  // Ops-alerting evaluator (docs/design/ops-alerting.md A2): probes the read
+  // Ops-alerting evaluator: probes the read
   // path + private-link routes, detects attribution stalls / fleet failures /
-  // inbox aging, and pages the external ntfy channel. Cron is the exact design
-  // literal (ar-L22), ≡4 mod 5 — off the 5- and 15-minute tick grids. Its OWN
+  // inbox aging, and pages the external ntfy channel. Cron ≡4 mod 5 — off the 5-
+  // and 15-minute tick grids. Its OWN
   // liveness is the A4 dead-man metric alert on this job's execution count.
   { name: 'ops-alert', cron: '9,24,39,54 * * * *' }
 ]
 
+// Eight at a time: each job's image is validated against the registry on
+// create, and 32 at once through a private endpoint had some refused.
+@batchSize(8)
 resource jobs 'Microsoft.App/jobs@2024-03-01' = [
   for w in workers: {
     // ACA job names are capped at 32 chars, but a WORKER_NAME can be longer

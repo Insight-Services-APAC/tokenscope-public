@@ -3,20 +3,23 @@
 /*
  * cron-trigger.mjs — sign + POST to the internal run-worker HTTP endpoint.
  *
- * This is the Azure-native realisation of the external-cron contract in
- * docs/build/worker-scheduler.md. It runs as an Azure Container Apps *Cron Job*
+ * This is the Azure-native realisation of the external-scheduler contract
+ * (docs/CONFIGURATION.md, Workers / scheduler). It runs as an Azure Container Apps *Cron Job*
  * (one job per worker, each with its own schedule), reusing the app image
  * (whose Node supplies node:crypto + global fetch, so no extra deps). Plain
  * .mjs so it runs without tsx (which is pruned from the production image).
  *
  * Why HTTP and not a direct DB call: the run-worker endpoint is the documented,
- * multi-instance-safe, observable trigger surface. /api/v1/internal/* is NOT
- * front-door-exempt, so the job must call the public Front Door URL (which
- * injects X-Azure-FDID); calling the container-app FQDN directly would 403.
+ * multi-instance-safe, observable trigger surface. When Front Door enforcement
+ * is on (AZURE_FRONT_DOOR_ID set), /api/v1/internal/* is NOT front-door-exempt,
+ * so the job must call the Front Door URL (which injects X-Azure-FDID); calling
+ * the container-app FQDN directly would 403. Without enforcement, the job calls
+ * the Container App FQDN (the Bicep param workerBaseUrl).
  *
  * Env:
  *   WORKER_NAME                   registry worker name (e.g. azure-monitor-read)
- *   TOKENSCOPE_BASE_URL           Front Door origin, e.g. https://<ep>.azurefd.net
+ *   TOKENSCOPE_BASE_URL           app base URL: the Front Door origin when enforced
+ *                                 (https://<ep>.azurefd.net), else the CA FQDN
  *   NUXT_INTERNAL_WORKER_HMAC_KEY shared HMAC key (same as the app's)
  *   CRON_TRIGGER_TIMEOUT_MS       optional, default 200000 (the bicep sets it; a
  *                                 non-numeric or non-positive value is rejected

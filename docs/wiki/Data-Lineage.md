@@ -685,7 +685,7 @@ recomputed before the key's facts have landed, and the next run heals it.
 
 | quantity | measured | when |
 |---|---|---|
-| OTel spans | 21,839 over 7 days (Dev) | 2026-08-01 |
+| OTel spans | 21,839 over 7 days (reference deployment) | 2026-08-01 |
 | — of those, rate-card-priced | **0** | 2026-08-01 |
 | Anthropic cost rows | ~250/day at pilot scale | 2026-08-01 |
 | `cost_type` fan-out | 80 usage rows → 240 cost rows, same day (3×) | 2026-08-01 |

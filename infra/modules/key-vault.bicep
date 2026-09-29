@@ -1,6 +1,6 @@
 // ── Key Vault — Secrets Management ────────────────────────────────
 //
-// TokenScope adopts the PSR pattern: RBAC authorization, soft-delete +
+// RBAC authorization, soft-delete +
 // purge-protection always on, optional private endpoint, optional
 // Key-Vault-Secrets-User role assignment for the app's user-assigned MI.
 //
@@ -9,7 +9,7 @@
 //     emitted when the deploying principal is Owner (SP via OIDC).
 //   • `createMode: 'recover'` lets us restore a soft-deleted vault
 //     of the same name (sandbox iteration).
-//   • `enablePrivateEndpoint` is OFF by default — Wave-III networking.
+//   • `enablePrivateEndpoint` is OFF by default (on with enablePrivateNetworking).
 
 @description('Resource name suffix (e.g. tokenscope-sandbox-aue).')
 param name string
@@ -33,7 +33,7 @@ param identityPrincipalId string = ''
 @description('Deploy RBAC role assignment (requires Owner/UAA on the deploying principal). Default false for Contributor-safe applies.')
 param deployRbac bool = false
 
-// ── Private Endpoint params (Wave-III; off in sandbox) ───────────────
+// ── Private Endpoint params (off in the sandbox posture) ──────────────
 
 @description('Enable private endpoint for the vault.')
 param enablePrivateEndpoint bool = false
@@ -99,7 +99,7 @@ resource kvSecretsUserRoleAssignment 'Microsoft.Authorization/roleAssignments@20
   }
 }
 
-// ── Private Endpoint (Wave-III) ──────────────────────────────────────
+// ── Private Endpoint ─────────────────────────────────────────────────
 
 resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (enablePrivateEndpoint) {
   name: 'pe-kv-${name}'
@@ -124,9 +124,9 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (e
 }
 
 // Zone group only when a zone ID was supplied. Central-DNS environments
-// where the SP has no write rights on IT's zones pass '' — the PE still
-// provisions, and IT registers the A record on their side (the infra.yml
-// handoff step reads the PE's customDnsConfigs live and prints the ask).
+// where the SP has no write rights on the zones pass '' — the PE still
+// provisions, and the zone owner registers the A record (the PE's
+// customDnsConfigs list the name and IP to register).
 resource dnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = if (enablePrivateEndpoint && !empty(privateDnsZoneId)) {
   parent: privateEndpoint
   name: 'default'

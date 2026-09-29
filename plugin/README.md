@@ -34,16 +34,21 @@ Tagging is also **zero-touch**: a `SessionStart` hook ensures the repo-local
 `project.code_hash` is set whenever you start `claude` in a repo that has a
 committed `.tokenscope` and the device is connected (see *Zero-touch tagging*).
 
-## Install (dogfood)
+## Install
 
 The marketplace manifest lives at the **repo root** (`.claude-plugin/marketplace.json`),
-so the GitHub shorthand resolves it. The simplest path — **works inside any Claude
-Code session, no `claude` CLI on PATH required** — is the slash form. Run the
-two commands **individually** (paste one, run it, then the next — Claude Code
-treats a multi-line paste as a single command):
+so the GitHub shorthand resolves it. The plugin talks to the deployment whose host
+is baked into it, so add the marketplace of the repository that carries **your**
+deployment's host (normally your fork; see
+[Point the plugins at your deployment](#point-the-plugins-at-your-deployment)).
+
+The simplest path — **works inside any Claude Code session, no `claude` CLI on
+PATH required** — is the slash form. Run the two commands **individually** (paste
+one, run it, then the next — Claude Code treats a multi-line paste as a single
+command):
 
 ```
-/plugin marketplace add Insight-Services-APAC/tokenscope-public
+/plugin marketplace add <your-org>/<your-fork>
 /plugin install tokenscope@tokenscope
 ```
 
@@ -53,28 +58,63 @@ the plugin is a personal tool that emits across all your repos. Don't use
 collaborators) or *local* scope (this repo only). The committed `.tokenscope`
 file is what travels per-repo, not the plugin.
 
-The add is an authenticated git clone, so it works for this **private** repo (a
-raw `marketplace.json` URL would not auth).
-
 **Lighter alternative (needs the standalone `claude` CLI on PATH).** The terminal
 form supports `--sparse`, a git sparse-checkout of just `.claude-plugin` + `plugin`
-so the whole monorepo isn't checked out:
+so the whole repository isn't checked out:
 
 ```
-claude plugin marketplace add Insight-Services-APAC/tokenscope-public --sparse .claude-plugin plugin
+claude plugin marketplace add <your-org>/<your-fork> --sparse .claude-plugin plugin
 claude plugin install tokenscope@tokenscope
 ```
 
 From a local checkout you can instead `claude plugin marketplace add .`.
 
-**[VERIFY at install]** the exact verbs/flags against the live docs
-(`code.claude.com/docs/en/plugin-marketplaces`).
+## Point the plugins at your deployment
+
+The API base is **part of the plugin**, not a user setting: it is baked into the
+plugin source, and the server it names returns the OTLP ingestion endpoint and the
+emit credential at provision time. `TOKENSCOPE_API_BASE` is honoured **only** when
+it names loopback (`http://localhost:3450`, for local development). Any other value
+is ignored, because a cloned repository can set that variable and the plugin cannot
+tell a repo-supplied value from one you exported.
+
+To run the plugins against your own TokenScope deployment:
+
+1. **Fork this repository.**
+2. **Set your host** (for example `https://tokenscope.your-company.example`) in all
+   four places it is baked:
+   - `plugin/scripts/api-base.mjs` — `DEFAULT_API_BASE`
+   - `plugin/.mcp.json` — the default inside `${TOKENSCOPE_API_BASE:-…}`
+   - `copilot-plugin/.mcp.json` — the literal `url` (Copilot CLI does not expand
+     variables there)
+   - `copilot-plugin/scripts/enroll.mjs` — its own `DEFAULT_API_BASE`
+3. **Check they agree:** `npm run check:copilot-plugin-sync` fails when the four
+   hosts differ, or when the copies in `copilot-plugin/scripts/` drift from
+   `plugin/scripts/`.
+4. **Bump both plugin versions** (`plugin/.claude-plugin/plugin.json`,
+   `copilot-plugin/plugin.json` and the matching entries in
+   `.claude-plugin/marketplace.json`). An installed plugin is replaced only when
+   its version increases, and CI (`scripts/check-plugin-version-bump.mjs`) fails a
+   plugin-code change without a bump.
+5. **Have developers add your fork as the marketplace** (see [Install](#install)).
+
+**Alternative without a fork (Claude Code):** register your deployment's MCP
+server yourself at user scope. The plugin's scripts discover that registration and
+use its host:
+
+```
+claude mcp add --transport http --scope user tokenscope https://<your-host>/api/v1/mcp
+```
+
+Run setup through that server's `tokenscope-setup` prompt. The plugin's own
+bundled MCP server still points at the baked host (and will fail to connect), so
+the fork is the cleaner path for a team.
 
 ## Configure
 
 | Var | Default | Purpose |
 |---|---|---|
-| `TOKENSCOPE_API_BASE` | baked default in `scripts/api-base.mjs` (the GBS Dev host `https://tokenscope.example.com`) | **Override only.** The API base is part of the plugin — the marketplace ships it per-deployment. Set this for local dev (`http://localhost:3450`) or to point at another instance (e.g. the sandbox host). `plugin/.mcp.json` reads the same base for the MCP server. The OTLP ingestion endpoint + emit credential are not baked here — the chosen deployment's server returns them at provision time. |
+| `TOKENSCOPE_API_BASE` | the host baked into `scripts/api-base.mjs` | **Local development only.** Honoured only for a loopback value (`http://localhost:3450`); any other value is ignored. To target another deployment, see [Point the plugins at your deployment](#point-the-plugins-at-your-deployment). `plugin/.mcp.json` reads the same variable for the MCP server URL. |
 
 Tagging makes **no server call** at write time and needs no env var — the
 `project` prompt resolves the code from your memberships and hashes it locally.
@@ -100,7 +140,7 @@ then run the setup prompt:
      `TOKENSCOPE_BEARER_ENDPOINT` to mint a fresh Azure token. The bearer is never a
      static header.
 
-     Since **0.1.27** that same request also states what the device is running:
+     That same request also states what the device is running:
      `X-TokenScope-Plugin-Version` (read from the `plugin.json` beside the helper,
      so it is the version that actually ran) and `X-TokenScope-Client-Version`
      (the CLI version, from `CLAUDE_CODE_EXECPATH` / `AI_AGENT`). The server
@@ -134,12 +174,10 @@ you pick one, and it:
   overridden to
   `tokenscope.instance_id=<DEVICE_SID>,project.code_hash=<sha256(code)>,tool=claude-code`,
   and WITHOUT the telemetry-enabling keys (`CLAUDE_CODE_ENABLE_TELEMETRY`, the OTel
-  exporters, the logs endpoint and protocol). Claude Code merges the blocks **per
-  key** (captured on 2.1.232,
-  [`env-precedence-capture.md`](../docs/security-sprint/env-precedence-capture.md)),
-  so those apply from the user settings; from 2.1.283 it refuses them from a
-  project file anyway, while the project tag still applies
-  ([`env-precedence-capture-2.1.283.md`](../docs/security-sprint/env-precedence-capture-2.1.283.md)).
+  exporters, the logs endpoint and protocol). Claude Code merges the `env` blocks
+  **per key**, so those apply from the user settings (recent Claude Code versions
+  refuse them from a project file anyway), while the project tag applies from the
+  repo file.
   The durable OAuth **refresh token** specifically is excluded
   from the copy — the one credential a hostile repo could otherwise exfiltrate
   merely by being cloned and opened — and `otel-headers-helper.sh` falls back to
@@ -147,8 +185,7 @@ you pick one, and it:
 
 The device session id + helper + OTLP config are reused from the global config,
 copied wholesale into the repo file on **every** `claude` launch in that repo —
-not merged by Claude, restated by us each time (ADR-0006's self-heal), which is
-what lets a plugin upgrade or re-enrol reach every tagged repo automatically.
+not merged by Claude, restated by us each time, which is what lets a plugin upgrade or re-enrol reach every tagged repo automatically.
 Commit the `.tokenscope`; teammates who clone it just run the `project` prompt
 with no project (or let the SessionStart hook auto-apply it). Restart `claude`
 in the repo — OTel resource attrs are read at startup, so the **next** session
@@ -156,8 +193,8 @@ is tagged.
 
 The project name/code is not emitted; the hash is a stable identifier, not a
 secret. (The full repo-local copy above — minus the refresh token — still sits
-at rest in the tagged repo's `settings.local.json`; that residual is accepted
-and documented in ADR-0006 §Risk accepted.)
+at rest in the tagged repo's `settings.local.json`; that residual is an accepted
+risk, which is why the refresh token is left out of it.)
 
 ## `.tokenscope` file
 
@@ -166,15 +203,15 @@ attribution:
 
 ```yaml
 project:
-  code: "6010011856/450127097"
-  id: "perpetual-services-pty-ltd-pwm-wp1-azure-landing-zone"
-  name: "Perpetual Services PTY Ltd-PWM WP1 - Azure Landing Zone"
+  code: "1000012345/450000001"
+  id: "contoso-ai-insights"
+  name: "Contoso - AI Insights"
 
 # Optional context — informational, not used for tagging.
-client: "Perpetual"
-practice: "Modern Platforms & Operations"
+client: "Contoso"
+practice: "Data & AI"
 engagement_type: "Fixed Price"
-pm: "Prabho Nallanathan"
+pm: "Alex Example"
 ```
 
 The `project` prompt + the SessionStart hook use `project.code` (the canonical
@@ -198,27 +235,25 @@ exits silently and never breaks your session.
 
 ## Status line
 
-`/tokenscope:statusline on` installs a status line (non-clobber — a custom status
-line is preserved); `off` removes it. It shows emission **health** + MCP-connection
-state + the current **session id** every refresh:
+The status line is **off** until you turn it on. `/tokenscope:statusline on`
+installs it in `~/.claude/settings.json`, **replacing** any custom status line you
+had; `/tokenscope:statusline off` removes it (a status line that isn't TokenScope's
+is left untouched). Restart `claude` for the change to take effect.
 
-- `TokenScope ✓ #65d2c64f` — emitting **and** the MCP is authenticated.
-- `TokenScope ⚠ emit-only #65d2c64f` — emitting, but the MCP is **not** connected
-  (telemetry flows, but you can't query — reconnect via `/mcp`).
-- `TokenScope ✗ not emitting` — the emit credential is failing (re-provision via
-  `tokenscope-setup`).
-
-The `#id` matches the dashboard's "Conversation" column, so you can tell which row
-is the session you're in. `/tokenscope:status` reports the same verdict in detail;
-for your spend breakdown use the `usage` prompt / `my_usage` tool / web dashboard.
+It shows emission and delivery **health**, MCP-connection state and the current
+**session id** (`#` + the first 8 characters of Claude's session id), for example
+`TokenScope ✓ landed #65d2c64f`. The full list of states and what each means is in
+[`commands/statusline.md`](commands/statusline.md). `/tokenscope:status` reports
+the same verdict in detail; for your spend breakdown use the `usage` prompt /
+`my_usage` tool / web dashboard.
 
 ## MCP server (the cross-client backbone)
 
 The plugin registers a **remote MCP server** (`plugin/.mcp.json`) — a
 streamable-HTTP server at the deployed base + `/api/v1/mcp`, authenticated by
 OAuth 2.1 (no token to paste; the browser consent runs on first connect). It
-points at the same deployment as the rest of the plugin (`scripts/api-base.mjs`),
-overridable for local dev via `TOKENSCOPE_API_BASE`.
+points at the same deployment as the rest of the plugin (`scripts/api-base.mjs`);
+`TOKENSCOPE_API_BASE` overrides it for local development.
 
 Over MCP the server exposes read tools (`list_my_projects`, `list_activity_types`,
 `my_usage`, `resolve_repo_project`) + a tag tool (`tag_session`), and **prompts**

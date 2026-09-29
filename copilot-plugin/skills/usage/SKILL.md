@@ -91,11 +91,11 @@ Footer line: `Updated <freshness_minutes_ago> min ago`.
 > GitHub billing. Expect a match within a few percent.
 
 If `needs_tagging_count > 0`, nudge the user to tag those sessions
-(`tag_session` MCP tool for a specific session, `tokenscope-project` skill to bind
+(`tag_session` MCP tool for a specific session, `project` skill to bind
 the repo, or in the web app). **This is the landed-but-UNBOUND signal**: that spend
 emitted and landed but binds to **no project** (and, multi-org, no tenant) — landing
 is not attribution. `unallocated.needs_tagging_count` is the same figure the
-`tokenscope-status` skill reads to decide landed-AND-attributed vs landed-but-unbound;
+`status` skill reads to decide landed-AND-attributed vs landed-but-unbound;
 a non-zero count means status is **not** healthy until those sessions are bound.
 
 If `buckets` is empty: "No attribution data yet — sessions appear ~5 minutes after

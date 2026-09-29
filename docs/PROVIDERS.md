@@ -10,8 +10,9 @@ the same **zero-touch, emit-now-attribute-later** principle.
 **Plugin:** `plugin/`.
 
 - **Onboarding** — an MCP server (`/api/v1/mcp`) plus prompts (`tokenscope-setup`,
-  `project`, `tag`, `usage`) and local commands (`/tokenscope:status`,
-  `statusline`, `backfill`). One OAuth consent.
+  `project`, `tag`, `usage`) and local commands (`/tokenscope:setup`,
+  `/tokenscope:status`, `/tokenscope:statusline`, `/tokenscope:backfill`). One
+  OAuth consent.
 - **Emission** — **native OpenTelemetry**. Claude Code emits OTLP `api_request`
   log events (the token counts per API call) directly to the telemetry sink. The
   setup step mints a one-time handoff that is redeemed for a durable emit
@@ -28,23 +29,57 @@ the same **zero-touch, emit-now-attribute-later** principle.
   appear read-only in a developer's usage view — they never generate
   "needs tagging" work (§A/§B separation).
 
+### Install
+
+The plugins talk to the deployment whose host is baked into them, so install from
+the marketplace of the repository that carries **your** deployment's host (your
+fork; see [Point the plugins at your deployment](../plugin/README.md#point-the-plugins-at-your-deployment)).
+The marketplace is named `tokenscope` (`.claude-plugin/marketplace.json`). Inside a
+Claude Code session, run these one at a time:
+
+```
+/plugin marketplace add <your-org>/<your-fork>
+/plugin install tokenscope@tokenscope
+```
+
+Choose user scope when asked, then run `/tokenscope:setup`. Full walkthrough:
+[`plugin/README.md`](../plugin/README.md).
+
 ## GitHub Copilot
 
 **Plugin:** `copilot-plugin/`.
 
 - **Onboarding** — the same MCP server plus skills (`tokenscope-setup`,
-  `project`, `usage`).
-- **Emission** — GitHub Copilot emits OpenTelemetry under the OTel **GenAI
-  semantic conventions** (`gen_ai.usage.*`, `gen_ai.request.model`). TokenScope's
-  read-side ingests that shape and joins on the same `tokenscope.instance_id`
-  key, so a device's Claude and Copilot usage unify. (The design for the native
-  managed-OTLP export path is in the repo; see the code comments in
-  `server/azure/reader.ts` around the GenAI read-side, gated by
-  `NUXT_COPILOT_NATIVE_OTEL`.)
+  `project`, `usage`, and `status`, the Copilot analogue of `/tokenscope:status`).
+- **Emission** — the plugin's **usage extension**
+  (`copilot-plugin/extensions/tokenscope-usage/`), loaded by the Copilot runtime
+  (the Copilot App, and the CLI with extensions enabled). It reads Copilot's
+  `assistant.usage` events, spools them locally and sends them as OTLP log
+  records to the same telemetry sink, carrying the same `tokenscope.instance_id`
+  key, so a device's Claude and Copilot usage unify. An older file-based
+  forwarder still runs for terminals that export
+  `COPILOT_OTEL_FILE_EXPORTER_PATH`; it is a legacy lane. The server can also
+  read Copilot's own OpenTelemetry under the GenAI semantic conventions
+  (`gen_ai.usage.*`), but that read-side is **off by default**
+  (`NUXT_COPILOT_NATIVE_OTEL=true` turns it on; see `server/azure/reader.ts`).
 - **Billing (§B)** — GitHub Copilot bills a **pooled** allowance per (org, SKU),
-  which TokenScope charges **per cost-centre** via a configured GitHub-org →
-  cost-owning-unit map — read from the bill, not inferred from seats. Per-user
+  which TokenScope charges **per Business Unit** via a configured GitHub-org →
+  Business Unit map — read from the bill, not inferred from seats. Per-user
   Copilot usage is *shown* (§A), not charged.
+
+### Install
+
+As for Claude Code, install from the marketplace that carries your deployment's
+host ([Point the plugins at your deployment](../plugin/README.md#point-the-plugins-at-your-deployment)).
+In a terminal, one at a time:
+
+```bash
+copilot plugin marketplace add <your-org>/<your-fork>
+copilot plugin install tokenscope-copilot@tokenscope
+```
+
+Then run the `tokenscope-setup` skill inside a `copilot` session, restart
+`copilot`, and check with the `status` skill.
 
 ## Reconciliation (both providers)
 

@@ -72,6 +72,6 @@ open-source) for other shapes.
 - **Project / agile managers** who run budgets and burn-down, and decide when to
   extend.
 - **Finance** who need a defensible chargeback at the grain the provider bills.
-- **Cost-centre owners** who carry the P&L for their unit's AI spend.
+- **Business Unit owners** who carry the P&L for their unit's AI spend.
 
 If those roles map to how your organisation works, TokenScope is built for you.

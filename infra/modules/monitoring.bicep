@@ -1,8 +1,8 @@
 // ── Monitoring — Log Analytics + App Insights + AMW + alert rules ───
 //
-// TokenScope adopts the PSR pattern (psr/infra/modules/monitoring.bicep)
-// and adds Azure Monitor Workspace for OTLP-preview metric ingestion
-// from the developer plugin's per-session emit.
+// Log Analytics + Application Insights + alert rules, plus the DCE/DCR
+// that devices send OTLP logs to directly, and an optional Azure Monitor
+// Workspace for OTLP-preview metrics (nothing consumes it today).
 //
 // Outputs consumed by:
 //   - container-app.bicep (AppInsights connection string + LAW
@@ -12,8 +12,7 @@
 //
 // AVM note: avm/res/operational-insights/workspace and
 // avm/res/insights/component cover the LAW + AppInsights resources
-// individually. We use native resources here to match PSR's shape and
-// keep the alert-rule wiring + AMW addition in one auditable place.
+// individually. We use native resources here to keep the alert-rule wiring + AMW addition in one auditable place.
 // Migration to AVM is a follow-up; revisit when the AppInsights AVM
 // module supports the WorkspaceResourceId field consistently across
 // versions.
@@ -44,19 +43,19 @@ param identityPrincipalId string = ''
 @description('Gate RBAC role assignments (the OIDC SP applying has Owner, so deployRbac=true is the normal sandbox apply).')
 param deployRbac bool = false
 
-@description('Deploy the Azure Monitor Workspace (Prometheus-shape OTLP metrics, preview). NOTHING consumes its outputs today — the token-usage path is LOGS via DCE/DCR. Set FALSE where the Microsoft.Monitor resource provider is not registered and the SP cannot register it (dev: your-subscription has it NotRegistered, registration is an IT-level action). Re-enable if/when the metrics path ships AND IT registers the provider.')
+@description('Deploy the Azure Monitor Workspace (Prometheus-shape OTLP metrics, preview). NOTHING consumes its outputs today — the token-usage path is LOGS via DCE/DCR. Set FALSE where the Microsoft.Monitor resource provider is not registered in the subscription and the deploying principal cannot register it (the apply would fail with MissingSubscriptionRegistration).')
 param deployAzureMonitorWorkspace bool = true
 
-@description('Make the Log Analytics QUERY path private: publicNetworkAccessForQuery=Disabled, so the corpus is queryable ONLY over an Azure Monitor Private Link Scope. INGESTION stays public (clients emit OTLP from outside the zone). Who owns the scope is useCentralAmpls. Default false — the back-out lever. Leave NUXT_AZURE_MONITOR_QUERY_ENDPOINT EMPTY: the reader SDK default api.loganalytics.io resolves over the PE, while api.monitor.azure.com 404s the LA query path. Redeploy the app after any posture change — a running revision caches the pre-change resolution. See docs/design/telemetry-query-network-posture.md.')
+@description('Make the Log Analytics QUERY path private: publicNetworkAccessForQuery=Disabled, so the corpus is queryable ONLY over an Azure Monitor Private Link Scope. INGESTION stays public (clients emit OTLP from outside the zone). Who owns the scope is useCentralAmpls. Default false — the back-out lever. Leave NUXT_AZURE_MONITOR_QUERY_ENDPOINT EMPTY: the reader SDK default api.loganalytics.io resolves over the PE, while api.monitor.azure.com 404s the LA query path. Redeploy the app after any posture change — a running revision caches the pre-change resolution.')
 param enableQueryPrivateLink bool = false
 
 @description('PE subnet resource id for the AMPLS private endpoint (from the networking module). Empty = no PE.')
 param privateEndpointSubnetId string = ''
 
-@description('IT owns the Azure Monitor Private Link Scope: create neither the scope nor its scoped-resource link — IT joins our workspace to theirs. TRUE wherever the privatelink DNS zones are central, because one shared zone holds ONE set of Monitor A records and a second scope PE overwrites the first, blackholing it. ARM is incremental, so flipping this does NOT delete a scope already deployed — remove it by hand. See docs/design/telemetry-query-network-posture.md.')
+@description('A central network team owns the Azure Monitor Private Link Scope: create neither the scope nor its scoped-resource link — the scope owner joins our workspace to theirs. TRUE wherever the privatelink DNS zones are central, because one shared zone holds ONE set of Monitor A records and a second scope PE overwrites the first, blackholing it. ARM is incremental, so flipping this does NOT delete a scope already deployed — remove it by hand.')
 param useCentralAmpls bool = false
 
-@description('Resource ID of the central AMPLS to point OUR private endpoint at, for when the central PE is not reachable from our VNet. Read only when useCentralAmpls. Empty (default) = create no PE either and reach the central scope over IT\'s own PE. Two prerequisites: privateEndpointSubnetId must be set (no subnet, no PE — the id is otherwise ignored in silence), and no PE of the same name may already point at a different scope, because privateLinkServiceId is IMMUTABLE — Azure rejects the retarget, so delete that PE first. Cross-subscription: the connection lands Pending until IT approves it.')
+@description('Resource ID of the central AMPLS to point OUR private endpoint at, for when the central PE is not reachable from our VNet. Read only when useCentralAmpls. Empty (default) = create no PE either and reach the central scope over the scope owner\'s own PE. Two prerequisites: privateEndpointSubnetId must be set (no subnet, no PE — the id is otherwise ignored in silence), and no PE of the same name may already point at a different scope, because privateLinkServiceId is IMMUTABLE — Azure rejects the retarget, so delete that PE first. Cross-subscription: the connection lands Pending until the scope owner approves it.')
 param centralAmplsResourceId string = ''
 
 // ── Log Analytics Workspace ─────────────────────────────────────────
@@ -74,10 +73,10 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
       dailyQuotaGb: dailyIngestionCapGb
     }
     // INGESTION stays public — developer clients emit OTLP to the DCE from
-    // outside the restricted zone (ADR-0003 Option H). QUERY goes private
+    // outside the private network. QUERY goes private
     // when enableQueryPrivateLink: only the in-VNet app MI (Log Analytics
     // Reader) can then query, shrinking the exfiltration surface of a stolen
-    // Reader credential. See docs/design/telemetry-query-network-posture.md.
+    // Reader credential.
     publicNetworkAccessForIngestion: 'Enabled'
     publicNetworkAccessForQuery: enableQueryPrivateLink ? 'Disabled' : 'Enabled'
   }
@@ -88,8 +87,8 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 // PrivateOnly forces scoped-resource queries through an AMPLS private endpoint.
 // Scoped resource = the Log Analytics workspace (what the read-joiner queries).
 // We deploy a scope ONLY where we own one (useCentralAmpls=false); the PE
-// carries no DNS zone group, so IT registers the A records in the Azure-Monitor
-// privatelink zones from the infra.yml handoff.
+// carries no DNS zone group, so the A records in the Azure Monitor privatelink
+// zones must be registered by whoever owns those zones.
 
 resource ampls 'Microsoft.Insights/privateLinkScopes@2021-07-01-preview' = if (enableQueryPrivateLink && !useCentralAmpls) {
   name: 'ampls-${name}'
@@ -112,7 +111,7 @@ resource amplsScopedLaw 'Microsoft.Insights/privateLinkScopes/scopedResources@20
 }
 
 // Our own PE: always when we own the scope, and on a central scope only when
-// IT's PE cannot serve our VNet (centralAmplsResourceId set).
+// the scope owner's PE cannot serve our VNet (centralAmplsResourceId set).
 var deployAmplsPrivateEndpoint = enableQueryPrivateLink && !empty(privateEndpointSubnetId) && (!useCentralAmpls || !empty(centralAmplsResourceId))
 
 resource amplsPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (deployAmplsPrivateEndpoint) {
@@ -152,9 +151,8 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
 }
 
 // ── Azure Monitor Workspace (OTLP-preview metric ingestion) ─────────
-// Receives Prometheus-shape metrics from the OTel Collector / plugin
-// per docs/design/architecture.md §1.5. Not used by the app itself —
-// the developer plugin emits here.
+// Preview target for Prometheus-shape metrics. Not used by the app, and
+// nothing emits here today: token usage travels as LOGS via the DCE/DCR.
 
 resource azureMonitorWorkspace 'Microsoft.Monitor/accounts@2023-04-03' = if (deployAzureMonitorWorkspace) {
   name: 'amw-${name}'
@@ -163,15 +161,13 @@ resource azureMonitorWorkspace 'Microsoft.Monitor/accounts@2023-04-03' = if (dep
 }
 
 // ── OTLP ingestion (preview): DCE + DCR + MI RBAC ───────────────────
-// ADR-0003 Shape A: Claude Code posts OTLP/HTTP DIRECT to the DCE with an
+// Devices post OTLP/HTTP DIRECT to the DCE with an
 // Entra bearer the TokenScope app mints via its MI (server/auth/obo.ts,
 // audience https://monitor.azure.com/.default). The app's MI needs
 // `Monitoring Metrics Publisher` to write and `Log Analytics Reader` to
 // run the read-joiner's KQL.
 //
-// VERIFIED on the live sandbox 2026-06-01 (see the "Verified OTLP → Azure
-// Monitor ingestion recipe" in docs/development/claude-code-telemetry-contract.md),
-// closing the prior [VERIFY at sandbox]:
+// Verified against a live deployment:
 //   (a) Wiring is DCE + DCR + stream. The OTLP ingest URL is
 //         https://<logs-dce-domain>/dataCollectionRules/<dcrImmutableId>/streams/Microsoft-OTLP-Logs/otlp/v1/logs
 //       where Microsoft-OTLP-Logs is a SERVICE-MANAGED built-in stream (the
@@ -193,26 +189,23 @@ resource dataCollectionEndpoint 'Microsoft.Insights/dataCollectionEndpoints@2023
   }
 }
 
-// VERIFIED against the live working sandbox DCR (read at api-version 2024-03-11,
-// 2026-06-18): direct OTLP ingestion to the DCE is only accepted when the DCR
+// Verified against a live DCR: direct OTLP ingestion to the DCE is only accepted when the DCR
 // declares `directDataSources.otelLogs` (the "sent directly with OTel Collector"
 // path per Microsoft's OTLP-ingestion doc). A plain logs DCR (dataFlows only)
-// returns HTTP 400 InvalidStream for POSTs to .../streams/Microsoft-OTLP-Logs/...
-// — which is exactly why dev's bicep-built DCR never ingested while sandbox's
-// (hand-created from Microsoft's OTLP_DCE_DCR ARM template) did. We add the
+// returns HTTP 400 InvalidStream for POSTs to .../streams/Microsoft-OTLP-Logs/....
+// We add the
 // `dataSources` + `directDataSources` + `references` sections the doc requires,
 // at api-version 2024-03-11 (the version that expresses `directDataSources`).
 //
 // Logs + traces only: `otelMetrics` is intentionally omitted because it must
 // route to an Azure Monitor Workspace `monitoringAccounts` destination, and envs
-// with `deployAzureMonitorWorkspace = false` (dev: Microsoft.Monitor NotRegistered)
-// have none — including it would fail the apply. Token usage is logs. The change
-// is additive (the prior DCR had no data sources), so no env loses metrics.
+// with `deployAzureMonitorWorkspace = false` have none — including it would fail
+// the apply. Token usage is logs.
 //
 // Stream-name note: the direct-OTLP ingest URL uses the service-managed
 // 'Microsoft-OTLP-Logs' segment, while the DCR-internal stream id (in
 // dataSources/directDataSources/dataFlows) is 'Microsoft-OTel-Logs'. The names
-// differ by design — verified verbatim against the working sandbox DCR.
+// differ by design.
 resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2024-03-11' = {
   name: 'dcr-${name}-otlp'
   location: location
@@ -313,8 +306,7 @@ resource publisherOnDcr 'Microsoft.Authorization/roleAssignments@2022-04-01' = i
 
 // Monitoring Reader on the DCR — required to READ the DCR platform metrics
 // (RowsReceived_Count / RowsDropped_Count / TransformationErrors_Count) the
-// read-path stall alerts use as their ingest-side coverage signal (PR #319,
-// docs/design/read-path-attribution-coverage-signal.md). Distinct from
+// read-path stall alerts use as their ingest-side coverage signal. Distinct from
 // publisherOnDcr above, which grants PUBLISH (the ingest-bearer path); READ of
 // the metrics needs its own role. Until this is applied, the coverage probe
 // gets a 403 and the alerts fall back to the bearer gate (fails toward paging).
@@ -340,7 +332,7 @@ resource readerOnLaw 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (
 
 // ── Action Group ────────────────────────────────────────────────────
 // Empty notificationEmail = no group provisioned, alerts still fire
-// (visible in Monitor) but no email/Teams ping. PSR's pattern.
+// (visible in Monitor) but no email/Teams ping.
 
 resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (!empty(notificationEmail)) {
   name: 'ag-${name}'
@@ -348,8 +340,8 @@ resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (!empty(n
   tags: tags
   properties: {
     // `groupShortName` max length is 12 chars (ARM constraint). It shows
-    // up in email subjects + SMS. PSR's `take(replace(name,'-',''),12)`
-    // collapses to the same 'tokenscopesa' across all envs, making
+    // up in email subjects + SMS. A `take(replace(name,'-',''),12)`
+    // would collapse to the same 'tokenscopesa' across all envs, making
     // on-call routing ambiguous. Map env name → short tag explicitly:
     //   sandbox    → ts-sand    (8)
     //   dev        → ts-dev     (7)
@@ -523,7 +515,7 @@ output appInsightsConnectionString string = appInsights.properties.ConnectionStr
 @description('Application Insights resource name.')
 output appInsightsName string = appInsights.name
 
-@description('Azure Monitor Workspace resource ID. The per-region OTLP ingest endpoint is reached via a Data Collection Endpoint + Data Collection Rule pair (not provisioned here yet — see Wave-N follow-up). For Wave-I deploys, the container app reads NUXT_AZURE_MONITOR_ENDPOINT from a Key Vault secret seeded externally, NOT derived from this output.')
+@description('Azure Monitor Workspace resource ID (preview metrics path; nothing consumes it today). Empty when deployAzureMonitorWorkspace is false. Token-usage ingest goes through the DCE/DCR pair provisioned in this module, not this workspace.')
 output amwResourceId string = deployAzureMonitorWorkspace ? azureMonitorWorkspace!.id : ''
 
 @description('Azure Monitor Workspace name — used by future DCE/DCR provisioning.')

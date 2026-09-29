@@ -5,17 +5,17 @@
 > into the linked domain pages. For mechanism-level depth see
 > [Authentication & Security](Authentication-and-Security.md); for the network
 > and data domains see [Network Architecture](Network-Architecture.md) and
-> [Data Protection](Data-Protection.md). Deployment-specific values for the
-> Insight instance are in your deployment's own configuration.
+> [Data Protection](Data-Protection.md).
 
 > **Status: 1.0.0-rc.1 — release candidate.** Claude Code is the primary client;
-> the **MCP/OAuth surface** and a **Copilot CLI** lane (local file-forwarder,
-> indicative tier-2 spend) are built and running. The tenant OTLP bridge and
+> the **MCP/OAuth surface** and a **GitHub Copilot** lane (the plugin's usage
+> extension reads Copilot's `assistant.usage` events and sends OTLP logs) are
+> built and running. The tenant OTLP bridge and
 > finance-system connectors are **designed but not built**.
 >
 > Throughout this page, controls are tagged **Today** (as-built, running in the
-> **VNet-integrated** deployment mode — internal ACA behind an upstream WAF, data
-> plane over private endpoints) or **Planned** (roadmap / pre-pilot). **A release
+> **VNet-integrated** deployment mode — internal ACA behind Front Door Premium
+> over Private Link or your own WAF, data plane over private endpoints) or **Planned** (roadmap / pre-pilot). **A release
 > candidate is not a claim that every control below is in force** — the register
 > further down lists the residuals that are accepted today, each with its
 > disposition. Read the tags; don't review the roadmap as if it shipped.
@@ -35,33 +35,32 @@
 ## Trust boundaries
 
 Four caller classes cross into the app, each with a distinct auth mechanism. In
-the VNet-integrated mode there is **no per-app Azure Front Door**: the Container
-Apps environment is **internal** (private VIP) and the public entrypoint is an
-**upstream WAF/edge**. The live network control is therefore the **network
-perimeter — VNet + the WAF**, not a per-app header check. The `X-Azure-FDID`
-header gate is **inert** in this mode (there is no Front Door to inject it); it is
-retained in the code as a defence-in-depth control for any Front-Door-fronted
-environment. An operator can close the pre-Front-Door window explicitly by setting
+the VNet-integrated mode the Container Apps environment is **internal** (private
+VIP) and the public entrypoint is either **Azure Front Door Premium over Private
+Link** (recommended) or **your own WAF/edge**. The network perimeter is the edge
+control in both. With Front Door, once `frontDoorId` is set, the `X-Azure-FDID`
+header gate also enforces: a request without Front Door's header is refused. With
+your own WAF the gate is **inert** (there is no Front Door to inject it). An
+operator can close the pre-`frontDoorId` window explicitly by setting
 `AZURE_FRONT_DOOR_REQUIRED=true`, which makes the middleware refuse every path but
-`/api/health` rather than no-op — that switch is **shipped in code and not yet set
-in any environment**, so nothing enforces on it today (R5). Data-plane and ACR
-access are over **private endpoints**.
+`/api/health` rather than no-op; the templates do not set it (R5). Data-plane and
+ACR access are over **private endpoints**.
 
 ```mermaid
 flowchart TB
     subgraph DevZone["Developer machine (untrusted)"]
         BR["Browser user<br/>developer / manager / region admin / global finance / platform admin"]
-        CC["Claude Code CLI<br/>+ TokenScope plugin"]
+        CC["Claude Code / Copilot CLI<br/>+ TokenScope plugin"]
     end
     subgraph InternalZone["Internal scheduler (Azure)"]
         CRON["Container Apps cron jobs"]
     end
 
-    WAF["Upstream WAF / edge<br/>(public entrypoint)"]
+    WAF["Front Door Premium or your WAF<br/>(public entrypoint)"]
 
     subgraph Perimeter["Network perimeter — VNet (the edge control)"]
     subgraph AppZone["TokenScope — Nitro app (Container App, INTERNAL ingress / private VIP)"]
-        FD["require-front-door<br/>(X-Azure-FDID gate — INERT without AFD)"]
+        FD["require-front-door<br/>(X-Azure-FDID gate — enforces once frontDoorId is set)"]
         OIDC["Entra OIDC cookie<br/>+ per-request DB enrichment"]
         RBAC["requireRole / requireRegionScope<br/>+ scope predicates"]
         HMACI["verifyInternalRequest<br/>(internal HMAC)"]
@@ -120,13 +119,8 @@ Full mechanism detail (env vars, headers, cookies, sequence diagrams):
 
 ## Threat model summary (STRIDE × trust boundary)
 
-As-built components only. The full per-component enumeration lives in the
-design-era threat model at
-`docs/design/stride-mvp-lite-threat-model.md`
-— note it **predates some as-built changes** (it still references the retired
-launcher / broker / bridge model and BullMQ workers; the as-built uses external
-cron + HMAC trigger and an **MCP-first OAuth 2.1** client backbone — the
-setup-token enrolment it may reference was itself retired in PR #38).
+As-built components only: scheduled workers are triggered by external cron + HMAC,
+and clients connect through an **MCP-first OAuth 2.1** backbone.
 
 | Boundary / component | S | T | R | I | D | E |
 |---|---|---|---|---|---|---|
@@ -187,8 +181,6 @@ setup-token enrolment it may reference was itself retired in PR #38).
   `recordAuditEvent` into the immutable `audit_event` table (DB trigger rejects
   UPDATE/DELETE). Events: JIT teammate creation, session attestation, setup
   exchange, persona impersonation, admin mutations.
-- Scanner SARIFs are retained under `.claude-audit/current/`. Full report:
-  `docs/security-audit-report.md`.
 
 ## Risk register (current — accepted residuals)
 
@@ -197,15 +189,15 @@ Honest, precise list of known-and-accepted gaps as-built. None blocking for
 
 | # | Residual | Why accepted today | Closes |
 |---|---|---|---|
-| R1 | **Internal-HMAC replay window** — ±300s, **no nonce** | Harm neutralised: every worker entrypoint is idempotent (joiner `ON CONFLICT`, poller upsert); behind the VNet perimeter + IT WAF + TLS + HMAC | Planned: replay nonce |
+| R1 | **Internal-HMAC replay window** — ±300s, **no nonce** | Harm neutralised: every worker entrypoint is idempotent (joiner `ON CONFLICT`, poller upsert); behind the VNet perimeter + the entrypoint WAF + TLS + HMAC | Planned: replay nonce |
 | R2 | **The app layer is the only data-scope boundary** — a handler that omits its scope predicate has nothing behind it | Deliberate: the schema's RLS policies key on role, while report reach is a revocable per-teammate grant, so enabling them would contradict configured access rather than back it up. The exposure is mitigated by a CI gate (`check-handler-rls-context.mjs`), shared scope-predicate helpers rather than hand-rolled clauses, and route-level tests | Not planned — the policies would first have to express grants rather than roles |
 | R3 | **~~`/instances/attest` not yet on a real Entra bearer~~ — CLOSED by the cutover** | The standalone direct-attest route was removed; the device binding is now minted by the OAuth-authenticated `provision_emit` (a read+tag consent token, validated via `requireOAuthBearer`), and `/bearer` / `/end` gate on the OAuth `tokenscope.emit` token. The placeholder-principal-OID gap no longer exists | Closed (PR #38) |
 | R4 | **CSP `style-src 'unsafe-inline'`** | `@nuxt/ui` v4 baseline requirement for injected styles; rest of CSP is tight (`frame-ancestors 'none'`, constrained `img-src`/`font-src`) | Track upstream |
-| R5 | **`X-Azure-FDID` header gate does not enforce in any environment today** — no per-app Front Door injects the header in the VNet-integrated mode, and no committed artefact supplies `AZURE_FRONT_DOOR_ID` in the Front-Door-fronted ones | The **network perimeter (VNet + upstream WAF) is the edge control** here; the ACA environment is internal (private VIP), so the header check is not the gate. The middleware now honours `AZURE_FRONT_DOOR_REQUIRED=true`, which makes it **fail closed** (403 on everything but `/api/health`) even before an FDID is wired — but that is the **code half only: shipped in code, not yet set in any environment's infra parameters**, so origin enforcement is still a no-op. Coupled effect worth knowing before leaning on "AFD is always in front": `container-app.bicep` sets `NUXT_SECURITY_RATE_LIMITER_IP_HEADER` to `x-azure-clientip` **only** when the FDID is non-empty, so nuxt-security's global 150 req / 5 min limiter is keyed on a spoofable forwarded hop until the same apply lands | Commit the real per-environment FDIDs and set `AZURE_FRONT_DOOR_REQUIRED` via `infra.yml` (see the pre-pilot checklist) |
-| R6 | **~~`assertSameOrigin` must trust the IT WAF's forwarded `Host`~~ — RESOLVED by origin pinning** | The public hostname (at the WAF) differs from the internal ACA FQDN. The app now **pins its public origin** via `appPublicOrigin` (`APP_PUBLIC_ORIGIN`), resolved through `getPublicRequestURL`, so same-origin validation uses the user-facing origin **regardless of whether the WAF preserves or rewrites `Host`** — no dependency on WAF Host-forwarding | Closed (origin pinning) |
+| R5 | **`X-Azure-FDID` header gate enforces only once `frontDoorId` is set** — with your own WAF there is no Front Door to inject the header, and with Front Door the gate is a no-op until the apply that sets `frontDoorId` | The **network perimeter (VNet + the entrypoint) is the edge control**; the ACA environment is internal (private VIP), so the header check is defence in depth, not the gate. `AZURE_FRONT_DOOR_REQUIRED=true` makes the middleware **fail closed** (403 on everything but `/api/health`) even before an FDID is wired, but the templates do not set it. Coupled effect: `container-app.bicep` sets `NUXT_SECURITY_RATE_LIMITER_IP_HEADER` to `x-azure-clientip` **only** when the FDID is non-empty, so without it nuxt-security's global 150 req / 5 min limiter is keyed on a spoofable forwarded hop | Set `frontDoorId` in the Front Door shape (see the pre-pilot checklist) |
+| R6 | **~~`assertSameOrigin` must trust the WAF's forwarded `Host`~~ — RESOLVED by origin pinning** | The public hostname (at the WAF) differs from the internal ACA FQDN. The app now **pins its public origin** via `appPublicOrigin` (`APP_PUBLIC_ORIGIN`), resolved through `getPublicRequestURL`, so same-origin validation uses the user-facing origin **regardless of whether the WAF preserves or rewrites `Host`** — no dependency on WAF Host-forwarding | Closed (origin pinning) |
 | R7 | **Shared app-level emit bearer is the attribution spoof-root** | Attribution **identity is anchored to the authed device attestation** (resolved by `tokenscope.instance_id` / DEVICE_SID, bound at an authenticated enrol) — **not spoofable per-event**; the **project is a membership-gated claim**. The residual: an *enrolled insider* who extracts the shared MI bearer from the global config can emit **arbitrary** resource attrs (foreign DEVICE_SID and/or project). Bounded to **noise-class** — no quota gain (attribution never grants/blocks compute), membership-gated, and reconciliation against Anthropic Analytics nets it out. **Accepted** per ADR-0004; insider-bounded (bearer needs an authed enrol). Pre-pilot guardrail: ingestion-volume / anomaly alert (below) | Re-open per ADR-0004 triggers (e.g. enforcement coupling, per-user bearer) |
 | R8 | **Spoofed emissions over the untrusted, public-write LAW channel** — anyone holding the broadly-readable `tokenscope.emit` credential (it lives in `~/.claude/settings.json` on every host) or LAW write access can hand-write **spoofed** `attribution_record` rows claiming a victim's `instance_id` / `project.code_hash` / email | Defended by **revoke + detect + reconcile** with strict emit-credential isolation, **not** by trusting the wire or per-record signing (a signing collector was rejected as over-engineering — ADR-0008, ADR-0005). **Detect (built, PR #37):** each `/bearer` mint stamps an **authenticated heartbeat** (`last_bearer_at`); the heartbeat-coverage worker **quarantines** spend whose session window has no covering heartbeat as "unverified spend" (`/api/v1/me/quarantined-spend`), **catching the cross-instance spoof early** (before reconciliation's ~1h+ lag). **Quarantine is informational only — never auto-revokes/deletes.** **Reconcile** wipes non-reconciling spend (the truth backstop). **Isolation:** the read→emit one-way wall (an emit bearer is rejected by every read/tag/MCP/admin surface). **Residual not caught by quarantine:** full emit-credential **theft** — a thief's `/bearer` mints heartbeat **as the victim**, so theft-spend looks covered → stays on **revoke + reconcile** | Re-open per ADR-0008 triggers; admin/region quarantine view is the tracked follow-up |
-| R9 | **Query-side exfiltration of the telemetry corpus via a stolen `Log Analytics Reader` credential** — the app MI holds `Log Analytics Reader`; before this hardening the query path was the one data egress reachable over the public internet, so a stolen credential could mass-exfiltrate attribution metadata from anywhere | **Mitigated:** Private query (AMPLS + PE), in-VNet only; ingestion stays public. `publicNetworkAccessForQuery=Disabled` + an Azure Monitor Private Link Scope (`queryAccessMode=PrivateOnly`) + a private endpoint make the corpus queryable **only from inside the VNet** — same private-endpoint pattern as KV/PG/Redis/ACR; OTLP ingestion stays public by design (clients emit from outside the zone). Leak is bounded to metadata (NFR-SEC-3/5: no prompt/response bodies); does **not** defend against code execution inside the VNet/on the app, and **does not touch** the write/spoof path (R8) | Mitigated (dev; rolls to staging/prod via `monitorQueryPrivateOnly`) |
+| R9 | **Query-side exfiltration of the telemetry corpus via a stolen `Log Analytics Reader` credential** — the app MI holds `Log Analytics Reader`; before this hardening the query path was the one data egress reachable over the public internet, so a stolen credential could mass-exfiltrate attribution metadata from anywhere | **Mitigated:** Private query (AMPLS + PE), in-VNet only; ingestion stays public. `publicNetworkAccessForQuery=Disabled` + an Azure Monitor Private Link Scope (`queryAccessMode=PrivateOnly`) + a private endpoint make the corpus queryable **only from inside the VNet** — same private-endpoint pattern as KV/PG/Redis/ACR; OTLP ingestion stays public by design (clients emit from outside the zone). Leak is bounded to metadata (NFR-SEC-3/5: no prompt/response bodies); does **not** defend against code execution inside the VNet/on the app, and **does not touch** the write/spoof path (R8) | Mitigated where `monitorQueryPrivateOnly` is on |
 | R10 | **~~Copilot flat-seat showback does not populate for an App-mode enterprise~~ — CLOSED (UF-19)** | The enterprise seats pull is a PAT surface (it presents a Bearer PAT header an App-constructed client does not have), so App mode 401'd. It was a functional gap, never a leak — the call failed loud and isolated, no credential crossed a boundary and no wrong number was written. **The seat DATA path now branches on credential kind** like the construction path already did: the flat-seat writer reads `/orgs/{org}/copilot/billing/seats` per onboarded license org with that org's installation token, and org discovery reads the enterprise's `installable_organizations` census. The per-org pull reports whether the App was installed on the org at all, so the seat-convergence prune cannot read an unreadable org as "these seats are gone" | Closed |
 | R11 | **The anonymous OAuth client-registration ceiling is per-process, not per-deployment** — the per-source sliding window is an in-memory counter, so N Container Apps replicas give N independent counters and the effective ceiling is N × the intended one | Bounded and low. The global `MAX_OAUTH_CLIENTS` cap still bounds total damage, the 1-hour sweep reclaims never-transacted clients, and registration mints nothing of value on its own — a registered client still needs a user to complete PKCE consent. This is defence-in-depth against registration spam, not the control that stops an attacker. **Do not read the code as a deployment-wide rate limit** | A shared counter substrate (the existing Redis session-store connection is the recommendation) |
 | R12 | **The provisional enrolment credential is served on a deliberately weak gate** (`/api/v1/setup/enroll`) | Ratified as a threat-model invariant in the route's own header: the credential is **PROVISIONAL, EMIT-ONLY, CONSTANT-SHAPE**, and it binds a *shadow* teammate — `confirm-instance` refuses to join that shadow to a real teammate without an email match. The residual rests entirely on **enrolment-secret rotation**, for which **no application writer exists today** | Re-rate if rotation is still absent when the pilot widens beyond the dogfood cohort |
@@ -227,7 +219,8 @@ scale-out beyond the dogfood/beta footprint.
       the OAuth-authenticated `provision_emit` and `/bearer`/`/end` gate on the
       OAuth `tokenscope.emit` token (closes R3).
 - [x] **VNet + private endpoints** — **in place** (VNet-integrated mode): the ACA
-      environment is internal (private VIP) behind an upstream WAF, and the data
+      environment is internal (private VIP) behind Front Door Premium or your own
+      WAF, and the data
       plane + ACR are reached over private endpoints (see
       [Network Architecture](Network-Architecture.md)). Remaining: per-app edge
       hardening as the footprint scales out.
@@ -243,7 +236,7 @@ scale-out beyond the dogfood/beta footprint.
       login, so it is SQL rather than Bicep — it does NOT need a human with a psql
       prompt: the migration runner already connects as the Flexible Server
       administrator) → a `database-url-app` KV secret + `secretRef` + an
-      `infra.yml` apply → the bootstrap-table `DISABLE` sweep → `FORCE`
+      apply of `main.bicep` → the bootstrap-table `DISABLE` sweep → `FORCE`
       **per table**, on dev, watching for
       empty-result regressions at each step. A CI guard
       (`scripts/check-handler-rls-context.mjs`) holds the line: it started by
@@ -259,28 +252,28 @@ scale-out beyond the dogfood/beta footprint.
       connection factory for all nine `postgres()` call sites are **shipped in
       code**, and the boot pre-flight now **warns** when `DATABASE_URL` names a
       non-loopback host without `verify-full` — but the change only takes effect on
-      an `infra.yml` apply that rewrites the secret, and a certificate/hostname
+      an apply of `main.bicep` that rewrites the secret, and a certificate/hostname
       mismatch turns a working app into a **boot loop** (migrations run first and
       are fatal). Probe each environment's PG FQDN from inside its network, apply
       one environment at a time, then flip the warning to a hard failure.
-- [ ] **Front Door origin enforcement** (closes R5) — commit each environment's real
-      `frontDoorId`, plumb `AZURE_FRONT_DOOR_REQUIRED` through
-      `main.bicep`/`container-app.bicep` so one source owns both, and drop the
-      workflow `--parameters` overrides that currently beat the bicepparam. The
-      fail-closed code half is shipped; **no environment sets either value**.
-      `/api/health` must stay excluded or ACA's probe restart-loops the replicas.
-- [ ] **Make a missing `appPublicOrigin` fail closed in a deployed env** — `dev` is
-      the only environment this repo deploys and the only parameter file that pins
-      the value; an environment stood up from the `example-*` templates derives its
-      public origin from forwarded headers instead. The origin is baked into every
-      device's durable emit credential, the OAuth issuer and the MCP
-      `WWW-Authenticate` challenge, so a wrong-but-valid value is a silent
-      fleet-wide outage with 2xx-looking symptoms. Any new environment must pin it,
-      verify `/.well-known/oauth-authorization-server`, and the missing-pin case
-      must then refuse to boot rather than guess.
+- [ ] **Front Door origin enforcement** (closes R5) — set `frontDoorId` in every
+      Front Door deployment, and plumb `AZURE_FRONT_DOOR_REQUIRED` through
+      `main.bicep`/`container-app.bicep` so one source owns both. The fail-closed
+      code half is shipped; the templates do not set the flag. `/api/health` must
+      stay excluded or ACA's probe restart-loops the replicas.
+- [x] **A missing public origin fails closed where it matters** — the origin is
+      baked into every device's durable emit credential, the OAuth issuer and the
+      MCP `WWW-Authenticate` challenge. The setup routes (`/setup/enroll`,
+      `/setup/redeem`) and the emit-bundle builder refuse (`500 Server
+      Misconfigured`) unless `APP_PUBLIC_ORIGIN` is pinned, the request came
+      through Front Door (`AZURE_FRONT_DOOR_ID` set and `X-Forwarded-Host`
+      present), or the host is loopback. Both example parameter files document
+      `appPublicOrigin`; after setting it, verify
+      `/.well-known/oauth-authorization-server`.
 - [ ] **Per-worker Managed Identity separation** — split the shared app MI as worker scope grows.
-- [ ] **Split the deploy identity off the infra service principal** — `deploy.yml`
-      and `infra.yml` federate the same client id, and that principal holds **Owner**
+- [ ] **Split the deploy identity off the infra service principal** — the example
+      workflows (`tokenscope-infra.yml`, `tokenscope-deploy.yml`) sign in with the
+      same client id, and that principal holds **Owner**
       on the resource group for `deployRbac`. The far more frequently dispatched
       image-roll workflow therefore inherits role-assignment write it has no use for.
       Needs a second app registration + federated credential (AcrPush on the one
@@ -320,12 +313,12 @@ scale-out beyond the dogfood/beta footprint.
       with **per-endpoint caps** rather than a general brake, so every "an
       authenticated caller loops this endpoint" argument rests on those caps; note
       that the registration cap is per-process (R11) and that the global limiter's
-      key is only trustworthy once R5's apply lands.
+      key is only trustworthy once `frontDoorId` is set (R5).
 - [ ] **Standalone STRIDE for the Copilot lane and the tenant OTLP bridge** — the
       bridge is not built and is out of scope for the as-built model above. The
-      Copilot CLI lane **is** in the footprint and carries the same client-side
-      controls as the Claude lane (shared endpoint validator, span-file provenance,
-      device-store credentials — see [Copilot CLI Client](Copilot-CLI-Client.md)),
+      Copilot lane **is** in the footprint and carries the same client-side
+      controls as the Claude lane (shared endpoint validator, device-store
+      credentials — see [Copilot CLI Client](Copilot-CLI-Client.md)),
       but it has never had its own per-component enumeration; the STRIDE table above
       does not cover it.
 
@@ -337,5 +330,5 @@ scale-out beyond the dogfood/beta footprint.
   ingest endpoints gate on the OAuth `tokenscope.emit` token. No placeholder
   principal remains.
 - **R6** — CLOSED by origin pinning: `assertSameOrigin` validates against the
-  pinned `appPublicOrigin` (the public WAF hostname), so it no longer depends on
+  pinned `appPublicOrigin` (the public hostname), so it no longer depends on
   the WAF forwarding the original `Host`.

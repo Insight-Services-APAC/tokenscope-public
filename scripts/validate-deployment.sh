@@ -2,9 +2,14 @@
 #
 # validate-deployment.sh — smoke check against a deployed TokenScope env.
 #
-# Used by the sandbox-validation-playbook (docs/development/
-# sandbox-validation-playbook.md §1). Operator runs this AFTER infra.yml
-# + deploy.yml complete, to verify the deployed surface end-to-end.
+# Run it after the infrastructure apply and the first image roll (see
+# docs/DEPLOY-AZURE.md) to verify the deployed surface end-to-end. Needs an
+# authenticated Azure CLI.
+#
+# Resource names: it assumes resource group rg-tokenscope-<env>-aue and app
+# ca-tokenscope-<env>-aue (the template's naming for projectName=tokenscope in
+# Australia East, with a matching resource group name). Edit RG / APP below if
+# your deployment differs.
 #
 # Usage:
 #   bash scripts/validate-deployment.sh <env>
@@ -62,12 +67,12 @@ echo "  ok (https://$FQDN)"
 # replicas). `/` is not on the bypass list, so it's the right path to
 # detect enforcement state:
 #
-#   200 → middleware in no-op mode (pre-phase-3; AZURE_FRONT_DOOR_ID empty)
+#   200 → middleware in no-op mode (AZURE_FRONT_DOOR_ID empty)
 #   302 → no-op mode + global auth redirect (still no-op detected)
-#   403 → enforcement ON (post-phase-3; matches the phase-3 contract)
+#   403 → enforcement ON (AZURE_FRONT_DOOR_ID set)
 #
 # /api/health is ALSO probed below to confirm the bypass list still
-# works after phase 3 — both 200 (no-op) and 200 (enforcing-but-bypassed)
+# works with enforcement on — both 200 (no-op) and 200 (enforcing-but-bypassed)
 # look the same on that path, so it doesn't distinguish state.
 echo "[4/8] Direct-to-CA enforcement check..."
 HTTP_ROOT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${FQDN}/" || true)

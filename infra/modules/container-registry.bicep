@@ -12,8 +12,8 @@
 // the user-assigned MI (AcrPull); admin user is always disabled.
 //
 // AVM note: avm/res/container-registry/registry covers this resource. We
-// keep the native resource here because (a) PSR's pattern is the proven
-// baseline for the wider TokenScope deploy, and (b) the AVM module's
+// keep the native resource here because (a) it matches the other native
+// modules in infra/modules/, and (b) the AVM module's
 // param surface for the RBAC integration with our root-scoped UAI
 // requires more wrapping than benefit. Revisit if/when we need
 // geo-replication or trust policies.
@@ -88,11 +88,11 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (e
   }
 }
 
-// Zone group only when a zone ID was supplied — '' means IT registers
-// the records on their side (see key-vault.bicep for the rationale).
+// Zone group only when a zone ID was supplied — '' means the owner of the
+// central private DNS zones registers the records (see key-vault.bicep for the rationale).
 // NOTE for that path: a Premium/private ACR needs TWO records — the
 // registry FQDN and the regional data endpoint
-// (<acr>.westus3.data.azurecr.io); both appear in customDnsConfigs.
+// (<acr>.<region>.data.azurecr.io); both appear in customDnsConfigs.
 resource dnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = if (enablePrivateEndpoint && !empty(privateDnsZoneId)) {
   parent: privateEndpoint
   name: 'default'

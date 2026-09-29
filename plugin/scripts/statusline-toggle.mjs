@@ -3,8 +3,8 @@
  * statusline-toggle.mjs — implements `/tokenscope:statusline [on|off]`.
  *
  * Turns the TokenScope status line (emission health + session id) on or off in
- * the GLOBAL ~/.claude/settings.json. It's installed ON by default at enrolment;
- * this lets a developer opt out, or opt in (replacing a custom status line).
+ * the GLOBAL ~/.claude/settings.json. Nothing installs it at enrolment; this is
+ * how a developer opts in (replacing a custom status line) or out.
  *
  *   on   — install TokenScope's status line (replaces a custom one if present)
  *   off  — remove TokenScope's status line (a non-TokenScope one is left untouched)

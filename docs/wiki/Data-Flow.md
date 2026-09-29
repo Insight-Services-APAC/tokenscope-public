@@ -91,9 +91,8 @@ OTel is therefore blank for 95% of spend **by construction**, and the fix is
 never "chase enrolment"; it is "read the dimension the API already carries."
 
 This once meant most of the model axis rendered as a "Not split by model"
-bucket (58% of Dev spend on 2026-08-01). That state is superseded. Both
-providers send a model dimension on every row
-(`docs/design/provider-data-capture-and-shaping.md:14-45`, captured live), and
+bucket (58% of the reference deployment's spend on 2026-08-01). That state is superseded. Both
+providers send a model dimension on every row (captured live), and
 it is now read, not discarded: the hourly `provider-transform` worker stores it
 in `provider_usage_fact` (migs 0118–0122), and `v_complete_usage` names a model
 on every row the sources can name (mig 0124) —
@@ -117,9 +116,8 @@ footer, never as a category row.
 ## 2. The two axes — §A and §B
 
 The system separates two concerns that look alike and are not. Conflating them
-has produced wrong decisions repeatedly, which is why the canonical document
-(`docs/design/provider-billing-attribution-model.md`, owner-ratified 2026-06-28)
-exists to hold them apart.
+has produced wrong decisions repeatedly, so the design holds them apart
+explicitly.
 
 | | **§A — usage completeness** | **§B — billing / chargeback** |
 |---|---|---|
@@ -132,8 +130,7 @@ exists to hold them apart.
 
 **A §B fact never settles a §A question, and vice versa.** Copilot billing
 being *pooled per cost centre* (§B) says nothing about whether per-*user* usage
-is available (§A — it is, and we already store it). This exact confusion has
-been made and corrected twice; `CLAUDE.md` §Decision discipline records it.
+is available (§A — it is, and we already store it).
 
 ---
 
@@ -313,8 +310,7 @@ Three consequences that are enforced, not conventional:
 This is the point on which the two canonical documents contradict each other,
 and where a wrong belief has been propagated for months. Resolving it:
 
-**The cost-precedence ladder** (`server/usage/span-costing.ts:209-225`,
-`docs/design/provider-cost-precedence.md`):
+**The cost-precedence ladder** (`server/usage/span-costing.ts:209-225`):
 
 | rung | fires when | effect |
 |---|---|---|
@@ -322,7 +318,7 @@ and where a wrong belief has been propagated for months. Resolving it:
 | 2 `rate-card` | provider cost missing, zero, negative or unstorable | our card prices each row — **and raises an alert** (`azure-monitor-reader.ts:1750-1756`) |
 | 3 `skip` | neither | the span is not written at all |
 
-**Observed on Dev, one 7-day sample (2026-08-01): 21,839 spans provider-priced,
+**Observed on the reference deployment, one 7-day sample (2026-08-01): 21,839 spans provider-priced,
 0 rate-card-priced.** That is a dated observation from one environment, **not** a
 proof that rung 2 is dead. Rung 2 is live code: it fires for missing, zero and
 negative provider cost (`tests/integration/azure/joiner-provider-cost.test.ts:330-380`)
@@ -331,14 +327,14 @@ rare needs production-wide rung counts, not this sample.
 
 ### The conflict, and which document wins
 
-- `docs/design/provider-billing-attribution-model.md:74` and
+- The billing-attribution design and
   `server/usage/over-emission-detection.ts:11-23` both describe
   `attribution_record` as the *"OTel rate-carded estimate"*, a different money
   basis from the bill.
-- `docs/design/provider-cost-precedence.md` and the live evidence say the
-  amounts are provider-priced.
+- The cost-precedence design and the live evidence say the amounts are
+  provider-priced.
 
-**The precedence doc plus the evidence wins** on the common case. But "rate-carded"
+**The precedence design plus the evidence wins** on the common case. But "rate-carded"
 and "provider-priced" are both too absolute, because the card plays **three
 different roles depending on the rung**:
 
@@ -428,9 +424,10 @@ Copilot card was deleted as "dead and misleading"
 
 ---
 
-## 5. Insight-specific wiring
+## 5. Reference deployment (example)
 
-Everything above is the generic model. This is what is actually configured here.
+Everything above is the generic model. This is how the reference deployment is
+configured; a deployment's own provider plans and credentials may differ.
 
 ### Anthropic
 
@@ -472,20 +469,17 @@ against the page ceiling.
 
 | | |
 |---|---|
-| Target mode | **App mode** — owner-ratified 2026-07 (`github-pat-to-github-app-transition.md:62-72`) |
+| Target mode | **App mode** (preferred) |
 | App read | `GET /enterprises/{ent}/copilot/metrics/reports/users-1-day?day=` → signed NDJSON `download_links[]`, fetched **with no `Authorization` header** (a bearer breaks the signature) |
 | PAT read | `GET /enterprises/{ent}/settings/billing/ai_credit/usage?user=…` — carries full SKU/gross/discount/net |
 | §B bill | `GET /enterprises/{ent}/settings/billing/usage?year=&month=` |
 | Rate | $0.01 per AI credit |
 | Raw capture | **no** — no GitHub writer exists |
 
-**`[VERIFY]` — which mode Dev/Prod actually runs.** The repo cannot answer it.
-The branch is `provider_enterprise.github_app_id` being non-NULL
+**Which mode a deployment runs** is decided per enterprise by
+`provider_enterprise.github_app_id` being non-NULL
 (`server/reconciliation/credentials.ts:216-245`), which is set through the admin
-UI, not by seed or env. Repo state points to PAT (seed has no `github_app_id`;
-only `NUXT_GITHUB_PAT_*` appears in any env file), while the 2026-08-01 live
-capture is explicitly App mode. Assume App mode is live and confirm before
-relying on either.
+UI, not by seed or env.
 
 The modes are **not** interchangeable, and the difference is load-bearing:
 
@@ -504,8 +498,7 @@ Every classic PAT scope that reaches `ai_credit/usage` is mutate-capable
 The plugin ships via a server-managed marketplace; `provision_emit` mints the
 instance. Enrolment is effectively **per-host**: the credential lives in
 `~/.claude/settings.json`, so every container sharing a home directory on one
-host emits the same `tokenscope.instance_id` (verified in the 2026-06-05 dogfood
-incident).
+host emits the same `tokenscope.instance_id`.
 
 ---
 
@@ -587,16 +580,6 @@ stable). Listed so they are not rediscovered as surprises.
 5. **`is_frozen` enforces nothing.** Written `true` on every
    `attribution_record` row and read nowhere; no trigger, CHECK or policy makes
    the row immutable.
-6. **Shadow→real identity confirmation does not re-key rollups.**
-   `confirm-instance.ts:277-290` re-points `teammate_id` without bumping
-   `ts_recorded`, and the incremental rollup keys its day-set on `ts_recorded` —
-   so aggregates may hold the shadow teammate's dimensions until a backfill.
-   `[VERIFY]` — no re-keying path found.
-7. **Point-in-time cost-centre homing is not implemented for Copilot.**
-   Re-pointing an org's cost centre restates prior months.
-8. **Dangling doc references.** `copilot-surface-lanes` is cited by four
-   migrations and three server files and **does not exist**;
-   `docs/design/reconciliation-engine.md` exists only under `archive/`.
 
 ---
 
@@ -605,6 +588,3 @@ stable). Listed so they are not rediscovered as surprises.
 - [Data Lineage](Data-Lineage.md) — tables, columns, transformations, invariants
 - [Data Model](Data-Model.md) — schema reference *(stale on this path; see gaps)*
 - [Reporting](Reporting.md) — what reads these surfaces
-- `docs/design/provider-billing-attribution-model.md` — canonical §A/§B
-- `docs/design/provider-cost-precedence.md` — canonical cost ladder
-- `docs/design/github-pat-to-github-app-transition.md` — credential modes

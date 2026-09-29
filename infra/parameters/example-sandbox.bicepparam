@@ -31,12 +31,14 @@ param oidcSessionSecret = readEnvironmentVariable('OIDC_SESSION_SECRET')
 param oidcAuthSessionSecret = readEnvironmentVariable('OIDC_AUTH_SESSION_SECRET')
 param oidcTokenKey = readEnvironmentVariable('OIDC_TOKEN_KEY')
 param entraIdClientSecret = readEnvironmentVariable('ENTRA_CLIENT_SECRET')
-// Optional provider credentials: empty = not configured.
+// Optional provider credentials: empty = not configured. The GITHUB_* names
+// are the earlier spelling, still read so existing secrets files keep working
+// (GitHub Actions refuses secrets named GITHUB_*).
 param anthropicApiKey = readEnvironmentVariable('ANTHROPIC_API_KEY', '')
-param githubPatPartnerDemo = readEnvironmentVariable('GITHUB_PAT_PARTNER_DEMO', '')
-param githubPatProduction = readEnvironmentVariable('GITHUB_PAT_PRODUCTION', '')
-param githubPatApacNfr = readEnvironmentVariable('GITHUB_PAT_APAC_NFR', '')
-param githubAppKeyPartnerDemo = readEnvironmentVariable('GITHUB_APP_KEY_PARTNER_DEMO', '')
+param githubPatPartnerDemo = readEnvironmentVariable('GH_PAT_PARTNER_DEMO', readEnvironmentVariable('GITHUB_PAT_PARTNER_DEMO', ''))
+param githubPatProduction = readEnvironmentVariable('GH_PAT_PRODUCTION', readEnvironmentVariable('GITHUB_PAT_PRODUCTION', ''))
+param githubPatApacNfr = readEnvironmentVariable('GH_PAT_ENTERPRISE_NFR', readEnvironmentVariable('GITHUB_PAT_APAC_NFR', ''))
+param githubAppKeyPartnerDemo = readEnvironmentVariable('GH_APP_KEY_PARTNER_DEMO', readEnvironmentVariable('GITHUB_APP_KEY_PARTNER_DEMO', ''))
 
 // ── Auth (Entra ID OIDC) ─────────────────────────────────────────────────
 // Deployed images have no dev-mode sign-in: until these are set, nobody can
@@ -68,6 +70,7 @@ param workerBaseUrl = ''
 // ── Networking / Front Door ──────────────────────────────────────────────
 param enablePrivateNetworking = false   // public endpoints, RBAC + firewall
 param enableFrontDoor = false           // three-phase apply, docs/DEPLOY-AZURE.md
+// param frontDoorSku = 'Standard'      // 'Premium' adds the managed WAF rule sets
 // param frontDoorId = ''               // phase 3: the frontDoorInstanceId output
 
 // ── Optional ─────────────────────────────────────────────────────────────

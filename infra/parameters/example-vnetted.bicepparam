@@ -36,18 +36,21 @@ param oidcSessionSecret = readEnvironmentVariable('OIDC_SESSION_SECRET')
 param oidcAuthSessionSecret = readEnvironmentVariable('OIDC_AUTH_SESSION_SECRET')
 param oidcTokenKey = readEnvironmentVariable('OIDC_TOKEN_KEY')
 param entraIdClientSecret = readEnvironmentVariable('ENTRA_CLIENT_SECRET')
-// Optional provider credentials: empty = not configured.
+// Optional provider credentials: empty = not configured. The GITHUB_* names
+// are the earlier spelling, still read so existing secrets files keep working
+// (GitHub Actions refuses secrets named GITHUB_*).
 param anthropicApiKey = readEnvironmentVariable('ANTHROPIC_API_KEY', '')
-param githubPatPartnerDemo = readEnvironmentVariable('GITHUB_PAT_PARTNER_DEMO', '')
-param githubPatProduction = readEnvironmentVariable('GITHUB_PAT_PRODUCTION', '')
-param githubPatApacNfr = readEnvironmentVariable('GITHUB_PAT_APAC_NFR', '')
-param githubAppKeyPartnerDemo = readEnvironmentVariable('GITHUB_APP_KEY_PARTNER_DEMO', '')
+param githubPatPartnerDemo = readEnvironmentVariable('GH_PAT_PARTNER_DEMO', readEnvironmentVariable('GITHUB_PAT_PARTNER_DEMO', ''))
+param githubPatProduction = readEnvironmentVariable('GH_PAT_PRODUCTION', readEnvironmentVariable('GITHUB_PAT_PRODUCTION', ''))
+param githubPatApacNfr = readEnvironmentVariable('GH_PAT_ENTERPRISE_NFR', readEnvironmentVariable('GITHUB_PAT_APAC_NFR', ''))
+param githubAppKeyPartnerDemo = readEnvironmentVariable('GH_APP_KEY_PARTNER_DEMO', readEnvironmentVariable('GITHUB_APP_KEY_PARTNER_DEMO', ''))
 
-// ── Public entry point ───────────────────────────────────────────────────
-// Ingress is internal, so users reach the app through your own WAF, App
-// Gateway or reverse proxy, pointed at the Container App's internal FQDN.
-// Pin the public origin it serves under so self-URLs, CSRF, cookies and OAuth
-// metadata are right whether or not the proxy preserves the Host header.
+// ── Public entry point: pick ONE ─────────────────────────────────────────
+// Ingress is internal. Users reach the app through either
+//   (a) your own WAF, App Gateway or reverse proxy (the default below), or
+//   (b) Azure Front Door Premium over Private Link (the Front Door section).
+// Pin the public origin users see so self-URLs, CSRF, cookies and OAuth
+// metadata are right: (a) your hostname, (b) https://<frontDoorEndpointFqdn>.
 param appPublicOrigin = 'https://tokenscope.example.com'
 
 // ── Auth (Entra ID OIDC) ─────────────────────────────────────────────────
@@ -58,10 +61,14 @@ param bootstrapAdminEmail = ''        // first sign-in → platform-admin
 param allowPersonaOverride = false    // refused outside local/sandbox anyway
 
 // ── Scheduled workers ────────────────────────────────────────────────────
-// MUST be the app's INTERNAL FQDN: the jobs run inside the environment and
-// usually cannot reach the public host. After the first apply:
-//   https://<containerAppUrl output>
-// Empty = no worker jobs: telemetry is never joined, dashboards stay at $0.
+// The address the worker jobs call. Empty = no worker jobs: telemetry is
+// never joined, dashboards stay at $0. After the first apply:
+//   (a) own WAF: https://<containerAppUrl output>, the INTERNAL address; the
+//       jobs run inside the environment and usually cannot reach your WAF.
+//   (b) Front Door: https://<frontDoorEndpointFqdn output>. Once frontDoorId
+//       is set the app refuses direct calls, and the jobs reach Front Door
+//       through the environment's outbound internet access (allow it if you
+//       force outbound traffic through a firewall).
 param workerBaseUrl = ''
 
 // ── Networking ───────────────────────────────────────────────────────────
@@ -74,6 +81,15 @@ param vnetAddressSpace = '10.0.0.0/24'
 param containerAppsSubnetPrefix = '10.0.0.0/27'
 param privateEndpointsSubnetPrefix = '10.0.0.32/28'
 param amplsSubnetPrefix = '10.0.0.48/28'
+// Optional build subnet for a private registry: a self-hosted runner or an ACR
+// agent pool builds from here (examples/github-actions/README.md). Declare it
+// here rather than adding it by hand: the next apply removes unlisted subnets.
+param buildSubnetPrefix = ''          // e.g. '10.0.0.64/27'
+// Egress and landing-zone controls, attached by the template (anything attached
+// to a subnet by hand is cleared on the next apply):
+// param natGatewayId = '/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/natGateways/<nat>'
+// param subnetRouteTableId = '<route table id>'    // e.g. forced tunnelling to a hub firewall
+// param subnetNetworkSecurityGroupId = '<nsg id>'
 
 // Private DNS. Default: the template creates the privatelink zones for Key
 // Vault, Postgres, Redis and ACR, links them to the VNet and registers every
@@ -103,8 +119,19 @@ param monitorQueryPrivateOnly = false
 // param useRemoteGateways = true     // only if the hub has a gateway + allowGatewayTransit
 
 // ── Front Door ───────────────────────────────────────────────────────────
-// Off: this template deploys AFD Standard, which cannot reach internal ingress.
+// Off for option (a). For option (b), Premium only: Standard cannot reach an
+// internal environment, and the template refuses that combination. Three
+// applies, as in docs/DEPLOY-AZURE.md §Front Door Premium:
+//   1. enableFrontDoor = true, frontDoorSku = 'Premium'; then approve Front
+//      Door's private endpoint request (infra/scripts/approve-front-door-private-link.sh)
+//   2. frontDoorId = '<frontDoorInstanceId output>', and appPublicOrigin,
+//      entraIdRedirectUri and workerBaseUrl on the Front Door endpoint
+// Premium's managed WAF rules start in Log mode; set
+// frontDoorWafManagedRuleAction = 'Block' once the logs are clean.
 param enableFrontDoor = false
+// param frontDoorSku = 'Premium'
+// param frontDoorId = ''
+// param frontDoorWafManagedRuleAction = 'Log'
 
 // ── Optional ─────────────────────────────────────────────────────────────
 // param deployAzureMonitorWorkspace = false   // if Microsoft.Monitor cannot be registered

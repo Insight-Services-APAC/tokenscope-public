@@ -7,9 +7,7 @@ content.**
 
 See also [Security Overview](Security-Overview.md)
 ([Authentication & Security](Authentication-and-Security.md) as-built),
-[Architecture](Architecture.md), [Data Model](Data-Model.md). Region/tenant
-specifics for the Insight instance are in
-your deployment's own configuration.
+[Architecture](Architecture.md), [Data Model](Data-Model.md).
 
 Labels used throughout: **[Current]** = as-built and running; **[Planned]** =
 designed, not yet enforced; **[VERIFY]** = needs deployment-owner confirmation.
@@ -37,7 +35,7 @@ Confirmed against the as-built schema — `attribution_record`
 This is the system's primary **data-minimisation** property: the most sensitive
 data class (conversation content) is never collected, transmitted, or stored.
 (Sources: [Data Model](Data-Model.md) `attribution_record`;
-`docs/development/claude-code-telemetry-contract.md`.)
+[Claude Code Client](Claude-Code-Client.md#telemetry-contract).)
 
 ---
 
@@ -175,8 +173,7 @@ flowchart LR
 
 - **Single-region deployment.** TokenScope deploys into one region and resource
   group (chosen via `location` / passed at `-g`); all stores live in that region.
-  The concrete region, RG, and tenant for the Insight instance are in
-  your deployment's own configuration. **[Current]**
+  **[Current]**
 - **Region and org-subtree scoping.** Multi-tenant tables carry `region_id` /
   `org_unit_id`, and every scoped surface clamps on them in-query through shared
   scope-predicate helpers. This is the authorization boundary; see

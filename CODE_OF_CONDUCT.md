@@ -49,8 +49,9 @@ an individual is officially representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement via GitHub's
-private reporting on this repository. All complaints will be reviewed and
+reported by contacting the maintainers of this repository directly (not through
+a public issue, and not through GitHub's private vulnerability reporting, which is
+for security reports only). All complaints will be reviewed and
 investigated promptly and fairly.
 
 ## Attribution

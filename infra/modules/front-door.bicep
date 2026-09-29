@@ -1,12 +1,16 @@
-// ── Azure Front Door Standard — WAF-protected ingress for TokenScope ──
+// ── Azure Front Door — WAF-protected ingress for TokenScope ──────────
 //
 // Single endpoint, single origin group, single origin — TokenScope is one
-// Nuxt container app. Standard SKU CANNOT VNet-integrate with Container
-// Apps; protection is via header-only check (AFD injects X-Azure-FDID
-// containing the AFD instance ID, and the container app's
-// require-front-door middleware rejects requests where the header is
-// missing or doesn't match). The container app's ingress stays public
-// (`external: true`) — see `infra/modules/container-app.bicep`.
+// Nuxt container app. Two SKUs:
+//   - Standard: the origin is the app's PUBLIC ingress. Standard cannot reach
+//     an internal Container Apps environment.
+//   - Premium: may instead reach an INTERNAL (VNet) environment over Private
+//     Link (privateLinkResourceId set). Front Door then requests a private
+//     endpoint on the managed environment, which must be APPROVED before any
+//     traffic flows (docs/DEPLOY-AZURE.md). Premium also carries Microsoft's
+//     managed WAF rule sets.
+// Either way the container app's require-front-door middleware rejects
+// requests without this profile's X-Azure-FDID header once frontDoorId is set.
 //
 // AVM consideration: `avm/res/cdn/profile` (Azure Verified Module) covers
 // AFD profile/endpoints/origins, but does NOT bundle the WAF policy +
@@ -20,8 +24,8 @@
 // container-app.bicep's startup/liveness/readiness probes).
 //
 // Custom domains are added out-of-band via `az afd custom-domain create`
-// AFTER DNS validation (matches Tuckwell's pattern — managing custom
-// domains in Bicep races DNS propagation). When a custom domain is added,
+// AFTER DNS validation (managing custom domains in Bicep races DNS
+// propagation). When a custom domain is added,
 // it MUST also be added to the securityPolicy.associations.domains array
 // via `az afd security-policy update` — AFD does NOT inherit WAF coverage
 // from the endpoint to attached custom domains.
@@ -41,11 +45,50 @@ param originFqdn string
 @maxValue(240)
 param originResponseTimeoutSeconds int = 60
 
-@description('ISO-3166 alpha-2 country codes allowed to reach the app. Empty array (default) = no geo restriction (TokenScope serves Insight globally). Populate with e.g. [\'AU\', \'US\'] to restrict.')
+@description('ISO-3166 alpha-2 country codes allowed to reach the app. Empty array (default) = no geo restriction. Populate with e.g. [\'AU\', \'US\'] to restrict.')
 param wafGeoAllowedCountries array = []
+
+@description('Front Door tier. Premium is required for a Private Link origin and for the managed WAF rule sets.')
+@allowed(['Standard', 'Premium'])
+param sku string = 'Standard'
+
+@description('Managed environment resource id to reach over Private Link (Premium only). Empty = public origin.')
+param privateLinkResourceId string = ''
+
+@description('Region of the managed environment (Private Link location). Required with privateLinkResourceId.')
+param privateLinkLocation string = ''
+
+@description('What the Premium managed rule sets (DRS 2.1, Bot Manager 1.1) do on a match: Log (observe) or Block. Ignored on Standard.')
+@allowed(['Log', 'Block'])
+param managedRuleAction string = 'Log'
+
+@description('Log Analytics workspace resource id for Front Door access, health-probe and WAF logs. Empty = no diagnostic setting.')
+param logAnalyticsId string = ''
+
+@description('Requests per IP per 5 minutes before the WAF rate-limit rule blocks. Everyone behind one NAT address shares a budget.')
+@minValue(10)
+param rateLimitPerIpPer5Min int = 100
 
 @description('Tags applied to every resource that accepts the tags property.')
 param tags object = {}
+
+var skuName = '${sku}_AzureFrontDoor'
+var usePrivateLink = sku == 'Premium' && !empty(privateLinkResourceId)
+// Front Door's private endpoint request carries this message; the approval
+// step matches on it (Front Door can file duplicate requests).
+var privateLinkRequestMessage = 'TokenScope Front Door fd-${name}'
+var premiumManagedRuleSets = [
+  {
+    ruleSetType: 'Microsoft_DefaultRuleSet'
+    ruleSetVersion: '2.1'
+    ruleSetAction: managedRuleAction
+  }
+  {
+    ruleSetType: 'Microsoft_BotManagerRuleSet'
+    ruleSetVersion: '1.1'
+    ruleSetAction: managedRuleAction
+  }
+]
 
 // Merge the environment marker into tags so the module is self-describing
 // even when the caller passes an empty tags object. Module's
@@ -62,7 +105,7 @@ resource frontDoorProfile 'Microsoft.Cdn/profiles@2024-02-01' = {
   name: 'fd-${name}'
   location: 'global'
   sku: {
-    name: 'Standard_AzureFrontDoor'
+    name: skuName
   }
   properties: {
     originResponseTimeoutSeconds: originResponseTimeoutSeconds
@@ -116,11 +159,19 @@ resource origin 'Microsoft.Cdn/profiles/originGroups/origins@2024-02-01' = {
     priority: 1
     weight: 1000
     enabledState: 'Enabled'
+    sharedPrivateLinkResource: usePrivateLink ? {
+      privateLink: {
+        id: privateLinkResourceId
+      }
+      groupId: 'managedEnvironments'
+      privateLinkLocation: privateLinkLocation
+      requestMessage: privateLinkRequestMessage
+    } : null
   }
 }
 
 // ── Route (the endpoint routes /* HTTPS-only to the origin group) ───
-// `dependsOn: [origin]` is explicit — Tuckwell pattern. The route binds
+// `dependsOn: [origin]` is explicit. The route binds
 // to the origin group via id, but ARM occasionally races the route
 // provisioning ahead of the origin write, which the explicit dependsOn
 // avoids.
@@ -149,9 +200,9 @@ resource route 'Microsoft.Cdn/profiles/afdEndpoints/routes@2024-02-01' = {
 
 // ── WAF Policy ──────────────────────────────────────────────────────
 // Standard SKU = custom rules only (no managed OWASP rulesets). The
-// rules below are the Tuckwell pattern, adapted for TokenScope:
+// rules below:
 //   - Geo-restriction is now a conditional knob (wafGeoAllowedCountries).
-//   - The block-response page is a generic TokenScope card (not ANU).
+//   - The block-response page is a generic TokenScope card.
 //   - The OIDC-callback comment for the 8192 limit is preserved verbatim
 //     because the same Entra-callback-URL-length pressure applies.
 //
@@ -178,12 +229,12 @@ resource route 'Microsoft.Cdn/profiles/afdEndpoints/routes@2024-02-01' = {
 //   <main class="card">
 //   <h1>Request blocked</h1>
 //   <p>The Web Application Firewall in front of TokenScope rejected this request. This is usually because the request matched a known-bad pattern (SQL injection, XSS, scanner, path traversal) or your client tripped a rate limit.</p>
-//   <p>If you believe this is a mistake, contact your Insight TokenScope administrator and include this page's URL plus the approximate time.</p>
+//   <p>If you believe this is a mistake, contact your TokenScope administrator and include this page's URL plus the approximate time.</p>
 //   </main>
-//   <footer>TokenScope &middot; Insight FinOps</footer>
+//   <footer>TokenScope</footer>
 //   </body>
 //   </html>
-var wafBlockResponseBodyBase64 = 'PCFET0NUWVBFIGh0bWw+CjxodG1sIGxhbmc9ImVuIj4KPGhlYWQ+CjxtZXRhIGNoYXJzZXQ9InV0Zi04Ij4KPG1ldGEgbmFtZT0idmlld3BvcnQiIGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCwgaW5pdGlhbC1zY2FsZT0xIj4KPHRpdGxlPlRva2VuU2NvcGUg4oCUIFJlcXVlc3QgYmxvY2tlZDwvdGl0bGU+CjxzdHlsZT4KKntib3gtc2l6aW5nOmJvcmRlci1ib3h9CmJvZHl7Zm9udC1mYW1pbHk6LWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsc3lzdGVtLXVpLHNhbnMtc2VyaWY7bWF4LXdpZHRoOjMycmVtO21hcmdpbjozcmVtIGF1dG87cGFkZGluZzoxLjc1cmVtO2NvbG9yOiMxZTI5M2I7bGluZS1oZWlnaHQ6MS41NTtiYWNrZ3JvdW5kOmxpbmVhci1ncmFkaWVudCgxODBkZWcsI2YxZjVmOSwjZmFmYWY5IDYwJSwjZWZmNmZmKTttaW4taGVpZ2h0OjEwMHZoO21hcmdpbjowO3BhZGRpbmctdG9wOjVyZW19Ci5jYXJke21heC13aWR0aDozMnJlbTttYXJnaW46MCBhdXRvO3BhZGRpbmc6MS43NXJlbTtiYWNrZ3JvdW5kOiNmZmZmZmY7Ym9yZGVyOjFweCBzb2xpZCByZ2JhKDIyNiwyMzIsMjQwLDAuNyk7Ym9yZGVyLXJhZGl1czoxNHB4O2JveC1zaGFkb3c6MCAxcHggMnB4IHJnYmEoMTUsMjMsNDIsMC4wNCl9Cmgxe2ZvbnQtc2l6ZToxLjRyZW07bGV0dGVyLXNwYWNpbmc6LTAuMDFlbTttYXJnaW46MCAwIDAuNzVyZW07Y29sb3I6IzBmMTcyYX0KcHttYXJnaW46MC43NXJlbSAwfQpmb290ZXJ7Y29sb3I6Izk0YTNiODtmb250LXNpemU6MC43OHJlbTttYXJnaW46MnJlbSBhdXRvIDA7dGV4dC1hbGlnbjpjZW50ZXI7bWF4LXdpZHRoOjMycmVtO3BhZGRpbmc6MCAxLjc1cmVtfQo8L3N0eWxlPgo8L2hlYWQ+Cjxib2R5Pgo8bWFpbiBjbGFzcz0iY2FyZCI+CjxoMT5SZXF1ZXN0IGJsb2NrZWQ8L2gxPgo8cD5UaGUgV2ViIEFwcGxpY2F0aW9uIEZpcmV3YWxsIGluIGZyb250IG9mIFRva2VuU2NvcGUgcmVqZWN0ZWQgdGhpcyByZXF1ZXN0LiBUaGlzIGlzIHVzdWFsbHkgYmVjYXVzZSB0aGUgcmVxdWVzdCBtYXRjaGVkIGEga25vd24tYmFkIHBhdHRlcm4gKFNRTCBpbmplY3Rpb24sIFhTUywgc2Nhbm5lciwgcGF0aCB0cmF2ZXJzYWwpIG9yIHlvdXIgY2xpZW50IHRyaXBwZWQgYSByYXRlIGxpbWl0LjwvcD4KPHA+SWYgeW91IGJlbGlldmUgdGhpcyBpcyBhIG1pc3Rha2UsIGNvbnRhY3QgeW91ciBJbnNpZ2h0IFRva2VuU2NvcGUgYWRtaW5pc3RyYXRvciBhbmQgaW5jbHVkZSB0aGlzIHBhZ2UncyBVUkwgcGx1cyB0aGUgYXBwcm94aW1hdGUgdGltZS48L3A+CjwvbWFpbj4KPGZvb3Rlcj5Ub2tlblNjb3BlICZtaWRkb3Q7IEluc2lnaHQgRmluT3BzPC9mb290ZXI+CjwvYm9keT4KPC9odG1sPgo='
+var wafBlockResponseBodyBase64 = 'PCFET0NUWVBFIGh0bWw+CjxodG1sIGxhbmc9ImVuIj4KPGhlYWQ+CjxtZXRhIGNoYXJzZXQ9InV0Zi04Ij4KPG1ldGEgbmFtZT0idmlld3BvcnQiIGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCwgaW5pdGlhbC1zY2FsZT0xIj4KPHRpdGxlPlRva2VuU2NvcGUg4oCUIFJlcXVlc3QgYmxvY2tlZDwvdGl0bGU+CjxzdHlsZT4KKntib3gtc2l6aW5nOmJvcmRlci1ib3h9CmJvZHl7Zm9udC1mYW1pbHk6LWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsc3lzdGVtLXVpLHNhbnMtc2VyaWY7bWF4LXdpZHRoOjMycmVtO21hcmdpbjozcmVtIGF1dG87cGFkZGluZzoxLjc1cmVtO2NvbG9yOiMxZTI5M2I7bGluZS1oZWlnaHQ6MS41NTtiYWNrZ3JvdW5kOmxpbmVhci1ncmFkaWVudCgxODBkZWcsI2YxZjVmOSwjZmFmYWY5IDYwJSwjZWZmNmZmKTttaW4taGVpZ2h0OjEwMHZoO21hcmdpbjowO3BhZGRpbmctdG9wOjVyZW19Ci5jYXJke21heC13aWR0aDozMnJlbTttYXJnaW46MCBhdXRvO3BhZGRpbmc6MS43NXJlbTtiYWNrZ3JvdW5kOiNmZmZmZmY7Ym9yZGVyOjFweCBzb2xpZCByZ2JhKDIyNiwyMzIsMjQwLDAuNyk7Ym9yZGVyLXJhZGl1czoxNHB4O2JveC1zaGFkb3c6MCAxcHggMnB4IHJnYmEoMTUsMjMsNDIsMC4wNCl9Cmgxe2ZvbnQtc2l6ZToxLjRyZW07bGV0dGVyLXNwYWNpbmc6LTAuMDFlbTttYXJnaW46MCAwIDAuNzVyZW07Y29sb3I6IzBmMTcyYX0KcHttYXJnaW46MC43NXJlbSAwfQpmb290ZXJ7Y29sb3I6Izk0YTNiODtmb250LXNpemU6MC43OHJlbTttYXJnaW46MnJlbSBhdXRvIDA7dGV4dC1hbGlnbjpjZW50ZXI7bWF4LXdpZHRoOjMycmVtO3BhZGRpbmc6MCAxLjc1cmVtfQo8L3N0eWxlPgo8L2hlYWQ+Cjxib2R5Pgo8bWFpbiBjbGFzcz0iY2FyZCI+CjxoMT5SZXF1ZXN0IGJsb2NrZWQ8L2gxPgo8cD5UaGUgV2ViIEFwcGxpY2F0aW9uIEZpcmV3YWxsIGluIGZyb250IG9mIFRva2VuU2NvcGUgcmVqZWN0ZWQgdGhpcyByZXF1ZXN0LiBUaGlzIGlzIHVzdWFsbHkgYmVjYXVzZSB0aGUgcmVxdWVzdCBtYXRjaGVkIGEga25vd24tYmFkIHBhdHRlcm4gKFNRTCBpbmplY3Rpb24sIFhTUywgc2Nhbm5lciwgcGF0aCB0cmF2ZXJzYWwpIG9yIHlvdXIgY2xpZW50IHRyaXBwZWQgYSByYXRlIGxpbWl0LjwvcD4KPHA+SWYgeW91IGJlbGlldmUgdGhpcyBpcyBhIG1pc3Rha2UsIGNvbnRhY3QgeW91ciBUb2tlblNjb3BlIGFkbWluaXN0cmF0b3IgYW5kIGluY2x1ZGUgdGhpcyBwYWdlJ3MgVVJMIHBsdXMgdGhlIGFwcHJveGltYXRlIHRpbWUuPC9wPgo8L21haW4+Cjxmb290ZXI+VG9rZW5TY29wZTwvZm9vdGVyPgo8L2JvZHk+CjwvaHRtbD4K'
 
 // Conditional geo-block rule — emitted only when the operator has
 // populated wafGeoAllowedCountries. Sandbox (default empty) gets no geo
@@ -419,8 +470,7 @@ var staticRules = [
   // 1500–4000 chars and can spike higher with larger token shapes. 8192
   // matches the de-facto industry max (nginx large_client_header_buffers
   // default, Apache LimitRequestLine default) and leaves headroom over
-  // the largest observed callback. (Tuckwell experience: 2048 blocked
-  // legitimate logins — incident 2026-05-11.)
+  // the largest observed callback (a 2048 limit blocks legitimate logins).
   {
     name: 'BlockOversizedURL'
     priority: 70
@@ -440,14 +490,14 @@ var staticRules = [
     ]
   }
   // ── Rate limit per IP (edge-level) ──────────────────────────────────
-  // 100 reqs / 5 min — same as Tuckwell. Catches abusive automated
+  // 100 reqs / 5 min. Catches abusive automated
   // traffic before it reaches the container app.
   {
     name: 'RateLimitPerIP'
     priority: 100
     enabledState: 'Enabled'
     ruleType: 'RateLimitRule'
-    rateLimitThreshold: 100
+    rateLimitThreshold: rateLimitPerIpPer5Min
     rateLimitDurationInMinutes: 5
     action: 'Block'
     matchConditions: [
@@ -469,7 +519,8 @@ resource wafPolicy 'Microsoft.Network/FrontDoorWebApplicationFirewallPolicies@20
   location: 'global'
   tags: effectiveTags
   sku: {
-    name: 'Standard_AzureFrontDoor'
+    // A WAF policy must match its profile's tier.
+    name: skuName
   }
   properties: {
     policySettings: {
@@ -481,7 +532,7 @@ resource wafPolicy 'Microsoft.Network/FrontDoorWebApplicationFirewallPolicies@20
       customBlockResponseBody: wafBlockResponseBodyBase64
     }
     managedRules: {
-      managedRuleSets: []
+      managedRuleSets: sku == 'Premium' ? premiumManagedRuleSets : []
     }
     customRules: {
       // Concat the conditional geo rule (priority 10) with the static
@@ -541,5 +592,30 @@ output endpointFqdn string = endpoint.properties.hostName
 @description('Front Door profile resource name (fd-<nameSuffix>).')
 output profileName string = frontDoorProfile.name
 
-@description('WAF policy resource name — useful for `az afd security-policy update` runbook commands.')
+@description('WAF policy resource name — useful for `az afd security-policy update` commands.')
 output wafPolicyName string = wafPolicy.name
+
+@description('Message on Front Door\'s private endpoint request; approve pending connections carrying it. Empty without Private Link.')
+output privateLinkRequestMessage string = usePrivateLink ? privateLinkRequestMessage : ''
+
+// Access, health-probe and WAF logs, so managed-rule matches in Log mode can be
+// reviewed before switching to Block (docs/DEPLOY-AZURE.md).
+resource frontDoorDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (!empty(logAnalyticsId)) {
+  name: 'diag-fd-${name}'
+  scope: frontDoorProfile
+  properties: {
+    workspaceId: logAnalyticsId
+    logs: [
+      {
+        categoryGroup: 'allLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
+  }
+}

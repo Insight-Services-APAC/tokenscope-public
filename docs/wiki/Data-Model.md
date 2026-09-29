@@ -16,9 +16,7 @@ The schema lives in two layers, both of which are ground truth:
   trigger, RLS policies, and `CHECK` constraints. When this page names a
   constraint or index, it names the migration that introduced it.
 
-The design intent and rationale live in `docs/design/data-model.md`. Where the
-design doc and the code disagree, this page follows the code and flags the
-difference. See also [Architecture](Architecture.md) and
+Where the original design and the code disagree, this page follows the code. See also [Architecture](Architecture.md) and
 [Authentication & Security](Authentication-and-Security.md).
 
 ## How the data is organised
@@ -257,7 +255,7 @@ cost-owning unit as ambiguous and places nobody through them.
 ### directory_region_rule
 
 Curated region-derivation config (mig 0088, generalised from the earlier
-`department_to_region`; see `docs/design/org-entra-region-derivation.md`). Each row
+`department_to_region`). Each row
 says "when a user's directory `attribute` matches `match_value`, their region is R",
 so any tenant can key on whichever directory field is region-correlated on *their*
 directory — not just `department`.
@@ -468,7 +466,7 @@ The core ledger — one row per attributed cost event. Rows are frozen on write
 | `source_run_id` | TEXT | provider-side run id (span/request id; retro claims + Copilot parallel-subagent dedup) |
 | `is_frozen` | BOOL NOT NULL = true | re-cost only via authorised admin event |
 | `activity` | TEXT | orthogonal activity axis (mig 0020), denormalised from `session_assignment` for within-project activity rollups; nullable |
-| `query_source` | TEXT | Claude's per-event `query_source` (mig 0045), stored RAW — Claude's own token (`repl_main_thread`, `agent:custom`, `compact`, …) and **never** the word `main`; classify with `shared/usage/query-source.ts` (vocabulary + evidence in `docs/development/claude-code-telemetry-contract.md`); NULL = attr absent / pre-0045 (unknown lane, never assumed to be a conversation) |
+| `query_source` | TEXT | Claude's per-event `query_source` (mig 0045), stored RAW — Claude's own token (`repl_main_thread`, `agent:custom`, `compact`, …) and **never** the word `main`; classify with `shared/usage/query-source.ts`; NULL = attr absent / pre-0045 (unknown lane, never assumed to be a conversation) |
 | `identity_state` | TEXT | identity provenance (mig 0057) stamped from the emitting instance's `instance_attestation.identity_state` so surfaces can exclude/label provisional usage; display-only, never gates money; NULL = pre-0057 (treat as `confirmed`) |
 | `emitting_email` | TEXT | canonicalised (trim + lower) Claude per-event `user.email` (mig 0119) — which **account** was signed in, as distinct from which device emitted (`instance_id`); the evidence for `billing_lane`; NULL = the emitter did not report one; redacted in place on erasure (`billing_lane` survives, stamped at write) |
 | `emitting_org_id` | TEXT | Claude per-event `organization.id` (mig 0119); hint and diagnostics only — never decides `billing_lane` |
@@ -688,8 +686,7 @@ window — raw with `ts_event` below it has been exported + dropped and is serve
 
 The credential-custody / onboarding unit **above** `provider_org` (mig 0038, the
 two-level lane registry). GitHub: one `manage_billing` credential per enterprise
-lives here. Anthropic: the per-org key stays on `provider_org`. See
-`docs/design/reconciliation-engine.md` §3.2.
+lives here. Anthropic: the per-org key stays on `provider_org`.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -822,7 +819,7 @@ simply yields several rows per (teammate, date, source) instead of one.
 Indexes: `(teammate_id, date)`, `(source, pulled_at)`.
 
 Two views consume this table on the two sides of the §A/§B line
-(`docs/design/provider-billing-attribution-model.md`):
+(see [Data Flow §2](Data-Flow.md#2-the-two-axes--a-and-b)):
 
 - **`v_teammate_usage_daily`** (mig 0073; current definition mig 0101, which
   reverted mig 0084's non-Code exclusion) — the **complete** §A
@@ -925,8 +922,7 @@ The per-(enterprise, org, month) **pooled** Copilot bill (mig 0080), read straig
 off the enterprise billing usage report (never recomputed). This is the §B sibling
 of `actual_spend`: Copilot's bill is pooled per (org, SKU) with no per-user field,
 so it can't live in `actual_spend` (whose `teammate_id` is NOT NULL). It homes to a
-cost-owning unit via the `provider_org` → CoU map. See
-`docs/design/provider-billing-attribution-model.md` §B.
+cost-owning unit via the `provider_org` → CoU map.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -1201,7 +1197,7 @@ effective window. Carries the provenance triple.
 |---|---|---|
 | `id` | UUID PK | |
 | `repo_provider` | TEXT NOT NULL | `github` / `azure-devops` / … |
-| `repo_full_name` | TEXT NOT NULL | e.g. `Insight-Services-APAC/a sibling project` |
+| `repo_full_name` | TEXT NOT NULL | e.g. `acme/example-repo` |
 | `project_id` | UUID NOT NULL → project | |
 | `weight` | NUMERIC(5,4) NOT NULL = 1.0 | per-repo split |
 | `effective_from` | TIMESTAMPTZ NOT NULL = now() | |
@@ -1574,10 +1570,8 @@ will not build without them:
 
 ## Notes on as-built vs design
 
-- `burst_request`, `coaching_nudge`, and `fin_project_staging` appear in
-  `docs/design/data-model.md` but are **not built** — no schema file and no
-  migration creates them. Treat the design doc's coverage of these as
-  aspirational.
+- `burst_request`, `coaching_nudge`, and `fin_project_staging` were designed
+  but are **not built** — no schema file and no migration creates them.
 - The design doc describes monthly `RANGE` partitioning for `audit_event` (from
   day one) and `attribution_record` (deferred). As-built these landed the other
   way round: **`attribution_record` is monthly `RANGE`-partitioned on `ts_event`**

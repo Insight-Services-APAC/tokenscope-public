@@ -1,38 +1,46 @@
 # Deploy-time tests
 
-These tests run AGAINST a real deployed environment (sandbox / staging
-/ production) — NOT against the local dev stack. They are Wave-IV
-deliverables.
+Maintainer tests that run **against a deployed environment**, not the local dev
+stack. Neither is part of `npm run test:*` or CI: the Vitest config only includes
+`tests/unit`, `tests/integration` and the `__tests__` folders, and the Playwright
+config's `testDir` is `tests/e2e`.
 
-Two test files:
+## `against-deployed.spec.ts` (Playwright)
 
-- `against-deployed.spec.ts` — Playwright suite that hits the deployed
-  FQDN (direct-to-CA in Wave-II phase 1; AFD-fronted in phase 2+) and
-  exercises the same flows as the local E2E suite. Driven by
-  `DEPLOYED_BASE_URL` env var.
+A public-surface smoke check of a deployed app: `/api/health`, `/login`, the
+unauthenticated redirect from `/`, and 401s from `/api/v1/me/usage` and the
+HMAC-gated internal worker endpoint. It does not sign in.
 
-- `infra-idempotency.test.ts` — Vitest that calls `az deployment group
-  what-if` against the live RG and parses the output. Pass criteria:
-  the second apply reports zero structural changes (idempotent). Calls
-  out KV-secret writes which always show as `Modify` because the
-  values are passed as @secure() (ARM can't diff them); these are
-  filtered from the "changed" count.
+Point it at the address you reach the app on (the Front Door endpoint, or the
+Container App FQDN when it is reachable from where you run it). Passing the test
+directory as the config makes Playwright use it as the test directory; the
+`against-deployed` filter keeps it from loading the Vitest file beside it:
 
-Both files are GATED on opt-in env vars so the local `npm run test:*`
-invocations skip them — they require Azure auth + a live RG.
-
-Run patterns:
-
-```
-# Against sandbox after a deploy
-DEPLOYED_BASE_URL="https://ca-tokenscope-sandbox-aue.<hash>.australiaeast.azurecontainerapps.io" \
-  npx playwright test tests/deploy/against-deployed.spec.ts
-
-# Idempotency check (requires az auth)
-AZURE_RESOURCE_GROUP=rg-tokenscope-sandbox \
-  npx vitest run tests/deploy/infra-idempotency.test.ts
+```bash
+npx playwright install chromium        # once
+DEPLOYED_BASE_URL="https://<your-app-host>" \
+  npx playwright test -c tests/deploy against-deployed
 ```
 
-The CI workflows don't run these automatically. The validation
-playbook (`docs/development/sandbox-validation-playbook.md`) calls them
-out as manual steps in each scenario.
+Without `DEPLOYED_BASE_URL` every test is skipped.
+
+## `infra-idempotency.test.ts` (Vitest)
+
+Intended to run `az deployment group what-if` against a freshly applied resource
+group and assert that nothing but Key Vault secret values would change.
+
+**Not runnable from the public tree yet.** The Vitest config does not include
+`tests/deploy`, and the test calls `what-if` with the template only, without a
+parameters file or the secrets the template requires, so it cannot complete as
+written. To check idempotency by hand, run `what-if` yourself with the same
+parameters file and environment variables you applied with (see
+[docs/DEPLOY-AZURE.md](../../docs/DEPLOY-AZURE.md)):
+
+```bash
+az deployment group what-if -g <your-rg> -f infra/main.bicep \
+  -p infra/parameters/<your>.bicepparam
+```
+
+The test's pass criterion is the one to apply: `Modify` rows for Key Vault
+secrets are expected (their `@secure()` values cannot be compared); any other
+change means the apply is not idempotent.

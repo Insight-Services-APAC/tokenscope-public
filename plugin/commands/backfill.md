@@ -1,6 +1,6 @@
 ---
 description: Re-emit recent local Claude usage that may have been dropped (short emission-gap catch-up)
-argument-hint: '[--since 24h] [--until now] [--max-records 5000] [--dry-run]'
+argument-hint: '[--since 24h] [--until now] [--max-records 5000] [--max-window-hours 48] [--dry-run]'
 allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/backfill.mjs":*)
 ---
 

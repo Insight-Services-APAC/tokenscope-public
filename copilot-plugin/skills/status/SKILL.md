@@ -42,6 +42,16 @@ It prints a JSON object:
   "emitting": true,
   "probe": { "status": 200, "message": "Emission auth OK — ..." },
   "emission_healthy": true,
+  "usage_capture": {
+    "lane": "extension",
+    "enabled": true,
+    "healthy": true,
+    "extensions_feature": "on",
+    "extension_mode": "default",
+    "drift": null,
+    "backlog": { "files": 0, "oldest_age_ms": null },
+    "message": "Usage extension enabled; nothing reported missing."
+  },
   "managed_telemetry": {
     "state": "none",
     "source": "none",
@@ -174,7 +184,7 @@ hide. The local probe can't see this (it's query-side state), so resolve it via
      a project; nothing untagged.
    - `needs_tagging_count > 0` → **WARN — landed but UNBOUND.** That many sessions are
      landing untagged: the spend reconciles to no project. Tell the user to **bind**
-     it — run the `tokenscope-project` skill to commit a `.tokenscope` for the repo, or
+     it — run the `project` skill to commit a `.tokenscope` for the repo, or
      `tag_session` for a specific session — then re-check. **Do not call this state
      healthy.**
    - `my_usage` returns an auth error → the query side isn't connected; run
@@ -222,6 +232,6 @@ call the **`my_usage`** MCP tool: data back = authed; "Not authenticated" = run 
 | `managed_telemetry.state: "unknown"`                                          | The check could not confirm either way (often: server-managed settings, which no local script can read). Treat as "cannot confirm clean", not as healthy.                                              |
 | `emitting: true` but `landed: unconfirmed`                                    | Often offline/transient. Emission auth is the primary signal; re-run later.                                                                                                                             |
 | `emitting: true` but `landed: silent` for a while                             | Records lag ~5 min; ensure you've actually run a Copilot session since setup.                                                                                                                           |
-| `landed: true` but `attribution.state: "unbound"` (`needs_tagging_count > 0`) | Spend is landing UNTAGGED — it binds to no project. Run the `tokenscope-project` skill to commit a `.tokenscope` for the repo, or `tag_session` for a specific session, then re-check. **Not healthy.** |
+| `landed: true` but `attribution.state: "unbound"` (`needs_tagging_count > 0`) | Spend is landing UNTAGGED — it binds to no project. Run the `project` skill to commit a `.tokenscope` for the repo, or `tag_session` for a specific session, then re-check. **Not healthy.** |
 | `attribution.state: "unknown"`                                                | The probe wasn't given the `my_usage` count. Call `my_usage` and read `unallocated.needs_tagging_count` (or re-run with `TOKENSCOPE_NEEDS_TAGGING_COUNT=`).                                             |
 | Want to confirm the query side too                                            | Call `my_usage` — it's the canonical MCP-auth signal for Copilot.                                                                                                                                       |

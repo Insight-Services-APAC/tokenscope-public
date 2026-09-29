@@ -31,23 +31,21 @@ if [ -n "${DATABASE_URL:-}" ]; then
   node node_modules/.bin/tsx drizzle/ensure-stat-statements.ts || \
     echo "[entrypoint] pg_stat_statements step exited non-zero (ignored by design)"
 
-  # Provision the NON-OWNER app role that makes the RLS policies execute
-  # (docs/design/rls-enforcement.md §9). DORMANT BY DEFAULT: a no-op unless
+  # Provision the NON-OWNER app role that makes the RLS policies execute.
+  # DORMANT BY DEFAULT: a no-op unless
   # TOKENSCOPE_PROVISION_APP_ROLE=true, so shipping it changes nothing until
   # someone opts in. Runs on the OWNER's DATABASE_URL (same login as migrate.ts
   # — its ALTER DEFAULT PRIVILEGES only covers objects created by the role that
   # runs it). Idempotent and safe on every replica restart.
   #
   # IT CREATES A ROLE. IT DOES NOT TOUCH RLS POSTURE. The cutover DISABLE sweep
-  # is the NEXT step and its own script, because its trigger was wrong three
-  # adversarial rounds running while it was a side effect of provisioning.
-  # Creating a role and cutting an estate over to RLS enforcement are two
+  # is the NEXT step and its own script. Creating a role and cutting an estate over to RLS enforcement are two
   # decisions with two opt-ins.
   #
   # ONE THING IT DOES EVEN WHEN DORMANT: if TOKENSCOPE_APP_DATABASE_URL is set,
   # it probes that credential. useAppRoleAtRuntime=true with
-  # provisionAppRole=false is a combination Bicep permits, and it used to boot
-  # silently into a permanent 503.
+  # provisionAppRole=false is a combination Bicep permits; without the probe it
+  # would boot silently into a permanent 503.
   #
   # THE PASSWORD IS SET ONCE, WHEN THE ROLE IS CREATED. A boot that finds the
   # role already there does NOT touch its password — not to "re-sync" it, not
@@ -59,7 +57,7 @@ if [ -n "${DATABASE_URL:-}" ]; then
   #   EXISTING ROLE'S PASSWORD (Bicep: param rotateAppDbPassword).
   #
   # It is off by default and is meant to be on for ONE deliberate boot, after
-  # re-applying infra.yml with writeAppDbPassword=true. Left on, every restart is
+  # re-applying the infrastructure with writeAppDbPassword=true. Left on, every restart is
   # a rotation again — which is the behaviour this step was cut down to remove,
   # because a restart that rotates takes the credential out from under whichever
   # replica is already serving.
@@ -109,7 +107,7 @@ if [ -n "${DATABASE_URL:-}" ]; then
   esac
   # THE CUTOVER SWEEP — a distinct, deliberate, once-per-environment operation,
   # which is why it is its own script with its own opt-in and not a side effect
-  # of the step above (docs/design/rls-enforcement.md §5, §7, §9 step 0).
+  # of the step above.
   #
   # FORCE binds the OWNER; a NON-OWNER is bound by ENABLE alone, so the instant
   # the runtime connects as the app role EVERY RLS-enabled table starts
@@ -119,9 +117,9 @@ if [ -n "${DATABASE_URL:-}" ]; then
   #
   # IT NEVER DISABLES A FORCEd TABLE. That is how a rollout phase says
   # "deliberately enabled, hands off", and a boot script reverting one is the
-  # defect this split exists to end. A BOOTSTRAP table that is FORCEd is a
-  # genuine §5-vs-§7 conflict, and the step refuses (code 4) rather than picking
-  # a winner silently.
+  # defect this split exists to end. A BOOTSTRAP table (read before any identity
+  # exists) that is FORCEd is a genuine conflict, and the step refuses (code 4)
+  # rather than picking a winner silently.
   #
   # DORMANT BY DEFAULT and safe to leave on: a no-op unless
   # TOKENSCOPE_RLS_CUTOVER_SWEEP=true (Bicep: param runRlsCutoverSweep), and once

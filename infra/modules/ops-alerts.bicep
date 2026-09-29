@@ -1,4 +1,4 @@
-// ── Ops alerting — A4 platform metric alerts (docs/design/ops-alerting.md §A4) ──
+// ── Ops alerting — platform metric alerts ──
 //
 // The watchman problem, three Azure-native legs: these alerts evaluate INSIDE
 // Azure Monitor — no app, AMPLS or LA-query dependency — so they still page
@@ -134,8 +134,7 @@ resource pgAliveAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
 // Count, PT1M grain, Total aggregation, dimension `state` = 'Succeeded' (the
 // ARM JobExecution status enum). The dimension value AND the no-executions
 // behaviour (the filtered series evaluates as 0, not no-data, so total
-// dispatch silence fires too) were confirmed live on Dev 2026-08-20 —
-// docs/design/ops-alerting.md §Validation plan.
+// dispatch silence fires too) have been confirmed against a live deployment.
 resource opsAlertDeadmanAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = if (!empty(opsAlertJobId)) {
   name: 'alert-ops-alert-deadman-${name}'
   location: 'global'

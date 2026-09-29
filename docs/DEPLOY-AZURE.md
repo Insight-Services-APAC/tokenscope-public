@@ -8,16 +8,18 @@ and Front Door.
 
 Pick a posture. Each has an example parameter file:
 
-| | **Sandbox** | **VNet-integrated** (dev / production posture) |
+| | **Sandbox** | **Staging / production** (VNet-integrated) |
 |---|---|---|
+| Use it for | Trying TokenScope on Azure: a developer or pilot environment | Anything people rely on |
 | Parameters | `infra/parameters/example-sandbox.bicepparam` | `infra/parameters/example-vnetted.bicepparam` |
-| Data plane | Public endpoints. Postgres admits any Azure-hosted client (the "Allow Azure services" rule) plus its password; Redis is public with its access key | Private endpoints on Key Vault, Postgres, Redis, ACR |
-| App ingress | Public (optionally behind Front Door) | Internal only, behind your own WAF / proxy |
-| You provide | An Azure subscription and an Entra app registration | That, plus address space, DNS, a public entry point and a build machine inside the network |
-| Time to first sign-in | About an hour | A day or more, mostly network and DNS coordination |
+| Data plane | Public endpoints. Postgres admits any Azure-hosted client (the "Allow Azure services" rule) plus its password; Redis is public with its access key | Private endpoints on Key Vault, Postgres, Redis and the registry; nothing public |
+| App ingress | Public (optionally behind Front Door Standard) | Internal only. **Recommended:** Azure Front Door Premium over Private Link, so the only public surface is Front Door's WAF. Alternative: your own WAF / application gateway |
+| Deploy with | This guide by hand, or the example workflows | The example GitHub Actions workflows ([examples/github-actions/](../examples/github-actions/README.md)) |
+| You provide | An Azure subscription and an Entra app registration | That, plus address space and a way to build images inside the network |
+| Time to first sign-in | About an hour | Half a day, most of it waiting on Azure |
 
-Every apply command below is the same for both. The VNet section only adds
-steps.
+Every apply below uses the same command; the staging / production section only
+adds steps.
 
 ## 1. Prerequisites
 
@@ -73,9 +75,9 @@ registration**:
    - **Grant admin consent** for the tenant. `User.Read.All` requires it, and
      tenants that restrict user consent need it for the delegated scopes too.
      Without consent the deployment still works; what fails is visible:
-     sign-in stops at Entra's "Need admin approval" page when users may not
-     consent themselves, and without `User.Read.All` the people picker and
-     manager lookups return errors. Developer enrolment, telemetry and
+     sign-in stops at Entra's "Approval required" (or "Need admin approval")
+     page when users may not consent themselves, and without `User.Read.All`
+     the people picker and manager lookups return errors. Developer enrolment, telemetry and
      reporting do not depend on it.
 5. **Token configuration:** add the optional claim `email` to the ID token.
    Sign-in needs an email, and the bootstrap admin is matched on it.
@@ -133,9 +135,8 @@ remove it from the file and the next apply unhooks it from the app.
 - **Anthropic** (Claude spend reconciliation): an Admin API key or an
   Enterprise Analytics key. Add `ANTHROPIC_API_KEY='<key>'` to the secrets file
   and uncomment `anthropicApiEndpoint` in the parameter file. The app reads it
-  under the credential name
-  `insight`: use that name when you register the organisation under
-  **Admin → Reconciliation**.
+  under the credential name `main`; use that name when you register the
+  organisation under **Admin → Reconciliation**.
 - **GitHub** (Copilot usage and billing): a classic PAT with
   `manage_billing:enterprise` and `read:org`, or a GitHub App private key
   (base64-encoded PEM). The template has fixed slots, each tied to the
@@ -143,10 +144,10 @@ remove it from the file and the next apply unhooks it from the app.
 
   | Secrets-file variable | Credential name |
   |---|---|
-  | `GITHUB_PAT_PARTNER_DEMO` | `partner-demo` |
-  | `GITHUB_PAT_PRODUCTION` | `production` |
-  | `GITHUB_PAT_APAC_NFR` | `enterprise-nfr` |
-  | `GITHUB_APP_KEY_PARTNER_DEMO` (App key) | `partner-demo` |
+  | `GH_PAT_PARTNER_DEMO` | `partner-demo` |
+  | `GH_PAT_PRODUCTION` | `production` |
+  | `GH_PAT_ENTERPRISE_NFR` | `enterprise-nfr` |
+  | `GH_APP_KEY_PARTNER_DEMO` (App key) | `partner-demo` |
 
   Any other credential name needs a template change
   (`infra/modules/container-app.bicep`). See [PROVIDERS.md](PROVIDERS.md).
@@ -155,8 +156,8 @@ Both can be added later: add the value and apply again.
 
 ## 2. The apply command
 
-Every step that says "apply" runs this (swap in the VNet parameter file for
-that posture):
+Every step that says "apply" runs this (swap in your parameter and secrets
+files for each environment):
 
 ```bash
 RG=<your-resource-group>
@@ -165,10 +166,16 @@ SECRETS=./.azure-sandbox-secrets.env
 set -a; . "$SECRETS"; set +a
 
 az deployment group create --resource-group "$RG" \
-  --template-file infra/main.bicep --parameters "$PARAMS"
+  --template-file infra/main.bicep --parameters "$PARAMS" --no-wait
+infra/scripts/approve-front-door-private-link.sh "$RG"
 ```
 
-Preview any apply with `az deployment group what-if` and the same arguments.
+The script waits for the deployment and exits non-zero with Azure's error if it
+fails. With Front Door Premium on a VNet deployment it also approves Front
+Door's Private Link request while the apply runs: Front Door does not finish
+until that request is approved. For every other posture it only waits.
+
+Preview any apply with `az deployment group what-if` and the same `--parameters`.
 
 ## 3. Sandbox
 
@@ -228,8 +235,9 @@ Preview any apply with `az deployment group what-if` and the same arguments.
 
 ### Optional: Front Door
 
-Front Door (Standard + WAF) goes in front of the public app in three applies,
-because each side needs the other's identity:
+Front Door (Standard + WAF; `frontDoorSku = 'Premium'` adds Microsoft's
+managed rule sets) goes in front of the public app in three applies, because
+each side needs the other's identity:
 
 1. With `enableFrontDoor = false`: done above.
 2. Set `enableFrontDoor = true` and apply. Note the `frontDoorEndpointFqdn` and
@@ -238,98 +246,171 @@ because each side needs the other's identity:
    Door: `appPublicOrigin`, `entraIdRedirectUri` and `workerBaseUrl` use
    `https://<frontDoorEndpointFqdn>`, and the two redirect URIs in Entra change
    to match. Devices enrolled before this point hold the old address; re-run
-   setup on them. Apply. The app now
-   rejects any request that did not come through Front Door (except
-   `/api/health`), which is why the workers must call Front Door too.
+   setup on them. Apply. The app now rejects requests that lack this Front
+   Door's `X-Azure-FDID` header (except `/api/health`), which is why the
+   workers must call Front Door too.
 
-## 4. VNet-integrated (dev / production posture)
+With Standard the app's own address stays public, and the header check is the
+only thing keeping callers on Front Door. The ID it checks is not a secret, so
+this deters casual bypass of the WAF but is not a network boundary. That is
+fine for a sandbox; for production use the VNet posture with Front Door
+Premium, where the app has no public address at all.
 
-This is the shape of the project's own Dev environment. The app, its jobs and
-all data planes live in your VNet; nothing is reachable from the internet
-except through the entry point you put in front of it.
+## 4. Staging and production (VNet-integrated)
+
+The app, its jobs and every data plane live in your VNet: Key Vault, Postgres,
+Redis and the registry are private endpoints, and the Container Apps
+environment is internal. Deploy it with the example GitHub Actions workflows
+([examples/github-actions/](../examples/github-actions/README.md)); the steps
+below are what they run, and work by hand too.
+
+### Choose the entry point
+
+- **(b) Azure Front Door Premium over Private Link (recommended).** Front Door
+  reaches the internal environment through a private endpoint in Microsoft's
+  network, so the only public surface is Front Door and its WAF (with
+  Microsoft's managed rule sets, logging by default:
+  `frontDoorWafManagedRuleAction = 'Block'` once the logs are clean). No DNS
+  zone of your own, no inbound rule, no proxy to run. Front Door Premium has a
+  base fee of about USD 330 a month, billed hourly.
+- **(a) Your own WAF or application gateway** in front of the internal app,
+  when your organisation already runs one. You also create the environment's
+  private DNS zone (below).
+
+Front Door Standard cannot reach an internal environment; the template refuses
+that combination before deploying anything.
 
 ### Additional prerequisites
 
-- **Address space** from your IPAM: at least a /24 carved into a Container Apps
-  subnet (/27 minimum), a private-endpoint subnet (/28) and, if you make Log
-  Analytics query private, an AMPLS subnet (/28).
-- **A public entry point you operate:** an Application Gateway, WAF or reverse
-  proxy that can reach the VNet and forwards to the Container App's internal
-  FQDN. This template's Front Door (Standard) cannot reach internal ingress, so
-  it stays off. Decide the public hostname now (for example
-  `tokenscope.example.com`) and set `appPublicOrigin` and `entraIdRedirectUri`
-  to it.
-- **DNS.** By default the template creates and links the privatelink zones for
-  Key Vault, Postgres, Redis and ACR and registers every record. You must
-  create one more zone yourself after the first apply (step 4). If a central
+- **Outbound traffic.** The app and its worker jobs call Entra ID, Azure
+  Monitor, the provider APIs and (with Front Door Premium) the Front Door
+  endpoint; the build subnet reaches GitHub and base-image registries. Azure is
+  retiring default outbound access for new subnets, so give the Container Apps
+  and build subnets a NAT gateway (`natGatewayId`) or a route through your
+  firewall (`subnetRouteTableId`). A landing-zone NSG goes in
+  `subnetNetworkSecurityGroupId`. Set these in the parameter file rather than
+  on the subnets: the template lists the VNet's subnets and their attachments,
+  so the next apply clears anything attached by hand.
+- **Address space** from your IPAM, at least a /24: a Container Apps subnet
+  (/27), a private-endpoint subnet (/28), and a build subnet (`buildSubnetPrefix`,
+  e.g. /27) if you build images inside the VNet. The example uses `10.0.0.0/24`.
+  Declare every subnet in the parameter file: the template lists the VNet's
+  subnets, so the next apply removes one added by hand.
+- **A way to build images inside the network.** The registry accepts no public
+  traffic, so `az acr build` cannot push to it. Either a self-hosted runner (a
+  VM in `snet-build`, at least 8 GB of RAM) or an ACR Tasks agent pool in
+  `snet-build` (preview, not offered in every region). The build subnet needs
+  outbound internet: Azure is retiring default outbound access for new
+  subnets, so plan a NAT gateway or a firewall route.
+  [examples/github-actions/README.md](../examples/github-actions/README.md#building-for-a-private-registry-vnet)
+  has both.
+- **DNS.** The template creates and links the privatelink zones for Key Vault,
+  Postgres, Redis and the registry and registers every record. If a central
   team owns private DNS in a hub subscription, use the commented "central DNS"
   variant in the parameter file and give that team the record list.
-- **A build machine inside the network.** The registry is private, so images
-  are built with Docker on a machine (or CI runner) that resolves and reaches
-  the ACR private endpoint. `az acr build` cannot push to it.
 
-### Steps
+### Steps (Front Door Premium)
 
 1. **Copy and edit the parameters.**
 
    ```bash
-   cp infra/parameters/example-vnetted.bicepparam infra/parameters/my.bicepparam
+   cp infra/parameters/example-vnetted.bicepparam infra/parameters/staging.bicepparam
    ```
 
-   Fill in `env`, `location`, `projectName`, the subnet prefixes,
-   `appPublicOrigin`, `entraIdRedirectUri`, `entraIdTenantId`,
-   `entraIdClientId` and `bootstrapAdminEmail`. Leave `workerBaseUrl` empty.
-   Generate a separate secrets file for this environment and set `SECRETS` to
-   it in the apply command.
+   Commit it if you deploy with the workflows (names starting `my` are
+   gitignored). Fill in `env`, `location`, a unique `projectName`, the subnet
+   prefixes and `buildSubnetPrefix`, `entraIdTenantId`, `entraIdClientId` and
+   `bootstrapAdminEmail`. Leave `appPublicOrigin`, `entraIdRedirectUri`,
+   `workerBaseUrl` and `enableFrontDoor` as they are for now. Generate a
+   secrets file for this environment and set `SECRETS` to it.
 
-2. **Register the redirect URIs now.** Your public hostname is already known:
-   add `https://<public-host>/auth/entra/callback` and
-   `https://<public-host>/login` as Web redirect URIs.
+2. **First apply.** The VNet, private endpoints, zones and data planes are
+   created; the Container App fails with `MANIFEST_UNKNOWN`, as in the
+   sandbox, because the registry is empty.
 
-3. **First apply.** The VNet, private endpoints, zones and data planes are
-   created. The Container App fails, as in the sandbox, because the registry
-   is empty.
-
-4. **Create the Container Apps environment DNS zone.** Internal ingress
-   resolves only through a private zone named after the environment's default
-   domain, which the template does not create:
-
-   ```bash
-   ENV_NAME=$(az containerapp env list -g "$RG" --query "[0].name" -o tsv)
-   DOMAIN=$(az containerapp env show -g "$RG" -n "$ENV_NAME" --query properties.defaultDomain -o tsv)
-   IP=$(az containerapp env show -g "$RG" -n "$ENV_NAME" --query properties.staticIp -o tsv)
-   VNET=$(az network vnet list -g "$RG" --query "[0].id" -o tsv)
-   az network private-dns zone create -g "$RG" -n "$DOMAIN"
-   az network private-dns record-set a add-record -g "$RG" -z "$DOMAIN" -n '*' -a "$IP"
-   az network private-dns record-set a add-record -g "$RG" -z "$DOMAIN" -n '@' -a "$IP"
-   az network private-dns link vnet create -g "$RG" -z "$DOMAIN" -n app-vnet \
-     -v "$VNET" -e false
-   ```
-
-   Also link this zone to the networks of your entry point and your build
-   machine, and link `privatelink.azurecr.io` to the build machine's network.
-
-5. **Build and push the image** from the build machine:
+3. **Build and push the image from inside the VNet**, with the deploy
+   workflow (`docker` on your runner, or `acr-agent-pool`) or by hand:
 
    ```bash
    ACR=$(az acr list -g "$RG" --query "[0].name" -o tsv)
-   az acr login --name "$ACR"
-   docker build --build-arg GIT_COMMIT_SHA="$(git rev-parse HEAD)" \
-     -t "$ACR.azurecr.io/tokenscope:latest" .
-   docker push "$ACR.azurecr.io/tokenscope:latest"
+   # agent pool (created once; see examples/github-actions/README.md)
+   az acr build --registry "$ACR" --agent-pool tokenscope-builds \
+     --image tokenscope:latest --build-arg GIT_COMMIT_SHA="$(git rev-parse HEAD)" --file Dockerfile .
    ```
 
-6. **Apply again.** The Container App provisions. Its internal host is the
-   `containerAppUrl` output.
+   The deploy workflow also rolls the app, so the Container App from step 2
+   comes up without another apply. By hand, apply again instead.
 
-7. **Point the entry point and the workers at it.** Configure your WAF or proxy
-   to forward `https://<public-host>` to `https://<containerAppUrl>`, sending
-   the internal FQDN as the backend host header. In `my.bicepparam` set
-   `workerBaseUrl = 'https://<containerAppUrl>'`: the worker jobs run inside
-   the environment and usually cannot reach the public host. Apply again.
+4. **Turn on Front Door.** Set `enableFrontDoor = true` and
+   `frontDoorSku = 'Premium'`, and apply. The approval script in the apply
+   command approves Front Door's Private Link request while the apply runs.
+   Note the `frontDoorEndpointFqdn` and `frontDoorInstanceId` outputs. A new
+   Premium endpoint can keep answering Front Door's own 404 for a while after
+   the apply; the script waits for it to serve the app and re-approves the
+   connection meanwhile, which has cleared it in testing.
 
-8. **Check it.** `https://<public-host>/api/health` returns 200 through your
-   entry point, and the bootstrap email signs in as platform-admin.
+5. **Move everything to the Front Door host.** Set
+   `frontDoorId = '<frontDoorInstanceId>'`, and `appPublicOrigin`,
+   `entraIdRedirectUri` and `workerBaseUrl` on `https://<frontDoorEndpointFqdn>`
+   (the worker jobs reach it through the environment's outbound access). Add
+   the two redirect URIs to the app registration
+   (`/auth/entra/callback` and `/login` on that host). Apply. From now on the
+   app refuses any request that did not come through this Front Door (except
+   `/api/health`).
+
+6. **Check it.** `https://<frontDoorEndpointFqdn>/api/health` returns 200 and
+   `/api/v1/meta/build` reports your commit; the bootstrap email signs in as
+   platform-admin. The deploy workflow checks each deploy through the app's
+   public origin (`appPublicOrigin`), so it verifies Front Door end to end.
+
+7. **Tune the WAF, then block.** Premium's managed rule sets start in Log
+   mode. Front Door's WAF log goes to the deployment's Log Analytics
+   workspace; review what the managed rules would have blocked:
+
+   ```bash
+   WS=$(az monitor log-analytics workspace list -g "$RG" --query "[0].customerId" -o tsv)
+   az monitor log-analytics query -w "$WS" -o table --analytics-query \
+     "AzureDiagnostics | where Category == 'FrontDoorWebApplicationFirewallLog'
+      | where TimeGenerated > ago(7d) and action_s == 'Log'
+      | summarize hits=count() by ruleName_s, requestUri_s | order by hits desc"
+   ```
+
+   When the matches are all attacks rather than your developers' traffic, set
+   `frontDoorWafManagedRuleAction = 'Block'` and apply. Block is the intended
+   production end state.
+
+**Custom domains** are not part of the template. If you add one to Front Door
+(`az afd custom-domain create`), also add it to the WAF security policy
+(`az afd security-policy update`), and repeat that after every apply: the
+template declares the policy with the default endpoint only, so an apply drops
+the custom domain's WAF coverage.
+
+### Steps (your own WAF)
+
+As above, with these differences: leave `enableFrontDoor = false`; set
+`appPublicOrigin` and `entraIdRedirectUri` to your public hostname in step 1
+and register the redirect URIs then; and replace steps 4 and 5 with:
+
+- **Create the Container Apps environment's DNS zone** so your proxy (and the
+  worker jobs) can resolve the internal app:
+
+  ```bash
+  ENV_NAME=$(az containerapp env list -g "$RG" --query "[0].name" -o tsv)
+  DOMAIN=$(az containerapp env show -g "$RG" -n "$ENV_NAME" --query properties.defaultDomain -o tsv)
+  IP=$(az containerapp env show -g "$RG" -n "$ENV_NAME" --query properties.staticIp -o tsv)
+  VNET=$(az network vnet list -g "$RG" --query "[0].id" -o tsv)
+  az network private-dns zone create -g "$RG" -n "$DOMAIN"
+  az network private-dns record-set a add-record -g "$RG" -z "$DOMAIN" -n '*' -a "$IP"
+  az network private-dns record-set a add-record -g "$RG" -z "$DOMAIN" -n '@' -a "$IP"
+  az network private-dns link vnet create -g "$RG" -z "$DOMAIN" -n app-vnet \
+    -v "$VNET" -e false
+  ```
+
+  Link it to your proxy's network too.
+- **Point your proxy at the app** (`https://<containerAppUrl>`, sending that
+  FQDN as the backend host header), set
+  `workerBaseUrl = 'https://<containerAppUrl>'` (the internal address: the jobs
+  run inside the environment and usually cannot reach your proxy), and apply.
 
 **Private Log Analytics query** (`monitorQueryPrivateOnly`, off in the example)
 routes the app's telemetry reads through an Azure Monitor Private Link Scope.
@@ -369,36 +450,34 @@ shows the join job's runs.
 
 ### Deploying with GitHub Actions
 
-The repository's workflows deploy the maintainers' own environment and are not
-part of the public repository. To automate your deployment, wrap the commands in
-this guide in your own pipeline: an OIDC federated credential for an identity
-with Owner on the resource group, the secrets file's variables as pipeline
-secrets exported into the apply step, `az acr build` (sandbox) or a runner inside
-the network (VNet) for the image, and `az containerapp update` to roll it.
+Two example workflows automate this guide: infra (`what-if` and apply) and
+deploy (build, roll, health check, roll back). Copy them from
+[`examples/github-actions/`](../examples/github-actions/README.md) into your
+fork; that README covers the federated deployment identity, the GitHub
+environment and the order to run them in.
 
 ## 6. Shipping a new version
 
-Build the new image under a unique tag **and** `latest`: the worker jobs, and
-every re-apply, use `tokenscope:latest`. Then roll the app to the unique tag.
+The deploy workflow does this for you. By hand: build under a unique tag, roll
+the app to it, check it, and only then move `latest` (the worker jobs, and every
+re-apply, use `tokenscope:latest`, so it should only ever point at a build that
+works).
 
 ```bash
 TAG=$(git rev-parse --short HEAD)
 ACR=$(az acr list -g "$RG" --query "[0].name" -o tsv)
 
 # Sandbox: build in Azure
-az acr build --registry "$ACR" --image "tokenscope:$TAG" --image tokenscope:latest \
+az acr build --registry "$ACR" --image "tokenscope:$TAG" \
   --build-arg GIT_COMMIT_SHA="$(git rev-parse HEAD)" --file Dockerfile .
+# VNet: build inside the network instead (runner or agent pool; see the examples README)
 
-# VNet: build on the build machine instead
-az acr login --name "$ACR"
-docker build --build-arg GIT_COMMIT_SHA="$(git rev-parse HEAD)" \
-  -t "$ACR.azurecr.io/tokenscope:$TAG" -t "$ACR.azurecr.io/tokenscope:latest" .
-docker push "$ACR.azurecr.io/tokenscope:$TAG"
-docker push "$ACR.azurecr.io/tokenscope:latest"
-
-# Both: roll the app
 APP=$(az containerapp list -g "$RG" --query "[0].name" -o tsv)
 az containerapp update -g "$RG" -n "$APP" --image "$ACR.azurecr.io/tokenscope:$TAG"
+
+# Check https://<public-host>/api/v1/meta/build reports $TAG, then:
+az acr import --name "$ACR" --source "$ACR.azurecr.io/tokenscope:$TAG" \
+  --image tokenscope:latest --force
 ```
 
 On boot the container migrates the database and applies its idempotent seeds.
@@ -417,4 +496,9 @@ Re-run the apply command only when parameters or infrastructure change.
 | Sign-in error about the redirect URI | The URI in `entraIdRedirectUri` is not registered on the app registration, or the `/login` one is missing. |
 | People picker / manager lookups fail | `User.Read.All` (Application) is missing or not admin-consented. |
 | Dashboards stay at $0 while developers are enrolled | `workerBaseUrl` is empty, or points at a host the jobs cannot reach. |
-| VNet: the app FQDN does not resolve | The Container Apps environment zone (step 4) is missing or not linked to the querying network. |
+| VNet with your own WAF: the app FQDN does not resolve | The Container Apps environment's DNS zone is missing or not linked to the querying network. |
+| Front Door Premium apply sits on the origin for many minutes | Its Private Link request is waiting for approval; run the apply with the approval script (§2). |
+| Front Door endpoint answers its own `404` "Page not found" after a successful apply | Front Door is not routing to the Private Link origin yet. The approval script waits for it and re-approves the connection meanwhile; if it persists, run the script again. |
+| Apply fails with `ServerIsBusy` on a Postgres setting | Two writes reached the server at once. Current templates write them one at a time; apply again. |
+| A self-hosted build runner goes offline mid-build | It ran out of memory; the build needs at least 8 GB of RAM. |
+| Apply fails before creating anything: "Front Door Standard cannot reach a VNet" | Standard cannot reach an internal environment: set `frontDoorSku = 'Premium'`, or use your own WAF. |

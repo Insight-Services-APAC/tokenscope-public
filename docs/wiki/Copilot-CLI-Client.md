@@ -1,145 +1,93 @@
 # Copilot CLI Client
 
 Built spec for **TokenScope maintainers**: how the GitHub Copilot client is
-wired — the `copilot-plugin/` package, the usage extension (the live emitter, in
-Copilot CLI and the Copilot App), the legacy file-forwarder it replaces, and the
-provisioning flow that makes a developer's Copilot sessions emit attributable token
-spend to Azure Monitor. This is the as-built mechanism.
+wired — the `copilot-plugin/` package, the **usage extension** that emits token
+usage from Copilot CLI and the Copilot App, and the provisioning flow that makes
+a developer's Copilot sessions emit attributable token spend to Azure Monitor.
+This is the as-built mechanism.
 
 See also: [Architecture](Architecture.md) · [Claude Code Client](Claude-Code-Client.md) ·
-[API Reference](API-Reference.md).
-Source of truth for the Copilot telemetry shape:
-`docs/development/copilot-cli-telemetry-contract.md`.
+[API Reference](API-Reference.md) · [Data Flow](Data-Flow.md).
 
-> **Copilot v1 spend is indicative (tier-2/telemetry-only).** It is priced from
-> the emitted AI-credit value (1 credit = $0.01 USD, verified 2026-06-01). An
-> **off-PAT, App-mode _metrics_ reconciliation lane now exists** (`users-1-day`
-> `ai_credits_used` × $0.01, PR #112 — the preferred posture; see
-> `docs/design/github-pat-to-github-app-transition.md`), which cross-checks the
-> emitted consumption per (teammate, day). It is **metrics-grade**, not the
-> invoiced billing total: **billing-grade reconciliation** against GitHub's
-> `ai_credit/usage` figure (gross/discount/net + USD) is still a planned follow-up
-> and remains classic-PAT-only (the F2 worker, see `docs/build/copilot-followups.md`).
+> **Telemetry-priced Copilot spend is indicative (tier-2 / telemetry-only).** It
+> is priced from the emitted AI-credit value (1 credit = $0.01 USD). The
+> reconciled Copilot figures come from GitHub's own APIs on the provider lane
+> (`reconciliation-sync`, `copilot-pool-bill`); see [Data Flow](Data-Flow.md).
 
 ---
 
-## Why Copilot needs a different host
+## The usage extension (the live emitter)
 
-Claude Code can emit OTLP logs directly to Azure Monitor (the "native OTel"
-path). Copilot CLI **cannot**: as of v1, it only supports writing traces to a
-local file (`COPILOT_OTEL_FILE_EXPORTER_PATH`) and posting OTLP/HTTP **JSON**
-to an endpoint. Azure Monitor OTLP ingest is **protobuf-only** (415 on JSON),
-and Azure Monitor has **no traces table** — only logs. A transcode step is
-therefore required.
+`copilot-plugin/extensions/tokenscope-usage/extension.mjs` is loaded by the
+Copilot runtime: the **Copilot App** always, and the **terminal CLI** when
+Copilot's `EXTENSIONS` feature is on (setup turns it on). The extension file is
+wiring only; the logic is `scripts/copilot-usage.mjs`. It registers no hooks,
+tools or permission handlers, so the runtime never asks for an
+extension-permission grant.
 
-The **file-forwarder** (`copilot-plugin/scripts/copilot-forwarder.mjs`) was the
-v1 host; since 0.1.18 it only serves sessions started with the span env var (see
-"Which lane sends a session" below). It is **per project**, not per host: Copilot runs container-per-project, so
-each project root gets its own forwarder. All forwarder state — the span file, the
-persisted byte-offset, and the singleton PID/heartbeat lock — lives WITH the project
-in `<project-root>/.tokenscope.local/` (the daemon's launch cwd, passed by the hook
-as `COPILOT_PROJECT_DIR`). Only the device credential stays in HOME
-(`~/.tokenscope/config.copilot-cli.json`), shared by every project on the host.
-The Claude lane has its own `config.claude-code.json` beside it; neither lane
-reads or writes the other's. On start the
-forwarder self-heals the project's `.gitignore` so `.tokenscope.local/` is never
-committed. It:
+1. It joins the session and receives the runtime's typed events. Each
+   **`assistant.usage`** event becomes one `api_request` OTLP log record: a
+   hashed provider call id as `request_id`, `model`, Copilot's `session.id`, the
+   four token counts, `query_source`, and `github.copilot.nano_aiu` (Copilot's
+   own cost, used for pricing). Token counts and ids only, never content.
+2. `query_source` is `main` for conversation turns (the agent and its
+   subagents) and the interaction type otherwise (e.g. compaction), the same wire
+   attribute Claude emits, so the server-side overhead detector works for both.
+3. Behavioural signals (context saturation from `session.usage_info`, turn and
+   MCP-call counts at `session.idle`) ride a separate, non-billing
+   `usage_signal` record with no token attributes, so the billing reader never
+   sees them.
+4. Every record is **spooled (0600) under `~/.tokenscope/copilot-usage-spool/`
+   before any send**, so a crash or a failed POST loses nothing. Records are sent
+   on a debounce, on `session.idle` and on close. Spool files belong to a random
+   per-process writer id with a 30 s heartbeat (`~/.tokenscope` can be shared by
+   a host and its containers, whose pid namespaces differ); a writer silent past
+   the stale threshold is dead and its files are adopted. Spooled records older
+   than 7 days are dropped.
+5. Sending goes through `scripts/copilot-emit.mjs`: the per-tool credential
+   store, the bearer mint (`otel-headers-helper.sh`) and a guarded HTTPS POST of
+   OTLP-logs **protobuf** to the Azure Monitor DCE.
+6. A per-checkpoint comparison of Copilot's own cost total against the recorded
+   calls writes a **drift** verdict under `~/.tokenscope/copilot-usage-drift/`,
+   which the `status` skill reports.
 
-1. Tails the JSON-lines file by byte offset. It **never truncates or rotates** the
-   file (Copilot holds the handle open mid-session; truncating would corrupt
-   concurrent writes) — span-file growth is bounded by the container lifetime.
-2. Filters `chat` spans only — excludes `invoke_agent` which carries duplicate
-   totals (the double-count guard; see below).
-3. Calls `transcodeChatSpans()` (`otlp-logs.mjs`) to produce the standard
-   `api_request` OTLP-logs record shape (plus a separate non-billing `usage_signal`
-   lane, see below).
-4. Encodes to protobuf and forwards to Azure Monitor every ~60 seconds.
-5. Mints the bearer via `otel-headers-helper.sh` (refresh + 401 self-heal) using
-   credentials from `~/.tokenscope/config.copilot-cli.json` only (falling back to the
-   read-only pre-split `config.json` until a redeem writes the per-tool file, so an
-   un-migrated device keeps forwarding) — **no dependency on
-   `~/.claude`**.
+Each batch carries resource attributes `tokenscope.instance_id`,
+`tool=copilot-cli`, `copilot.surface` (`cli` or `app`),
+`tokenscope.emitter=extension`, and, when resolved, `project.code_hash` and
+`github.org`.
 
-Two guards sit on that loop, both because the span file lives **inside a
-repository** the forwarder does not control:
-
-- **Span-file provenance.** Before reading, the forwarder checks that the file's
-  owner uid matches its own process and that git does **not** track it
-  (`git ls-files --error-unmatch`). A file it does not own, or one that is
-  committed, is **refused outright** rather than partially trusted — on a fresh
-  clone the byte offset starts at 0, so a span file planted by a hostile
-  contributor (or surviving a stale `.gitignore`) would otherwise be transcoded
-  and forwarded as this device's usage. The forwarder still self-heals the
-  project's `.gitignore` on start; the provenance check is what makes that
-  self-heal non-load-bearing.
-- **Https-only egress.** Every credential-bearing call routes through the same
-  `assertSafeEndpoint()` validator the Claude lane uses — the file is vendored
-  verbatim into `copilot-plugin/scripts/endpoint-guard.mjs` by the sync script
-  rather than reimplemented, so the two lanes cannot drift. Off-box plaintext is
-  refused; loopback is exempt only where a caller explicitly opts in.
-
-**The live emitter: the usage extension** (`copilot-plugin/extensions/tokenscope-usage/`,
-Copilot plugin 0.1.18). It reads the runtime's `assistant.usage` events instead of a
-span file, so it also covers the **Copilot App**, needs no env var, writes nothing into
-the repository, and runs no daemon. Records (token counts and ids, never content) are spooled (0600) under
-`~/.tokenscope/copilot-usage-spool/` before any send; spool files are owned by a random
-per-process writer id with a 30 s heartbeat, since `~/.tokenscope` is shared across pid
-namespaces. The terminal CLI loads it only with the `EXTENSIONS` feature, which setup
-enables; the Copilot status reports `usage_capture.enabled: false` when it would not load.
-A per-checkpoint comparison of Copilot's own cost total against the recorded calls writes
-a drift sentinel the status reports. Design, parity evidence, risk and cutover:
-`docs/design/copilot-usage-extension.md`.
-
-**Which lane sends a session:** whether setup has turned on Copilot's `EXTENSIONS`
-feature (`extensionsEnabled`, from Copilot's `settings.json`, which every process can
-read; Copilot hides the old span variable from hooks and tools). On: the extension sends
-every session, old terminals included, and the forwarder hook idles; setup removed the
-legacy forwarder's files once, at migration. Off: no extension loads in the CLI and the
-forwarder below runs as before. So a call is never sent by both lanes. The forwarder
-stays in the plugin for one release, for devices not yet migrated.
-
-A **Stop hook** triggers a final flush of the spans already in the file (a call whose
-span Copilot had not yet written when it exited is not there to forward; the
-daemon lives on — it is a container-lifetime singleton shared by every session in the
-project). A **SessionStart hook** starts the forwarder as a **heartbeat-guarded
-singleton** (per project root — it does not double-spawn) and catch-up-forwards any
-spans left behind by a hard-killed prior forwarder in that project.
-
----
-
-## Double-count guard
-
-Both `chat` and `invoke_agent` spans carry **identical** `gen_ai.usage.*` totals.
-Summing both would double the token count. The transcoder filters on
-`gen_ai.operation.name === 'chat'` exclusively. This is a **merge-blocker test**
-(Slice 2, `tests/unit/plugin/copilot-transcoder.test.ts`).
+**Https-only egress.** Every credential-bearing call routes through the same
+`assertSafeEndpoint()` validator the Claude lane uses: the file is vendored
+verbatim into `copilot-plugin/scripts/endpoint-guard.mjs` by the sync script
+rather than reimplemented, so the two lanes cannot drift. Off-box plaintext is
+refused; loopback is exempt only where a caller explicitly opts in.
 
 ---
 
 ## Attribution identity
 
-| What                                          | Where it comes from                                                                                                             | Why                                                                                                                                                                                                                                                                                                                          |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `instance_id` (teammate binding)              | `~/.tokenscope/config.copilot-cli.json` (minted by `provision_emit`)                                                                        | Unspoofable — written by the local redeem helper, never by the Copilot client itself                                                                                                                                                                                                                                         |
-| `claude_session_id` (session grouping)        | `gen_ai.conversation.id` span attr                                                                                              | Copilot's own session id; subagents share the parent's id                                                                                                                                                                                                                                                                    |
-| `project.code_hash` (project claim, B′)       | Extension: per session, from the `.tokenscope` of the session's working directory. Forwarder: per batch, from the daemon's cwd. Both via `resolveRepoProjectCode` + `computeCodeHash` | The forwarder hashes the committed `.tokenscope` in the project root — the SAME shared resolver Claude Code uses, so both hash an identical repo to the same value. The config stamp is **explicitly not read** (a host-wide config hash is the per-HOME footgun the per-project model removes); no `.tokenscope` → untagged |
-| `github.org` (+ mirrored `github.repository`) | The project's **git remote** (`remote.origin.url`), with an `invoke_agent` span-attr (`github.copilot.git.repository`) fallback | Stamped for org→enterprise keying (F2). Lowercased org; omitted when neither source yields one (untagged-enterprise is acceptable). Not an identity factor                                                                                                                                                                   |
-| `tool`                                        | always `copilot-cli` (hardcoded by both lanes)                                                                               | Fixed — not controllable by the Copilot client                                                                                                                                                                                                                                                                               |
+| What | Where it comes from | Why |
+|---|---|---|
+| `instance_id` (teammate binding) | `~/.tokenscope/config.copilot-cli.json` (minted by `provision_emit`), read at send time | Unspoofable — written by the local redeem helper, never taken from an event or the spool |
+| session (grouping) | Copilot's `session.id` | Copilot's own session id |
+| `project.code_hash` (project claim) | Per session, from the `.tokenscope` of the session's working directory, via the shared `resolveRepoProjectCode` + `computeCodeHash` | The SAME resolver Claude Code uses, so both hash an identical repo to the same value. No `.tokenscope` → untagged |
+| `github.org` (+ mirrored `github.repository`) | The project's git remote (`remote.origin.url`) | For org→enterprise keying. Lowercased org; omitted when unknown. Not an identity factor |
+| `tool` | always `copilot-cli` | Fixed — not controllable by the Copilot client |
 
-> **Attribution is split by concern.** `instance_id` (the security invariant) and the
-> emit endpoints come from `~/.tokenscope/config.copilot-cli.json`, never from process env — that
-> config is authoritative for those. The `project.code_hash` is a **different axis**:
-> it is derived from the `.tokenscope` of the project being worked in, NOT from config.
-> Nothing is exported into the shell: setup removes the legacy
-> `COPILOT_OTEL_FILE_EXPORTER_PATH` block earlier versions wrote, so a plain `copilot`
-> works alongside Claude Code with no per-tool OTel env.
+> **Attribution is split by concern.** `instance_id` and the emit endpoints come
+> from `~/.tokenscope/config.copilot-cli.json`, never from process env. The
+> `project.code_hash` is a **different axis**: it comes from the project being
+> worked in, not from config. Nothing is exported into the shell, so a plain
+> `copilot` works alongside Claude Code with no per-tool OTel env. The Claude
+> lane keeps its own `config.claude-code.json`; neither lane reads or writes the
+> other's.
 
 ---
 
 ## Provisioning flow
 
 ```
-Developer runs tokenscope-setup skill
+Developer runs the tokenscope-setup skill
          │
          ▼
 provision_emit { tool: 'copilot-cli' }   (MCP tool, OAuth-scoped)
@@ -154,122 +102,67 @@ provision_emit { tool: 'copilot-cli' }   (MCP tool, OAuth-scoped)
          │  ← response: instance_id, bearer_endpoint, oauth_token_endpoint,
          │              logs_endpoint, OAuth emit credential
          │
-         ├─ write ~/.tokenscope/config.copilot-cli.json  (durable emit credential + endpoints;
-         │                                      instance_id/endpoints authoritative — NO project hash)
-         ├─ enable enabledFeatureFlags.EXTENSIONS + extensions.mode load_only in Copilot's settings.json
-         │                                     (merged into plain JSON; symlink/JSONC read, never rewritten; else the user is told)
-         └─ remove the legacy shell-rc block   (# >>> TokenScope >>> … written before 0.1.18)
+         ├─ write ~/.tokenscope/config.copilot-cli.json  (durable emit credential + endpoints)
+         ├─ enable enabledFeatureFlags.EXTENSIONS + extensions.mode load_only in Copilot's
+         │  settings.json (merged into plain JSON; otherwise the user is told what to change)
+         └─ remove the legacy shell-rc block written by older versions
 ```
 
-Provisioning does **not** write `~/.copilot/config.json` — the SessionStart + Stop
-lifecycle hooks ship in the plugin's `copilot-plugin/hooks/hooks.json` (the "B3 fix":
-`copilot-redeem.mjs` no longer writes a competing hook config with inconsistent
-casing/args).
+After setup, **start a new `copilot` session** so the extension loads, then run
+the `status` skill.
 
-**Emit-on-install** (`copilot-plugin/scripts/enroll.mjs`, run by the SessionStart
-hook) is the no-human alternative to the flow above: with a bundled enrolment
-secret it POSTs `/api/v1/setup/enroll` and creates `config.copilot-cli.json`
+**Emit-on-install** (`copilot-plugin/scripts/enroll.mjs`, run by the
+SessionStart hook) is the no-human alternative: with a bundled enrolment secret
+it POSTs `/api/v1/setup/enroll` and creates `config.copilot-cli.json`
 **exclusively**. It is a no-op whenever that file already exists, in any shape —
 a complete one is `already-enrolled`, an incomplete or corrupt one is
 `own-store-incomplete` and is repaired only by the manual redeem, never by
-re-enrolling. With no own file, a complete legacy `config.json` also counts as
-enrolled; an incomplete or corrupt legacy file does not block enrolment.
-
-The `CopilotBundle` returned by `redeem` (see `server/api/v1/setup/redeem.post.ts`)
-is the Copilot-specific variant of the `telemetry.*` envelope — the endpoints and
-resource attributes the store records (its advisory file-exporter path is no longer
-used).
+re-enrolling.
 
 ### What the setup skill may hand the redeem helper
 
 Copilot CLI has no `allowed-tools` mechanism, so the argv of
-`copilot-redeem.mjs` is simply whatever the model wrote, and the process it
-starts spends a live single-use handoff code and appends an export block to a
-shell init file. The validation therefore sits in the helper, in the shared
-`argv-guard.mjs` vendored from `plugin/scripts/` alongside `endpoint-guard.mjs`:
+`copilot-redeem.mjs` is whatever the model wrote, and the process it starts
+spends a live single-use handoff code. The validation therefore sits in the
+helper, in the shared `argv-guard.mjs` vendored from `plugin/scripts/`:
 
 - An **unknown `--flag` refuses the whole argv**, and a flag missing its value is
   refused rather than reinterpreted as the next token. A second bare positional
-  is refused too — the documented form passes the handoff code once.
+  is refused too.
 - **`--api-base` may only select an origin this device already knows**: loopback,
   or whatever discovery returns — the user-scope MCP registration
   (`~/.copilot/mcp-config.json` first, then the Claude CLI's own user config),
   falling back to the plugin's bundled `.mcp.json`. A **repo-local** `.mcp.json`
   is deliberately not a candidate, for the same reason `TOKENSCOPE_API_BASE` is
-  not. Anything else is warned about on stderr and dropped, and
-  resolution continues from local configuration — refusing outright would hand a
-  prompt injection a denial of setup for free. No flag names the POST target at
-  all — the path is fixed at `/api/v1/setup/redeem` on the resolved base — and
-  `TOKENSCOPE_API_BASE` is not in this chain either. When nothing resolves, the
-  remedy is to register the server in `~/.copilot/mcp-config.json`, not to pass a
-  flag.
+  not. Anything else is warned about and dropped. No flag names the POST target:
+  the path is fixed at `/api/v1/setup/redeem` on the resolved base.
 - **`--shell-rc` is confined** to the user's own home — compared on real,
-  symlink-resolved paths — and to one of the shell init filenames the no-flag
-  default already considers (`.bashrc`, `.profile`, `.bash_profile`, `.bash_login`,
-  `.zshrc`, `.zprofile`, `.zshenv`). Setup now only removes its legacy block from
-  that file, but it still rewrites a file every future shell executes, so an
-  arbitrary path would be a model-chosen write target.
+  symlink-resolved paths — and to the shell init filenames the no-flag default
+  already considers. Setup only removes its legacy block from that file, but it
+  still rewrites a file every future shell executes.
 
-The same skill needs this host's existing `instance_id` so a re-run rotates the
-device instead of minting a duplicate — and that id sits in
-`~/.tokenscope/config.copilot-cli.json` next to `oauth_refresh_token`. It
-therefore asks
-`scripts/device-id.mjs --tool copilot-cli` (vendored verbatim from the Claude
-plugin), which reads the store out of process and prints only
+The skill needs this host's existing `instance_id` so a re-run rotates the
+device instead of minting a duplicate, and that id sits next to the durable
+refresh token. It therefore asks `scripts/device-id.mjs --tool copilot-cli`,
+which reads the store out of process and prints only
 `{enrolled, tool, instance_id, bearer_host, reason}`. `--tool` is load-bearing:
-the helper reads only that tool's store, so it can never hand back the Claude
-Code id on a host running both — a cross-tool re-provision would revoke the other
-CLI's credential and silently stop its emitting. A host with no Copilot enrolment
-reports `enrolled: false` (`reason: "no-enrolment"`), which means *mint a fresh
-one*. `bearer_host` is how the skill tells which deployment the device currently
-points at, so a Sandbox→Dev move omits the old id.
-
----
-
-## Transcoder contract
-
-`transcodeChatSpans(spans, opts)` — with `opts = { instanceId, projectCodeHash }` —
-in `otlp-logs.mjs`:
-
-- Accepts both **file-exporter shape** (flat `{key: value}` attributes object) and
-  **OTLP wire shape** (`[{key, value: {stringValue|intValue|doubleValue}}]` list).
-- Token keys supported: `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`,
-  `gen_ai.usage.cache_creation_input_tokens`, `gen_ai.usage.cache_read_input_tokens`
-  (also the nested `gen_ai.usage.cache_creation.input_tokens` variant — VS Code).
-- `request_id` = span id (stable re-forward dedup key).
-- `ts_event` = span `endTime` (not startTime — LLM call ends when the response is
-  complete; matches what a direct emitter would emit).
-- `github.copilot.nano_aiu` carried as a record attribute for server-side pricing.
-- `query_source` stamped on every token record (`main` for an interactive turn —
-  `github.copilot.initiator == 'user'` or absent — else `auto`), the SAME wire attr
-  Claude emits so the server-side aux-overhead detector fires for Copilot too.
-
-### Behavioural signal lane (`usage_signal`) — NON-billing
-
-`transcodeSignalSpans(spans, { instanceId })` runs alongside the token path and emits
-a **separate** record shape with `event.name = 'usage_signal'` and **no token
-attributes** — so the billing reader (`api_request` + tokens>0) never sees it and
-this lane carries zero billing risk. Signal → source span is 1:1 (no double-count):
-`sig.tool_count` + `sig.ctx_pct` come from the `chat` span; `sig.mcp_count` +
-`sig.turn_count` from the `invoke_agent` span (dropped by the token path's
-double-count guard, but the turn-level source of truth for these). `sig.ctx_pct` is a
-per-record context-window saturation ratio (a ratio, not USD — client-side derivation
-is fine). A span with no signals emits no record.
+it can never hand back the Claude Code id on a host running both, and
+provisioning the other tool's id would revoke that tool's credential.
 
 ---
 
 ## Server-side pricing (Copilot-only)
 
-The read joiner (`server/workers/azure-monitor-reader.ts`) detects `tool='copilot-cli'`
-and bypasses the token rate-card path entirely:
+The read joiner (`server/workers/azure-monitor-reader.ts`) detects
+`tool='copilot-cli'` and bypasses the token rate-card path:
 
 ```
 cost_usd = (nano_aiu / 1e9) × COPILOT_AI_CREDIT_USD   // COPILOT_AI_CREDIT_USD = 0.01
 ```
 
 - Priced once on the `input` token-type record; output/cache records get `cost_usd = 0`.
-- `rateCardId` / `rateCardVersion` are `NULL` for Copilot rows (migration 0036).
-- `fidelityTier = 'tier-2'`, `costBasis = 'telemetry-only'` (indicative until F2).
+- `rateCardId` / `rateCardVersion` are `NULL` for Copilot rows.
+- `fidelityTier = 'tier-2'`, `costBasis = 'telemetry-only'` (indicative).
 
 ---
 
@@ -277,99 +170,154 @@ cost_usd = (nano_aiu / 1e9) × COPILOT_AI_CREDIT_USD   // COPILOT_AI_CREDIT_USD 
 
 ```
 copilot-plugin/
-  plugin.json           manifest
-  .mcp.json             MCP server → /api/v1/mcp (same as Claude)
-  hooks/hooks.json      SessionStart (start forwarder) + Stop (final flush)
-  hooks/forwarder-lifecycle.mjs   hook driver → ../scripts/copilot-forwarder.mjs (co-located)
-  scripts/copilot-forwarder.mjs   legacy forwarder, idle unless the span env var is set (+ otlp-logs.mjs, copilot-redeem.mjs)
-  scripts/copilot-emit.mjs        store, bearer mint, guarded POST — shared by forwarder + extension
-  scripts/copilot-usage.mjs       usage-extension core (event → api_request, spool, heartbeat, drift, shadow)
-  extensions/tokenscope-usage/extension.mjs   the usage extension, the live emitter (wiring only)
-  scripts/managed-telemetry.mjs   enterprise-managed `telemetry`-setting detector (hostile/benign/none/unknown)
-  scripts/argv-guard.mjs          redeem-argv validator (vendored from plugin/scripts/)
-  scripts/device-id.mjs           credential-free device identity (vendored from plugin/scripts/)
-  skills/tokenscope-setup/SKILL.md
-  skills/project/SKILL.md
-  skills/usage/SKILL.md
+  plugin.json                     manifest (version)
+  .mcp.json                       MCP server → <host>/api/v1/mcp (a literal URL)
+  extensions/tokenscope-usage/extension.mjs   the usage extension (wiring only)
+  hooks/hooks.json                SessionStart (enrol + legacy forwarder) + Stop (legacy flush)
+  hooks/forwarder-lifecycle.mjs   hook driver
+  scripts/copilot-usage.mjs       usage-extension core (event → record, spool, heartbeat, drift)
+  scripts/copilot-emit.mjs        credential store, bearer mint, guarded POST
+  scripts/otlp-logs.mjs           OTLP-logs record + protobuf encoding
+  scripts/copilot-redeem.mjs      local redeem helper (setup)
+  scripts/enroll.mjs              emit-on-install enrolment
+  scripts/device-store.mjs        per-tool credential store
+  scripts/device-id.mjs           credential-free device identity
+  scripts/status.mjs              emission / landed / managed-telemetry probe (status skill)
+  scripts/landed-check.mjs        did a record land? (/instances/{id}/health)
+  scripts/managed-telemetry.mjs   enterprise-managed telemetry-setting detector
+  scripts/argv-guard.mjs          redeem-argv validator
+  scripts/endpoint-guard.mjs      https-only endpoint validator
+  scripts/copilot-forwarder.mjs   legacy file forwarder (see below)
+  scripts/...                     shared helpers (mcp-origin, real-home, trusted-git, …)
+  skills/tokenscope-setup/SKILL.md   connect + provision
+  skills/project/SKILL.md            bind this repo to a project (.tokenscope)
+  skills/usage/SKILL.md              month-to-date usage
+  skills/status/SKILL.md             is this device emitting, landing and attributing?
 ```
 
-The skills reuse the same MCP tools (`provision_emit`, `my_usage`,
-`list_my_projects`, `resolve_repo_project`, `tag_session`) as the Claude Code
-prompts. The `tokenscope-setup` skill passes `tool: 'copilot-cli'` to
-`provision_emit` and describes the Copilot-specific redeem flow.
+Most of `scripts/` is vendored verbatim from `plugin/scripts/` by
+`npm run sync:copilot-plugin`; `npm run check:copilot-plugin-sync` fails when a
+copy is stale. The skills reuse the same MCP tools (`provision_emit`,
+`my_usage`, `list_my_projects`, `resolve_repo_project`, `tag_session`) as the
+Claude Code prompts; `tokenscope-setup` passes `tool: 'copilot-cli'` to
+`provision_emit`.
 
-### Enterprise-managed `telemetry` detection (not to be confused with Distribution below)
+### Enterprise-managed `telemetry` detection
 
-A DIFFERENT "managed settings" concern from the plugin-distribution one below:
-GitHub Copilot CLI itself honours an enterprise-managed `telemetry` key
+GitHub Copilot CLI honours an enterprise-managed `telemetry` setting
 (`managed-settings.json` — file-based / native-MDM / server-managed) that can
-silently disable telemetry or reroute it away from the file exporter this
-whole client depends on, **while a valid TokenScope credential still mints a
-healthy bearer** — the same false-healthy shape as a valid-but-undelivered
-credential. `scripts/managed-telemetry.mjs` (canonical source
-`plugin/scripts/managed-telemetry.mjs`, vendored verbatim per the sync
-mechanism above) checks every LOCALLY-readable channel (the well-known per-OS
-file-based path; best-effort Windows registry / macOS managed preferences;
-Linux has no native-MDM channel at all) and classifies `hostile` /
-`benign` / `none` / `unknown` — never printing header/endpoint values, and
-never guessing at server-managed settings (not locally readable at all; every
-result says so explicitly). Wired into `scripts/status.mjs` (a new
-`emission_healthy` field, distinct from `emitting`: `true` only when the
-credential is valid AND no hostile setting was found) and `scripts/enroll.mjs`
-(a best-effort post-enrol check, logged loudly, never blocking). See
-`docs/design/usage-completeness-and-provider-governance.md` §10.1 for the full
-design rationale and the exact hostile/benign key list.
+disable or reroute telemetry **while a valid TokenScope credential still mints a
+healthy bearer**. `scripts/managed-telemetry.mjs` checks every locally-readable
+channel (the per-OS file path; best-effort Windows registry / macOS managed
+preferences) and classifies `hostile` / `benign` / `none` / `unknown`, never
+printing header/endpoint values and never guessing at server-managed settings
+(not locally readable). `scripts/status.mjs` reports it as `emission_healthy`
+(distinct from `emitting`: `true` only when the credential is valid AND no
+hostile setting was found), and `scripts/enroll.mjs` runs it as a best-effort
+post-enrol check.
 
 ---
 
 ## Distribution
 
-**Enterprise-managed (Business/Enterprise):** add `.github-private/.github/copilot/settings.json`
-(see `.github-private/.github/copilot/settings.json` in this repo for the example)
-with `extraKnownMarketplaces` pointing at this repo and `enabledPlugins` referencing
-`copilot-plugin/` as the path. The plugin installs automatically on auth.
+The plugin ships from the repository's `.claude-plugin/marketplace.json`
+(entry `tokenscope-copilot`, source `./copilot-plugin`). Its API host is baked
+into `copilot-plugin/.mcp.json` and `copilot-plugin/scripts/enroll.mjs`, so a
+self-hosted deployment needs its own copy — see "Installing for your own
+deployment" below.
 
-**Individual/Pro (manual):** run, in a terminal (one at a time):
+**Individual/Pro (manual):** in a terminal:
 
 ```bash
-copilot plugin marketplace add Insight-Services-APAC/tokenscope-public
+copilot plugin marketplace add <owner>/<repo>
 copilot plugin install tokenscope-copilot@tokenscope
 ```
 
-Then run the `tokenscope-setup` skill inside a `copilot` session (type `/` to list
-TokenScope's skills). Open a **new** terminal (the emit config is read at launch), then
-**verify** by running the `tokenscope-status` skill — the Copilot analogue of Claude's
-`/tokenscope:status` (Copilot CLI has no always-on status line): it confirms emitting,
-landing, and attribution. Ingestion takes ~4–5 min.
+Then run the `tokenscope-setup` skill inside a `copilot` session (type `/` to
+list TokenScope's skills). **Start a new `copilot` session** so the usage
+extension loads, then **verify** with the `status` skill (Copilot CLI has no
+always-on status line): it confirms emitting, landing and attribution, and
+reports `usage_capture.enabled: false` when the extension would not load.
+Ingestion takes ~4–5 min.
 
-> There is no `--path` flag. Install a subdirectory plugin either via the
-> marketplace form above (preferred) or directly with the `owner/repo:path` form:
-> `copilot plugin install Insight-Services-APAC/tokenscope-public:copilot-plugin`
-> (direct installs are flagged deprecated in a future Copilot CLI release).
+**Enterprise-managed (Business/Enterprise):** in your organisation's
+`.github-private` repository, add `.github/copilot/settings.json` naming your
+repository as a known marketplace and enabling the plugin, for example:
+
+```json
+{
+  "copilot": {
+    "chat": {
+      "plugins": {
+        "extraKnownMarketplaces": [
+          {
+            "name": "TokenScope",
+            "url": "https://github.com/<owner>/<repo>",
+            "description": "TokenScope — attribute Copilot token spend to projects."
+          }
+        ],
+        "enabledPlugins": [
+          { "source": "<owner>/<repo>", "path": "copilot-plugin" }
+        ]
+      }
+    }
+  }
+}
+```
 
 The published version is declared in both `copilot-plugin/plugin.json` and the
-repo-root `.claude-plugin/marketplace.json`. Read it from there rather than from
-this page: a version restated in prose drifts on the next bump, and this
-paragraph did drift (it named 0.1.7 after the manifests had moved on).
-Like the Claude plugin, an installed copy is cached by version and replaced only
-when the number **increases** — a fix that ships without a bump reaches no
-enrolled device. CI fails a plugin-code change with no version bump, and a
-separate guard asserts the vendored `copilot-plugin/scripts/*` copies still match
-the sources they are synced from.
+repo-root `.claude-plugin/marketplace.json`; read it from there. An installed
+copy is cached by version and replaced only when the number **increases** — a
+fix that ships without a bump reaches no enrolled device. CI fails a
+plugin-code change with no version bump.
+
+### Installing for your own deployment
+
+The API base is baked per deployment, by design: an off-box
+`TOKENSCOPE_API_BASE` is ignored (only loopback is honoured, for local dev),
+because a cloned repository can set it. Either:
+
+1. **Fork and set your host (recommended).** Set `https://<your-host>` in
+   `copilot-plugin/.mcp.json` (a literal URL: Copilot does not expand `${VAR}`),
+   `copilot-plugin/scripts/enroll.mjs` (`DEFAULT_API_BASE`),
+   `plugin/scripts/api-base.mjs` (`DEFAULT_API_BASE`) and `plugin/.mcp.json`.
+   Run `npm run sync:copilot-plugin` and `npm run check:copilot-plugin-sync`
+   (it fails if the hosts disagree), bump the plugin versions
+   (`copilot-plugin/plugin.json`, `plugin/.claude-plugin/plugin.json` and both
+   entries in `.claude-plugin/marketplace.json`), and have developers add your
+   fork as the marketplace.
+2. **Register the MCP server yourself** in `~/.copilot/mcp-config.json`
+   (`copilot-plugin/.mcp.json` notes the form
+   `copilot mcp add --transport http tokenscope https://<your-host>/api/v1/mcp`).
+   The redeem helper discovers that registration ahead of the bundled one.
+   Emit-on-install still targets the baked host, so a fork is the complete
+   option.
 
 ---
 
-## Deferred items (not built in v1)
+## Legacy lane (removed next release)
 
-- **GitHub-billing-API reconciliation** — lifts Copilot spend to tier-1.
-- **VS Code Copilot Chat** — same file-forwarder approach, pending client-level
-  `COPILOT_OTEL_FILE_EXPORTER_PATH` availability in the VS Code extension.
-- **§4a mode-2 per-span project resolution** — multi-repo sessions; v1 ships
-  single-repo `.tokenscope` tag only.
+Before the usage extension, the plugin shipped a per-project **file forwarder**
+(`scripts/copilot-forwarder.mjs`, started by the SessionStart hook): Copilot CLI
+wrote spans to a file named by `COPILOT_OTEL_FILE_EXPORTER_PATH`, and the
+forwarder transcoded `chat` spans into the same `api_request` records and sent
+them. It remains in the plugin for one release, for devices not yet migrated.
 
-> **Not on the roadmap:** a **server-side OTLP-receive route** was once floated as a
-> deferred fallback; it is **REJECTED** (2026-06-22). Copilot stays a local-only client
-> file-forwarder shim until GitHub ships a native attribution feature — no server-side
-> OTLP receiver will be built. See `docs/build/copilot-followups.md` §F1 and ADR-0009.
+**Which lane sends a session** is decided by whether Copilot's `EXTENSIONS`
+feature is on (read from Copilot's `settings.json`). On: the extension sends
+every session and the forwarder idles; setup removed the forwarder's files once,
+at migration. Off: no extension loads in the CLI and the forwarder runs for
+sessions from a terminal that still exports the span variable. If a session
+still has that variable while extensions are off, the extension records only
+what it *would* send (shadow mode). A call is never sent by both lanes.
 
-See `docs/build/copilot-followups.md` for the full list.
+---
+
+## Not covered
+
+- **VS Code Copilot Chat** — the usage extension runs in Copilot CLI and the
+  Copilot App; the plugin does not capture VS Code.
+- **Per-span project resolution for multi-repo sessions** — a session is tagged
+  from the `.tokenscope` of its working directory only.
+- **A server-side OTLP-receive route** is not planned: clients send straight to
+  Azure Monitor.

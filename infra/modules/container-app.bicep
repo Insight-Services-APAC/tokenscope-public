@@ -1,7 +1,7 @@
 // ── Container App — TokenScope Nuxt application ───────────────────────
 //
 // Includes the Container Apps managed environment as well as the app
-// itself — PSR pattern. The user-assigned MI (created at root scope in
+// itself. The user-assigned MI (created at root scope in
 // main.bicep) is passed in via identityId + identityClientId and is the
 // identity used for BOTH ACR pull AND KV-reference resolution.
 
@@ -42,7 +42,7 @@ param entraClientId string = ''
 @description('Entra ID redirect URI for nuxt-oidc-auth (public callback URL).')
 param entraRedirectUri string = ''
 
-@description('Optional pinned PUBLIC origin (scheme://host) when an upstream WAF/proxy fronts the app under a fixed hostname (e.g. the IT dev zone https://tokenscope.example.com). Empty = derive the public origin from Front Door / the request Host. See server/utils/public-url.ts.')
+@description('Optional pinned PUBLIC origin (scheme://host) when an upstream WAF/proxy fronts the app under a fixed hostname (e.g. https://tokenscope.your-company.example behind your own WAF). Empty = derive the public origin from Front Door / the request Host. See server/utils/public-url.ts.')
 param appPublicOrigin string = ''
 
 @description('Break-glass EXTRA hostnames the MCP transport answers to, comma-separated. The app already derives its public origin and its Container Apps app/revision FQDNs; this covers a topology that derivation does not model (custom backend domain, private DNS alias, traffic-label FQDN) WITHOUT a code change and release. Empty is the normal state. See server/utils/public-url.ts platformSelfHosts().')
@@ -59,7 +59,7 @@ param bootstrapAdminEmail string = ''
 @description('Subnet ID for Container App Environment VNet integration. Empty = no VNet.')
 param containerAppsSubnetId string = ''
 
-@description('Make the Container Apps environment INTERNAL — a private VIP on the VNet, no public endpoint. The deployment zone (IT central WAF/firewall) is then the only public entrypoint, routing inbound to the internal VIP over the VNet/hub. Wired from main.bicep `enablePrivateNetworking`. Requires containerAppsSubnetId.')
+@description('Make the Container Apps environment INTERNAL — a private VIP on the VNet, no public endpoint. Whatever fronts it (Front Door Premium over Private Link, or your own WAF / application gateway) is then the only public entrypoint, reaching the internal VIP over the VNet. Wired from main.bicep `enablePrivateNetworking`. Requires containerAppsSubnetId.')
 param internalIngress bool = false
 
 // ── Log Analytics (for Container App Environment app-logs) ──────────
@@ -81,7 +81,7 @@ param dcrResourceId string = ''
 // container app must NOT reference a KV secret that doesn't exist —
 // ACA rejects KV refs to missing secrets and the deploy fails.
 
-@description('Whether the anthropic-admin-api-key KV secret exists (the Anthropic admin key for the analytics poller, read as NUXT_ANTHROPIC_KEY_MAIN). Set true once IT has placed it in Key Vault.')
+@description('Whether the anthropic-admin-api-key KV secret exists (the Anthropic admin key for the analytics poller, read as NUXT_ANTHROPIC_KEY_MAIN). Set true once the secret is in Key Vault.')
 param hasAnthropicKey bool = false
 
 // ── GitHub Copilot reconciliation PAT presence flags (F2 — GATED OFF) ──
@@ -103,7 +103,7 @@ param hasGithubPatApacNfr bool = false
 @description('Whether the github-app-key-partner-demo KV secret was created (the GitHub App PRIVATE KEY, base64 PEM, for the partner-demo enterprise App-credential path; read as NUXT_GITHUB_APP_KEY_PARTNER_DEMO; credential_secret_name "partner-demo"). Default false = no KV ref emitted; flip true ONLY after the key is in Key Vault (ACA rejects a ref to a missing secret).')
 param hasGithubAppKeyPartnerDemo bool = false
 
-// Ops alerting channel (docs/design/ops-alerting.md §A1). The ntfy topic URL
+// Ops alerting channel. The ntfy topic URL
 // IS the credential, so it reaches the container ONLY as a secretRef — never a
 // plain env value (ar-M20). False = no KV ref, no env var: the ops-alert
 // worker sees an empty NUXT_OPS_ALERT_NTFY_URL and alerting is disabled (the
@@ -111,7 +111,7 @@ param hasGithubAppKeyPartnerDemo bool = false
 @description('Whether the ops-alert-ntfy-url KV secret exists (the operator push channel, read as NUXT_OPS_ALERT_NTFY_URL). Default false = no KV ref emitted (ACA rejects a ref to a missing secret); alerting disabled.')
 param hasOpsAlertNtfyUrl bool = false
 
-// ── RLS enforcement: the non-owner app role (docs/design/rls-enforcement.md §9) ──
+// ── RLS enforcement: the non-owner app role ──
 // FOUR FLAGS, FOUR SEPARATE DECISIONS, ALL DEFAULT FALSE (a fifth,
 // rotateAppDbPassword, is a rare deliberate act — see below). They are not one
 // switch because they fail in different ways, and the order between them is the
@@ -183,7 +183,7 @@ param hasOidcModuleSecrets bool = false
 @description('Azure AI Foundry endpoint URL (empty = not used; Anthropic direct).')
 param aiFoundryEndpoint string = ''
 
-@description('Azure Front Door instance ID (Wave-II). Default empty — Wave-I deploys do not gate on FD presence.')
+@description('Azure Front Door instance ID. Default empty = the app does not require requests to come through Front Door.')
 param azureFrontDoorId string = ''
 
 @description('Git commit SHA at deploy time. Empty = use the build-time baked value (Dockerfile ARG GIT_COMMIT_SHA). The /admin/settings → build.commitSha read reflects whichever wins.')
@@ -196,7 +196,7 @@ param anthropicApiEndpoint string = ''
 param tags object = {}
 
 // ── Container App Environment ──────────────────────────────────────
-// PSR's pattern — the managed env lives inside this module so it's
+// The managed env lives inside this module so it's
 // always co-versioned with the app revision.
 
 // Reference the LAW as `existing` so the shared key resolves inline
@@ -205,7 +205,7 @@ param tags object = {}
 // -time reference; ARM only resolves it when listKeys() is invoked,
 // which the appLogsConfiguration ternary below guards on the same
 // `!empty(logAnalyticsName)` predicate). When logAnalyticsName is
-// empty, the deploy is a Wave-I config-only test and the LAW isn't
+// empty, the deploy is a config-only test and the LAW isn't
 // expected to exist — listKeys() is never called.
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
   name: empty(logAnalyticsName) ? 'placeholder-never-used' : logAnalyticsName
@@ -219,8 +219,8 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
     zoneRedundant: false
     vnetConfiguration: !empty(containerAppsSubnetId) ? {
       infrastructureSubnetId: containerAppsSubnetId
-      // Internal = private VIP only (no public endpoint); the IT zone WAF
-      // fronts it. External otherwise (standalone public ingress).
+      // Internal = private VIP only (no public endpoint); Front Door Premium
+      // (Private Link) or your own WAF fronts it. External otherwise (standalone public ingress).
       internal: internalIngress
     } : null
     appLogsConfiguration: !empty(logAnalyticsCustomerId) && !empty(logAnalyticsName) ? {
@@ -456,12 +456,11 @@ var baseEnvVars = [
   { name: 'NITRO_PORT', value: '3000' }
   { name: 'AZURE_CLIENT_ID', value: identityClientId }
   { name: 'AZURE_KEYVAULT_URL', value: keyVaultUri }
-  // ── Wave-II Front Door hook ──
-  // The require-front-door middleware is a Wave-II deliverable. For
-  // Wave-I, the variable is plumbed but defaults to empty string,
-  // making the middleware a no-op until Wave-II flips it on.
+  // ── Front Door enforcement hook ──
+  // Empty = the require-front-door middleware is a no-op. Set to the Front
+  // Door instance id, it rejects requests without a matching X-Azure-FDID.
   { name: 'AZURE_FRONT_DOOR_ID', value: azureFrontDoorId }
-  // Pinned public origin for a proxy-fronted custom hostname (IT dev zone).
+  // Pinned public origin for a proxy-fronted custom hostname.
   // Empty everywhere else → public origin derives from AFD / the request Host.
   { name: 'APP_PUBLIC_ORIGIN', value: appPublicOrigin }
   { name: 'MCP_ALLOWED_HOSTS', value: mcpAllowedHosts }
@@ -487,7 +486,7 @@ var gitCommitShaEnvVars = !empty(gitCommitSha) ? [
 
 // ── Conditional env vars (only when corresponding KV secret exists) ──
 // The analytics poller reads the org admin key as NUXT_ANTHROPIC_KEY_<credential_secret_name>
-// (server/workers/analytics-poller.ts::resolveOrgApiKey). credential_secret_name 'insight'
+// (server/workers/analytics-poller.ts::resolveOrgApiKey). credential_secret_name 'main'
 // -> NUXT_ANTHROPIC_KEY_MAIN. The KV secret name (anthropic-admin-api-key) is decoupled
 // from the env var; this secretRef is what links them. (Replaces the dead ANTHROPIC_API_KEY,
 // which nothing read.)
@@ -521,7 +520,7 @@ var githubAppKeyEnvVars = concat(
     { name: 'NUXT_GITHUB_APP_KEY_PARTNER_DEMO', secretRef: 'github-app-key-partner-demo' }
   ] : []
 )
-// RLS enforcement (docs/design/rls-enforcement.md §9). Five env vars, emitted
+// RLS enforcement. Five env vars, emitted
 // on five separate flags — see the param block for why the order matters.
 // Nothing here is emitted by default, so an apply that does not name these
 // flags leaves the app connecting exactly as it does today.
@@ -589,7 +588,6 @@ var aiFoundryEnvVars = !empty(aiFoundryEndpoint) ? [
 //     bearer via the user-assigned MI over IMDS (the real path; no static/mock).
 //   - NUXT_AZURE_MONITOR_LOGS_ENDPOINT is the DCR logs URL the attest endpoint
 //     hands the plugin as OTEL_EXPORTER_OTLP_LOGS_ENDPOINT.
-// See docs/development/sandbox-realclaude-journey.md.
 var telemetryReaderEnvVars = !empty(azureMonitorLogsEndpoint) ? [
   { name: 'NUXT_TELEMETRY_READER', value: 'log-analytics' }
   { name: 'NUXT_LOG_ANALYTICS_WORKSPACE_ID', value: logAnalyticsCustomerId }
@@ -727,7 +725,7 @@ output appId string = containerApp.id
 @description('Container App Environment resource ID (for future co-deployed apps in the same env).')
 output environmentId string = containerAppEnv.id
 
-@description('ACA environment default domain (e.g. happyhill-0a1b2c3d.westus3.azurecontainerapps.io). For an INTERNAL env this is the private DNS zone name IT must create centrally — surfaced to them via scripts/ci/it-dev-handoff.sh.')
+@description('ACA environment default domain (e.g. happyhill-0a1b2c3d.westus3.azurecontainerapps.io). For an INTERNAL env this is the private DNS zone name that must exist in your private DNS, with A records pointing at the staticIp output.')
 output defaultDomain string = containerAppEnv.properties.defaultDomain
 
 @description('ACA environment static IP. Internal env → the private VIP on snet-container-apps that the private DNS A records must point at. External env → the public inbound IP.')

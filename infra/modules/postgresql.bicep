@@ -1,7 +1,6 @@
 // ── PostgreSQL Flexible Server ─────────────────────────────────────
 //
-// TokenScope schema requires `btree_gist`, `ltree`, `pgcrypto` per
-// docs/design/data-model.md. The allow-listed extensions are configured
+// TokenScope schema requires `btree_gist`, `ltree`, `pgcrypto`. The allow-listed extensions are configured
 // via the `azure.extensions` server param; the Drizzle migrations issue
 // `CREATE EXTENSION` once they're allow-listed.
 
@@ -23,7 +22,7 @@ param adminLogin string
 @secure()
 param adminPassword string
 
-// ── Private Endpoint params (Wave-III; off in sandbox) ───────────────
+// ── Private Endpoint params (off in the sandbox posture) ──────────────
 
 @description('Enable private endpoint.')
 param enablePrivateEndpoint bool = false
@@ -43,8 +42,8 @@ param tags object = {}
 // Non-production = burstable B2s; production = D2ds_v4 with geo-redundant
 // backup + ZoneRedundant HA.
 //
-// STORAGE IOPS, NOT THE COMPUTE TIER, is what bounds this workload. Measured
-// 2026-08-28: a /me/usage request spent 17.3 s of summed statement time across
+// STORAGE IOPS, NOT THE COMPUTE TIER, is what bounds this workload. Measured:
+// a /me/usage request spent 17.3 s of summed statement time across
 // 44 statements while CPU sat at 23% and burst credits never left their
 // maximum — the 32 GB disk's 120 IOPS was the ceiling, and it was exceeded.
 // So the disk carries a PERFORMANCE TIER above its size band (see
@@ -87,7 +86,7 @@ resource postgresql 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
     }
     // network: {} when public; `publicNetworkAccess: Disabled` when PE on.
     // Empty object {} is the documented Bicep idiom for "no networking
-    // overrides", and matches PSR's pattern.
+    // overrides".
     network: enablePrivateEndpoint ? {
       publicNetworkAccess: 'Disabled'
     } : {}
@@ -114,7 +113,7 @@ resource allowedExtensions 'Microsoft.DBforPostgreSQL/flexibleServers/configurat
 }
 
 // ── Performance observability parameters ─────────────────────────────
-// docs/design/performance-observability-baseline.md O2. Both dynamic — no
+// Both dynamic — no
 // restart. Declarative so a hand-run `az ... parameter set` cannot drift the
 // environment; rollback is the same parameter, previous value. Serial
 // dependsOn: configuration writes on the same server can conflict when
@@ -180,7 +179,11 @@ resource statStatementsTrack 'Microsoft.DBforPostgreSQL/flexibleServers/configur
     value: 'top'
     source: 'user-override'
   }
-  dependsOn: [allowedExtensions]
+  // Serial chain: the server accepts one write at a time and refuses a
+  // concurrent one with ServerIsBusy, so every server-level write follows the
+  // previous: extensions → Query Store → slow log → pg_stat_statements →
+  // preload → database → firewall.
+  dependsOn: [slowStatementLog]
 }
 
 resource statStatementsUtility 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2024-08-01' = {
@@ -200,9 +203,8 @@ resource slowStatementLog 'Microsoft.DBforPostgreSQL/flexibleServers/configurati
     value: slowStatementLogMs
     source: 'user-override'
   }
-  // Chained after the (possibly condition-false, then no-op) Query Store
-  // pair: same-server configuration writes can conflict when concurrent, so
-  // the whole set deploys serially on every tier.
+  // After the Query Store pair (condition-false on Burstable, then a no-op
+  // dependency); see the chain note on statStatementsTrack.
   dependsOn: [queryStorePlans]
 }
 
@@ -267,9 +269,8 @@ resource preloadLibraries 'Microsoft.DBforPostgreSQL/flexibleServers/configurati
     value: effectivePreloadLibraries
     source: 'user-override'
   }
-  // Same serial chain as the parameters above — concurrent configuration
-  // writes on one server can conflict.
-  dependsOn: [slowStatementLog]
+  // Same serial chain as the parameters above.
+  dependsOn: [statStatementsUtility]
 }
 
 // ── Database ────────────────────────────────────────────────────────
@@ -281,6 +282,7 @@ resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-0
     charset: 'UTF8'
     collation: 'en_US.utf8'
   }
+  dependsOn: [preloadLibraries, statStatementsUtility]
 }
 
 // Allow Azure-services traffic when NOT using a private endpoint — this is
@@ -294,9 +296,10 @@ resource firewallAllowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallR
     startIpAddress: '0.0.0.0'
     endIpAddress: '0.0.0.0'
   }
+  dependsOn: [database]
 }
 
-// ── Private Endpoint (Wave-III) ──────────────────────────────────────
+// ── Private Endpoint ─────────────────────────────────────────────────
 
 resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (enablePrivateEndpoint) {
   name: 'pe-pg-${name}'
@@ -320,8 +323,8 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (e
   }
 }
 
-// Zone group only when a zone ID was supplied — '' means IT registers
-// the A record on their side (see key-vault.bicep for the rationale).
+// Zone group only when a zone ID was supplied — '' means the zone owner
+// registers the A record (see key-vault.bicep for the rationale).
 resource dnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = if (enablePrivateEndpoint && !empty(privateDnsZoneId)) {
   parent: privateEndpoint
   name: 'default'

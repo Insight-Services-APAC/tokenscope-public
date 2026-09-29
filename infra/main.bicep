@@ -1,39 +1,32 @@
 // ── TokenScope — Root Bicep Template ──────────────────────────────────
 //
-// Deploys all Azure resources for TokenScope (Wave-I + Wave-II).
-// Usage (dev is the only environment with a parameter file; see
-// .github/workflows/infra.yml, which is the supported way to apply):
+// Deploys all Azure resources for TokenScope. Walkthrough: docs/DEPLOY-AZURE.md.
+// Usage (the example parameter files read every secret from environment
+// variables, so export those first):
 //   az deployment group create \
-//     -g rg-tokenscope-example \
+//     -g <resource-group> \
 //     -f infra/main.bicep \
-//     -p infra/parameters/dev.bicepparam \
-//     -p pgAdminLogin=... -p pgAdminPassword=... <other-secrets>
+//     -p infra/parameters/example-sandbox.bicepparam   # or example-vnetted.bicepparam
+// A copy-in GitHub Actions workflow that compiles, runs what-if and applies is
+// in examples/github-actions/tokenscope-infra.yml.
 //
-// Pattern follows PSR's battle-tested root shape. Deployment graph
-// documented at the bottom of this file in the //-comment block.
+// Deployment graph documented at the bottom of this file.
 //
-// ── Wave-II three-phase deploy (Front Door) ───────────────────────────
-// Standard SKU Front Door cannot VNet-integrate with Container Apps;
-// protection is via header-only check. AFD injects `X-Azure-FDID`
-// containing its instance ID; the container app's middleware rejects
-// requests missing / mismatching that header. The three-phase loop:
+// ── Front Door ────────────────────────────────────────────────────────
+// `enableFrontDoor` provisions Azure Front Door + WAF; `frontDoorSku` picks
+// the tier:
+//   - Standard fronts the app's PUBLIC ingress (the sandbox posture).
+//   - Premium reaches the internal (VNet) environment over Private Link. It
+//     is required with `enablePrivateNetworking`: Standard + VNet is refused
+//     by a fail() before anything is created. Front Door's private endpoint
+//     request must be approved WHILE the apply runs — start the apply with
+//     `--no-wait`, then run infra/scripts/approve-front-door-private-link.sh <rg>.
 //
-//   Phase 1 — First apply runs with `enableFrontDoor=false`. Container
-//             app provisions WITHOUT AFD knowledge. Capture the CA
-//             FQDN. (Provisioning everything in one shot would leave
-//             the AFD origin with no FQDN to point at.)
-//
-//   Phase 2 — Set workflow input `enableFrontDoor=true` + re-apply.
-//             AFD provisions (origin = the CA's now-known FQDN).
-//             Capture `frontDoorInstanceId` from outputs.
-//
-//   Phase 3 — Set workflow input `frontDoorId=<value-from-phase-2>` +
-//             re-apply once more. The container-app revision picks up
-//             `AZURE_FRONT_DOOR_ID`; the middleware starts enforcing.
-//
-// See `docs/development/sandbox-setup.md` §Wave II for the full
-// runbook. `enableFrontDoor`'s default (false) + `frontDoorId`'s
-// default ('') correspond to phase 1.
+// Enforcement: Front Door sends its instance id in `X-Azure-FDID`. After an
+// apply with Front Door on, read the `frontDoorInstanceId` output and re-apply
+// with `frontDoorId=<that value>`; the container app gets AZURE_FRONT_DOOR_ID
+// and its require-front-door middleware then rejects requests without the
+// matching header. `frontDoorId=''` (the default) means not enforced.
 
 targetScope = 'resourceGroup'
 
@@ -52,7 +45,7 @@ param projectName string = 'tokenscope'
 @description('Container image tag to deploy. Override at apply time; defaults to `latest` for first apply.')
 param imageTag string = 'latest'
 
-@description('Git commit SHA at deploy time (Wave VII). Empty = use the build-time baked value (Dockerfile ARG GIT_COMMIT_SHA). Non-empty values override the Dockerfile bake at runtime and are surfaced via /admin/settings → build.commitSha so operators can verify the running revision.')
+@description('Git commit SHA at deploy time. Empty = use the build-time baked value (Dockerfile ARG GIT_COMMIT_SHA). Non-empty values override the Dockerfile bake at runtime and are surfaced via /admin/settings → build.commitSha so operators can verify the running revision.')
 param gitCommitSha string = ''
 
 @description('Anthropic analytics API base URL (NUXT_ANTHROPIC_API_ENDPOINT). Empty = reconciliation/poller no-op. Set to https://api.anthropic.com on envs with a reconciled Anthropic org.')
@@ -68,14 +61,14 @@ param pgAdminLogin string
 @secure()
 param pgAdminPassword string
 
-// ── RLS enforcement: the non-owner app role (docs/design/rls-enforcement.md §9) ──
+// ── RLS enforcement: the non-owner app role ──
 // The 40 RLS policies do not execute today because the app connects as the table
 // OWNER. Enforcement needs a non-owner login, which drizzle/provision-app-role.ts
 // creates at boot using the credentials below.
 //
 // FIVE FLAGS, ALL DEFAULT FALSE — an apply that names none of them changes
 // nothing. They are separate because they fail differently and their ORDER is
-// the safety property. The intended sequence, one infra.yml dispatch each:
+// the safety property. The intended sequence, one apply each:
 //
 //   1. writeAppDbPassword=true, hasAppRoleSecrets=true, provisionAppRole=true
 //      → generates the password, writes app-db-password + database-url-app, and
@@ -92,15 +85,13 @@ param pgAdminPassword string
 //        Stamped in seed_state, so it does not re-run and the flag is safe to
 //        leave on. Read the boot log for "[cutover-rls-sweep] verified".
 //
-//        THE WRITE FLAG MUST GO OFF HERE, and this comment said step 3 for a
-//        whole PR. `appDbPasswordSeed` defaults to `newGuid()`, which yields a
+//        THE WRITE FLAG MUST GO OFF HERE. `appDbPasswordSeed` defaults to `newGuid()`, which yields a
 //        NEW value on every deployment, so a second dispatch with the flag
 //        still true rewrites app-db-password and database-url-app with a
 //        password the ROLE DOES NOT HAVE — provisioning sets a password only
 //        when it CREATEs the role, and moving an existing one needs
 //        rotateAppDbPassword. Step 3 would then bind a credential that cannot
-//        authenticate, and the boot aborts. dev.bicepparam always said this
-//        correctly; this block was the copy that drifted.
+//        authenticate, and the boot aborts.
 //   3. keep the others, add useAppRoleAtRuntime=true → THE CUTOVER. The runtime
 //      pools connect as the role and the policies start executing.
 //   4. Rollback, if anything looks wrong: useAppRoleAtRuntime=false, re-apply.
@@ -154,16 +145,16 @@ param entraIdClientId string = ''
 @secure()
 param entraIdClientSecret string = ''
 
-@description('Entra ID redirect URI for nuxt-oidc-auth (the public callback URL, e.g. https://<ca-fqdn>/auth/entra/callback). Empty during phase-1 / app-reg bring-up; operator passes the value at apply time once the FQDN is known.')
+@description('Entra ID redirect URI for nuxt-oidc-auth (the public callback URL, e.g. https://<ca-fqdn>/auth/entra/callback). Empty during first bring-up (before the app registration exists); operator passes the value at apply time once the FQDN is known.')
 param entraIdRedirectUri string = ''
 
-@description('Optional pinned PUBLIC origin (scheme://host) when an upstream WAF/proxy fronts the app under a fixed hostname (the IT dev zone). Empty = derive from Front Door / the request Host. See server/utils/public-url.ts.')
+@description('Optional pinned PUBLIC origin (scheme://host) when an upstream WAF/proxy fronts the app under a fixed hostname (for example your own WAF or application gateway). Empty = derive from Front Door / the request Host. See server/utils/public-url.ts.')
 param appPublicOrigin string = ''
 
 @description('Break-glass EXTRA hostnames the MCP transport answers to, comma-separated. The app already derives its public origin and its Container Apps app/revision FQDNs; this covers a topology that derivation does not model (custom backend domain, private DNS alias, traffic-label FQDN) WITHOUT a code change and release. Empty is the normal state. See server/utils/public-url.ts platformSelfHosts().')
 param mcpAllowedHosts string = ''
 
-// ── Persona-impersonation gate (Wave-V) ──────────────────────────────
+// ── Persona-impersonation gate ──────────────────────────────
 // SAFETY FLOOR: defaulted to `false`. The triple-gate in
 // server/api/v1/auth/dev-login.post.ts refuses unless one of:
 //   a) NUXT_OIDC_AUTH_DEV_MODE=true (local dev fallback), OR
@@ -186,13 +177,13 @@ param anthropicApiKey string = ''
 @description('Whether the anthropic-admin-api-key KV secret exists (read by the app as NUXT_ANTHROPIC_KEY_MAIN). Set true when the secret was placed in Key Vault out-of-band; a non-empty anthropicApiKey implies it.')
 param hasAnthropicKey bool = false
 
-@description('log_min_duration_statement (ms) forwarded to the PG module — the per-environment slow-statement threshold (docs/design/performance-observability-baseline.md O2/dr-M9).')
+@description('log_min_duration_statement (ms) forwarded to the PG module — the per-environment slow-statement threshold.')
 param slowStatementLogMs string = '1000'
 
 // ── GitHub Copilot reconciliation PATs (F2 — GATED OFF; TEMPLATE) ──
 // Empty (the default) = NO-OP: no KV secret written, no container-app KV ref/env
 // var emitted, F2 stays gated off (no reconciled provider_enterprise → no lookup).
-// Provide post-merge per docs/build/copilot-multi-org-onboarding.md (a redeploy).
+// Supply the value at apply time (a redeploy) when onboarding that enterprise.
 @description('GitHub manage_billing PAT for the NFR/internal enterprise (credential_secret_name "partner-demo"). Empty = NO-OP.')
 @secure()
 param githubPatPartnerDemo string = ''
@@ -206,22 +197,22 @@ param githubPatProduction string = ''
 param githubPatApacNfr string = ''
 
 // ── GitHub App private key (App-credential path — OPT-IN; create-from-value) ──
-// The App-mode replacement for a PAT (docs/design/github-pat-to-github-app-transition.md).
+// The App-mode replacement for a PAT.
 // CRITICAL: the value is the App private key (multi-line PEM) BASE64-ENCODED — raw
 // newlines don't survive the GH-secret → bicep → KV → container-env pipeline. Supplied
-// from the GH secret GH_APP_KEY_PARTNER_DEMO via infra.yml. Empty = NO-OP.
+// at apply time (e.g. from a CI secret such as GH_APP_KEY_PARTNER_DEMO). Empty = NO-OP.
 @description('GitHub App private key (BASE64-encoded PEM) for the partner-demo enterprise App-credential path (credential_secret_name "partner-demo", read as NUXT_GITHUB_APP_KEY_PARTNER_DEMO). Pair with provider_enterprise.github_app_id via onboarding. Empty = NO-OP.')
 @secure()
 param githubAppKeyPartnerDemo string = ''
 
-// ── Ops alerting channel (docs/design/ops-alerting.md §A1) ───────────
+// ── Ops alerting channel ─────────────────────────────────────────────
 // GitHub env secret OPS_ALERT_NTFY_URL → this param → KV secret
 // ops-alert-ntfy-url → container secretRef → NUXT_OPS_ALERT_NTFY_URL.
 // The topic URL IS the credential (public ntfy.sh; the 64-char CSPRNG topic
 // name is the access control — ar-H8 accepted residual), so it is secretRef-
 // only downstream (ar-M20). Empty = NO-OP write (safety contract) AND no
 // container ref/env = alerting disabled (the sandbox/local default).
-@description('ntfy topic URL for operator push alerts (NUXT_OPS_ALERT_NTFY_URL). Supplied by infra.yml from the GitHub env secret OPS_ALERT_NTFY_URL. Empty = NO-OP: no KV write, no container ref, alerting disabled.')
+@description('ntfy topic URL for operator push alerts (NUXT_OPS_ALERT_NTFY_URL). Supplied at apply time (e.g. from a CI secret OPS_ALERT_NTFY_URL). Empty = NO-OP: no KV write, no container ref, alerting disabled.')
 @secure()
 param opsAlertNtfyUrl string = ''
 
@@ -241,7 +232,7 @@ param internalWorkerHmacKey string
 // These three keys MUST be stable across revisions. The module
 // generates random per-boot values if absent, which invalidates every
 // OIDC session on every container deploy AND breaks the SSR-side
-// cookie decryption in /api/v1/auth/me. Matches a sibling project's pattern.
+// cookie decryption in /api/v1/auth/me.
 
 @description('nuxt-oidc-auth user-session encryption secret (NUXT_OIDC_SESSION_SECRET). Empty = module generates random per boot (bad for stability; sessions break on every roll).')
 @secure()
@@ -257,46 +248,58 @@ param oidcTokenKey string = ''
 
 // ── Private Networking ──────────────────────────────────────────────
 
-@description('Enable VNet + private endpoints (Wave-III). Sandbox = false; dev / staging / production = true.')
+@description('Enable VNet + private endpoints (Key Vault, Postgres, Redis, ACR) and internal ingress. False for the sandbox posture (example-sandbox.bicepparam); true for staging / production (example-vnetted.bicepparam).')
 param enablePrivateNetworking bool = false
 
-@description('Make the Log Analytics QUERY path private: publicNetworkAccessForQuery=Disabled, queryable only over an Azure Monitor Private Link Scope. Ingestion stays public. Requires enablePrivateNetworking. Default false — the back-out lever. Flipping this on before the AMPLS privatelink DNS resolves locks query out, the app included, so bundle the DNS ask with IT. Who owns the scope is useCentralAmpls. See docs/design/telemetry-query-network-posture.md.')
+@description('Make the Log Analytics QUERY path private: publicNetworkAccessForQuery=Disabled, queryable only over an Azure Monitor Private Link Scope. Ingestion stays public. Requires enablePrivateNetworking. Default false — the back-out lever. Flipping this on before the AMPLS privatelink DNS resolves locks query out, the app included, so arrange the DNS first. Who owns the scope is useCentralAmpls.')
 param monitorQueryPrivateOnly bool = false
 
-@description('Consume IT\'s central Azure Monitor Private Link Scope instead of deploying our own. DEFAULTS from centralDnsZonesSubscriptionId, because the two are the same constraint: one shared privatelink zone holds ONE set of Monitor A records, so a scope of our own overwrites IT\'s and blackholes whoever it displaced. An env on central zones therefore consumes the central scope unless someone opts out ON PURPOSE. IT joins our workspace to their scope as a scoped resource.')
+@description('Consume a central Azure Monitor Private Link Scope (owned by whoever owns the central private DNS zones) instead of deploying our own. DEFAULTS from centralDnsZonesSubscriptionId, because the two are the same constraint: one shared privatelink zone holds ONE set of Monitor A records, so a scope of our own overwrites the central one and blackholes whoever it displaced. An env on central zones therefore consumes the central scope unless someone opts out ON PURPOSE. The scope owner joins our workspace to their scope as a scoped resource.')
 param useCentralAmpls bool = !empty(centralDnsZonesSubscriptionId)
 
 @description('Resource ID of the central AMPLS to point our own private endpoint at. Read only when useCentralAmpls, and needed only if the central PE is unreachable from our VNet. Empty (default) = we deploy no AMPLS PE at all. Requires amplsSubnetPrefix, and no same-named PE already pointing at another scope (privateLinkServiceId is immutable).')
 param centralAmplsResourceId string = ''
 
-@description('VNet resource name override. Empty = `vnet-{nameSuffix}` convention. Dev must use the IT-issued name (vnet-tokenscope-example) — IT scripts hub peerings + central-DNS VNet links against it.')
+@description('VNet resource name override. Empty = `vnet-{nameSuffix}` convention. Set it when your network team issues the VNet name, e.g. because hub peerings and central-DNS VNet links are scripted against it.')
 param vnetName string = ''
 
-@description('Subscription ID of the IT-central private DNS zones (privatelink.* + the ACA-env zone). Empty = self-owned zones (sandbox/staging/production). Dev sets your-subscription. Set together with centralDnsZonesResourceGroup.')
+@description('Subscription ID of central private DNS zones you do not own (privatelink.* + the ACA-env zone). Empty = self-owned zones. Set together with centralDnsZonesResourceGroup.')
 param centralDnsZonesSubscriptionId string = ''
 
-@description('Resource group of the IT-central private DNS zones. Empty = self-owned zones. Dev sets rg-hub-network-example. Set together with centralDnsZonesSubscriptionId.')
+@description('Resource group of the central private DNS zones. Empty = self-owned zones. Set together with centralDnsZonesSubscriptionId.')
 param centralDnsZonesResourceGroup string = ''
 
-@description('Write DNS on our side: attach privateDnsZoneGroups to the PEs. Set FALSE when the deploying SP has no write rights on the (central) zones (dev: SP is Owner on the dev RG only) — PEs still provision, and IT creates every record from the infra.yml handoff report. True (default) for self-owned-zone environments. NOTE: the ACA-env zone is ALWAYS IT-created from the handoff report; the in-template module for it was deleted 2026-06-11 (recover aca-private-dns.bicep from git history if DNS writes ever move in-template).')
+@description('Write DNS on our side: attach privateDnsZoneGroups to the PEs. Set FALSE when the deploying SP has no write rights on the (central) zones (e.g. the SP is Owner on its own resource group only) — PEs still provision, and the zone owner creates the records. True (default) for self-owned-zone environments. NOTE: this template never writes the Container Apps environment\'s private DNS zone; its records are always created outside the template.')
 param registerDnsZoneGroups bool = true
 
-@description('VNet address space CIDR. Default 10.0.0.0/16 matches sandbox-validated PSR layout. Override in dev.bicepparam with the range Insight IT assigns from corporate IPAM.')
+@description('VNet address space CIDR. Default 10.0.0.0/16. Override with the range your network team assigns when the VNet peers into a corporate network.')
 param vnetAddressSpace string = '10.0.0.0/16'
 
-@description('Container Apps subnet CIDR. Minimum /27 for our workload-profiles env (/23 is the legacy Consumption-only minimum). Default /23 is generous headroom for staging/production; dev.bicepparam tightens it to /27. Override alongside vnetAddressSpace.')
+@description('Container Apps subnet CIDR. Minimum /27 for our workload-profiles env (/23 is the legacy Consumption-only minimum). Default /23 is generous headroom; a tight IPAM allocation can use /27. Override alongside vnetAddressSpace.')
 param containerAppsSubnetPrefix string = '10.0.0.0/23'
 
 @description('Private-endpoint subnet CIDR. Default /24 is roomy; dev uses /28 (11 usable) for 4 PEs — KV/PG/Redis + ACR when ACR is private — plus headroom. (/29 only holds 3, pre-ACR-private.)')
 param privateEndpointsSubnetPrefix string = '10.0.2.0/24'
 
-@description('Optional dedicated subnet CIDR for the AMPLS private endpoint (the `azuremonitor` PE is multi-IP and overflows the shared PE subnet). Empty = no AMPLS subnet/PE. Set where monitorQueryPrivateOnly is on (dev: 10.0.0.48/28, inside the IT-assigned /26).')
+@description('Optional dedicated subnet CIDR for the AMPLS private endpoint (the `azuremonitor` PE is multi-IP and overflows the shared PE subnet). Empty = no AMPLS subnet/PE. Set where monitorQueryPrivateOnly is on (e.g. a /28 inside your VNet range).')
 param amplsSubnetPrefix string = ''
 
-@description('Optional hub VNet resource ID for spoke-to-hub peering. Empty = no peering (sandbox/staging/production default). Set in dev.bicepparam when Insight IT requires peering for on-prem connectivity.')
+@description('Optional subnet CIDR for image builds inside the VNet: a self-hosted CI runner or an ACR Tasks agent pool (a private registry refuses builds from outside). Empty = none. Requires enablePrivateNetworking.')
+param buildSubnetPrefix string = ''
+
+@description('Optional network security group resource id attached to every subnet the template creates. Landing zones often require one; attach it here, since the template lists its subnets and would clear one attached by hand.')
+param subnetNetworkSecurityGroupId string = ''
+
+@description('Optional route table resource id (e.g. forced tunnelling to a hub firewall) attached to the Container Apps and build subnets.')
+param subnetRouteTableId string = ''
+
+@description('Optional NAT gateway resource id for outbound traffic from the Container Apps and build subnets. Azure is retiring default outbound access for new subnets; provide this or a route through a firewall.')
+param natGatewayId string = ''
+
+@description('Optional hub VNet resource ID for spoke-to-hub peering. Empty = no peering (default). Set when a hub network you do not own requires peering for on-prem connectivity.')
 param hubVnetId string = ''
 
-@description('Use the hub VNet\'s gateway for on-prem connectivity. Default false; set true via dev.bicepparam ONLY when IT confirms the hub has a gateway and has set allowGatewayTransit=true on the reverse peering.')
+@description('Use the hub VNet\'s gateway for on-prem connectivity. Default false; set true ONLY when the hub owner confirms the hub has a gateway and has set allowGatewayTransit=true on the reverse peering.')
 param useRemoteGateways bool = false
 
 // ── Key Vault Recovery ──────────────────────────────────────────────
@@ -310,12 +313,12 @@ param keyVaultCreateMode string = 'default'
 @description('Optional notification email for the Azure Monitor alert action group. Empty = alerts still fire (visible in Monitor) but no email goes out.')
 param alertNotificationEmail string = ''
 
-@description('Deploy the Azure Monitor Workspace (preview metrics path; currently consumer-less). FALSE for dev — Microsoft.Monitor RP is NotRegistered in your-subscription and only IT can register it; the apply would fail with MissingSubscriptionRegistration.')
+@description('Deploy the Azure Monitor Workspace (preview metrics path; currently consumer-less). Set FALSE where the Microsoft.Monitor resource provider is not registered in the subscription and you cannot register it; the apply would otherwise fail with MissingSubscriptionRegistration.')
 param deployAzureMonitorWorkspace bool = true
 
 // ── RBAC two-phase flag ─────────────────────────────────────────────
 
-@description('Deploy RBAC role assignments. Requires Owner / User-Access-Administrator on the deploying principal. CI/CD SP has Owner per the runbook. Set true in `.bicepparam` for normal deploys; false only for a Contributor dry-run.')
+@description('Deploy RBAC role assignments. Requires Owner / User-Access-Administrator on the deploying principal. The CI/CD service principal needs Owner (or Contributor + User Access Administrator). Set true in `.bicepparam` for normal deploys; false only for a Contributor dry-run.')
 // Defaults to false as a safety floor — applying main.bicep WITHOUT a
 // bicepparam (e.g. a quick `az deployment group create` test) will skip
 // every role assignment. The expected failure mode in that case: the
@@ -324,28 +327,24 @@ param deployAzureMonitorWorkspace bool = true
 // infra/parameters/ sets it true; do not bare-apply main.bicep.
 param deployRbac bool = false
 
-// ── Wave-II Front Door ──────────────────────────────────────────────
-//
-// Three-phase deploy (see `docs/development/sandbox-setup.md` §Front Door):
-//
-//   Phase 1 — first apply, `enableFrontDoor=false`, `frontDoorId=''`.
-//     Container app provisions, accessible directly via its
-//     *.azurecontainerapps.io FQDN. Confirm health. Required because
-//     the AFD origin needs a real CA FQDN to point at — provisioning
-//     everything in one shot leaves the origin's hostName empty.
-//
-//   Phase 2 — re-apply with `enableFrontDoor=true`. AFD provisions
-//     (origin = the CA's now-known FQDN). The `frontDoorInstanceId`
-//     output is now non-empty. Capture it.
-//
-//   Phase 3 — re-apply with `enableFrontDoor=true` AND
-//     `frontDoorId=<value-from-phase-2>` (passed as a workflow input).
-//     The container app revision picks up the AZURE_FRONT_DOOR_ID env
-//     var. The `require-front-door` middleware starts enforcing —
-//     direct-to-CA requests 403; only AFD-fronted requests succeed.
+// ── Front Door ──────────────────────────────────────────────────────
+// Tiers, Private Link approval and FDID enforcement: see the file header and
+// docs/DEPLOY-AZURE.md.
 
-@description('Provision Azure Front Door + WAF. Sandbox starts false (phase 1 of the three-phase deploy); flip to true on phase 2 once the container app FQDN exists. EVERY environment defaults false and must set it explicitly — an earlier version of this line said staging and production default to true, and no parameter file has ever set it.')
+@description('Provision Azure Front Door + WAF in front of the container app. Defaults false; set it explicitly. With enablePrivateNetworking it requires frontDoorSku Premium.')
 param enableFrontDoor bool = false
+
+@description('Front Door tier when enableFrontDoor. Standard fronts the app\'s public ingress. Premium is required with enablePrivateNetworking: it reaches the internal environment over Private Link, and its private endpoint request must be approved after the apply (docs/DEPLOY-AZURE.md). Premium adds the managed WAF rule sets.')
+@allowed(['Standard', 'Premium'])
+param frontDoorSku string = 'Standard'
+
+@description('Premium only: what the managed WAF rule sets (DRS 2.1, Bot Manager 1.1) do on a match. Log observes; switch to Block once the logs show no false positives on developer traffic.')
+@allowed(['Log', 'Block'])
+param frontDoorWafManagedRuleAction string = 'Log'
+
+@description('Front Door WAF: requests per client IP per 5 minutes before blocking (all paths). Raise it when many users share one NAT address.')
+@minValue(10)
+param frontDoorRateLimitPerIpPer5Min int = 100
 
 @description('ISO-3166 alpha-2 country codes allowed through the AFD WAF. Empty array = no geo restriction (global access). Forwarded directly to `front-door.bicep`.')
 param wafGeoAllowedCountries array = []
@@ -355,7 +354,7 @@ param wafGeoAllowedCountries array = []
 @maxValue(240)
 param afdOriginResponseTimeoutSeconds int = 60
 
-@description('Azure Front Door instance ID (Wave-II). Default empty — phase-1 + phase-2 deploys leave this empty. Phase 3 sets it to the value emitted by `frontDoorInstanceId` from the phase-2 apply, which flips the container-app revision into FDID-enforced mode.')
+@description('Azure Front Door instance ID. Default empty = not enforced. Set it to the `frontDoorInstanceId` output of an apply with Front Door on; the container-app revision then rejects requests without the matching X-Azure-FDID header.')
 param frontDoorId string = ''
 
 @description('Base URL the scheduled worker jobs call. Empty = no worker jobs (nothing joins telemetry or rolls up). With Front Door enforced (frontDoorId set) it must be the Front Door endpoint, because the app rejects direct calls; otherwise the Container App FQDN (https://<containerAppUrl output>), which for internal ingress is the only address the jobs can reach.')
@@ -373,16 +372,14 @@ param tags object = {
 // ── Naming Convention ─────────────────────────────────────────────
 // Pattern: {kind}-{projectName}-{env}-{regionShort}
 // e.g. kv-tokenscope-sandbox-aue (Australia East, sandbox),
-//      ca-tokenscope-example   (West US 3, corporate dev).
+//      ca-tokenscope-example   (West US 3, dev).
 // ACR is the exception (alphanumeric only) — `cr${nameSuffix}` with
 // hyphens stripped, inside container-registry.bicep.
 //
 // regionShort is DERIVED from `location` so the suffix tracks the region
-// automatically. Sandbox = Australia East (aue); corporate non-prod is
-// IT-hosted in West US 3 (wus3) — RG `rg-tokenscope-example`,
-// passed at deploy time (`-g`). Add a row here for any new region.
-// NOTE for IT review: child-resource names use this `tokenscope-<env>-<region>`
-// scheme; the RG itself follows the GBS naming standard (set by IT, not here).
+// automatically; an unmapped region uses its full name. Add a row here for a
+// new region. Child-resource names use this `tokenscope-<env>-<region>`
+// scheme; the resource group is yours to name and is passed at deploy time (`-g`).
 var regionShortMap = {
   australiaeast: 'aue'
   westus3: 'wus3'
@@ -396,14 +393,22 @@ var nameSuffix = '${projectName}-${env}-${regionShort}'
 // + KV-ref resolution). Without this, RBAC + KV-ref wiring would
 // require a circular or two-phase apply.
 
+// Front Door Standard cannot reach an internal environment. Checked on a
+// top-level resource because Azure's pre-deployment validation evaluates those,
+// so the apply is refused before anything is created (a check inside a module's
+// inputs would only fire mid-deployment).
+var frontDoorTierAllowed = !(enablePrivateNetworking && enableFrontDoor && frontDoorSku == 'Standard')
+
 resource appIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: 'id-${nameSuffix}'
   location: location
-  tags: tags
+  tags: frontDoorTierAllowed
+    ? tags
+    : fail('Front Door Standard cannot reach a VNet (internal) environment: set frontDoorSku to Premium, or use your own WAF with enableFrontDoor false.')
 }
 
 // ── Monitoring ──────────────────────────────────────────────────────
-// Already adapted from PSR; provides LAW + AppInsights + AMW + alerts.
+// Provides LAW + AppInsights + AMW + alerts.
 
 module monitoring 'modules/monitoring.bicep' = {
   name: 'monitoring'
@@ -429,7 +434,7 @@ module monitoring 'modules/monitoring.bicep' = {
   }
 }
 
-// ── Networking (Wave III) ───────────────────────────────────────────
+// ── Networking ───────────────────────────────────────────
 // Conditional on `enablePrivateNetworking`. Provides:
 //   - VNet 10.0.0.0/16
 //   - snet-container-apps  10.0.0.0/23  (Container Apps env delegation)
@@ -447,6 +452,10 @@ module networking 'modules/networking.bicep' = if (enablePrivateNetworking) {
     containerAppsSubnetPrefix: containerAppsSubnetPrefix
     privateEndpointsSubnetPrefix: privateEndpointsSubnetPrefix
     amplsSubnetPrefix: amplsSubnetPrefix
+    buildSubnetPrefix: buildSubnetPrefix
+    subnetNetworkSecurityGroupId: subnetNetworkSecurityGroupId
+    subnetRouteTableId: subnetRouteTableId
+    natGatewayId: natGatewayId
     hubVnetId: hubVnetId
     useRemoteGateways: useRemoteGateways
     centralDnsZonesSubscriptionId: centralDnsZonesSubscriptionId
@@ -537,7 +546,7 @@ module redis 'modules/redis.bicep' = {
 // Grants the user-assigned MI permission to pull images from ACR.
 // Inlined at root scope (rather than inside container-app.bicep) so
 // it's in the same scope as appIdentity — keeps the principalId
-// reference simple and avoids passing it down twice. PSR pattern.
+// reference simple and avoids passing it down twice.
 //
 // dependsOn: containerRegistry — the registry resource must EXIST
 // before the role assignment can target it. The `existing` reference
@@ -633,7 +642,7 @@ module containerApp 'modules/container-app.bicep' = {
     allowPersonaOverride: allowPersonaOverride
     bootstrapAdminEmail: bootstrapAdminEmail
     containerAppsSubnetId: enablePrivateNetworking ? networking!.outputs.containerAppsSubnetId : ''
-    // Private networking → internal ACA env (private VIP; IT zone WAF fronts it).
+    // Private networking → internal ACA env (private VIP; Front Door Premium or your own WAF fronts it).
     internalIngress: enablePrivateNetworking
     logAnalyticsCustomerId: monitoring.outputs.logAnalyticsCustomerId
     // logAnalyticsName lets container-app call listKeys() itself —
@@ -710,12 +719,12 @@ module containerApp 'modules/container-app.bicep' = {
   ]
 }
 
-// ── Front Door (Wave-II) ───────────────────────────────────────────
+// ── Front Door ─────────────────────────────────────────────────
 // Conditional on `enableFrontDoor`. Origin FQDN comes from
 // containerApp.outputs.fqdn — both an implicit dependency (output ref)
 // AND an explicit dependsOn so deployment-graph order is unambiguous.
-// On phase-1 applies (`enableFrontDoor=false`), the whole module is
-// elided and no AFD resources are touched.
+// With `enableFrontDoor=false` the whole module is elided and no AFD
+// resources are touched.
 
 module frontDoor 'modules/front-door.bicep' = if (enableFrontDoor) {
   name: 'front-door'
@@ -730,20 +739,24 @@ module frontDoor 'modules/front-door.bicep' = if (enableFrontDoor) {
     originFqdn: containerApp.outputs.fqdn
     originResponseTimeoutSeconds: afdOriginResponseTimeoutSeconds
     wafGeoAllowedCountries: wafGeoAllowedCountries
+    sku: frontDoorSku
+    privateLinkResourceId: enablePrivateNetworking ? containerApp.outputs.environmentId : ''
+    privateLinkLocation: enablePrivateNetworking ? location : ''
+    managedRuleAction: frontDoorWafManagedRuleAction
+    logAnalyticsId: monitoring.outputs.logAnalyticsId
+    rateLimitPerIpPer5Min: frontDoorRateLimitPerIpPer5Min
     tags: tags
   }
 }
 
 // ── Scheduled worker jobs (Container Apps Jobs) ─────────────────────
 // Codifies the cron worker surface (registry.ts recommendedCron) incl. the
-// ADR-0005 observability workers (went-silent, reconciliation-gap). Guarded on
-// workerBaseUrl so phase-1 (FD host not yet known) elides it. On a sandbox with
-// no GH deploy workflow, the two new jobs are mirrored with `az containerapp job
-// create`. NOTE: a full apply CONVERGES the six ad-hoc-created jobs to the
-// values declared in the module (it overwrites any drifted live config back to
-// e.g. replicaTimeout: 240) — it is NOT a safe no-op. Reconcile the live jobs to
-// the module first, or scope the first apply to the two new jobs only. See the
-// module header for the full caveat.
+// observability workers (went-silent, reconciliation-gap). Guarded on
+// workerBaseUrl, so an apply without it (e.g. before the Front Door host is
+// known) elides it. NOTE: an apply CONVERGES existing jobs of the same names to
+// the values declared in the module (it overwrites any drifted live config,
+// e.g. replicaTimeout) — it is NOT a safe no-op over hand-edited jobs. See the
+// module header.
 module workerJobs 'modules/worker-jobs.bicep' = if (!empty(workerBaseUrl)) {
   name: 'worker-jobs'
   params: {
@@ -757,7 +770,7 @@ module workerJobs 'modules/worker-jobs.bicep' = if (!empty(workerBaseUrl)) {
   }
 }
 
-// ── Ops alerting — A4 platform metric alerts (docs/design/ops-alerting.md) ──
+// ── Ops alerting — platform metric alerts ──
 // A LATE module by graph necessity: monitoring is a PRODUCER for postgresql
 // and container-app, so alert rules scoping those resources cannot live in
 // monitoring.bicep without a cycle. This module is the graph's last consumer —
@@ -774,7 +787,7 @@ module opsAlerts 'modules/ops-alerts.bicep' = {
     // when worker-jobs deploys ('caj-ts-' + registry key, the worker-jobs.bicep
     // naming rule; the ops-alert workers-array entry + ar-L22 cron lockstep are
     // owned there). Same workerBaseUrl gate as the workerJobs module, so
-    // phase-1 applies elide the rule instead of scoping a missing resource.
+    // applies without workerBaseUrl elide the rule instead of scoping a missing resource.
     // resourceId() is a pure string build — NO implicit dependency — hence the
     // explicit dependsOn below.
     opsAlertJobId: !empty(workerBaseUrl) ? resourceId('Microsoft.App/jobs', 'caj-ts-ops-alert') : ''
@@ -806,23 +819,17 @@ output postgresqlServerName string = postgresql.outputs.serverName
 @description('Redis cache host name (non-sensitive).')
 output redisHostName string = redis.outputs.hostName
 
-// ── IT-zone handoff output ──────────────────────────────────────────
-// NOTE: the authoritative IT handoff for dev is the infra.yml handoff
-// step (scripts/ci/it-dev-handoff.sh) reading LIVE state — it works
-// even when the apply partially fails, which deployment outputs do not.
-// (The former acaPrivateDnsZoneName output + aca-private-dns.bicep
-// module were deleted 2026-06-11: unreachable while the SP has no
-// rights on IT's central DNS RG. Recover from git history if IT ever
-// grants Private DNS Zone Contributor and DNS writes move in-template.)
+// ── Network outputs ─────────────────────────────────────────────────
+// For whoever creates DNS records / peerings outside the template.
 
-@description('VNet name (empty when private networking is off). Convenience mirror; the infra.yml handoff step is the authoritative IT channel.')
+@description('VNet name (empty when private networking is off).')
 output vnetName string = enablePrivateNetworking ? networking!.outputs.vnetName : ''
 
-// ── Wave-II Front Door outputs ─────────────────────────────────────
-// Both outputs are emitted unconditionally — they just resolve to ''
-// when `enableFrontDoor=false`, which matches the runbook's "capture
-// the value from the workflow output" loop. On phase-1 the operator
-// sees empty strings (expected). On phase-2 they get populated.
+@description('Build subnet resource ID when buildSubnetPrefix is set (for a runner VM or `az acr agentpool create --subnet-id`).')
+output buildSubnetId string = enablePrivateNetworking ? networking!.outputs.buildSubnetId : ''
+
+// ── Front Door outputs ─────────────────────────────────────────────
+// Emitted unconditionally; they resolve to '' when `enableFrontDoor=false`.
 
 @description('Public AFD endpoint FQDN (e.g. ep-tokenscope-sandbox-aue-<hash>.azurefd.net). Empty when enableFrontDoor=false.')
 // The `!` non-null assertion is safe: enableFrontDoor=true is the exact
@@ -831,14 +838,17 @@ output vnetName string = enablePrivateNetworking ? networking!.outputs.vnetName 
 // possibly-null).
 output frontDoorEndpointFqdn string = enableFrontDoor ? frontDoor!.outputs.endpointFqdn : ''
 
-@description('AFD instance ID (the X-Azure-FDID header value). Capture this on phase-2 apply and feed it back as the `frontDoorId` workflow input on phase-3.')
+@description('AFD instance ID (the X-Azure-FDID header value). Pass it back as `frontDoorId` on the next apply to enforce Front Door.')
 output frontDoorInstanceId string = enableFrontDoor ? frontDoor!.outputs.frontDoorId : ''
+
+@description('Premium + Private Link: the message on Front Door\'s private endpoint request to approve. Empty otherwise.')
+output frontDoorPrivateLinkRequestMessage string = enableFrontDoor ? frontDoor!.outputs.privateLinkRequestMessage : ''
 
 // ── Deployment graph (consumer ← producer) ──────────────────────────
 //
 // appIdentity            (root-scope resource, no deps)
 // monitoring             (no deps; LAW + AppInsights + AMW + alerts)
-// networking (Wave-III)  (no deps; VNet + subnets + 3 private DNS zones).
+// networking             (no deps; VNet + subnets + 3 private DNS zones).
 //                        Gated on `enablePrivateNetworking`.
 // keyVault              ← appIdentity (principalId for RBAC),
 //                         networking (when private endpoints on)
@@ -852,18 +862,17 @@ output frontDoorInstanceId string = enableFrontDoor ? frontDoor!.outputs.frontDo
 //                         on, for snet-container-apps); implicit via
 //                         outputs. + kvSecrets, acrPullRoleAssignment
 //                         (explicit dependsOn).
-// frontDoor (Wave-II)   ← containerApp (implicit via outputs.fqdn).
+// frontDoor             ← containerApp (implicit via outputs.fqdn).
 //                        Gated on `enableFrontDoor`.
 // workerJobs            ← containerApp (environmentId), containerRegistry,
 //                         keyVault, appIdentity (implicit via outputs).
-//                        Gated on `workerBaseUrl` (phase-1 elides it).
+//                        Gated on `workerBaseUrl`.
 // opsAlerts             ← monitoring (actionGroupId), containerApp (appId),
 //                         postgresql (serverId) — implicit via outputs — and
 //                         workerJobs (explicit dependsOn: the dead-man rule
 //                         scopes the caj-ts-ops-alert job). The LAST consumer:
 //                         its alert rules scope resources monitoring produces
-//                         FOR, which is why they cannot live in monitoring.bicep
-//                         (docs/design/ops-alerting.md §A4).
+//                         FOR, which is why they cannot live in monitoring.bicep.
 //
 // No cycles. Every consumer comes after its producer.
 // When private networking is off (sandbox), the networking module is

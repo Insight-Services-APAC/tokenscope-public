@@ -8,4 +8,5 @@
 - [ ] Tests added/updated; `npm run test:unit` (+ integration if relevant) pass
 - [ ] `npm run typecheck` and `npm run lint` pass
 - [ ] Docs updated if behaviour/config/deploy changed
+- [ ] Plugin code changed → plugin versions bumped (CI enforces)
 - [ ] §A (usage) and §B (billing) stay separate — no conflation

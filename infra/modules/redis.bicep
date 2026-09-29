@@ -19,7 +19,7 @@ param location string
 @allowed(['sandbox', 'dev', 'staging', 'production'])
 param environment string
 
-// ── Private Endpoint params (Wave-III; off in sandbox) ───────────────
+// ── Private Endpoint params (off in the sandbox posture) ──────────────
 
 @description('Enable private endpoint.')
 param enablePrivateEndpoint bool = false
@@ -60,7 +60,7 @@ resource redis 'Microsoft.Cache/redis@2024-11-01' = {
   }
 }
 
-// ── Private Endpoint (Wave-III) ──────────────────────────────────────
+// ── Private Endpoint ─────────────────────────────────────────────────
 
 resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (enablePrivateEndpoint) {
   name: 'pe-redis-${name}'
@@ -84,8 +84,8 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (e
   }
 }
 
-// Zone group only when a zone ID was supplied — '' means IT registers
-// the A record on their side (see key-vault.bicep for the rationale).
+// Zone group only when a zone ID was supplied — '' means the zone owner
+// registers the A record (see key-vault.bicep for the rationale).
 resource dnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = if (enablePrivateEndpoint && !empty(privateDnsZoneId)) {
   parent: privateEndpoint
   name: 'default'

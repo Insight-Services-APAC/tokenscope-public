@@ -104,17 +104,23 @@ Full walkthrough: **[docs/RUN-LOCALLY.md](docs/RUN-LOCALLY.md)**.
 
 ## Deploy to Azure
 
-Two modular, documented modes — pick per environment:
+One Bicep template, two postures:
 
-- **Sandbox** — public networking, optional Azure Front Door + WAF. Fast to
-  stand up for a pilot.
-- **Fully VNet-integrated** — private endpoints on every data plane, internal
-  ingress behind your own WAF, optional private Log Analytics query.
+| | Use it for | How |
+|---|---|---|
+| **Sandbox** | Trying TokenScope on Azure: a developer or pilot environment. Public endpoints; about an hour to first sign-in. | `infra/parameters/example-sandbox.bicepparam`, deployed by hand or with the example workflows |
+| **VNet-integrated** | Staging and production. Private endpoints on every data plane, internal-only app ingress, private registry. | `infra/parameters/example-vnetted.bicepparam`, deployed with the example GitHub Actions workflows |
 
-Both from the same Bicep, selected by two independent switches
-(`enablePrivateNetworking`, `enableFrontDoor`). See
-**[docs/DEPLOY-AZURE.md](docs/DEPLOY-AZURE.md)** and
-**[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
+**For production we recommend Azure Front Door Premium over Private Link:** no
+TokenScope service is reachable from the internet except through Front Door's
+WAF. Your own WAF or application gateway in front of the internal app is the
+supported alternative.
+
+- Walkthrough and prerequisites (Entra app registration, secrets, providers):
+  **[docs/DEPLOY-AZURE.md](docs/DEPLOY-AZURE.md)**
+- Tested GitHub Actions workflows (infra what-if/apply, build, roll, verify,
+  roll back): **[examples/github-actions/](examples/github-actions/README.md)**
+- Settings: **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**
 
 ## Is this for you?
 

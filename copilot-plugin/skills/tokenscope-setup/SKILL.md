@@ -62,16 +62,15 @@ nothing else. Use `instance_id` only when `enrolled` is `true`; anything else
 > before any rotation, but do not rely on that alone — pass the right id, or none.
 
 **Re-provisioning against a DIFFERENT deployment? Do NOT reuse the old id.** When
-you are moving this device from one TokenScope deployment to another (Sandbox→Dev,
-later Dev→Production), **omit** the existing `instance_id` so a fresh instance is
-minted under the new environment — passing the old id would try to rotate an
-instance that belongs to the _other_ deployment. Tell which environment you're on
-from the **`bearer_host`** the device-id helper printed in Step 2 (it carries
-`tokenscope-<env>`), or the `(Env)` label in the TokenScope status line if it's
-enabled.
+you are moving this device from one TokenScope deployment to another (for example
+from a sandbox to production), **omit** the existing `instance_id` so a fresh
+instance is minted under the new deployment — passing the old id would try to
+rotate an instance that belongs to the _other_ deployment. To tell, compare the
+**`bearer_host`** the device-id helper printed in Step 2 with the host of the
+deployment you are provisioning against (the host of the TokenScope MCP server
+this session is connected to).
 
-If that environment differs from the deployment you're now provisioning against,
-this is a cross-environment transition: omit the old id. (The local redeem helper
+If the hosts differ, this is a cross-environment transition: omit the old id. (The local redeem helper
 also detects the change from the bearer host and writes a **clean** config, so the
 old environment's credentials and endpoints are dropped rather than left at rest.)
 
@@ -165,12 +164,12 @@ Call `my_usage` again to confirm the MCP connection still answers. Then tell the
 - **Confirm actual landing out-of-band.** After a few minutes of real `copilot`
   usage, run `my_usage` (or open the dashboard) and look for this device's spend.
   That — not the setup output — is what tells you records are being attributed.
-- **A valid credential is not proof of capture either.** Run the `tokenscope-status`
+- **A valid credential is not proof of capture either.** Run the `status`
   skill and read `emission_healthy` (not `emitting` alone) and `usage_capture`:
   `enabled: false` means Copilot extensions are off: only sessions from a terminal
   that still exports the old `COPILOT_OTEL_FILE_EXPORTER_PATH` are captured (by the
   legacy forwarder), and nothing else is. Re-run setup.
-- **Next:** commit a `.tokenscope` per repo via the `tokenscope-project` skill. Copilot
+- **Next:** commit a `.tokenscope` per repo via the `project` skill. Copilot
   spend in a repo with one is tagged to that project; elsewhere it lands untagged until
   tagged with `tag_session`.
 
@@ -181,4 +180,4 @@ Call `my_usage` again to confirm the MCP connection still answers. Then tell the
 | `my_usage` says "Not authenticated"               | Let the browser OAuth consent finish, then retry.                                                                                                                      |
 | `provision_emit` handoff expired before redeem    | Handoff codes are ~5 min single-use — re-run `provision_emit` for a fresh one.                                                                                         |
 | Redeem helper reports a network error (not a 401) | Check network connectivity to the TokenScope server. If the base resolved wrongly, register the server in `~/.copilot/mcp-config.json` and re-run — the helper only accepts an origin it can already see, so neither `--api-base` nor `TOKENSCOPE_API_BASE` can introduce a host from this chat. |
-| Sessions not appearing in TokenScope              | Run the `tokenscope-status` skill. `usage_capture.enabled: false`: re-run setup, which enables Copilot extensions or says exactly what to change by hand (extension mode `disabled`, TokenScope's extension switched off in `/extensions`, or keys in Copilot's `config.json`), then restart copilot. `usage_capture.drift` set: Copilot's own totals and the recorded calls disagree, so report it. `usage_capture.backlog` over 24h old: records are not reaching the ingest endpoint (network); `usage_capture.backlog.error`: the spool directory cannot be read (check its permissions). |
+| Sessions not appearing in TokenScope              | Run the `status` skill. `usage_capture.enabled: false`: re-run setup, which enables Copilot extensions or says exactly what to change by hand (extension mode `disabled`, TokenScope's extension switched off in `/extensions`, or keys in Copilot's `config.json`), then restart copilot. `usage_capture.drift` set: Copilot's own totals and the recorded calls disagree, so report it. `usage_capture.backlog` over 24h old: records are not reaching the ingest endpoint (network); `usage_capture.backlog.error`: the spool directory cannot be read (check its permissions). |

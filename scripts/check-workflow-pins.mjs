@@ -21,7 +21,8 @@ import { resolve, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const WORKFLOWS_DIR = resolve(root, '.github/workflows')
+// The example workflows are copied into forks as-is, so they are held to the same rule.
+const WORKFLOW_DIRS = [resolve(root, '.github/workflows'), resolve(root, 'examples/github-actions')]
 
 const SHA_RE = /^[0-9a-f]{40}$/
 
@@ -53,11 +54,14 @@ export function findUnpinnedUses(content) {
 }
 
 function main() {
-  const files = readdirSync(WORKFLOWS_DIR).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+  const files = WORKFLOW_DIRS.flatMap((dir) =>
+    readdirSync(dir)
+      .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+      .map((f) => resolve(dir, f)),
+  )
   let failed = false
 
-  for (const file of files) {
-    const full = resolve(WORKFLOWS_DIR, file)
+  for (const full of files) {
     const rel = relative(root, full)
     const problems = findUnpinnedUses(readFileSync(full, 'utf8'))
     for (const p of problems) {

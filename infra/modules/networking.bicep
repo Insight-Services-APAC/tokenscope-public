@@ -1,9 +1,9 @@
 // ── Networking — VNet, subnets, private DNS zones ──────────────────
 //
-// Wave III deliverable. Only emitted when `enablePrivateNetworking =
-// true` (conditional in main.bicep). Sandbox stays public + RBAC and
-// never references this module's outputs; dev / staging / production
-// turn it on once this module is validated end-to-end.
+// Only emitted when `enablePrivateNetworking = true` (conditional in
+// main.bicep). The sandbox posture stays public + RBAC and never
+// references this module's outputs; VNet-integrated environments
+// (infra/parameters/example-vnetted.bicepparam) turn it on.
 //
 // VNet layout (default — overridable per env via main.bicep params):
 //   addressSpace          10.0.0.0/16
@@ -17,16 +17,15 @@
 //                          minimum and does not apply here).
 //   snet-private-endpoints   sized to the PE count. KV+PG+Redis = 3
 //                          (a /29's 3 usable); +ACR when ACR is private
-//                          = 4, so dev uses a **/28** (11 usable) for
+//                          = 4, so a **/28** (11 usable) leaves
 //                          headroom. Azure reserves 5 IPs of every subnet.
-// The defaults above are deliberately generous for staging/production
-// headroom; dev tightens to /26 VNet · /27 CA · /28 PE in dev.bicepparam.
+// The defaults above are deliberately generous; a tight allocation can go
+// down to /26 VNet · /27 CA · /28 PE.
 // Do not shrink the CA subnet below /27 — the env provisions will fail.
 //
-// Wave-VII* (corporate Dev rollout) — IT-actionable params: each VNet
-// range + the optional hub-peering target are parameterised so Insight
-// IT can plug their IPAM-assigned range + central hub VNet without
-// touching this module. Sandbox/staging/production keep the defaults.
+// Each VNet range + the optional hub-peering target are parameterised so
+// your network team can plug in an IPAM-assigned range + a central hub
+// VNet without touching this module.
 //
 // Private DNS zones (one per data-plane resource type):
 //   privatelink.vaultcore.azure.net          ← Key Vault
@@ -36,13 +35,11 @@
 //
 // Two DNS ownership modes:
 //   self-owned (default) — this module creates the four zones + links
-//     them to the VNet. Correct for standalone environments (sandbox,
-//     and staging/production until they move into an IT zone).
-//   central (IT zone)    — `centralDnsZonesSubscriptionId` +
+//     them to the VNet. Correct for standalone environments.
+//   central              — `centralDnsZonesSubscriptionId` +
 //     `centralDnsZonesResourceGroup` set → zones/links are NOT created;
-//     outputs compose resource IDs of IT's existing central zones, and
-//     IT creates the VNet links. Dev uses this (your-subscription /
-//     rg-hub-network-example per IT network team, 2026-06-11).
+//     outputs compose resource IDs of the existing central zones, and
+//     the owner of those zones creates the VNet links.
 
 @description('Resource name suffix (e.g. tokenscope-staging-aue).')
 param name string
@@ -50,44 +47,65 @@ param name string
 @description('Azure region for the VNet + subnets.')
 param location string
 
-@description('VNet resource name override. Empty = derive `vnet-<name suffix>` (sandbox/staging/production convention). IT-zone environments (dev) must use the name issued by the network team — e.g. vnet-tokenscope-example — because IT scripts the hub peerings + DNS VNet links against that exact name.')
+@description('VNet resource name override. Empty = derive `vnet-<name suffix>` (sandbox/staging/production convention). Set it when your network team issues the VNet name and scripts hub peerings + central DNS VNet links against that exact name.')
 param vnetName string = ''
 
-// ── Central private-DNS mode (IT-zone environments) ─────────────────
-// When IT manages the privatelink zones centrally (one zone per service
-// in a hub networking RG, linked to spoke VNets by IT automation), this
+// ── Central private-DNS mode ────────────────────────────────────────
+// When a central network team manages the privatelink zones (one zone per
+// service in a hub networking RG, linked to spoke VNets by their
+// automation), this
 // module must NOT create its own zones or links — duplicated zones on
 // the spoke VNet would shadow the central ones and break resolution
 // from peered networks. Set BOTH params to flip into consume-existing
 // mode: zone create + VNet-link resources are elided and the outputs
 // compose cross-subscription resource IDs pointing at the central
 // zones. The PE dnsZoneGroups in the data-plane modules then register
-// their A records into IT's zones — which requires the deploying SP to
-// hold Private DNS Zone Contributor (or at least join + record write)
-// on those zones. IT creates the VNet links (VNLs) on its side.
+// their A records into the central zones — which requires the deploying
+// SP to hold Private DNS Zone Contributor (or at least join + record
+// write) on those zones. The zones' owner creates the VNet links (VNLs).
 
-@description('Subscription ID hosting the IT-central privatelink DNS zones (e.g. your-subscription). Empty = self-owned zones (sandbox/staging/production).')
+@description('Subscription ID hosting the central privatelink DNS zones. Empty = self-owned zones.')
 param centralDnsZonesSubscriptionId string = ''
 
-@description('Resource group hosting the IT-central privatelink DNS zones (e.g. rg-hub-network-example). Empty = self-owned zones.')
+@description('Resource group hosting the central privatelink DNS zones. Empty = self-owned zones.')
 param centralDnsZonesResourceGroup string = ''
 
-@description('VNet address space CIDR. Default 10.0.0.0/16 matches sandbox-validated PSR layout. Insight IT typically assigns an IPAM-coordinated range for corporate Dev — override via dev.bicepparam.')
+@description('VNet address space CIDR. Default 10.0.0.0/16. Override with the range your network team assigns when the VNet must fit a corporate IPAM plan.')
 param vnetAddressSpace string = '10.0.0.0/16'
 
-@description('Container Apps subnet CIDR. MUST be >= /27 for this workload-profiles env (/23 is the legacy Consumption-only minimum). Delegated to Microsoft.App/environments. Default 10.0.0.0/23 fits inside the default /16; dev tightens to /27.')
+@description('Container Apps subnet CIDR. MUST be >= /27 for this workload-profiles env (/23 is the legacy Consumption-only minimum). Delegated to Microsoft.App/environments. Default 10.0.0.0/23 fits inside the default /16; a tight allocation can use /27.')
 param containerAppsSubnetPrefix string = '10.0.0.0/23'
 
-@description('Private-endpoint subnet CIDR. One NIC per data-plane PE: KV + PG + Redis (+ ACR when ACR is private) = up to 4. dev uses /28 (11 usable, headroom); default 10.0.2.0/24 has more. /29 only fits 3 (pre-ACR-private).')
+@description('Private-endpoint subnet CIDR. One NIC per data-plane PE: KV + PG + Redis (+ ACR when ACR is private) = up to 4. A /28 (11 usable) leaves headroom; default 10.0.2.0/24 has more. /29 only fits 3 (pre-ACR-private).')
 param privateEndpointsSubnetPrefix string = '10.0.2.0/24'
 
-@description('Optional dedicated subnet CIDR for the Azure Monitor Private Link Scope (AMPLS) private endpoint. The `azuremonitor` PE allocates several IPs (one per Monitor data-plane endpoint), more than fit alongside the data-plane PEs in the main PE subnet — so it gets its own subnet. Empty = no AMPLS subnet (the monitoring module then provisions no AMPLS PE). Set per-env where monitorQueryPrivateOnly is on (dev: 10.0.0.48/28).')
+@description('Optional dedicated subnet CIDR for the Azure Monitor Private Link Scope (AMPLS) private endpoint. The `azuremonitor` PE allocates several IPs (one per Monitor data-plane endpoint), more than fit alongside the data-plane PEs in the main PE subnet — so it gets its own subnet. Empty = no AMPLS subnet (the monitoring module then provisions no AMPLS PE). Set where monitorQueryPrivateOnly is on (a /28 is enough).')
 param amplsSubnetPrefix string = ''
 
-@description('Optional hub VNet resource ID for peering. Empty = no peering (default — sandbox/staging/production). Set in dev.bicepparam when Insight IT requires peering to a central hub VNet for on-prem connectivity. The peering is one-way (this VNet → hub); IT establishes the reverse peering on the hub side.')
+@description('Optional subnet for image builds inside the network: a self-hosted CI runner or an ACR Tasks agent pool. Empty = none. Declared here because the VNet lists its subnets inline, so a subnet added outside the template is removed by the next apply.')
+param buildSubnetPrefix string = ''
+
+@description('Optional NSG resource id attached to every subnet created here.')
+param subnetNetworkSecurityGroupId string = ''
+
+@description('Optional route table resource id for the Container Apps and build subnets.')
+param subnetRouteTableId string = ''
+
+@description('Optional NAT gateway resource id for the Container Apps and build subnets.')
+param natGatewayId string = ''
+
+// Attached here because the VNet lists its subnets inline: anything attached
+// to a subnet by hand is cleared by the next apply.
+var nsgProps = empty(subnetNetworkSecurityGroupId) ? {} : { networkSecurityGroup: { id: subnetNetworkSecurityGroupId } }
+var egressProps = union(
+  empty(subnetRouteTableId) ? {} : { routeTable: { id: subnetRouteTableId } },
+  empty(natGatewayId) ? {} : { natGateway: { id: natGatewayId } }
+)
+
+@description('Optional hub VNet resource ID for peering. Empty = no peering (default). Set it when your network requires peering to a central hub VNet for on-prem connectivity. The peering is one-way (this VNet → hub); the hub owner establishes the reverse peering on the hub side.')
 param hubVnetId string = ''
 
-@description('Use the hub VNet\'s gateway for on-prem connectivity (typical enterprise hub-spoke pattern with ExpressRoute / VPN). Default false stays safe when the hub has no gateway. Set true via dev.bicepparam when IT confirms the hub has a gateway AND has set allowGatewayTransit=true on the reverse peering. Ignored when hubVnetId is empty.')
+@description('Use the hub VNet\'s gateway for on-prem connectivity (typical enterprise hub-spoke pattern with ExpressRoute / VPN). Default false stays safe when the hub has no gateway. Set true only when the hub owner confirms the hub has a gateway AND has set allowGatewayTransit=true on the reverse peering. Ignored when hubVnetId is empty.')
 param useRemoteGateways bool = false
 
 @description('Tags applied to every resource in this module.')
@@ -118,7 +136,7 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
     subnets: concat([
       {
         name: 'snet-container-apps'
-        properties: {
+        properties: union(nsgProps, egressProps, {
           addressPrefix: containerAppsSubnetPrefix
           // Container Apps env requires the subnet delegated to
           // Microsoft.App/environments. Without this, the env's
@@ -132,18 +150,18 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
               }
             }
           ]
-        }
+        })
       }
       {
         name: 'snet-private-endpoints'
-        properties: {
+        properties: union(nsgProps, {
           addressPrefix: privateEndpointsSubnetPrefix
           // Private endpoint subnets must have
           // privateEndpointNetworkPolicies=Disabled (legacy default
           // for some regions). New deployments default correctly but
           // setting it explicitly avoids surprise.
           privateEndpointNetworkPolicies: 'Disabled'
-        }
+        })
       }
     ], empty(amplsSubnetPrefix) ? [] : [
       {
@@ -152,21 +170,27 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
         // overflow the shared PE subnet (SubnetIsFull). Inside our own VNet
         // address space, so no cross-VNet conflict.
         name: 'snet-ampls'
-        properties: {
+        properties: union(nsgProps, {
           addressPrefix: amplsSubnetPrefix
           privateEndpointNetworkPolicies: 'Disabled'
-        }
+        })
+      }
+    ], empty(buildSubnetPrefix) ? [] : [
+      {
+        name: 'snet-build'
+        properties: union(nsgProps, egressProps, {
+          addressPrefix: buildSubnetPrefix
+        })
       }
     ])
   }
 }
 
-// ── Hub VNet peering (optional, IT-driven) ──────────────────────────
+// ── Hub VNet peering (optional) ─────────────────────────────────────
 // Emitted only when `hubVnetId` is non-empty. The reverse peering
-// (hub → this VNet) MUST be created by IT on the hub side; without it
-// traffic flows one-way. Insight central tooling typically orchestrates
-// the pair via a hub-spoke automation; this module just creates our
-// spoke side.
+// (hub → this VNet) MUST be created by the hub owner on the hub side;
+// without it traffic flows one-way. This module just creates our spoke
+// side.
 
 resource peeringToHub 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2024-01-01' = if (!empty(hubVnetId)) {
   parent: vnet
@@ -178,7 +202,7 @@ resource peeringToHub 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@
     allowVirtualNetworkAccess: true
     allowForwardedTraffic: true
     // This VNet is a spoke — never lets others traverse via us (we have
-    // no gateway). useRemoteGateways defers to IT's call on whether the
+    // no gateway). useRemoteGateways defers to the hub owner on whether the
     // hub's gateway routes our on-prem traffic; default false stays safe.
     allowGatewayTransit: false
     useRemoteGateways: useRemoteGateways
@@ -190,13 +214,9 @@ resource peeringToHub 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@
 // linked to the VNet. The zones live at `global` location (they are
 // not regional resources).
 //
-// CONFIRMED 2026-06-11 (Tricia, IT network team): on the IT-hosted dev
-// instance the four privatelink zones are CENTRAL — they live in
-// your-subscription / rg-hub-network-example and IT creates the VNet
-// links. dev.bicepparam sets the central-DNS params, flipping this
-// module into consume-existing mode: nothing below is created, and the
-// outputs point at IT's zones. Sandbox/staging/production keep the
-// self-owned shape (params empty → resources emitted as before).
+// Setting the central-DNS params flips this module into consume-existing
+// mode: nothing below is created, and the outputs point at the central
+// zones. With the params empty (self-owned), the zones are created here.
 
 // Zone names are shared between create-mode (resource names below) and
 // central-mode (composed into cross-sub resource IDs in the outputs).
@@ -235,10 +255,10 @@ resource dnsAcr 'Microsoft.Network/privateDnsZones@2024-06-01' = if (!useCentral
 // would still try to reach `kv-...vault.azure.net` over the public IP
 // and the network ACL would block it.
 //
-// Central-DNS mode: SKIPPED — IT links its central zones to this VNet
-// from their side (we hand them the VNet name; they create the VNLs).
-// We could not create them anyway: the link is a child of the zone,
-// which lives in IT's subscription.
+// Central-DNS mode: SKIPPED — the zones' owner links the central zones to
+// this VNet from their side (given the VNet name). We could not create
+// them anyway: the link is a child of the zone, which lives in their
+// subscription.
 
 resource linkKeyVault 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (!useCentralDnsZones) {
   parent: dnsKeyVault
@@ -294,14 +314,17 @@ output privateEndpointSubnetId string = '${vnet.id}/subnets/snet-private-endpoin
 @description('Dedicated AMPLS-PE subnet resource ID, or empty when amplsSubnetPrefix is unset. Passed to the monitoring module for the Azure Monitor Private Link Scope private endpoint.')
 output amplsSubnetId string = empty(amplsSubnetPrefix) ? '' : '${vnet.id}/subnets/snet-ampls'
 
-@description('VNet resource name — handed to IT so they can create the hub peerings + central-zone VNet links against it.')
+@description('VNet resource name — hand it to whoever creates the hub peerings + central-zone VNet links.')
 output vnetName string = vnet.name
 
+@description('Build subnet resource ID (runner or ACR agent pool), or empty when buildSubnetPrefix is unset.')
+output buildSubnetId string = empty(buildSubnetPrefix) ? '' : '${vnet.id}/subnets/snet-build'
+
 // Zone-ID outputs: central mode composes cross-subscription resource
-// IDs pointing at IT's zones; self-owned mode returns our own. The PE
+// IDs pointing at the central zones; self-owned mode returns our own. The PE
 // dnsZoneGroup resources downstream accept either — registering records
 // into a cross-sub zone just needs the SP to hold join/record rights
-// on it (Private DNS Zone Contributor on IT's networking RG).
+// on it (Private DNS Zone Contributor on the zones' resource group).
 
 @description('Key Vault private DNS zone resource ID.')
 output dnsZoneKeyVaultId string = useCentralDnsZones

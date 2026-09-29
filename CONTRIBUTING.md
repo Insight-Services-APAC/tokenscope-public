@@ -16,7 +16,10 @@ it's that fit is a design goal.
 
 ```bash
 npm install
-npm run dev:stack && npm run dev     # local stack + app (see docs/RUN-LOCALLY.md)
+cp .env.example .env
+npm run dev:stack                    # backing services (see docs/RUN-LOCALLY.md)
+npm run db:migrate && npm run db:seed
+npm run dev
 npm run typecheck && npm run lint
 npm run test:unit && npm run test:integration
 ```

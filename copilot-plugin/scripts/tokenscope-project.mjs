@@ -103,7 +103,7 @@ export function computeCodeHash(code) {
  * trusting it downstream into a hash, a server request, or (session-start.mjs)
  * a developer-facing warning message that used to also reach the MODEL's
  * context via additionalContext. Admits `/` deliberately: real project codes
- * look like "6010011856/450127097" (see plugin/README.md's `.tokenscope`
+ * look like "1000012345/450000001" (see plugin/README.md's `.tokenscope`
  * example) — but excludes whitespace, quotes, backticks, and shell/markdown-
  * special characters that would be unsafe to interpolate into a message, a
  * URL query param, or a rendered warning.

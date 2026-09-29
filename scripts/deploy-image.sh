@@ -2,27 +2,28 @@
 #
 # deploy-image.sh — local image-roll to a TokenScope environment.
 #
-# A from-the-laptop substitute for the `.github/workflows/deploy.yml`
-# workflow_dispatch (used while the GitHub→Azure OIDC CD path is not yet
-# wired). Mirrors that workflow's build → push → roll → verify → rollback
-# exactly, so behaviour matches once GH CD lands.
+# A from-the-laptop image roll: build → push → roll → verify → rollback. For
+# CI/CD, see the copy-in workflow examples/github-actions/tokenscope-deploy.yml.
 #
 # NO DOCKER REQUIRED: the image builds inside ACR via `az acr build`
 # (server-side). The only prerequisite is an authenticated Azure CLI:
 #     az login            # interactive (device code / browser)
-#     az account set --subscription "<VS Enterprise sub id or name>"
+#     az account set --subscription "<subscription id or name>"
 #
 # Migrations: drizzle/migrate.ts runs on container boot (entrypoint.sh),
 # idempotently (tracked in _drizzle_migrations) — so this image roll
-# applies any new migrations (e.g. 0043/0044) automatically on start.
+# applies any new migrations automatically on start.
 #
 # SCOPE: image roll ONLY. It does NOT apply infra/Bicep changes (env vars,
-# scaling, networking). A change like CORE-4's NUXT_SECURITY_RATE_LIMITER_IP_HEADER
-# lives in infra/modules/container-app.bicep and needs an infra deploy
-# (`.github/workflows/infra.yml`, or `az deployment group create
-# --template-file infra/main.bicep --parameters infra/parameters/<env>.bicepparam
-# ...` with the PG/Entra/Anthropic/session/HMAC secrets) — see that workflow
-# for the full parameter surface.
+# scaling, networking). A change to, say, an env var in
+# infra/modules/container-app.bicep needs an infrastructure apply
+# (`az deployment group create --template-file infra/main.bicep --parameters
+# infra/parameters/<your>.bicepparam`, or examples/github-actions/
+# tokenscope-infra.yml) — see docs/DEPLOY-AZURE.md.
+#
+# Resource names: it assumes rg-/ca-tokenscope-<env>-aue and crtokenscope<env>aue
+# (the template's naming in Australia East, with a matching resource group
+# name). Edit RG / APP / ACR below if your deployment differs.
 #
 # Usage:
 #   scripts/deploy-image.sh [sandbox|staging|production] [tag]
@@ -45,7 +46,7 @@ case "$ENVIRONMENT" in
   *) echo "::error:: invalid environment '$ENVIRONMENT' (sandbox|staging|production)"; exit 1 ;;
 esac
 
-# Resolve + validate the tag (charset-locked to match deploy.yml / avoid injection).
+# Resolve + validate the tag (charset-locked to avoid injection).
 TAG="$TAG_INPUT"
 if [ -z "$TAG" ]; then TAG="$(git rev-parse --short HEAD)"; fi
 if ! printf '%s' "$TAG" | grep -Eq '^[a-zA-Z0-9._-]+$'; then

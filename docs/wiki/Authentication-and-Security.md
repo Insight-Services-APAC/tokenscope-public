@@ -4,9 +4,9 @@ As-built reference for how TokenScope authenticates callers and defends its data
 Names the exact mechanisms, env vars, headers, and cookies in the shipped code.
 System shape: [Architecture](Architecture.md). Endpoint detail: [API Reference](API-Reference.md).
 
-> Deployment-specific values (real hostnames, the upstream WAF, environment
-> switches) are illustrated generically here; the Insight instance's specifics
-> live in your deployment's own configuration.
+> Deployment-specific values (hostnames, the public entrypoint, environment
+> switches) are illustrated generically here; see
+> [Deployment & Operations](Deployment-and-Operations.md) for the switches.
 
 ## Trust boundaries
 
@@ -91,7 +91,7 @@ sequenceDiagram
 - Configured in `nuxt.config.ts` under the `entra` provider; OIDC enabled unless `NUXT_OIDC_AUTH_DEV_MODE === 'true'`.
 - Secrets (`clientId`, `clientSecret`, URLs) are build-time placeholders, overridden at boot by `NUXT_OIDC_PROVIDERS_ENTRA_*` env vars — `nuxt.config.ts` is evaluated at build with no secrets present, so reading `process.env` in provider config is deliberately avoided.
 - `userNameClaim = preferred_username`; the optional claims copied into the session are `oid`, `email`, `name`, `preferred_username` and `upn`. The last two carry the sign-in UPN, which is the axis the directory-exclusion policy matches on, and this list is their only source — `user.claims` is populated from it alone, and no `userInfoUrl` is configured. `userNameClaim` is not a substitute: it is read from the access token, which does not reliably carry `preferred_username`.
-- **Session resolution — Option C** (`docs/design/auth-session-cookie-architecture.md`): identity resolved **per request** from OIDC cookie + DB enrichment; the earlier dual-cookie `ts_session` bridge was retired.
+- **Session resolution — Option C**: identity resolved **per request** from OIDC cookie + DB enrichment; the earlier dual-cookie `ts_session` bridge was retired.
   - `tryAuth(event)` → resolved `Session` or `null` (unauthenticated / enrichment fails).
   - `requireAuth(event)` → strict gate; `401` problem-details on no session.
   - Enriched `Session` = `teammateId, email, displayName, role, regionId, orgPath, issuedAt`; **frozen + cached per request** on `event.context.__tokenscope_session` so middleware → `withRequestRls` → route share one DB lookup.
@@ -249,7 +249,7 @@ teammate whose baseline lacks that scope — a region admin included — to
 company-wide reporting, or **revoke** a person's report
 access entirely — per-teammate, revocable, optionally-expiring rows
 (`report_access_grant`, migs 0129 + 0130), without touching anyone's platform
-role. Design: `docs/design/report-visibility-policy.md`.
+role.
 
 **To grant report access** (requires Global finance or Platform admin — the
 roster is org-wide only): **Admin → Policies → Report access** → search the
@@ -583,44 +583,53 @@ sequenceDiagram
   1. **Pinned `appPublicOrigin`** (`APP_PUBLIC_ORIGIN`) — when an upstream WAF/proxy fronts the app under a fixed hostname, the app **pins its public origin from config**. This is deliberately independent of `Host`/`X-Forwarded-*`, so same-origin matching is correct **whether the proxy preserves or rewrites the `Host` header** — no reliance on the WAF forwarding the original Host.
   2. **`X-Forwarded-Host`** — honoured **only when `AZURE_FRONT_DOOR_ID` is set** (the same gate as `require-front-door`, inside which every request already carries a matching `X-Azure-FDID`, so the forwarded header is trustworthy). Trusting it otherwise would allow header-injection origin forgery. Even inside that gate the **last** hop is taken, never the first: each proxy *appends* its own value, so hop 1 is whatever the client sent and hop N is what Front Door itself set. (h3's own `xForwardedHost` option takes hop 1, which is why this is resolved by hand.)
   3. Otherwise the request's own Host (local dev / no proxy).
-- **Scheme** is resolved from `X-Forwarded-Proto` **unconditionally**, Front Door or not: TLS always terminates upstream of this process, so `connection.encrypted` is structurally false inside the container and is never the right signal. Absent the header (genuine local dev) it falls through to the request's own scheme. The two cacheable discovery documents (`/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`) send `Vary: X-Forwarded-Host, X-Forwarded-Proto, Host` so a shared cache in front of them cannot serve one origin's issuer to another's client.
-- **WAF-fronted deployments** (no per-app AFD): set `appPublicOrigin` to the public hostname the WAF exposes. Same-origin validation then uses the user-facing origin, not the internal Container Apps FQDN — with no dependency on the WAF's Host-forwarding behaviour. (The Insight dev value is in your deployment's own configuration.)
+- **Scheme**: `X-Forwarded-Proto` is honoured **only when `AZURE_FRONT_DOOR_ID` is set** (off that chain the header is caller-supplied, and a spoofed `http` would downgrade the expected origin). Otherwise the scheme is `https`, because TLS always terminates upstream of this process (`connection.encrypted` is structurally false inside the container); only a loopback host keeps the request's own `http` scheme, for local dev. The two cacheable discovery documents (`/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`) send `Vary: X-Forwarded-Host, X-Forwarded-Proto, Host` so a shared cache in front of them cannot serve one origin's issuer to another's client.
+- **WAF-fronted deployments** (no Front Door): set `appPublicOrigin` to the public hostname the WAF exposes. Same-origin validation then uses the user-facing origin, not the internal Container Apps FQDN — with no dependency on the WAF's Host-forwarding behaviour. Without it, CSRF falls back to the request's own `Host`.
+- **Emit credentials need a trusted origin.** The public origin is baked into every device's durable emit credential and the OAuth issuer, so `/setup/enroll`, `/setup/redeem` and the emit-bundle builder (`server/auth/emit-provision.ts`) call `assertTrustedPublicOrigin` (`server/utils/public-url.ts`). The origin counts as trusted only when `APP_PUBLIC_ORIGIN` is pinned, when `AZURE_FRONT_DOOR_ID` is set **and** the request carries `X-Forwarded-Host`, or when the host is loopback (local dev). Otherwise the app **refuses to issue the credential** (`500 Server Misconfigured`, "Set APP_PUBLIC_ORIGIN") rather than bake a host developers cannot reach.
 - Token-is-auth endpoints (`/setup/redeem`, `/bearer`) and the cookieless OAuth endpoints (`/oauth/token`, `/oauth/register`, `/oauth/revoke`) have **no** CSRF check — they carry no cookie. (The cookie-bearing `POST /oauth/authorize` consent grant **does** assert same-origin.)
 
 ## Network — edge & ingress
 
-TokenScope supports two edge topologies, selected by `enableFrontDoor` /
-`AZURE_FRONT_DOOR_ID`:
+TokenScope supports three edge shapes, selected by `enablePrivateNetworking`,
+`enableFrontDoor` / `frontDoorSku`, and `frontDoorId` (→ `AZURE_FRONT_DOOR_ID`):
 
-**VNet-integrated mode (no per-app Front Door).** The network perimeter — **VNet +
-an upstream WAF/edge** — is the edge control:
+**Front Door Standard (sandbox).** The Container App ingress stays **public**
+(Standard cannot reach an internal environment); protection is the Front Door WAF
+plus the **header check** below.
 
-- The ACA environment is **internal** (private VIP), not publicly reachable. An
-  **upstream WAF** is the public entrypoint; traffic reaches the app over the
-  VNet, so the `*.azurecontainerapps.io` FQDN is not exposed to the internet.
+**Front Door Premium (VNet-integrated, recommended for production).** The ACA
+environment is **internal**; Front Door reaches it over **Private Link**, so the
+app is not reachable from the internet except through Front Door's WAF. The
+**header check** still applies once `frontDoorId` is set.
+
+**Your own WAF (VNet-integrated, no Front Door).** The network perimeter (VNet +
+your WAF/edge) is the edge control:
+
+- The ACA environment is **internal** (private VIP), not publicly reachable. Your
+  WAF is the public entrypoint; traffic reaches the app over the VNet, so the
+  `*.azurecontainerapps.io` FQDN is not exposed to the internet.
 - `require-front-door` middleware (`server/middleware/require-front-door.ts`) is
-  therefore **inert**: `AZURE_FRONT_DOOR_ID` is unset, so it is a deliberate no-op
-  and the app is reachable over the VNet. The network perimeter (internal ingress
-  + WAF), not a header check, is the edge control here.
-- `AZURE_FRONT_DOOR_REQUIRED=true` overrides that no-op: with the flag set and no
-  FDID wired, the middleware **refuses every request** except `EXCLUDED_PATHS`
-  instead of falling through. It exists so an operator can close the phase-1/2
-  window explicitly ("no AFD id yet, but direct access must not be allowed")
-  without the middleware ever *inferring* "this looks like production" on its own.
-  Unset preserves the exact three-phase no-op, which initial provisioning depends
-  on. **This is the code half only — no environment's infra parameters set it, or
-  set a real `AZURE_FRONT_DOOR_ID`, so nothing enforces on it today.**
+  **inert**: `AZURE_FRONT_DOOR_ID` is unset, so it is a deliberate no-op. The
+  network perimeter (internal ingress + WAF), not a header check, is the edge
+  control here.
 
-**Front-Door-fronted mode.** The header-check mechanism still ships for
-environments that front the app with a per-app Azure Front Door:
+**The header check** (`require-front-door`):
 
 - When `AZURE_FRONT_DOOR_ID` is populated, the middleware rejects any request
   lacking a matching `X-Azure-FDID` header (the AFD instance ID injected by Front
-  Door) — for that topology, ingress stays public and protection is by header
-  check rather than private networking.
-- **Phased** via `AZURE_FRONT_DOOR_ID`: unset/empty (dev / non-AFD) → deliberate no-op; populated → enforces, direct-to-origin → `403`.
+  Door) with `403`.
+- **Phased** via `AZURE_FRONT_DOOR_ID`: unset/empty (first applies, or no Front
+  Door) → deliberate no-op; populated → enforces.
+- `AZURE_FRONT_DOOR_REQUIRED=true` overrides the no-op: with the flag set and no
+  FDID wired, the middleware **refuses every request** except `EXCLUDED_PATHS`.
+  It lets an operator close the window before `frontDoorId` is known without the
+  middleware ever *inferring* "this looks like production". The Bicep templates
+  do not set it; it is an operator-set environment variable.
 - `/api/health` is **exempt** — Container Apps' internal LB probes it directly (blocking it would loop-restart replicas).
 - Plain equality compare (AFD ID is DNS-discoverable, not a secret); logs record only path + a coarse header-present signal, never the expected/received ID.
+- With `frontDoorId` set, the rate limiter keys on Front Door's `X-Azure-ClientIP`
+  (`NUXT_SECURITY_RATE_LIMITER_IP_HEADER`) instead of the spoofable first
+  `X-Forwarded-For` hop.
 
 ## Audit logging
 
@@ -633,8 +642,7 @@ Each of these has a disposition in the [Security Overview](Security-Overview.md)
 risk register; this is the mechanism-level view of the same list.
 
 - **CSP `style-src` allows `'unsafe-inline'`** (`nuxt.config.ts`) — baseline gap `@nuxt/ui` v4 requires for injected styles. Rest of CSP is tighter: `frame-ancestors 'none'` (clickjacking — never iframed by design), constrained `img-src`/`font-src`.
-- **Origin enforcement is not running anywhere.** `AZURE_FRONT_DOOR_REQUIRED` ships in code; no environment sets it, and none supplies a real `AZURE_FRONT_DOOR_ID`. The same emptiness leaves nuxt-security's global rate limiter keyed on a spoofable forwarded hop.
-- **`appPublicOrigin` is pinned in dev only.** `dev.bicepparam` is the only parameter file that sets it, and it is also the only environment this repo deploys; anything stood up from the `example-*` templates derives its public origin from forwarded headers instead. That origin is baked into every device's durable emit credential and the OAuth issuer.
-- **Postgres connections encrypt but do not authenticate the server.** The `verify-full` change and a single connection factory are in code and the pre-flight **warns**; it takes effect only on an `infra.yml` apply that rewrites the `DATABASE_URL` secret.
+- **Origin enforcement depends on configuration.** The header check runs only once `frontDoorId` is set; until then (and in the own-WAF shape) the network perimeter is the control, and nuxt-security's global rate limiter stays keyed on the first `X-Forwarded-For` hop, which a caller can spoof.
+- **Postgres connections encrypt but do not authenticate the server.** The `verify-full` change and a single connection factory are in code and the pre-flight **warns**; it takes effect only on an apply of `main.bicep` that rewrites the `DATABASE_URL` secret.
 - **The anonymous OAuth registration ceiling is per-process.** The per-source sliding window is an in-memory counter, so it is one ceiling per replica, not one per deployment. The global client cap and the 1-hour abandonment sweep are what actually bound it.
 - **A live emit handoff code appears in the agent transcript** for its ~5-minute, single-use, instance-bound life. That is the accepted cost of keeping the *durable* credential out of the LLM channel entirely.

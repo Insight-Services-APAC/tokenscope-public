@@ -7,6 +7,24 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## 2026-09-29 (snapshot cba982b4)
+
+- The deploy guide names the Anthropic credential the published template
+  actually reads, so Claude spend reconciliation finds its key.
+- Staging and production deployments can put Azure Front Door Premium in front
+  of the VNet-integrated posture over Private Link, so nothing but Front Door's
+  WAF is public; the template refuses Front Door Standard there. The apply
+  approves Front Door's Private Link request while it runs, and an optional
+  build subnet hosts a self-hosted runner or an ACR agent pool for building into
+  the private registry.
+- The public docs were checked end to end: installing the plugins and pointing
+  them at your own deployment, configuration, the architecture and wiki pages
+  now describe what the code does.
+- Example GitHub Actions workflows (`examples/github-actions/`) deploy
+  TokenScope from your fork: infrastructure with a what-if preview, and image
+  rolls that only promote a build once it is verified serving, rolling back
+  otherwise.
+
 ## 2026-09-29 (snapshot 0bc69c1f)
 
 - Running locally and deploying to Azure now work as documented: the local

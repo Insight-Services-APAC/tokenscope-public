@@ -6,15 +6,10 @@ the marketplace plugin plus the telemetry contract that makes a developer's
 as-built mechanism, not an end-user tutorial.
 
 See also: [Architecture](Architecture.md) · [API Reference](API-Reference.md).
-Source of truth for the emission recipe:
-`docs/development/claude-code-telemetry-contract.md`.
 
-> **MCP-first cutover (PR #37 backbone + PR #38).** The old setup-token enrolment
-> (`/tokenscope:enrol` → `POST /api/v1/me/setup-token` → `POST /api/v1/setup/exchange`)
-> was **retired**. Device onboarding is now an MCP OAuth flow: connect the MCP
-> (one browser consent), then run the `tokenscope-setup` prompt, which provisions
-> emitting via a secret-isolating handoff (`provision_emit` → `/api/v1/setup/redeem`).
-> See MCP-first client backbone (`docs/design/mcp-client-backbone.md`).
+Device onboarding is an MCP OAuth flow: connect the MCP (one browser consent),
+then run the `tokenscope-setup` prompt, which provisions emitting via a
+secret-isolating handoff (`provision_emit` → `/api/v1/setup/redeem`).
 
 ## Connect + emission flow
 
@@ -133,11 +128,12 @@ so it vendors verbatim into the Copilot plugin.
 The **device-local** commands (`plugin/commands/*.md` → `plugin/scripts/*.mjs`)
 are the Claude-specific surface that the MCP spine can't cover — genuinely local
 or emit-probe work. Install — **slash form, inside Claude Code** (no `claude` CLI
-on PATH needed): `/plugin marketplace add Insight-Services-APAC/tokenscope-public` then
-`/plugin install tokenscope@tokenscope`. The manifest is the repo-root
-`.claude-plugin/marketplace.json`; the add is an authenticated git clone (works
-for the private repo). A lighter terminal-CLI alternative
-(`claude plugin marketplace add … --sparse .claude-plugin plugin`)
+on PATH needed): `/plugin marketplace add <owner>/<repo>` then
+`/plugin install tokenscope@tokenscope`, where `<owner>/<repo>` is the repository
+that carries your deployment's plugin (see "Installing for your own deployment"
+below). The manifest is the repo-root `.claude-plugin/marketplace.json`; the add
+is a git clone (authenticated, so a private fork works). A lighter terminal-CLI
+alternative (`claude plugin marketplace add … --sparse .claude-plugin plugin`)
 sparse-checks-out only those two dirs but requires the standalone `claude` CLI.
 
 | Command                            | What it does                                                                                                                                                                                                                                                                                             | Backing                                                                  |
@@ -179,24 +175,48 @@ authenticates as itself, never via a borrowed browser cookie. The old
 `TOKENSCOPE_AUTH_COOKIE` crutch is gone.
 
 The published versions are declared in three places that must move
-together, and this page deliberately does NOT restate the numbers: a literal
-version in prose drifts the moment a plugin is bumped, and it drifted exactly
-that way (this paragraph said 0.1.28 / 0.1.7 while the manifests had moved on).
-Read them from `.claude-plugin/marketplace.json` (both entries) and each plugin's own
+together, and this page deliberately does NOT restate the numbers. Read them from `.claude-plugin/marketplace.json` (both entries) and each plugin's own
 manifest. Claude Code caches an installed plugin **by version** and re-installs
 only when the number **increases** — a fix shipped without a bump reaches no
 device, however many restarts the fleet does. A CI check fails the build on a
 plugin-code change with no version bump, and a sync-manifest guard keeps the
 vendored `copilot-plugin/` copies byte-identical to their sources.
 
+### Installing for your own deployment
+
+The API base is **baked into the plugin per deployment**, by design: an off-box
+`TOKENSCOPE_API_BASE` is ignored (only loopback, e.g. `http://localhost:3450`, is
+honoured, for local dev), because a cloned repository can set that variable. So
+the plugin in this repository points at the maintainers' deployment. To point
+developers at yours, either:
+
+1. **Fork and set your host (recommended).** In your fork, set your deployment's
+   URL (`https://<your-host>`) in all four places that must agree:
+   - `plugin/scripts/api-base.mjs` — `DEFAULT_API_BASE`
+   - `plugin/.mcp.json` — the default inside `${TOKENSCOPE_API_BASE:-…}/api/v1/mcp`
+   - `copilot-plugin/.mcp.json` — the literal `url` (Copilot does not expand `${VAR}`)
+   - `copilot-plugin/scripts/enroll.mjs` — its own `DEFAULT_API_BASE`
+
+   Then run `npm run sync:copilot-plugin` and `npm run check:copilot-plugin-sync`
+   (it fails if the four hosts disagree or a vendored copy is stale), bump the
+   plugin versions (`plugin/.claude-plugin/plugin.json`,
+   `copilot-plugin/plugin.json` and both entries in
+   `.claude-plugin/marketplace.json`; an installed plugin only updates when the
+   number increases), and have developers add **your fork** as the marketplace.
+2. **Register the MCP server yourself.** Keep the published plugin and register
+   your server at user scope:
+   `claude mcp add --transport http --scope user tokenscope https://<your-host>/api/v1/mcp`.
+   The scripts discover that registration (it is configuration the developer
+   wrote, not something a repository can supply) and prefer it over the baked
+   default.
+   The plugin's own bundled MCP entry (`plugin/.mcp.json`) still names the baked
+   host, so this leaves two `tokenscope` servers side by side; a fork avoids that.
+
 ## Plugin trust boundary
 
 Claude Code merges a repository's `.claude/settings.local.json` over the device's
 global `~/.claude/settings.json`, **per key**, with the repo-local value winning
-any key present in both — measured against Claude Code 2.1.232 in
-`env-precedence-capture.md`.
-(ADR-0006
-§2 previously described this as wholesale replacement; that claim is amended.)
+any key present in both — measured on Claude Code 2.1.232 and 2.1.283.
 Any cloned repository therefore gets a vote on the environment the plugin's own
 scripts run under — which is fine for a project claim and not fine for anything
 that carries a credential. Merge makes the boundary **more** important than
@@ -262,9 +282,7 @@ looking untouched.
 ## Telemetry contract
 
 The load-bearing detail. Claude Code emits OTLP **directly** to Azure Monitor —
-**no collector on the Claude path** (ADR-0003). Verified against Claude Code
-v2.1.158 (2026-06-01). Full recipe:
-`docs/development/claude-code-telemetry-contract.md`.
+**no collector on the Claude path**. Verified against Claude Code v2.1.158.
 
 - **Emit LOG events, not metrics.** Attribution joins on the `api_request` log
   event — it carries `input_tokens`, `output_tokens`, `cache_read_tokens`,
@@ -317,8 +335,8 @@ The repo tag (`writeRepoTag`) copies the device env into a tagged repo's
 (`CLAUDE_CODE_ENABLE_TELEMETRY`, the OTel exporters, the logs endpoint and protocol).
 Claude Code 2.1.283 refuses those from a project settings file and warns at startup;
 they apply from `~/.claude/settings.json`. The project tag still applies from the repo
-file ([captured on 2.1.283](../security-sprint/env-precedence-capture-2.1.283.md)). Supported CLI builds are roughly the last 4-6 weeks
-(ADR-0006, amended 2026-09-26).
+file (measured on Claude Code 2.1.232 and 2.1.283). Supported CLI builds are
+roughly the last 4-6 weeks.
 
 The Content-Length forwarder that worked around the chunked-OTLP regression in CLI
 2.1.191-2.1.211 (fixed in 2.1.212) was removed in Claude plugin 0.1.41.
@@ -370,8 +388,6 @@ The Content-Length forwarder that worked around the chunked-OTLP regression in C
 | OAuth 2.1 routes                   | `server/api/v1/oauth/*.ts`                                                   |
 | Retroactive assign                 | `server/api/v1/me/sessions/[sid]/assign`                                     |
 | Telemetry reader                   | `server/azure/reader.ts`                                                     |
-| Telemetry contract (full recipe)   | `docs/development/claude-code-telemetry-contract.md`                         |
-| MCP-first client backbone (design) | `docs/design/mcp-client-backbone.md`                                         |
 | Plugin user guide                  | `plugin/README.md`                                                           |
 
 > [VERIFY] `claude plugin marketplace add` / `claude plugin install` verb names

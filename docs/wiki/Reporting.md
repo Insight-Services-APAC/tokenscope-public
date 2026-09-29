@@ -1,13 +1,9 @@
 # Reporting — showback, chargeback, and what every number means
 
 > **Status:** as-built reference + the bar new reporting work is audited
-> against. Canonical model:
-> `docs/design/provider-billing-attribution-model.md`
-> (§A / §B). Governing decisions:
-> ADR-0010
-> (showback vs chargeback) and
-> ADR-0011
-> (governance is data, not config).
+> against. Canonical model: §A / §B (see [Data Flow](Data-Flow.md)). Governing
+> decisions: ADR-0010 (showback vs chargeback) and ADR-0011 (governance is data,
+> not config).
 >
 > **Not everything here is built yet.** Workstream B (2026-07-29) built the
 > governance-is-data mechanism — `billing` is now the read authority, gated
@@ -48,7 +44,7 @@ together**.
 | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Question  | "What did we consume?"                                                                                                                                                | "What do we cross-charge?"                                                                                                                    |
 | Audience  | Practice managers, region leaders, developers                                                                                                                         | Finance                                                                                                                                       |
-| Includes  | **Everything genuine** — NFR, demo, exempt, personal subscriptions, every vendor and surface (mig 0101, Workstream A: every metered surface is now covered — see §6). Personal declarations add self-reported §A context without changing §B. | Only spend Insight pays _and_ cross-charges                                                                                                   |
+| Includes  | **Everything genuine** — NFR, demo, exempt, personal subscriptions, every vendor and surface (mig 0101, Workstream A: every metered surface is now covered — see §6). Personal declarations add self-reported §A context without changing §B. | Only spend the organisation pays _and_ cross-charges                                                                                                   |
 | Excludes  | Only quarantined telemetry (ADR-0010 rule 2)                                                                                                                          | NFR / tracked provider spend; self-declared personal costs never enter the provider ledger                                                     |
 | Source    | `v_complete_usage`                                                                                                                                                    | `v_finance_bill_chargeback` (Anthropic, per-teammate, daily) + `v_finance_copilot_pool_chargeback` (Copilot, pooled per cost-centre, monthly) |
 | UI toggle | `Usage · attributed`                                                                                                                                                  | `Chargeback · billed`                                                                                                                         |
@@ -72,9 +68,7 @@ healthy data or, far worse, gets "fixed" by suppressing genuine licence cost,
 which is real money disappearing from the books to satisfy a bad test.
 
 So: compare **metered against metered**, excluding licence lanes, and guard it
-with a test rather than with vigilance. See
-`docs/design/usage-completeness-and-provider-governance.md` §1.1 for the
-derivation and the lane split.
+with a test rather than with vigilance.
 
 ### What the `Chargeback · billed` toggle now moves — including Top drivers
 
@@ -218,9 +212,9 @@ consulted again — see `server/governance/verdict.ts`.
 
 | Status                        | Whose money                                                                  | §A showback        | §B chargeback |
 | ------------------------------ | ---------------------------------------------------------------------------- | ------------------ | ------------- |
-| `billed`                      | Insight pays and cross-charges                                               | included           | **included**  |
-| `tracked`                     | Insight pays or receives free; not cross-charged (NFR, demo, partner-funded) | included           | excluded      |
-| `personal` (teammate-level, not a `billing` value) | The individual pays; no Insight money                   | included, labelled | excluded      |
+| `billed`                      | The organisation pays and cross-charges                                      | included           | **included**  |
+| `tracked`                     | The organisation pays or receives free; not cross-charged (NFR, demo, partner-funded) | included | excluded      |
+| `personal` (teammate-level, not a `billing` value) | The individual pays; no organisation money             | included, labelled | excluded      |
 
 A row whose governance key (`provider_org_id` / `provider_enterprise_id`,
 migration 0103) cannot be resolved is **governance-unresolved**: always
@@ -589,9 +583,9 @@ pooled allowance = Σ active seats × included allowance
 overage          = max(0, Σ org AIC usage − pooled allowance)
 ```
 
-An individual exceeding their $70 costs Insight **nothing** while the pool
-holds. In the APAC NFR org — 133 seats, several users past $70 — the pool is
-still under, so the overage is **zero**. This is _why_ per-user overage is not a
+An individual exceeding their $70 costs the organisation **nothing** while the
+pool holds. For example, an org of 133 seats with several users past $70 can
+still be under the pool, so the overage is **zero**. This is _why_ per-user overage is not a
 charge: it is not money.
 
 Per-user AIC consumption is still **displayed** — that is the point of
@@ -613,17 +607,16 @@ agree from day one. Admin API/UI: `GET`/`POST
 
 ### Allocating pooled overage
 
-**If the pool holds, nothing is charged beyond the seat** — Insight paid
-nothing extra, however many individuals went over. This is the common case, and
-the case Insight is in today.
+**If the pool holds, nothing is charged beyond the seat** — the organisation
+paid nothing extra, however many individuals went over. This is the common case.
 
 When the pool _is_ exhausted, the overage `O` actually billed is distributed to
-cost centres by a configurable per-enterprise policy (ADR-0011 D10). **Insight's
-policy is `consumption-share`**: weight `usage`, normalised so
+Business Units by a configurable per-enterprise policy (ADR-0011 D10). **The
+default policy is `consumption-share`**: weight `usage`, normalised so
 `Σ allocations == O` exactly.
 
-The rationale is organisational, not mathematical. Insight's AI function is a
-**cost centre, not a profit centre** — when overage is paid, the bill is split
+The rationale is organisational, not mathematical. It suits an organisation
+whose AI function is a **cost centre, not a profit centre** — when overage is paid, the bill is split
 across everyone who consumed, in proportion to consumption. Each person's share
 is then almost always _far less than they consumed_, because the pooled
 allowance absorbs most of the total. That is the intended outcome: the pool is a
@@ -661,7 +654,7 @@ this persisted mechanism.
 
 ### Three per-user numbers — never conflate them
 
-| Number                       | Insight value | What it is                                                      |
+| Number                       | Example value | What it is                                                      |
 | ---------------------------- | ------------- | --------------------------------------------------------------- |
 | Seat licence                 | $39/mo        | **Real cost**, charged every month regardless of usage          |
 | Included AI-Credit allowance | $70/user      | **Pool contribution** — exceeding it individually costs nothing |
@@ -717,8 +710,7 @@ provider-neutral instead: `shared/usage/surface.ts`'s
 `INGEST_ONLY_USAGE_TOOLS` generalises "§A-visible, never taggable" to every
 surface that needs it (both non-Code Claude AND `copilot-agent`), and
 `server/usage/unaccounted-reconciliation.ts` is the one place that reads it to
-keep the needs-tagging worklist clean. See
-`docs/design/usage-completeness-and-provider-governance.md` §3.1 (A1–A3). The
+keep the needs-tagging worklist clean. The
 arm cannot become a worklist item because the worklist reads
 `unaccounted_usage`, not `v_complete_usage` — pinned by
 `tests/integration/reports/complete-usage-view.test.ts` and
@@ -759,9 +751,7 @@ them) and some real configurations match none (a `provider_org` row pointing at
 a different enterprise, an installation of a different App, a failed capability
 probe). The classification is a **precedence-ordered truth table** of seven
 states, adding `mislinked` and `coverage-unknown`, evaluated against a specific
-target enterprise and the reconciliation App's own id. See
-`docs/design/usage-completeness-and-provider-governance.md` §6 for the table
-(now built).
+target enterprise and the reconciliation App's own id.
 
 **The reporting obligation:** any enterprise-scoped total must be presented with
 its coverage denominator — _"covers 12 of 15 orgs"_ — and must not be described
@@ -879,7 +869,7 @@ chargeback as a **charge** (`NUXT_COPILOT_CHARGEBACK_ENABLED`, default off →
 only — `copilot-pool-bill` writes `copilot_pool_bill` regardless.
 
 Report access grants are layered on top by
-`shared/auth/report-visibility.ts` (`docs/design/report-visibility-policy.md`) — the
+`shared/auth/report-visibility.ts` — the
 documented exception to the "every handler has `requireRole`" rule.
 
 

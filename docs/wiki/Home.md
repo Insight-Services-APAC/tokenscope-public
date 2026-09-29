@@ -1,13 +1,13 @@
 # TokenScope — Engineering Wiki
 
 The **built spec** for TokenScope: the living, as-built reference for developers,
-maintainers, and operators. For _why_ the system is shaped this way see the
-design docs (`docs/design/`) and ADRs (`docs/decisions/`); this wiki is _what is
-actually running_.
+maintainers, and operators. For _why_ the system is shaped this way see
+[ARCHITECTURE.md](../ARCHITECTURE.md) and [PRINCIPLES.md](../PRINCIPLES.md); this
+wiki is _what is actually running_.
 
-> **Status: 1.0.0-rc.1 — release candidate.** TokenScope runs end to end in an
-> internal, IT-hosted Azure environment. **Claude Code and the GitHub Copilot CLI
-> are both supported clients**, on a shared MCP server + OAuth 2.1 backbone.
+> **Status: 1.0.0-rc.1 — release candidate.** TokenScope runs end to end on Azure
+> ([DEPLOY-AZURE.md](../DEPLOY-AZURE.md)). **Claude Code and GitHub Copilot are
+> both supported clients**, on a shared MCP server + OAuth 2.1 backbone.
 > Usage is reconciled against the provider APIs on both lanes — Anthropic's
 > Analytics API and GitHub's Copilot billing API — and reporting covers
 > attributed usage, chargeback and budgets.
@@ -28,7 +28,7 @@ flowchart LR
     APP["TokenScope web app<br/>budgets · rollups · untagged worklist"]
     POLL["Analytics API poller<br/>(batch truth)"]
 
-    CC -- "OTLP api_request logs" --> AM
+    CC -- "OTLP logs (Claude api_request /<br/>Copilot usage extension)" --> AM
     AM -- "KQL" --> JOIN
     JOIN --> DB
     POLL --> DB
@@ -48,10 +48,10 @@ bucket — not static quotas.
 - **[Architecture](Architecture.md)** — logical + technical architecture, the attribution data flow, the trust model.
 - **[Data Model](Data-Model.md)** — the as-built Postgres schema, by domain.
 - **[Reporting](Reporting.md)** — showback vs chargeback, the three axes (provenance, billing status, lane), the per-metered-lane §A ≥ §B invariant, and the contract every report is built against.
-- **[API Reference](API-Reference.md)** — every `/api/v1` endpoint, its auth gate and purpose.
-- **[Background Workers](Background-Workers.md)** — the external-cron scheduler + the 31 workers.
+- **[API Reference](API-Reference.md)** — the `/api/v1` endpoints clients and operators use, their auth gates and purpose.
+- **[Background Workers](Background-Workers.md)** — the external-cron scheduler + the 33 workers.
 - **[Claude Code Client](Claude-Code-Client.md)** — the plugin, provisioning flow, and the OTel telemetry contract.
-- **[Copilot CLI Client](Copilot-CLI-Client.md)** — the GitHub Copilot CLI plugin, file-forwarder, and Copilot spend model.
+- **[Copilot CLI Client](Copilot-CLI-Client.md)** — the GitHub Copilot plugin, its usage extension, and the Copilot spend model.
 - **[Deployment & Operations](Deployment-and-Operations.md)** — Azure topology, the deploy pipeline, environments, runbooks.
 
 **Security & network (review surfaces):**

@@ -9,12 +9,8 @@
 // ── SAFETY CONTRACT ─────────────────────────────────────────────────
 // Every secret write below is wrapped in `if (!empty(<param>))`. An
 // empty parameter is a NO-OP and leaves the existing KV value intact.
-// NEVER remove these guards — a bicep run with empty params previously
-// clobbered 6 production secrets (lineage: Tuckwell incident
-// 2026-04-15 01:04 UTC, full RCA at /workspace/tmp/infra/bicep/modules/
-// keyvault-secrets.bicep:10-17), including a PII encryption key which
-// was load-bearing for decrypting already-stored data. The same trap
-// applies here: TokenScope's HMAC + session keys protect signed
+// NEVER remove these guards — a bicep run with empty params would
+// otherwise clobber every stored secret with an empty value. TokenScope's HMAC + session keys protect signed
 // state across revisions. Clobbering them on an empty re-run would
 // invalidate every active developer session AND every plugin-emitted
 // session-attestation token. Rotate by passing the new value
@@ -36,7 +32,7 @@ param pgAdminPassword string = ''
 @description('PostgreSQL server FQDN (e.g. psql-tokenscope-sandbox-aue.postgres.database.azure.com).')
 param pgServerFqdn string = ''
 
-// ── RLS enforcement: the non-owner app role (docs/design/rls-enforcement.md §9) ──
+// ── RLS enforcement: the non-owner app role ──
 // The 40 RLS policies do not execute because the app connects as the table
 // OWNER, and an owner bypasses RLS without FORCE. Enforcement needs a non-owner
 // login, created at boot by drizzle/provision-app-role.ts from the password
@@ -101,10 +97,10 @@ param anthropicApiKey string = ''
 //   1. NFR / internal (e.g. the partner-demo enterprise — credential_secret_name
 //      'partner-demo' -> env NUXT_GITHUB_PAT_PARTNER_DEMO -> kv secret
 //      'github-pat-partner-demo').
-//   2. Production (a real client enterprise — name + slug supplied post-merge per
-//      the multi-org onboarding runbook).
-// PAT scopes: manage_billing:enterprise + read:org + per-org SAML SSO authorization
-// (see docs/build/copilot-multi-org-onboarding.md §2). Onboarding a credential is a
+//   2. Production (a real client enterprise — name + slug supplied when that
+//      enterprise is onboarded).
+// PAT scopes: manage_billing:enterprise + read:org + per-org SAML SSO authorization.
+// Onboarding a credential is a
 // DEPLOYMENT change (provision the value + redeploy), by design.
 @description('GitHub manage_billing PAT for the NFR/internal enterprise (credential_secret_name "partner-demo"). Empty = NO-OP (F2 stays gated off).')
 @secure()
@@ -119,7 +115,7 @@ param githubPatProduction string = ''
 param githubPatApacNfr string = ''
 
 // ── GitHub App private keys (App-credential path — OPT-IN per enterprise) ──
-// The App-mode replacement for a PAT (docs/design/github-pat-to-github-app-transition.md):
+// The App-mode replacement for a PAT:
 // a registered GitHub App's PRIVATE KEY, read at runtime as NUXT_GITHUB_APP_KEY_<NAME>
 // (server/reconciliation/credentials.ts: envKeyForGithubAppKey -> prefix
 // NUXT_GITHUB_APP_KEY_ + upper-cased, '-'→'_' credential_secret_name). The matching
@@ -134,13 +130,13 @@ param githubPatApacNfr string = ''
 @secure()
 param githubAppKeyPartnerDemo string = ''
 
-// ── Ops alerting channel (docs/design/ops-alerting.md §A1) ──────────
+// ── Ops alerting channel ─────────────────────────────────────────────
 // The ntfy topic URL IS the credential — the 64-char CSPRNG topic name is the
 // only access control on the public ntfy.sh channel — so it lives in Key Vault
 // and reaches the container ONLY as a secretRef (ar-M20). Empty = NO-OP per
 // the SAFETY CONTRACT above: an apply without the value never clobbers a
 // stored topic. Rotation (the ar-H8 leak response) = pass the new URL.
-@description('ntfy topic URL for operator push alerts (read at runtime as NUXT_OPS_ALERT_NTFY_URL). Supplied by infra.yml from the GitHub environment secret OPS_ALERT_NTFY_URL. Empty = NO-OP (alerting disabled on envs without the secret; existing KV value untouched).')
+@description('ntfy topic URL for operator push alerts (read at runtime as NUXT_OPS_ALERT_NTFY_URL). Supplied at apply time (e.g. from a CI secret OPS_ALERT_NTFY_URL). Empty = NO-OP (alerting disabled on envs without the secret; existing KV value untouched).')
 @secure()
 param opsAlertNtfyUrl string = ''
 
@@ -153,7 +149,6 @@ param entraClientSecret string = ''
 // invalidate OIDC sessions on every revision roll AND prevent our
 // /api/v1/auth/me from decrypting the cookie set by /auth/entra/callback
 // (different password = decrypt fails silently → SSR redirects to /login).
-// Matches a sibling project's container-app.bicep:167-169 pattern.
 
 // Length requirements live in @description, NOT @minLength — the
 // safety contract (empty = NO-OP, don't clobber existing KV value)

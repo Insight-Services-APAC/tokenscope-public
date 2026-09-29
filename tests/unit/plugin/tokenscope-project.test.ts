@@ -109,7 +109,7 @@ describe('resolveRepoProjectCode', () => {
 
 describe('isSafeProjectCode / S1 fix 5 — parse-boundary charset validation', () => {
   it('accepts the real dogfood code (digits and a slash — README.md example)', () => {
-    expect(isSafeProjectCode('6010011856/450127097')).toBe(true)
+    expect(isSafeProjectCode('1000012345/450000001')).toBe(true)
   })
 
   it('accepts ordinary alphanumeric-with-hyphen/underscore/dot codes', () => {
@@ -155,9 +155,9 @@ describe('isSafeProjectCode / S1 fix 5 — parse-boundary charset validation', (
 
 describe('resolveRepoProjectCode — S1 fix 5: a hostile .tokenscope code is treated as no-tag, not carried forward', () => {
   it('accepts the real dogfood code end-to-end (.tokenscope → resolveRepoProjectCode)', () => {
-    writeFileSync(join(dir, '.tokenscope'), 'project:\n  code: 6010011856/450127097\n')
+    writeFileSync(join(dir, '.tokenscope'), 'project:\n  code: 1000012345/450000001\n')
     const r = resolveRepoProjectCode({ arg: '', cwd: dir })
-    expect(r.code).toBe('6010011856/450127097')
+    expect(r.code).toBe('1000012345/450000001')
     expect(r.source).toBe('tokenscope')
   })
 

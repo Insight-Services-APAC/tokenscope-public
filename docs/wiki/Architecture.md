@@ -1,16 +1,14 @@
 # Architecture
 
-TokenScope attributes AI coding-assistant token spend — **Claude Code and GitHub Copilot CLI** — to projects and cost centres. It is a Nuxt 3 / Nitro app with Drizzle + PostgreSQL, deployed on Azure Container Apps. The telemetry surface is **OTel log events read from Log Analytics via KQL** — not metrics, not spans — and the provider APIs supply the complete spend truth alongside it.
+TokenScope attributes AI coding-assistant token spend — **Claude Code and GitHub Copilot** — to projects and Business Units. It is a Nuxt 3 / Nitro app with Drizzle + PostgreSQL, deployed on Azure Container Apps. The telemetry surface is **OTel log events read from Log Analytics via KQL** — not metrics, not spans — and the provider APIs supply the complete spend truth alongside it.
 
-> **Where the money comes from is now its own page.** [Data Flow](Data-Flow.md) holds the ingest paths, the §A/§B split, and how spend is valued; [Data Lineage](Data-Lineage.md) holds every table, column, transformation and invariant. This page stays at the component/topology level — where the two disagree, **Data Flow wins** (it was rewritten from a full code trace on 2026-08-02).
+> **Where the money comes from is now its own page.** [Data Flow](Data-Flow.md) holds the ingest paths, the §A/§B split, and how spend is valued; [Data Lineage](Data-Lineage.md) holds every table, column, transformation and invariant. This page stays at the component/topology level — where the two disagree, **Data Flow wins**.
 
 > Sibling pages hold the rest of the detail: [Data Model](Data-Model.md), [Authentication & Security](Authentication-and-Security.md), [Background Workers](Background-Workers.md), [Claude Code Client](Claude-Code-Client.md), [Deployment & Operations](Deployment-and-Operations.md).
 
 ## Terminology
 
-The domain topology, restated for the engineering wiki. The repo-root
-`AGENTS.md` §Domain model / Terminology is the canonical source; this is the
-as-built mirror. The hierarchy is **teammate → instance → session → project**,
+The domain topology, restated for the engineering wiki. The hierarchy is **teammate → instance → session → project**,
 and spend is attributed per record.
 
 - **Teammate** — the human (Entra identity); who incurred the spend.
@@ -31,7 +29,7 @@ and spend is attributed per record.
   bucket with no conversation and no instant behind it, which is why Activity
   holds both kinds of row and is not called "Sessions".
 - **Project** — what the spend bills to. Resolved per record by the emitted
-  `project.code_hash` (the ADR-0004 "B′" model — a claim), membership-gated
+  `project.code_hash` (a claim), membership-gated
   ("tag proposes, membership disposes"). Untagged spend is retroactively
   assigned per-session via `session_assignment` (`claude_session_id →
   project_id`), also membership-gated.
@@ -39,24 +37,23 @@ and spend is attributed per record.
   token-type, model, **request**). Priced **provider-first**: the provider's own
   cost is the span total, and the rate card only *slices* that total across the
   token-type rows. The card sets the amount solely as a fallback when the
-  provider sent none — which in practice never happens
-  (0 of 21,839 spans on Dev). See [Data Flow §4](Data-Flow.md#4-how-money-is-valued--and-the-rate-cards-real-job).
+  provider sent none, which in practice is rare. See [Data Flow §4](Data-Flow.md#4-how-money-is-valued--and-the-rate-cards-real-job).
 
 ## Logical architecture
 
-The as-built system is seven components. There is **no launcher, no Insight-side token broker** — those were design-era ideas the build superseded. (A remote **MCP server** + OAuth 2.1 client backbone is **built and live** for both Claude Code and GitHub Copilot CLI; component 1 below.)
+The as-built system is seven components. There is **no launcher and no server-side token broker**. (A remote **MCP server** + OAuth 2.1 client backbone is **built and live** for both Claude Code and GitHub Copilot; component 1 below.)
 
 ```mermaid
 flowchart TB
-    subgraph CLI["Claude Code CLI (developer machine)"]
-        E["Native OTel emitter<br/>api_request log events"]
+    subgraph CLI["Claude Code / Copilot (developer machine)"]
+        E["Claude native OTel emitter /<br/>Copilot usage extension<br/>api_request log events"]
     end
 
     subgraph App["TokenScope app — Azure Container Apps (Nuxt + Nitro + Drizzle)"]
         ST["1. MCP server + OAuth 2.1<br/>/api/v1/mcp · provision_emit → setup/redeem"]
         BR["2. Bearer-refresh endpoint<br/>instances/{instanceId}/bearer"]
         APP["5. App: attribution + costing<br/>engine, dashboard, REST API"]
-        WK["6. Read joiner + 31-worker registry<br/>scheduler-invoked"]
+        WK["6. Read joiner + 33-worker registry<br/>scheduler-invoked"]
     end
 
     AM["3+4. Azure Monitor OTLP endpoint<br/>(DCE + DCR) → OTelLogs in LAW"]
@@ -73,12 +70,12 @@ flowchart TB
     APP -.->|budgets / rollups / untagged worklist| Browser["Dashboard user"]
 ```
 
-- **MCP server + OAuth 2.1** — the `/api/v1/mcp` remote MCP server (read/tag tools + prompts), authenticated by one PKCE browser consent (`tokenscope.read`+`tag`). The read-scoped `provision_emit` tool locates-or-creates the `instance_attestation` and mints a one-time `emit_handoff`; the local helper redeems it at `POST /api/v1/setup/redeem` for the durable emit credential + the OTel env bundle the CLI writes into `~/.claude/settings.json`. (Replaced the retired setup-token enrolment, PR #38.)
+- **MCP server + OAuth 2.1** — the `/api/v1/mcp` remote MCP server (read/tag tools + prompts), authenticated by one PKCE browser consent (`tokenscope.read`+`tag`). The read-scoped `provision_emit` tool locates-or-creates the `instance_attestation` and mints a one-time `emit_handoff`; the local helper redeems it at `POST /api/v1/setup/redeem` for the durable emit credential + the OTel env bundle (Claude Code: written into `~/.claude/settings.json`; Copilot: `~/.tokenscope/config.copilot-cli.json`).
 - **Bearer-refresh endpoint** — `GET /api/v1/instances/{instanceId}/bearer`, the `otelHeadersHelper` target; OAuth `tokenscope.emit` authed (not a cookie), returns the Azure Monitor bearer.
-- **Native OTel emitter** — Claude Code emits `api_request` **log events** directly to Azure Monitor with our injected `OTEL_RESOURCE_ATTRIBUTES` (`tokenscope.instance_id`, `project.code_hash`, `tool`). No TokenScope code runs in the CLI process.
+- **Emitters** — Claude Code emits `api_request` **log events** natively, directly to Azure Monitor, with our injected `OTEL_RESOURCE_ATTRIBUTES` (`tokenscope.instance_id`, `project.code_hash`, `tool`); no TokenScope code runs in the CLI process. For Copilot (CLI and App), the plugin's **usage extension** reads the runtime's `assistant.usage` events and sends the same `api_request` record shape as OTLP-logs protobuf ([Copilot CLI Client](Copilot-CLI-Client.md)).
 - **Azure Monitor OTLP endpoint → LAW** — DCE + DCR route the built-in OTel log stream into the `OTelLogs` table on a Log Analytics Workspace.
 - **TokenScope app** — attribution + costing engine, registry, dashboard, REST API, worker registry.
-- **Read joiner + workers** — a static registry of **31 workers** invoked by an external scheduler; the `azure-monitor-read` worker is the read joiner. See [Background Workers](Background-Workers.md) for the full roster.
+- **Read joiner + workers** — a static registry of **33 workers** invoked by an external scheduler; the `azure-monitor-read` worker is the read joiner. See [Background Workers](Background-Workers.md) for the full roster.
 - **TokenScope DB** — the authoritative *derived* state and the join source-of-truth.
 
 ## Attribution data flow
@@ -90,7 +87,7 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    CC["Claude Code /<br/>Copilot CLI"] -->|"OTLP api_request<br/>log events"| LAW[("Log Analytics<br/>OTelLogs")]
+    CC["Claude Code /<br/>Copilot usage extension"] -->|"OTLP api_request<br/>log events"| LAW[("Log Analytics<br/>OTelLogs")]
     LAW -->|"KQL on tokenscope.instance_id"| RJ["read joiner<br/>(azure-monitor-read)"]
 
     SA[("instance_attestation")] -->|join key| RJ
@@ -121,15 +118,15 @@ flowchart LR
 
 ## Technical / deployment topology
 
-The reference VNet-integrated deployment runs the app on **Azure Container Apps** with **internal ingress** (a private VIP) behind an **upstream WAF** (a shared corporate edge or an optional per-app Azure Front Door — selectable). PostgreSQL, Redis, Key Vault and ACR are all private (private endpoints); every backing service is reached by managed identity. (Instance-specific values — region, resource-group / VNet names, and which edge is used — live in your deployment's own configuration.)
+The VNet-integrated deployment runs the app on **Azure Container Apps** with **internal ingress** (a private VIP) behind either **Azure Front Door Premium over Private Link** (recommended) or **your own WAF / reverse proxy**. PostgreSQL, Redis, Key Vault and ACR are all private (private endpoints); every backing service is reached by managed identity. See [Network Architecture](Network-Architecture.md).
 
 ```mermaid
 flowchart TB
-    User["User browser"] --> WAF["Upstream WAF<br/>(corporate edge or Front Door)"]
-    WAF -->|forwards to internal VIP| TSAPP
+    User["User browser"] --> WAF["Front Door Premium<br/>or your WAF"]
+    WAF -->|"Private Link / VNet to internal VIP"| TSAPP
 
     subgraph ACA["Azure Container Apps — ingress internal: true (private VIP)"]
-        TSAPP["TokenScope app + 31-worker registry"]
+        TSAPP["TokenScope app + 33-worker registry"]
     end
 
     SCHED["External ACA cron jobs (caj-ts-*)"] -->|"HMAC-signed POST<br/>internal/run-worker/{name}"| TSAPP
@@ -148,17 +145,16 @@ flowchart TB
     class PG,LAW,KV,REDIS,ACR store;
 ```
 
-- **The upstream WAF** is the only public ingress; it terminates TLS and forwards to the internal ACA VIP. Whether that edge is a shared corporate WAF (no per-app Front Door, no `X-Azure-FDID` dependency) or a per-app Azure Front Door is a per-environment choice (`enableFrontDoor`).
-- **ACA ingress is internal** (`internal: true`, private VIP) — the app is not publicly reachable except through the WAF. `/api/health` remains the ACA probe target.
+- **The edge** is the only public ingress; it terminates TLS and forwards to the internal ACA VIP. Front Door Premium (`enableFrontDoor`, `frontDoorSku='Premium'`) reaches it over Private Link and, once `frontDoorId` is set, the app rejects requests without Front Door's `X-Azure-FDID` header. Your own WAF reaches it over the VNet, with no header dependency.
+- **ACA ingress is internal** (`internal: true`, private VIP) — the app is not publicly reachable except through the edge. `/api/health` remains the ACA probe target.
 - **External scheduler** (ACA cron jobs) drives the workers via the HMAC-signed `run-worker/{name}` endpoint — there is no standing worker pool and no BullMQ/Redis queue.
 - **PostgreSQL Flexible Server** (private endpoint) holds derived state (audit-trigger append-only). **Log Analytics** is the read-only attribution surface. **Key Vault** (private endpoint) is the single secrets surface; **Redis** (private endpoint) holds sessions/cache only; **ACR** (private endpoint) serves container images.
-- The concrete region and the exact private-endpoint resource set for the Insight instance are in your deployment's own configuration.
 
 ## The ingestion paths
 
 | Path | Source | Cadence | Role |
 |---|---|---|---|
-| **Telemetry** | Claude Code + Copilot CLI OTLP log events → `OTelLogs` | joiner ~every 5 min | The **detail** axis: session, project, activity, model. Covers only enrolled devices (~5%) |
+| **Telemetry** | Claude Code + Copilot usage-extension OTLP log events → `OTelLogs` | joiner ~every 5 min | The **detail** axis: session, project, activity, model. Covers only enrolled devices (~5%) |
 | **Anthropic Analytics** | Enterprise Analytics API, per reconciled org | poller ~every 15 min | **§A usage truth** — complete, day grain |
 | **GitHub Copilot** | metrics report (§A) + enterprise billing usage (§B) | `reconciliation-sync`, `copilot-pool-bill` | §A usage and the §B pooled bill |
 
@@ -168,7 +164,7 @@ The provider APIs supply the authoritative spend. **They are not a "ceiling" aga
 
 ## Trust model
 
-**Source split — attested identity × claimed project.** Attribution combines two independently-sourced facts: the **teammate** is resolved from the **authed device attestation** by `tokenscope.instance_id` (the DEVICE_SID / device-enrolment INSTANCE id, bound to the teammate at an authenticated device enrol — **unspoofable per-event**), while the **project** is taken from the emitted per-event `.tokenscope` `project.code_hash` (a *claim*). The membership gate decides whether the two combine into a bill. See ADR-0004.
+**Source split — attested identity × claimed project.** Attribution combines two independently-sourced facts: the **teammate** is resolved from the **authed device attestation** by `tokenscope.instance_id` (the DEVICE_SID / device-enrolment INSTANCE id, bound to the teammate at an authenticated device enrol — **unspoofable per-event**), while the **project** is taken from the emitted per-event `.tokenscope` `project.code_hash` (a *claim*). The membership gate decides whether the two combine into a bill.
 
 **Membership gate — "tag proposes, membership disposes."** The `project.code_hash` in a session's resource attributes is a *claim*, not an authorisation. Before billing the attested teammate's spend to the claimed project, the joiner checks the teammate is a *current* `project_assignment` member. If not, it **withholds** the attribution, the spend spills to untagged (for retroactive tagging), and an `attribution-spill-unauthorized` audit event fires. The same gate guards repo tagging (the MCP `tag_session` / `resolve_repo_project` tools and the `/me/sessions/{sid}/assign` quick-assign only admit projects the teammate is a member of).
 
@@ -185,16 +181,16 @@ The table describes the **Claude** lane. `tool = 'copilot-cli'` skips the `provi
 
 ## Region & RBAC
 
-- **Region:** multi-region operating model on the surface; the as-built dev deployment lands in a single region (see your deployment's own configuration for the instance's region). A region-local stack is design-surface only.
-- **Region derivation (placement).** A cost-bearing teammate's home region/unit is derived by a fixed precedence (highest wins): **cost-centre** (exact directory cost-centre → cost-owning unit) > **chain-unit** (manager-chain resolves to an owned unit/practice) > **attribute-rule** (a configurable directory-attribute → region rule) > **chain-region** (manager-chain resolves to a region leader) > **billing-region** (provider license-org → region fallback) > **global** (the unassigned holding node). `placement-sync` runs this bill-driven placement; `region-reenrichment` re-derives it on a `0 */6 * * *` cadence to heal stale/unplaced homes (2026-07-17 change). See [Background Workers](Background-Workers.md).
+- **Region:** multi-region operating model on the surface; a deployment lands in a single region. A region-local stack is design-surface only.
+- **Region derivation (placement).** A cost-bearing teammate's home region/unit is derived by a fixed precedence (highest wins): **cost-centre** (exact directory cost-centre → cost-owning unit) > **chain-unit** (manager-chain resolves to an owned unit/practice) > **attribute-rule** (a configurable directory-attribute → region rule) > **chain-region** (manager-chain resolves to a region leader) > **billing-region** (provider license-org → region fallback) > **global** (the unassigned holding node). `placement-sync` runs this bill-driven placement; `region-reenrichment` re-derives it on a `0 */6 * * *` cadence to heal stale/unplaced homes. See [Background Workers](Background-Workers.md).
 - **RBAC:** roles (cost-owning unit owner, regional/global FinOps, manager, admin) scoped by region + org-unit path, enforced in the **application** — `requireRole` plus per-resource scope predicates, with report reach as a revocable per-teammate grant (see [Authentication & Security](Authentication-and-Security.md)); dashboard auth is Entra via `nuxt-oidc-auth`. The admin area is a persistent admin shell (sidebar-navigated) with an Overview launcher, first-class Providers, a Settings split into System info + Policies, and a roles glossary.
 
 ## Built vs Planned
 
 **Built (shipped):**
 - **Claude Code client** — MCP server + OAuth 2.1 client backbone (PKCE consent, dynamic registration, grant lifecycle / revoke), `provision_emit`→`/setup/redeem` device provisioning + bearer-refresh, native OTel log-event ingestion, logs→LAW→KQL read joiner with membership gate + org-lane reconciliation.
-- **GitHub Copilot CLI client** — same MCP/OAuth backbone + `copilot-plugin/` (three skills, `hooks.json`), singleton file-forwarder (`copilot-forwarder.mjs`) that tails the Copilot OTEL file, filters `chat` spans (double-count guard), transcodes to `api_request` OTLP-logs protobuf, and forwards to Azure Monitor every ~60s. Provisioning writes `~/.tokenscope/config.copilot-cli.json`. Each CLI keeps its own store — the Claude lane's is `config.claude-code.json` — so enrolling one never overwrites the other's. Copilot v1 spend is **indicative** (tier-2/telemetry-only), priced at 1 AI credit = $0.01 USD.
-- 31-worker scheduler-driven registry, dashboard with budgets/rollups/untagged worklist, trigger-enforced audit log, internal ACA ingress behind an upstream WAF.
+- **GitHub Copilot client** — same MCP/OAuth backbone + `copilot-plugin/` (four skills: `tokenscope-setup`, `project`, `usage`, `status`) and its **usage extension** (`extensions/tokenscope-usage/`), which the Copilot runtime loads in the Copilot App and in the CLI: it reads `assistant.usage` events, spools them locally, and sends `api_request` OTLP-logs protobuf to Azure Monitor. A legacy file forwarder remains for one release for devices not yet migrated. Provisioning writes `~/.tokenscope/config.copilot-cli.json`. Each CLI keeps its own store — the Claude lane's is `config.claude-code.json` — so enrolling one never overwrites the other's. Copilot v1 spend is **indicative** (tier-2/telemetry-only), priced at 1 AI credit = $0.01 USD.
+- 33-worker scheduler-driven registry, dashboard with budgets/rollups/untagged worklist, trigger-enforced audit log, internal ACA ingress behind Front Door Premium or your own WAF.
 
 **Planned (future-state, not built):**
 - **F2 — promoting Copilot telemetry from tier-2 to tier-1.** Note the *reconciliation itself is built*: the GitHub billing adapter, `copilot-bill` and `copilot-pool-bill` all ship today and produce the §B pooled chargeback. What remains is lifting the **telemetry** lane's fidelity, and re-confirming the estate-global identity links before Copilot becomes §B-chargeable.
