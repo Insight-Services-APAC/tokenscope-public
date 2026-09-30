@@ -48,6 +48,11 @@ param imageTag string = 'latest'
 @description('Git commit SHA at deploy time. Empty = use the build-time baked value (Dockerfile ARG GIT_COMMIT_SHA). Non-empty values override the Dockerfile bake at runtime and are surfaced via /admin/settings → build.commitSha so operators can verify the running revision.')
 param gitCommitSha string = ''
 
+@description('Prefix of the scheduled worker jobs\' names (<prefix>-<worker>, at most 8 characters). Keep the default unless two deployments share a resource group: job names are per resource group, and a deleted job\'s name stays unavailable for a while.')
+@minLength(1)
+@maxLength(8)
+param workerJobPrefix string = 'caj-ts'
+
 @description('Anthropic analytics API base URL (NUXT_ANTHROPIC_API_ENDPOINT). Empty = reconciliation/poller no-op. Set to https://api.anthropic.com on envs with a reconciled Anthropic org.')
 param anthropicApiEndpoint string = ''
 
@@ -760,6 +765,7 @@ module frontDoor 'modules/front-door.bicep' = if (enableFrontDoor) {
 module workerJobs 'modules/worker-jobs.bicep' = if (!empty(workerBaseUrl)) {
   name: 'worker-jobs'
   params: {
+    namePrefix: workerJobPrefix
     location: location
     environmentId: containerApp.outputs.environmentId
     userAssignedIdentityId: appIdentity.id
@@ -790,7 +796,7 @@ module opsAlerts 'modules/ops-alerts.bicep' = {
     // applies without workerBaseUrl elide the rule instead of scoping a missing resource.
     // resourceId() is a pure string build — NO implicit dependency — hence the
     // explicit dependsOn below.
-    opsAlertJobId: !empty(workerBaseUrl) ? resourceId('Microsoft.App/jobs', 'caj-ts-ops-alert') : ''
+    opsAlertJobId: !empty(workerBaseUrl) ? resourceId('Microsoft.App/jobs', '${workerJobPrefix}-ops-alert') : ''
     logAnalyticsId: monitoring.outputs.logAnalyticsId
     tags: tags
   }

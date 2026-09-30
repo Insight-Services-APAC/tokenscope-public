@@ -144,16 +144,19 @@ jobs:
           APP: ${{ steps.res.outputs.app }}
           TAG: ${{ steps.res.outputs.tag }}
         run: |
+          # Azure's API can answer a read with a 5xx for a moment; retry each
+          # read before treating it as a failure.
+          azr() { local i; for i in 1 2 3; do az "$@" && return 0; sleep 15; done; return 1; }
           # 1. Azure's view, which needs no network path to the app: the newest
           #    revision runs this build, its /api/health probes pass, and it is
           #    the ready revision. A crash-looping build never gets there.
           ok=""
           for i in $(seq 1 20); do
-            LATEST=$(az containerapp show -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)
-            READY=$(az containerapp show -g "$RG" -n "$APP" --query properties.latestReadyRevisionName -o tsv)
-            IMG=$(az containerapp revision show -g "$RG" -n "$APP" --revision "$LATEST" \
+            LATEST=$(azr containerapp show -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)
+            READY=$(azr containerapp show -g "$RG" -n "$APP" --query properties.latestReadyRevisionName -o tsv)
+            IMG=$(azr containerapp revision show -g "$RG" -n "$APP" --revision "$LATEST" \
               --query "properties.template.containers[0].image" -o tsv)
-            HEALTH=$(az containerapp revision show -g "$RG" -n "$APP" --revision "$LATEST" \
+            HEALTH=$(azr containerapp revision show -g "$RG" -n "$APP" --revision "$LATEST" \
               --query properties.healthState -o tsv)
             if [ "$IMG" = "$ACR.azurecr.io/tokenscope:$TAG" ] && [ "$HEALTH" = "Healthy" ] && [ "$READY" = "$LATEST" ]; then
               ok=1; echo "Revision $LATEST runs $TAG and is healthy"; break
@@ -171,13 +174,13 @@ jobs:
           #    but /api/health, so the public origin is the one to check.
           BASE="$HEALTH_URL"
           if [ -z "$BASE" ]; then
-            BASE=$(az containerapp show -g "$RG" -n "$APP" \
+            BASE=$(azr containerapp show -g "$RG" -n "$APP" \
               --query "properties.template.containers[0].env[?name=='APP_PUBLIC_ORIGIN'].value | [0]" -o tsv)
           fi
           if [ -z "$BASE" ]; then
-            ENV_ID=$(az containerapp show -g "$RG" -n "$APP" --query properties.managedEnvironmentId -o tsv)
-            INTERNAL=$(az containerapp env show --ids "$ENV_ID" --query properties.vnetConfiguration.internal -o tsv)
-            [ "$INTERNAL" = "true" ] || BASE="https://$(az containerapp show -g "$RG" -n "$APP" \
+            ENV_ID=$(azr containerapp show -g "$RG" -n "$APP" --query properties.managedEnvironmentId -o tsv)
+            INTERNAL=$(azr containerapp env show --ids "$ENV_ID" --query properties.vnetConfiguration.internal -o tsv)
+            [ "$INTERNAL" = "true" ] || BASE="https://$(azr containerapp show -g "$RG" -n "$APP" \
               --query properties.configuration.ingress.fqdn -o tsv)"
           fi
           if [ -z "$BASE" ]; then

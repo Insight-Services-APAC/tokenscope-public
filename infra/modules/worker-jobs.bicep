@@ -45,6 +45,11 @@ param internalWorkerHmacKeyVaultUrl string
 @description('How long cron-trigger.mjs waits for the run-worker response, in ms. MUST stay below replicaTimeout (240s) so the trigger\'s clean exit(1) wins the race against a hard replica kill. Lockstepped to DISPATCH_TIMEOUT_MS in shared/workers/dispatch-budget.ts.')
 param dispatchTimeoutMs int = 200000
 
+@description('Prefix of every job name: <prefix>-<worker>. Job names are capped at 32 characters and the longest worker name is 23, so at most 8.')
+@minLength(1)
+@maxLength(8)
+param namePrefix string = 'caj-ts'
+
 // name = the registry worker key (WORKER_NAME); cron = registry recommendedCron.
 var workers = [
   { name: 'analytics-poll', cron: '*/15 * * * *' }
@@ -181,7 +186,7 @@ resource jobs 'Microsoft.App/jobs@2024-03-01' = [
     // deployment). `jobName` is an optional per-entry override; WORKER_NAME below
     // still carries the real registry key. The lockstep test asserts the derived
     // name fits, so a long new worker fails CI instead of failing the deploy.
-    name: 'caj-ts-${contains(w, 'jobName') ? w.jobName : w.name}'
+    name: '${namePrefix}-${contains(w, 'jobName') ? w.jobName : w.name}'
     location: location
     identity: {
       type: 'UserAssigned'

@@ -7,7 +7,7 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
-## v1.0.0 — 2026-09-29 (snapshot f9c7d086)
+## v1.0.0 — 2026-09-30 (snapshot 9f04b8d6)
 
 - **1.0.0, the first release.** Public releases are now versioned tags with
   GitHub Release notes: a major version means the upgrade needs action (a
@@ -16,10 +16,10 @@ the public mirror.)
   postures it passed on Azure before it was tagged; deploy a release rather
   than `main`.
 
-- Worker jobs are created one at a time, and an apply that fails only on
-  creating a worker job (`Secret "caj-ts-<job>--msi" not found`, an Azure-side
-  failure) deletes that job and exits 4 so that applying again recreates it; the
-  example infra workflow applies again by itself.
+- Worker jobs are created one at a time, and a new optional template parameter,
+  `workerJobPrefix`, names them (default unchanged), so two deployments can
+  share a resource group. The example deploy workflow retries a momentary
+  Azure error while checking a new build instead of rolling it back.
 
 ## 2026-09-29 (snapshot 3d47ef59)
 

@@ -177,8 +177,7 @@ infra/scripts/approve-front-door-private-link.sh "$RG"
 The script waits for the deployment and exits non-zero with Azure's error if it
 fails. It exits 3 when the only failure is a new Container App's missing
 image (`MANIFEST_UNKNOWN`), which is how a first apply ends: build the image,
-then apply again. It exits 4 after deleting worker jobs whose creation failed
-on Azure's side (see §Troubleshooting): apply again. With Front Door Premium on a VNet deployment it also approves Front
+then apply again. With Front Door Premium on a VNet deployment it also approves Front
 Door's Private Link request while the apply runs: Front Door does not finish
 until that request is approved. For every other posture it only waits.
 
@@ -496,7 +495,7 @@ Re-run the apply command only when parameters or infrastructure change.
 | Symptom | Cause |
 |---|---|
 | Container App `Failed` with `MANIFEST_UNKNOWN` | No image in the registry yet. Build it, then apply again. |
-| The apply that creates the worker jobs fails on one job: `Secret "caj-ts-<job>--msi" not found` | An Azure-side failure when that job is created, not yet understood; the other jobs and the app are unaffected. The failed job stays broken, so applying again alone fails on it again. The apply script deletes it and exits 4: apply again (the example infra workflow does this itself). |
+| The apply that creates the worker jobs fails on one job: `Secret "caj-ts-<job>--msi" not found` | A known Azure-side failure when that job is created, root cause not yet understood: the other jobs, on the same identity, are created, and the app is unaffected. Applying again has failed on the same job, so that one worker does not run until this is resolved. |
 | Revision fails pulling the image (401) or resolving secrets (403) | `deployRbac` is false, or the deploying identity cannot create role assignments. |
 | Key Vault name conflict on a redeploy | A soft-deleted vault with that name exists. Set `keyVaultCreateMode = 'recover'`, or change `projectName`. |
 | Sign-in redirects back to the login page, or signs out on every deploy | The `OIDC_*` secrets changed between applies, or `OIDC_TOKEN_KEY` is not base64 of 32 bytes. |

@@ -109,11 +109,9 @@ Infra (Bicep) and image rolls are separate cycles:
   and runs `infra/scripts/approve-front-door-private-link.sh`, which approves
   Front Door Premium's Private Link request while the apply runs (for any other
   posture it just waits for the deployment). A first apply, which stops at the
-  Container App because no image exists yet, ends green with a notice. When the
-  only failure is a worker job whose creation failed on Azure's side (its
-  `caj-ts-<job>--msi` secret), the job is deleted and the apply runs once more.
-  Any other failure fails the run. Worker jobs are created one at a time. The
-  parameter file reads every secret from
+  Container App because no image exists yet, ends green with a notice; any
+  other failure fails the run. Worker jobs are created one at a time, named
+  `<workerJobPrefix>-<worker>` (default `caj-ts`). The parameter file reads every secret from
   environment variables, which the workflow maps from the GitHub environment's
   secrets.
 - **`tokenscope-deploy.yml`** builds the image under the commit tag, rolls the
