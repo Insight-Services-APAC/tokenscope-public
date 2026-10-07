@@ -35,6 +35,7 @@ import { consola } from 'consola'
 import type * as schema from '../../drizzle/schema'
 import * as schemaImport from '../../drizzle/schema'
 import {
+  type EventWindow,
   type TelemetryReader,
   type UsageRecord,
   type ParseCounters,
@@ -76,8 +77,9 @@ export interface TelemetryOnlyRegionDay {
 
 export interface JoinResult {
   /*
-   * How many instances this run SELECTED and handed to processSession — the size
-   * of the selection query's result, NOT how many had usage. The selection
+   * How many instances this run SELECTED — the size of the selection query's
+   * result, NOT how many had usage, and since the tick deadline NOT necessarily
+   * how many were read (that is devicesAttempted). The selection
    * deliberately includes every open instance with a fresh bearer mint, and
    * Claude Code mints one at startup and every ~29 min for as long as the editor
    * is open, so an idle laptop is `sessionsProcessed: 1` every tick. It is
@@ -174,9 +176,8 @@ export interface JoinResult {
   // the whole tick and starve every remaining instance — the documented "silent
   // attribution stop" outage class. Errored sessions retry next tick.
   errors: number
-  // Whether this run ignored the per-instance watermark and re-read the full
-  // window (ING-1 daily deep-rescan). Persisted via worker_run.result so
-  // shouldDeepRescan can find the last deep pass.
+  // Whether this run ignored the per-instance watermark and re-read its window
+  // (a forced deep read, or a telemetry-recovery instance-day).
   deepRescan: boolean
   // Behavioural usage-signal lane (mig 0065, Copilot tool/MCP/context/turn). The
   // signal read+land runs in its OWN per-session try/catch AFTER token attribution,
@@ -195,10 +196,7 @@ export interface JoinResult {
   // worker_run.result alone — never infer a recovery succeeded from row counts.
   lookbackDaysApplied?: number | null
   // True when the caller supplied explicit instance ids instead of the scheduled
-  // selection. shouldDeepRescan EXCLUDES scoped runs: a scoped pass covers only
-  // its own instances, so letting it satisfy the fleet-wide ING-1 deep-rescan
-  // cadence would silently disarm that safety net for 24h — during exactly the
-  // recovery campaign that runs many scoped batches back to back.
+  // selection. read-path-health excludes scoped runs from its verdict.
   scoped?: boolean
   /*
    * Which rung of the cost-precedence ladder priced each SPAN this tick
@@ -213,7 +211,65 @@ export interface JoinResult {
    * line nobody reads.
    */
   costingRungs: CostingRungCounts
+  /*
+   * ── Tick capacity (docs/design/scaling-to-1000-users.md, Phase 1 item 2) ──
+   * devicesSelected equals sessionsProcessed; devicesAttempted is how many of
+   * them a lane started before the deadline (JOINER_DEADLINE_MS), success or
+   * failure. deadlineHit is true when the deadline left at least one selected
+   * device unstarted. Such a device is read from its watermark on a later tick
+   * exactly as a per-tick read would be; an event arriving more than the
+   * watermark lookback late behind a newer attributed one is the existing
+   * late-arrival limit (the deep reads cover it), not something the deadline
+   * introduces. Staleness claims are made from devicesAttempted, the measured
+   * per-tick capacity.
+   */
+  devicesSelected: number
+  devicesAttempted: number
+  deadlineHit: boolean
+  /*
+   * The largest (now - joiner_read_at), in whole minutes, over the SELECTED
+   * devices, read BEFORE this tick stamps its own reads. Devices never read by a
+   * scheduled tick (NULL) are not in it — they are counted in devicesNeverRead —
+   * and devices beyond the selection cap are in neither (selectionCapHit reports
+   * those); null when no selected device has been read.
+   */
+  oldestReadAgeMinutes: number | null
+  /** Selected devices with no joiner_read_at before this tick's stamp: never read by a scheduled tick. */
+  devicesNeverRead: number
+  /*
+   * The end-of-tick rotation stamp failed (logged; never fails the run). While it
+   * keeps failing the rotation does not advance: the same devices head every
+   * selection, so on a fleet larger than one tick's capacity the rest go unread.
+   */
+  rotationStampFailed: boolean
+  /** Largest process heapUsed sampled after each attempted device, in MB; null when none was attempted. */
+  heapUsedPeakMb: number | null
 }
+
+/** Concurrent lanes in one joiner run. Each takes a whole teammate group (see runReadJoiner). */
+export const JOINER_CONCURRENCY = 3
+/**
+ * No lane starts a device later than this after the TICK started: the registry
+ * passes its own start (JoinOptions.startedAtMs), so the ingest coverage probe
+ * (bounded at 10 s) and the selection count against it; a direct caller that
+ * passes none is measured from runReadJoiner's start. With the 45 s query abort
+ * (JOINER_QUERY_ABORT_MS) and two queries per device, the last device started
+ * has its queries answered or aborted by 80 + 2 x 45 = 170 s. That is NOT the
+ * end of the tick: the device's own writes and the end-of-tick housekeeping
+ * (rotation stamp, stale-dismissal sweep) come after and are not bounded by it.
+ * Enabling the native-GenAI lane adds a third query per device and must revisit
+ * this number.
+ */
+export const JOINER_DEADLINE_MS = 80_000
+
+/**
+ * Every Nth teammate group a lane takes is the next PROVISIONAL group, while any
+ * remain. Selection puts confirmed devices first (CS-EDGE-01, at the cap); this
+ * only orders processing within what was selected, so a tick whose deadline
+ * cannot reach the end of its confirmed devices still attempts some provisional
+ * ones.
+ */
+export const JOINER_PROVISIONAL_EVERY = 10
 
 /**
  * How many of `usage` are STRICTLY newer than `watermark` — the per-instance
@@ -246,9 +302,12 @@ export interface JoinOptions {
    * lookback, but OTLP batching/retry, laptop suspends, and Azure ingestion
    * latency routinely deliver events later than that — anything older than
    * (watermark − 5min) at read time was permanently dropped. A periodic
-   * deep-rescan re-reads the window; onConflictDoNothing makes it free.
+   * deep read re-reads the window; onConflictDoNothing makes it free. The daily
+   * pass is telemetry-recovery's scheduled request, one instance-day at a time.
    */
   deepRescan?: boolean
+  /** Bounds every reader call to this event-time slice (telemetry-recovery's instance-day). */
+  window?: EventWindow
   /**
    * Cap hit from the selection that produced `sessionIds`, echoed into the
    * result so it lands in worker_run.result. Only the caller that ran BOTH the
@@ -266,13 +325,25 @@ export interface JoinOptions {
    * the tests need no Azure metrics client.
    */
   sourceCoverage?: SourceCoverage | null
+  /*
+   * Stamp instance_attestation.joiner_read_at on every device this run
+   * attempted. ONLY the registry's scheduled tick sets it (no operator
+   * sessionIds, no forced deep read; telemetry-recovery never does): the stamp
+   * drives the selection's rotation, and only the scheduled read is the
+   * rotation's own pass, so only it moves a device to the back.
+   */
+  stampReadAt?: boolean
+  /** Monotonic-enough clock for the deadline, in epoch ms. Tests only; defaults to Date.now. */
+  clock?: () => number
+  /**
+   * When the tick started, on `clock`, in epoch ms. JOINER_DEADLINE_MS is
+   * measured from it. The registry passes the time it began the tick, before the
+   * coverage probe and the selection; absent, the run's own start is used.
+   */
+  startedAtMs?: number
 }
 
 const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000
-
-// ING-1: how often the scheduled tick swaps the watermark for a full-window
-// deep-rescan (recovers telemetry that arrived later than the 5-min lookback).
-const DEEP_RESCAN_INTERVAL_HOURS = 24
 
 // Liveness window on last_bearer_at for the joiner pre-query (see
 // selectRecentJoinableSessionIds). The floor is what makes the knob safe: below
@@ -307,35 +378,6 @@ export interface JoinableSelection {
   ids: string[]
   /** The cap value when the selection was truncated by it, else null. */
   capHit: number | null
-}
-
-/*
- * Decide whether the next scheduled joiner tick should deep-rescan (ING-1):
- * true when NO successful azure-monitor-read run in the last `intervalHours`
- * carried result.deepRescan=true. State lives in the existing worker_run
- * bookkeeping (run-health persists the result object verbatim) — no schema
- * change, and a crashed deep pass is retried on the very next tick.
- */
-export async function shouldDeepRescan(
-  db: PostgresJsDatabase<typeof schema>,
-  opts: { intervalHours?: number } = {},
-): Promise<boolean> {
-  const intervalHours = opts.intervalHours ?? DEEP_RESCAN_INTERVAL_HOURS
-  const rows = await db.execute<{ ok: number }>(sql`
-    SELECT 1 AS ok FROM worker_run
-    WHERE worker_name = 'azure-monitor-read'
-      AND status = 'success'
-      AND (result->>'deepRescan') = 'true'
-      -- A SCOPED run (operator-supplied instance ids) deep-rescanned only its own
-      -- batch, so it must not satisfy the FLEET-wide cadence. Without this, a
-      -- recovery campaign of scoped batches silently suppresses the daily deep
-      -- pass for 24h per batch — disarming the mechanism that recovers
-      -- late-arriving telemetry for everyone else.
-      AND (result->>'scoped') IS DISTINCT FROM 'true'
-      AND started_at > NOW() - (${intervalHours} * INTERVAL '1 hour')
-    LIMIT 1
-  `)
-  return rows.length === 0
 }
 
 /*
@@ -512,6 +554,9 @@ interface SessionRow extends Record<string, unknown> {
   // stamped onto every attribution_record this session writes. NOT NULL with a
   // 'confirmed' default on the attestation row, so it is always present.
   identity_state: string
+  // Seconds since a scheduled tick last attempted this device (mig 0149), as
+  // text; null when it never has. Feeds JoinResult.oldestReadAgeMinutes.
+  read_age_s: string | null
 }
 
 interface RateLine extends Record<string, unknown> {
@@ -910,7 +955,7 @@ export async function selectJoinableInstances(
       -- revoked AFTER enrolment (offboarding / force-revoke). Mirrors /bearer.
       AND NOT EXISTS (
         SELECT 1 FROM teammate t
-         WHERE t.id = sa.teammate_id AND t.revoked_at IS NOT NULL AND t.revoked_at > sa.ts_start
+         WHERE t.id = sa.teammate_id AND t.emit_revoked_at IS NOT NULL AND t.emit_revoked_at > sa.ts_start
       )
       AND (
         -- ACTIVE (open) within the active-age cap: re-scanned every tick.
@@ -934,19 +979,31 @@ export async function selectJoinableInstances(
                WHERE ar.instance_id = sa.instance_id
             ))
       )
-    -- R1 HIGH: a burst of recently-closed instances must never evict live/active
-    -- instances under the 500-row cap. Order active (ts_actual_end IS NULL) first,
-    -- then by most-recent ACTIVITY, so the LIMIT sheds the oldest dormant rows — not a
-    -- still-emitting active session whose spend would then silently stop attributing.
-    -- Activity (COALESCE(last_bearer_at, ts_start)) rather than ts_start alone: under
-    -- the cap a long-enrolled instance that is emitting RIGHT NOW must outrank a
-    -- newer one that has been dormant for weeks — ranking by enrolment date is the
-    -- same age-is-not-liveness mistake the dead zone came from.
-    -- Confirmed before provisional, within each open/closed group: a provisional
-    -- row is minted by the unauthenticated enrol door, so a flood of them must
-    -- never displace a confirmed device under the cap (CS-EDGE-01).
-    ORDER BY (sa.ts_actual_end IS NULL) DESC,
-             (sa.identity_state <> 'provisional') DESC,
+    -- Fair rotation (mig 0149, docs/design/scaling-to-1000-users.md Phase 1 item 2):
+    -- least recently READ first. Neither the cap nor the tick's deadline
+    -- (JOINER_DEADLINE_MS) can read the whole eligible set on a large fleet, and
+    -- the scheduled tick stamps joiner_read_at on every device it attempted. So a
+    -- device shed this tick sorts ahead of every device with the same
+    -- identity_state that was read, and each eligible confirmed device is
+    -- attempted within ceil(eligible / attempted per tick) ticks. NULL (never read
+    -- by a scheduled tick: a new enrolment, or one only ever read by operator or
+    -- recovery runs) sorts first.
+    --
+    -- Confirmed before provisional comes BEFORE the rotation: a provisional row is
+    -- minted by the login-less enrol door, which can create one with a NULL
+    -- joiner_read_at at will, so without this key a flood of them would sort
+    -- ahead of every confirmed device (CS-EDGE-01). The cost, at the cap: a
+    -- provisional device is selected only on a tick whose eligible confirmed
+    -- devices all fit under it. Within a selection the deadline does not shut
+    -- them out: runReadJoiner gives provisional teammates every
+    -- JOINER_PROVISIONAL_EVERY-th group it takes.
+    --
+    -- The old order (open first, then most recent activity) breaks ties within one
+    -- read time, which in practice means among never-read devices: a new open,
+    -- emitting device is read before a dormant or closed one.
+    ORDER BY (sa.identity_state <> 'provisional') DESC,
+             sa.joiner_read_at ASC NULLS FIRST,
+             (sa.ts_actual_end IS NULL) DESC,
              COALESCE(sa.last_bearer_at, sa.ts_start) DESC
     -- Over-fetch by ONE to tell "exactly at the cap" from "truncated by the cap".
     -- rows.length === limit alone cannot: a population of exactly the cap is fully
@@ -955,9 +1012,11 @@ export async function selectJoinableInstances(
     LIMIT ${limit + 1}
   `)
   // Observability (R2 L1): hitting the cap means some joinable instances are NOT
-  // scanned this tick. The ORDER BY sheds closed-first, but >limit ACTIVE instances
-  // would still drop live ones → silent attribution stop (the outage class). Surface
-  // it so the cap is visible before it bites; raise NUXT_JOINER_INSTANCE_CAP / page.
+  // scanned this tick. The rotation reaches a shed device on a later tick (a
+  // provisional one only on a tick whose confirmed devices all fit under the cap),
+  // but the more the eligible set exceeds what a tick reads, the longer each
+  // device waits between reads. Surface it so the cap is visible; raise
+  // NUXT_JOINER_INSTANCE_CAP / page.
   const all = [...rows]
   const capHit = all.length > limit ? limit : null
   const kept = capHit === null ? all : all.slice(0, limit)
@@ -1056,10 +1115,11 @@ export async function recordJoinerSelectionCap(
   // Severity is the dispatcher's default for this category ('attention'), set
   // there rather than here so there is ONE place that decides how loud a
   // category is. Deliberately not 'urgent' like read-path-stale: the selection
-  // sheds least-recently-active FIRST, so a cap hit does not prove spend is
-  // being lost, and a device that IS starved by it surfaces separately (and
-  // urgently) as attribution-gap once it falls 72h behind — provided it had
-  // attributed before. This is the early capacity warning, not the outage.
+  // rotates least-recently-read first, so a shed device is read on a later tick
+  // and a cap hit does not prove spend is being lost; a device that IS starved
+  // surfaces separately (and urgently) as attribution-gap once it falls 72h
+  // behind — provided it had attributed before. This is the early capacity
+  // warning, not the outage.
   const dispatched = await dispatchInbox(db, {
     category: JOINER_SELECTION_CAP,
     subject: `Attribution joiner is capped at ${capHit} devices per run — the surplus is skipped`,
@@ -1068,9 +1128,9 @@ export async function recordJoinerSelectionCap(
       cap: capHit,
       summary:
         `The scheduled selection matched more joinable devices than its per-run cap (${capHit}), so the surplus was not scanned on this run. ` +
-        'Candidates are ordered active-first, then by most recent activity, so what gets shed is the least recently active: dormant devices while the active population stays under the cap, and live ones once it does not. A device skipped on every run stops attributing spend silently.',
+        'Candidates are ordered confirmed before provisional, then least recently read first, so a device skipped on this run is among the first selected on the next: the surplus waits longer between reads rather than being dropped. Provisional devices are selected only on a run whose confirmed devices all fit under the cap.',
       hint:
-        'Raise NUXT_JOINER_INSTANCE_CAP (default 500) above the joinable-device count and redeploy the reader; this clears itself on the first run whose selection fits. Raise it deliberately — each device costs 2-3 serial Log Analytics queries inside one run, so a much larger cap makes the run proportionally longer.',
+        'Raise NUXT_JOINER_INSTANCE_CAP (default 500) above the joinable-device count and redeploy the reader; this clears itself on the first run whose selection fits. A run starts no device later than 80 s into its tick, so a larger cap does not lengthen the run; check devicesAttempted and oldestReadAgeMinutes in the run result for how far behind the reads are.',
       detectedAt: now.toISOString(),
     },
     relatedEntityKind: JOINER_SELECTION_CAP_KIND,
@@ -1090,11 +1150,36 @@ export async function selectRecentJoinableSessionIds(
   return (await selectJoinableInstances(db, opts)).ids
 }
 
+/**
+ * The group order the lanes take (JOINER_PROVISIONAL_EVERY): selection order,
+ * except that every Nth take is the next provisional group while any remain.
+ * Returns a taker that yields each group exactly once, then undefined.
+ */
+function interleaveProvisionalGroups(groups: ReadonlyArray<SessionRow[]>): () => SessionRow[] | undefined {
+  const isProvisional = (g: SessionRow[]) => g[0]!.identity_state === 'provisional'
+  const confirmed = groups.filter((g) => !isProvisional(g))
+  const provisional = groups.filter(isProvisional)
+  let c = 0
+  let p = 0
+  let taken = 0
+  return () => {
+    taken += 1
+    const provisionalSlot = taken % JOINER_PROVISIONAL_EVERY === 0
+    if ((provisionalSlot || c >= confirmed.length) && p < provisional.length) return provisional[p++]
+    if (c < confirmed.length) return confirmed[c++]
+    return undefined
+  }
+}
+
 export async function runReadJoiner(
   db: PostgresJsDatabase<typeof schema>,
   reader: TelemetryReader,
   opts: JoinOptions = {},
 ): Promise<JoinResult> {
+  // The deadline is measured on the wall clock, never on opts.now: a caller can
+  // pass a past `now` (telemetry-recovery does), and the deadline bounds elapsed time.
+  const clock = opts.clock ?? Date.now
+  const startedAtMs = opts.startedAtMs ?? clock()
   const now = opts.now ?? new Date()
   const sinceMs = opts.sinceMs ?? DEFAULT_WINDOW_MS
   const since = new Date(now.getTime() - sinceMs).toISOString()
@@ -1108,7 +1193,8 @@ export async function runReadJoiner(
                  region_id::text   AS region_id,
                  org_unit_id::text AS org_unit_id,
                  cost_owning_unit_id::text AS cost_owning_unit_id,
-                 project_code_hash, tool, identity_state
+                 project_code_hash, tool, identity_state,
+                 EXTRACT(EPOCH FROM (now() - joiner_read_at))::text AS read_age_s
           FROM instance_attestation
           -- Every gate the scheduled selection applies must be re-applied here.
           -- This branch takes ids from its CALLER, and since the operator-scoped
@@ -1119,7 +1205,7 @@ export async function runReadJoiner(
             AND NOT EXISTS (  -- E2 (ADR-0005): skip revoked-teammate instances
               SELECT 1 FROM teammate t
                WHERE t.id = instance_attestation.teammate_id
-                 AND t.revoked_at IS NOT NULL AND t.revoked_at > instance_attestation.ts_start
+                 AND t.emit_revoked_at IS NOT NULL AND t.emit_revoked_at > instance_attestation.ts_start
             )
             AND instance_id IN (${sql.join(
               explicitSessions.map((id) => sql`${id}::uuid`),
@@ -1132,14 +1218,15 @@ export async function runReadJoiner(
                  region_id::text   AS region_id,
                  org_unit_id::text AS org_unit_id,
                  cost_owning_unit_id::text AS cost_owning_unit_id,
-                 project_code_hash, tool, identity_state
+                 project_code_hash, tool, identity_state,
+                 EXTRACT(EPOCH FROM (now() - joiner_read_at))::text AS read_age_s
           FROM instance_attestation
           WHERE ts_purged IS NULL
             AND attestation_state IN ('attested', 'unassigned')  -- B′: include unassigned device-enrol rows
             AND NOT EXISTS (  -- E2 (ADR-0005): skip revoked-teammate instances
               SELECT 1 FROM teammate t
                WHERE t.id = instance_attestation.teammate_id
-                 AND t.revoked_at IS NOT NULL AND t.revoked_at > instance_attestation.ts_start
+                 AND t.emit_revoked_at IS NOT NULL AND t.emit_revoked_at > instance_attestation.ts_start
             )
             AND (ts_actual_end >= ${since}::timestamptz
                  OR (ts_actual_end IS NULL AND ts_start >= ${since}::timestamptz)
@@ -1157,6 +1244,16 @@ export async function runReadJoiner(
         `,
   )
 
+  // Keep the caller's order. For the scheduled tick that is the selection's
+  // least-recently-read-first order, and the lanes below take devices in it; the
+  // IN (...) query above returns rows in whatever order the planner chooses.
+  if (explicitSessions) {
+    const position = new Map(explicitSessions.map((id, i) => [id, i] as const))
+    sessions.sort(
+      (a, b) => (position.get(a.instance_id) ?? Infinity) - (position.get(b.instance_id) ?? Infinity),
+    )
+  }
+
   // ── Per-instance high-water-mark (scalability fix) ──────────────────────
   // For each instance about to be processed, the watermark is the MAX(ts_event)
   // of ALREADY-WRITTEN attribution_record rows — the last event we've attributed.
@@ -1172,8 +1269,22 @@ export async function runReadJoiner(
   // Batched into ONE query (instance_id → max_ts_event) to avoid N round-trips.
   // A deep-rescan tick (ING-1) WITHHOLDS the watermark from the reader (full
   // re-read) but the watermarks are still LOADED, because newEventsSeen measures
-  // every fetched record against them — without that, a daily deep pass on a
-  // quiet estate would report its whole re-read history as new work.
+  // every fetched record against them — without that, a deep read on a quiet
+  // estate would report its whole re-read history as new work.
+  //
+  // BOUNDED to the reader's own lookback (both watermark queries): without it,
+  // MAX(ts_event) per device reads every attribution_record partition the device
+  // ever wrote to. The bound changes no read. The reader's OUTER query timespan
+  // already caps every read at now - appliedLookbackDays, so a watermark older
+  // than that narrows nothing: with it the reader reads the whole lookback, and
+  // without one (a device whose last row is outside the bound now gets none) it
+  // reads exactly the same whole lookback. For a device whose last row is inside
+  // the bound, MAX over the bounded rows is the same MAX. A reader that applies
+  // no outer bound (the local collector: appliedLookbackDays undefined) keeps
+  // the unbounded watermark, because there a missing watermark WOULD widen the read.
+  const lookbackDays = reader.appliedLookbackDays
+  const watermarkBound =
+    lookbackDays === undefined ? sql`` : sql`AND ts_event >= now() - make_interval(days => ${lookbackDays}::int)`
   const watermarks = new Map<string, Date>()
   if (sessions.length > 0) {
     const wmRows = await db.execute<{ instance_id: string; max_ts: string | null }>(sql`
@@ -1183,6 +1294,7 @@ export async function runReadJoiner(
         [...new Set(sessions.map((s) => s.instance_id))].map((id) => sql`${id}::uuid`),
         sql`, `,
       )})
+        ${watermarkBound}
       GROUP BY instance_id
     `)
     for (const r of wmRows) {
@@ -1203,6 +1315,7 @@ export async function runReadJoiner(
         [...new Set(sessions.map((s) => s.instance_id))].map((id) => sql`${id}::uuid`),
         sql`, `,
       )})
+        ${watermarkBound}
       GROUP BY instance_id
     `)
     for (const r of swRows) {
@@ -1274,6 +1387,7 @@ export async function runReadJoiner(
       // mistaken for new work.
       opts.deepRescan ? undefined : watermark,
       parseCounters,
+      opts.window,
     )
     usageRowsFetched += usage.length
     newEventsSeen += countNewerThanWatermark(usage, watermark)
@@ -2124,6 +2238,7 @@ export async function runReadJoiner(
       session.instance_id,
       signalWatermarks.get(session.instance_id),
       parseCounters,
+      opts.window,
     )
     if (signals.length === 0) return
     for (const sig of signals) {
@@ -2144,27 +2259,117 @@ export async function runReadJoiner(
     }
   }
 
+  /*
+   * ── Lanes (docs/design/scaling-to-1000-users.md, Phase 1 item 2) ──────────
+   * Devices are grouped by teammate, because span keys (claudeSpanKey) omit the
+   * device: two devices of one teammate must never be written concurrently.
+   * JOINER_CONCURRENCY lanes each take the next whole group from a shared queue
+   * and run its devices one after another, with the per-device body unchanged.
+   * A group's place in the queue is its first device's place in the selection,
+   * except that every JOINER_PROVISIONAL_EVERY-th group taken is the next
+   * provisional group while any remain (a group is provisional when its first
+   * device is: selection puts confirmed devices first, so its others are too).
+   * Without that, the deadline would stop every tick inside the confirmed
+   * devices once there are more than a tick can start, and provisional devices
+   * would never be attempted at all.
+   *
+   * Interleaving: JS runs one lane at a time between awaits, so shared state is
+   * safe only while no read-modify-write spans an await. Every counter
+   * (`x += n`), parseCounters (merged synchronously by the reader),
+   * costingRungs (tallySpanPlan) and telemetryOnlyMicros (get then set) is
+   * updated synchronously after its await has resolved. rateCardCache can be
+   * resolved twice for one key by two lanes; both store the same card.
+   * enterpriseAddressSets is keyed by teammate, which only one lane holds.
+   * The group queue, `attempted`, `deadlineHit` and `heapPeak` below are only
+   * touched synchronously.
+   */
+  const teammateGroups = new Map<string, SessionRow[]>()
   for (const session of sessions) {
-    try {
-      await processSession(session)
-    } catch (err) {
-      // ING-6: isolate the bad session so it cannot starve the remaining
-      // instances this tick (the documented silent-attribution-stop class);
-      // it is retried on the next tick. Surfaced via JoinResult.errors.
-      errors += 1
-      console.warn(
-        `[azure-monitor-read] instance ${session.instance_id} failed; continuing with remaining sessions: ${String(err)}`,
-      )
+    const group = teammateGroups.get(session.teammate_id)
+    if (group) group.push(session)
+    else teammateGroups.set(session.teammate_id, [session])
+  }
+  const takeGroup = interleaveProvisionalGroups([...teammateGroups.values()])
+  const attempted: string[] = []
+  let deadlineHit = false
+  let heapPeak = 0
+  const lane = async (): Promise<void> => {
+    for (let group = takeGroup(); group !== undefined; group = takeGroup()) {
+      for (const session of group) {
+        // Checked before EVERY device, not only each group: one teammate can
+        // own many devices. A device not started is read from its watermark on
+        // a later tick (see JoinResult.deadlineHit).
+        if (clock() - startedAtMs >= JOINER_DEADLINE_MS) {
+          deadlineHit = true
+          return
+        }
+        attempted.push(session.instance_id)
+        try {
+          await processSession(session)
+        } catch (err) {
+          // ING-6: isolate the bad session so it cannot starve the remaining
+          // instances this tick (the documented silent-attribution-stop class);
+          // it is retried on the next tick. Surfaced via JoinResult.errors. A
+          // query that hit its timeout or abort lands here like any other fault.
+          errors += 1
+          console.warn(
+            `[azure-monitor-read] instance ${session.instance_id} failed; continuing with remaining sessions: ${String(err)}`,
+          )
+        }
+        // Signal lane in its OWN try/catch — a signal-path fault must never affect the
+        // token attribution above (billing-sacred) nor the JoinResult.errors count.
+        try {
+          await landSignals(session)
+        } catch (err) {
+          signalErrors += 1
+          console.warn(
+            `[azure-monitor-read] signal landing failed for instance ${session.instance_id}; token attribution unaffected: ${String(err)}`,
+          )
+        }
+        heapPeak = Math.max(heapPeak, process.memoryUsage().heapUsed)
+      }
     }
-    // Signal lane in its OWN try/catch — a signal-path fault must never affect the
-    // token attribution above (billing-sacred) nor the JoinResult.errors count.
+  }
+  await Promise.all(Array.from({ length: Math.min(JOINER_CONCURRENCY, teammateGroups.size) }, () => lane()))
+  if (deadlineHit) {
+    consola.warn(
+      `[azure-monitor-read] deadline (${JOINER_DEADLINE_MS} ms) reached: started ${attempted.length} of ${sessions.length} selected device(s); the rest are read on a later run.`,
+    )
+  }
+
+  // Read before the stamp below, so it describes the selection as this run found it.
+  let oldestReadAgeS: number | null = null
+  let devicesNeverRead = 0
+  for (const session of sessions) {
+    if (session.read_age_s == null) {
+      devicesNeverRead += 1
+      continue
+    }
+    const age = Number(session.read_age_s)
+    if (Number.isFinite(age)) oldestReadAgeS = oldestReadAgeS === null ? age : Math.max(oldestReadAgeS, age)
+  }
+
+  // Rotation stamp: one statement over every device attempted (success or
+  // failure), including when the deadline stopped the run. Fenced: it only
+  // orders FUTURE selections and must never fail the attribution this run
+  // already wrote. Not free, though: a failed stamp leaves these devices at the
+  // front of the next selection, so the rotation does not advance, and while it
+  // keeps failing the devices behind them on a fleet larger than one tick's
+  // capacity are not read at all. Hence rotationStampFailed in the result.
+  let rotationStampFailed = false
+  if (opts.stampReadAt && attempted.length > 0) {
     try {
-      await landSignals(session)
-    } catch (err) {
-      signalErrors += 1
-      console.warn(
-        `[azure-monitor-read] signal landing failed for instance ${session.instance_id}; token attribution unaffected: ${String(err)}`,
-      )
+      await db.execute(sql`
+        UPDATE instance_attestation
+           SET joiner_read_at = now()
+         WHERE instance_id IN (${sql.join(
+           attempted.map((id) => sql`${id}::uuid`),
+           sql`, `,
+         )})
+      `)
+    } catch (e) {
+      rotationStampFailed = true
+      consola.error('[azure-monitor-read] joiner_read_at stamp failed; attribution is unaffected, the rotation did not advance', e)
     }
   }
 
@@ -2272,6 +2477,13 @@ export async function runReadJoiner(
             ? -1
             : 1,
       ),
+    devicesSelected: sessions.length,
+    devicesAttempted: attempted.length,
+    deadlineHit,
+    oldestReadAgeMinutes: oldestReadAgeS === null ? null : Math.floor(oldestReadAgeS / 60),
+    devicesNeverRead,
+    rotationStampFailed,
+    heapUsedPeakMb: attempted.length > 0 ? Math.round(heapPeak / (1024 * 1024)) : null,
   }
 }
 

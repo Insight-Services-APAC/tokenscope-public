@@ -24,7 +24,7 @@
 import { readFileSync } from 'node:fs'
 
 import { accessCachePath, readBoundAccessToken } from './device-store.mjs'
-import { fileURLToPath } from 'node:url'
+import { isMainModule } from './is-main.mjs'
 import { resolveRepoProjectCode, computeCodeHash } from './tag-repo.mjs'
 import { stateDir as resolveStateDir, trustedGlobalSettingsEnv } from './plugin-runtime.mjs'
 import { assertSafeEndpoint } from './endpoint-guard.mjs'
@@ -152,7 +152,7 @@ export async function checkRepoProjectBillable({
 }
 
 // CLI: classify using the global settings.json env (best-effort, prints the result).
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isMainModule(import.meta.url)) {
   // TRUSTED read: homedir() honours HOME, which a hostile repo can move, and this
   // env names the endpoint the access token above is sent to.
   checkRepoProjectBillable({ env: trustedGlobalSettingsEnv() }).then((r) =>

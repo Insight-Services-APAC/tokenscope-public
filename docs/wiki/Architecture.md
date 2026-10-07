@@ -43,32 +43,20 @@ and spend is attributed per record.
 
 The as-built system is seven components. There is **no launcher and no server-side token broker**. (A remote **MCP server** + OAuth 2.1 client backbone is **built and live** for both Claude Code and GitHub Copilot; component 1 below.)
 
-```mermaid
-flowchart TB
-    subgraph CLI["Claude Code / Copilot (developer machine)"]
-        E["Claude native OTel emitter /<br/>Copilot usage extension<br/>api_request log events"]
-    end
+![The app issues credentials and reads telemetry back, but device usage goes straight to Azure Monitor](images/architecture-components.svg)
 
-    subgraph App["TokenScope app — Azure Container Apps (Nuxt + Nitro + Drizzle)"]
-        ST["1. MCP server + OAuth 2.1<br/>/api/v1/mcp · provision_emit → setup/redeem"]
-        BR["2. Bearer-refresh endpoint<br/>instances/{instanceId}/bearer"]
-        APP["5. App: attribution + costing<br/>engine, dashboard, REST API"]
-        WK["6. Read joiner + 33-worker registry<br/>scheduler-invoked"]
-    end
+1. The plugin connects to the MCP server at `/api/v1/mcp` after one PKCE browser consent at `/api/v1/oauth/authorize`, which grants `tokenscope.read` and `tag`.
+2. The `provision_emit` tool returns a one-time handoff code. The local helper redeems it at `POST /api/v1/setup/redeem` for the durable emit credential and the OTel settings. The handoff is the authentication; the credential never passes through chat.
+3. When the client needs to send, it calls `GET /api/v1/instances/{instanceId}/bearer` with its `tokenscope.emit` token. The app mints an Azure Monitor ingest bearer with its own managed identity and returns it.
+4. The client sends OTLP log events with that bearer straight to the data collection endpoint. No TokenScope process sits in this path.
+5. The data collection rule writes the events to the `OTelLogs` table in `log-<name>`.
+6. Each of the 32 `caj-ts-*` cron jobs posts an HMAC-signed request to `/api/v1/internal/run-worker/{name}`. The registry holds 33 workers; `archive-ledger` is deliberately unscheduled.
+7. The read joiner, `azure-monitor-read`, queries `OTelLogs` by KQL with the managed identity.
+8. `analytics-poll`, `reconciliation-sync` and `copilot-pool-bill` pull usage and bills from the provider APIs.
+9. Every component reads and writes PostgreSQL: the credential endpoints keep `instance_attestation`, `emit_handoff` and `oauth_token`, and the workers write the spend tables.
+10. People sign in with Entra and use the dashboard and the `/api/v1/reports/*` API.
 
-    AM["3+4. Azure Monitor OTLP endpoint<br/>(DCE + DCR) → OTelLogs in LAW"]
-    DB["7. PostgreSQL Flexible Server<br/>instance_attestation, emit_handoff,<br/>oauth_token, provider_org, ledger"]
-
-    ST -->|writes attestation, returns OTel env| CLI
-    CLI -->|reads env| E
-    BR -->|Azure Monitor bearer| E
-    E -->|OTLP/HTTP log events| AM
-    AM -->|KQL @azure/monitor-query| WK
-    WK -->|attribution_record| DB
-    APP --> DB
-    ST --> DB
-    APP -.->|budgets / rollups / untagged worklist| Browser["Dashboard user"]
-```
+_TokenScope never brokers usage: it hands out credentials and reads the telemetry back from Azure Monitor._
 
 - **MCP server + OAuth 2.1** — the `/api/v1/mcp` remote MCP server (read/tag tools + prompts), authenticated by one PKCE browser consent (`tokenscope.read`+`tag`). The read-scoped `provision_emit` tool locates-or-creates the `instance_attestation` and mints a one-time `emit_handoff`; the local helper redeems it at `POST /api/v1/setup/redeem` for the durable emit credential + the OTel env bundle (Claude Code: written into `~/.claude/settings.json`; Copilot: `~/.tokenscope/config.copilot-cli.json`).
 - **Bearer-refresh endpoint** — `GET /api/v1/instances/{instanceId}/bearer`, the `otelHeadersHelper` target; OAuth `tokenscope.emit` authed (not a cookie), returns the Azure Monitor bearer.
@@ -85,70 +73,47 @@ flowchart TB
 
 **Three** live ingest paths feed the spend surfaces, not two:
 
-```mermaid
-flowchart LR
-    CC["Claude Code /<br/>Copilot usage extension"] -->|"OTLP api_request<br/>log events"| LAW[("Log Analytics<br/>OTelLogs")]
-    LAW -->|"KQL on tokenscope.instance_id"| RJ["read joiner<br/>(azure-monitor-read)"]
+![Three ingest paths write their own tables; the attributed view combines them, and the billed reads take only the API lane](images/architecture-ingest-paths.svg)
 
-    SA[("instance_attestation")] -->|join key| RJ
-    PA[("project_assignment")] -->|membership gate| RJ
-    PO[("provider_org")] -->|org-lane fidelity| RJ
+1. `azure-monitor-read` (every 5 minutes) reads `OTelLogs`, resolves the teammate from `instance_attestation`, applies the membership gate and the provider org lane, costs each event, and writes `attribution_record`.
+2. `analytics-poll` (every 15 minutes) re-pulls the last 30 days from the Anthropic Analytics API into `actual_spend`, keeping the provider payload in `raw_payload`.
+3. `reconciliation-sync` (hourly) writes per-teammate Copilot usage to `reconciliation_record`. The dashed edge is its per-seat rows in `actual_spend`, which are showback only and excluded from every chargeback view.
+4. `copilot-pool-bill` (daily) writes the pooled enterprise bill to `copilot_pool_bill`.
+5. `provider-transform` (hourly) derives `provider_usage_fact`, the API lane with model and cost type, from `actual_spend.raw_payload` and, for Copilot, `reconciliation_record`.
+6. `usage-reconciliation` (every 2 hours) compares the API figure with OTel per teammate, day and tool and writes the remainder to `unaccounted_usage`.
+7. §A attributed usage is `v_complete_usage`. It combines OTel detail, the API-minus-OTel remainder, and the tools that never emit telemetry.
+8. §B reads only the API lane: the billed axis reads `provider_usage_fact`, and the chargeback views read Anthropic rows in `actual_spend` and `copilot_pool_bill`. None of them reads `attribution_record`.
 
-    RJ -->|writes| AR[("attribution_record")]
-
-    ANT["Anthropic<br/>Enterprise Analytics"] -->|"reconciled orgs"| AP["analytics-poll"]
-    AP -->|writes| AS[("actual_spend")]
-
-    GH["GitHub Copilot"] --> RS["reconciliation-sync ·<br/>copilot-pool-bill"]
-    RS --> RR[("reconciliation_record ·<br/>copilot_pool_bill")]
-
-    AS & RR -->|"raw payloads, hourly"| PT["provider-transform<br/>(+ github arm)"]
-    PT -->|writes| PUF[("provider_usage_fact")]
-
-    AR & AS & RR --> AGG["rollups + views<br/>v_complete_usage · chargeback"]
-    PUF -->|"billed axis · model split"| AGG
-    AGG --> WEB["Web app:<br/>budgets · rollups · worklist"]
-```
+_Telemetry and the provider APIs land in separate tables; §A combines them, and §B reads only the API lane._
 
 - **Telemetry path (detail, ~5% of the estate):** the joiner queries `OTelLogs` via KQL, joining on the TokenScope-minted `tokenscope.instance_id` (the device/enrolment INSTANCE id — not Claude's own per-SESSION `session.id`, which is captured per-record as `claude_session_id`), applies the membership gate and org-lane selection, costs each span, and writes `attribution_record`. A membership failure does **not** discard the row: it is written with `project_id` NULL, i.e. unallocated.
 - **Anthropic Analytics path (truth, 100%):** `analytics-poll` polls each *reconciled* org over a **trailing 30-day window** (`[now−30d, now]` — *not* month-start), one UTC day at a time, and upserts idempotent daily rows into `actual_spend`. Each row lands in a **per-surface tool lane** (#142). Zero reconciled orgs = clean no-op.
 - **Copilot path:** `reconciliation-sync` writes per-teammate §A usage to `reconciliation_record`; `copilot-pool-bill` writes the pooled §B bill to `copilot_pool_bill`. Copilot rows in `actual_spend` are **showback-only** and are firewalled out of every chargeback view by name.
 - **Billed lane:** the hourly `provider-transform` worker (plus its GitHub arm) derives `provider_usage_fact` — per-(teammate, day, tool, **model**, cost_type, context_window) facts — from the captured provider payloads (`actual_spend.raw_payload`; `reconciliation_record` for Copilot). The billed/chargeback reporting axes and the model split read it. `server/reporting/engine/` (scope, kpis, drivers, billed-axis, budget-axis, …) is the reporting read layer every `/api/v1/reports/*` route composes.
-- The read joiner is **pull-and-rejoin**, not write-once. It re-scans joinable sessions each tick with a **5-minute** watermark overlap — events later than that are recovered only by the ~24 h deep rescan or an operator `telemetry-recovery` run, **not** automatically on the next tick.
+- The read joiner is **pull-and-rejoin**, not write-once. It re-scans joinable sessions each tick with a **5-minute** watermark overlap — events later than that are recovered only by the daily `telemetry-recovery` pass (the last 7 days, one instance-day at a time) or an operator recovery, **not** automatically on the next tick.
 
 ## Technical / deployment topology
 
-The VNet-integrated deployment runs the app on **Azure Container Apps** with **internal ingress** (a private VIP) behind either **Azure Front Door Premium over Private Link** (recommended) or **your own WAF / reverse proxy**. PostgreSQL, Redis, Key Vault and ACR are all private (private endpoints); every backing service is reached by managed identity. See [Network Architecture](Network-Architecture.md).
+The VNet-integrated deployment runs the app on **Azure Container Apps** with **internal ingress** (a private VIP) behind either **Azure Front Door Premium over Private Link** (recommended) or **your own WAF / reverse proxy**. PostgreSQL, Redis, Key Vault and ACR all sit behind private endpoints. The platform pulls images and resolves Key Vault secrets with the app's managed identity; the app reaches PostgreSQL with a password held in Key Vault. See [Network Architecture](Network-Architecture.md).
 
-```mermaid
-flowchart TB
-    User["User browser"] --> WAF["Front Door Premium<br/>or your WAF"]
-    WAF -->|"Private Link / VNet to internal VIP"| TSAPP
+![VNet posture: the edge is the only public way into the app, and Key Vault, PostgreSQL and ACR answer only on private endpoints](images/architecture-topology.svg)
 
-    subgraph ACA["Azure Container Apps — ingress internal: true (private VIP)"]
-        TSAPP["TokenScope app + 33-worker registry"]
-    end
+1. Browsers and the client plugins reach the app only through the edge. Front Door Premium connects to the environment's internal VIP over Private Link; your own WAF reaches it over the VNet.
+2. The 32 `caj-ts-*` jobs run in the same environment with the same image and post HMAC-signed requests to the app.
+3. The platform pulls the image from ACR with the managed identity (AcrPull).
+4. The platform resolves the app's Key Vault secret references with the managed identity (Key Vault Secrets User).
+5. The app connects to PostgreSQL with a password-bearing connection string from Key Vault, not with the managed identity.
+6. The app queries `OTelLogs` with the managed identity (Log Analytics Reader). When the query path is private-only, that query goes through the optional `pe-ampls` endpoint.
+7. Devices send telemetry to the public ingest endpoint directly, not through the edge.
+8. The environment's console and system logs go to `log-ops-<name>` through a diagnostic setting when `separateOpsWorkspace` is on, and to `log-<name>` otherwise.
+9. Key Vault, PostgreSQL and ACR diagnostics follow the same rule.
 
-    SCHED["External ACA cron jobs (caj-ts-*)"] -->|"HMAC-signed POST<br/>internal/run-worker/{name}"| TSAPP
-
-    TSAPP -->|MI · private endpoint| PG[("PostgreSQL<br/>Flexible Server")]
-    TSAPP -->|MI| LAW[("Log Analytics<br/>OTelLogs")]
-    TSAPP -->|MI · private endpoint| KV["Key Vault<br/>(KV-ref secrets)"]
-    TSAPP -->|MI · private endpoint| REDIS["Redis<br/>(sessions/cache)"]
-    TSAPP -->|MI · private endpoint| ACR["ACR<br/>(container images)"]
-
-    MI["User-assigned Managed Identity"] -.-> TSAPP
-
-    classDef edge fill:#fde2c4,stroke:#c47f1a;
-    classDef store fill:#dceefb,stroke:#2a7ab0;
-    class WAF edge;
-    class PG,LAW,KV,REDIS,ACR store;
-```
+_With `enablePrivateNetworking` on, the edge is the only way in, and the data stores have no public endpoint._
 
 - **The edge** is the only public ingress; it terminates TLS and forwards to the internal ACA VIP. Front Door Premium (`enableFrontDoor`, `frontDoorSku='Premium'`) reaches it over Private Link and, once `frontDoorId` is set, the app rejects requests without Front Door's `X-Azure-FDID` header. Your own WAF reaches it over the VNet, with no header dependency.
-- **ACA ingress is internal** (`internal: true`, private VIP) — the app is not publicly reachable except through the edge. `/api/health` remains the ACA probe target.
+- **The ACA environment is internal** (`vnetConfiguration.internal: true`, private VIP) — the app is not publicly reachable except through the edge. `/api/health` remains the ACA probe target.
 - **External scheduler** (ACA cron jobs) drives the workers via the HMAC-signed `run-worker/{name}` endpoint — there is no standing worker pool and no BullMQ/Redis queue.
-- **PostgreSQL Flexible Server** (private endpoint) holds derived state (audit-trigger append-only). **Log Analytics** is the read-only attribution surface. **Key Vault** (private endpoint) is the single secrets surface; **Redis** (private endpoint) holds sessions/cache only; **ACR** (private endpoint) serves container images.
+- **PostgreSQL Flexible Server** (private endpoint) holds derived state (audit-trigger append-only). **Log Analytics** is the read-only attribution surface. **Key Vault** (private endpoint) is the single secrets surface; **ACR** (private endpoint) serves container images. **Redis** is provisioned with a private endpoint, but nothing in the app connects to it; sign-in sessions are stored in PostgreSQL.
 
 ## The ingestion paths
 

@@ -68,11 +68,20 @@ describe('device-id NEVER emits a credential', () => {
     // just because it was added — the result object is built from known keys only.
     const claude = readClaudeDevice(claudeSettings({ TOKENSCOPE_FUTURE_SECRET: 'nope' }))
     const copilot = readCopilotDevice(copilotConfig({ future_secret: 'nope' }))
-    const expected = ['enrolled', 'tool', 'instance_id', 'bearer_host', 'reason']
+    const expected = ['enrolled', 'tool', 'instance_id', 'bearer_host', 'reason', 'platform', 'node']
     expect(Object.keys(claude).sort()).toEqual([...expected].sort())
     expect(Object.keys(copilot).sort()).toEqual([...expected].sort())
     expect(JSON.stringify(claude)).not.toContain('nope')
     expect(JSON.stringify(copilot)).not.toContain('nope')
+  })
+})
+
+describe('device-id reports the runtime setup step 0 branches on (#408 S6)', () => {
+  it('platform and node are this process’s, on every branch', () => {
+    for (const out of [readClaudeDevice(claudeSettings()), readClaudeDevice(null), readCopilotDevice(null)]) {
+      expect(out.platform).toBe(process.platform)
+      expect(out.node).toBe(process.version)
+    }
   })
 })
 

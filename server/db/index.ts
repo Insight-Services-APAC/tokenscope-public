@@ -56,9 +56,11 @@ export function getDb() {
   // which is a function of the SKU's memory and therefore changes when the SKU
   // does — re-derive it after any scale, do not assume the number here
   // (`az postgres flexible-server parameter show --name max_connections`).
-  // maxReplicas is 3, so 3 replicas x (10 here + the worker lane's 10, idle 60)
-  // must stay under it — longer idles let a burst pin connections the next
-  // replica needs. connect_timeout 10 bounds a hung connect.
+  // maxReplicas is 3 outside production, so 3 replicas x (10 here + the worker
+  // lane's 10, idle 60 + the dispatch-lock pool's 24) + a reserve must stay
+  // under it (tests/unit/infra/postgres-connection-budget.test.ts, for every
+  // environment that sets postgresMaxConnections) — longer idles let a burst pin
+  // connections the next replica needs. connect_timeout 10 bounds a hung connect.
   // docs/design/request-floor-performance.md F3.
   client = createDbClient(url, {
     max: 10,

@@ -17,6 +17,13 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { runEnterpriseAnalyticsPoll, sourceForOrg } from '../../../server/workers/analytics-poller'
 import { runProviderTransform } from '../../../server/workers/provider-transform'
+import {
+  accumulate,
+  blankFact,
+  upsertProviderUsageFacts,
+  PROVIDER_FACT_UPSERT_BATCH,
+  type FactRow as Fact,
+} from '../../../server/workers/provider-fact'
 import type { AnthropicEnterpriseClient } from '../../../server/anthropic/enterprise-client'
 import * as schema from '../../../drizzle/schema'
 
@@ -541,4 +548,168 @@ describe('the rate card never reaches the billed lane', () => {
     expect(rows.filter((f) => f.cost_type !== null)).toHaveLength(0)
     expect(rows.filter((f) => f.cost_type === null)).toHaveLength(1)
   })
+})
+
+describe('set-based writes (scaling-to-1000-users.md Phase 1 item 1)', () => {
+  const DAY = '2026-08-03'
+  const base = (over: Partial<Fact>): Fact =>
+    blankFact({
+      source: SOURCE,
+      provider: 'anthropic',
+      providerOrgId: null,
+      providerEnterpriseId: null,
+      teammateId,
+      actorRef: EMAIL,
+      date: DAY,
+      tool: 'claude-code',
+      model: 'claude-opus-5',
+      costType: null,
+      contextWindow: '0-200k',
+      currency: 'USD',
+      ...over,
+    })
+
+  /** Every stored column but `id` and `pulled_at`, as Postgres renders it. */
+  async function stored() {
+    return t.client`
+      SELECT raw_batch_id::text AS raw_batch_id, source, provider,
+             provider_org_id::text AS provider_org_id, provider_enterprise_id::text AS provider_enterprise_id,
+             teammate_id::text AS teammate_id, actor_ref, date::text AS date, tool, model, cost_type,
+             context_window, region_id::text AS region_id, org_unit_id::text AS org_unit_id,
+             cost_owning_unit_id::text AS cost_owning_unit_id, dimension_source,
+             cost_usd::text AS cost_usd, currency, input_tokens::text AS input_tokens,
+             output_tokens::text AS output_tokens, cache_read_tokens::text AS cache_read_tokens,
+             cache_creation_tokens::text AS cache_creation_tokens, requests::text AS requests,
+             web_search_requests::text AS web_search_requests, data_refreshed_at::text AS data_refreshed_at
+        FROM provider_usage_fact
+       ORDER BY COALESCE(teammate_id::text, ''), COALESCE(actor_ref, ''), COALESCE(model, ''),
+                COALESCE(cost_type, ''), COALESCE(context_window, '')`
+  }
+
+  it('stores exactly what the single-row statement stored, for a representative mix', async () => {
+    /*
+     * The expected rows below were captured from the single-row
+     * `INSERT … VALUES` statement this batched one replaced (run against it
+     * before the swap), so they pin equality with the old path: cost from
+     * `toFixed(6)` text, bigints beyond 2^32, a resolved teammate's homing, an
+     * unresolved actor's NULL homing, NULL model / cost_type / context_window,
+     * and a token row with every measure NULL.
+     *
+     * 0.0000005 is the cost that tells the two encodings apart: `toFixed(6)`
+     * renders it 0.000000, while the JSON float `5e-7` would be rounded half
+     * away from zero by numeric(14,6) to 0.000001.
+     *
+     * MUTATIONS: send `cost_usd` as the JSON number instead of `toFixed(6)` →
+     * the EUR row stores 0.000001, red; snapshot homing from a NULL instead of
+     * `v.teammate_id` → the resolved rows lose region / unit, red.
+     */
+    const mix: Fact[] = [
+      Object.assign(base({}), {
+        inputTokens: 1000, outputTokens: 500, cacheReadTokens: 300, cacheCreationTokens: 100,
+        requests: 7, webSearchRequests: 3,
+      }),
+      Object.assign(base({ costType: 'tokens', contextWindow: '200k+' }), { costUsd: 1.23456789 }),
+      Object.assign(base({ costType: 'tokens', model: null, contextWindow: null, currency: 'EUR' }), {
+        costUsd: 0.0000005,
+      }),
+      base({ teammateId: null, actorRef: 'Ghost@Raw-Batch.test', model: null, contextWindow: null }),
+      Object.assign(base({ teammateId: null, actorRef: 'big@raw-batch.test', contextWindow: null }), {
+        inputTokens: 9007199254740991, requests: 0, webSearchRequests: null,
+      }),
+    ]
+    await upsertProviderUsageFacts(t.db, mix)
+
+    const common = {
+      raw_batch_id: null, source: SOURCE, provider: 'anthropic', provider_org_id: null,
+      provider_enterprise_id: null, date: DAY, tool: 'claude-code', dimension_source: 'ingest-snapshot',
+      data_refreshed_at: null,
+    }
+    const homed = { teammate_id: teammateId, actor_ref: EMAIL, region_id: regionId, org_unit_id: orgA, cost_owning_unit_id: orgA }
+    const unhomed = { teammate_id: null, region_id: null, org_unit_id: null, cost_owning_unit_id: null }
+    const noTokens = { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null }
+    expect(await stored()).toEqual([
+      { ...common, ...unhomed, actor_ref: 'big@raw-batch.test', model: 'claude-opus-5', cost_type: null,
+        context_window: null, cost_usd: null, currency: 'USD', ...noTokens, input_tokens: '9007199254740991',
+        requests: '0', web_search_requests: null },
+      { ...common, ...unhomed, actor_ref: 'Ghost@Raw-Batch.test', model: null, cost_type: null, context_window: null,
+        cost_usd: null, currency: 'USD', ...noTokens, requests: null, web_search_requests: null },
+      { ...common, ...homed, model: null, cost_type: 'tokens', context_window: null, cost_usd: '0.000000',
+        currency: 'EUR', ...noTokens, requests: null, web_search_requests: null },
+      { ...common, ...homed, model: 'claude-opus-5', cost_type: null, context_window: '0-200k', cost_usd: null,
+        currency: 'USD', input_tokens: '1000', output_tokens: '500', cache_read_tokens: '300',
+        cache_creation_tokens: '100', requests: '7', web_search_requests: '3' },
+      { ...common, ...homed, model: 'claude-opus-5', cost_type: 'tokens', context_window: '200k+',
+        cost_usd: '1.234568', currency: 'USD', ...noTokens, requests: null, web_search_requests: null },
+    ])
+
+    // A re-upsert of the same keys refreshes in place: same row count, new money.
+    mix[1]!.costUsd = 2
+    await upsertProviderUsageFacts(t.db, mix)
+    const again = await stored()
+    expect(again).toHaveLength(5)
+    expect(again[4]!.cost_usd).toBe('2.000000')
+  })
+
+  it('actor_refs that differ only in case collapse in-run and the batched statement commits', async () => {
+    /*
+     * A multi-row ON CONFLICT DO UPDATE fails outright when two rows of one
+     * statement share a key ("cannot affect row a second time"). The index keys
+     * an unresolved row on lower(actor_ref); grainKey must lower-case the same
+     * way so `accumulate` merges the two BEFORE the write.
+     *
+     * MUTATION: drop `.toLowerCase()` from grainKey → two map entries reach one
+     * statement and it throws, red.
+     */
+    const facts = new Map<string, Fact>()
+    for (const ref of ['Case@Raw-Batch.test', 'case@raw-batch.test', 'CASE@RAW-BATCH.TEST']) {
+      accumulate(facts, base({ teammateId: null, actorRef: ref, costType: 'tokens' }), (into) => {
+        into.costUsd = (into.costUsd ?? 0) + 1
+      })
+    }
+    expect(facts.size).toBe(1)
+    await upsertProviderUsageFacts(t.db, [...facts.values()])
+
+    const rows = await stored()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.cost_usd).toBe('3.000000')
+  })
+
+  it('a run with more facts than one batch writes, keeps and prunes across every chunk', async () => {
+    /*
+     * 2,050 distinct grains on one day = three statements (1000 + 1000 + 50).
+     *
+     * MUTATIONS:
+     *   - write only the first chunk (loop bound `i < PROVIDER_FACT_UPSERT_BATCH`)
+     *     → 1000 rows, red;
+     *   - prune with `pulled_at <= runStarted` → this run's own rows go too, red;
+     *   - stamp `pulled_at = clock_timestamp()` in the SET list → the second
+     *     run's updated rows carry several instants, red on the distinct count.
+     */
+    const N = 2050
+    expect(N).toBeGreaterThan(2 * PROVIDER_FACT_UPSERT_BATCH)
+    const models = (n: number) =>
+      Array.from({ length: n }, (_, i) => usageRow({ model: `m-${String(i).padStart(4, '0')}`, inTok: i + 1 }))
+
+    await poll({ '2026-08-01': { usage: models(N), cost: [] } })
+    const first = await transform('2026-08-01', '2026-08-01')
+    expect(first.factRowsUpserted).toBe(N)
+    expect(first.deriveMs).toBeGreaterThanOrEqual(0)
+    expect(first.writeMs).toBeGreaterThanOrEqual(0)
+    const [one] = await t.client<{ n: number; instants: number; tokens: string }[]>`
+      SELECT COUNT(*)::int AS n, COUNT(DISTINCT pulled_at)::int AS instants, SUM(input_tokens)::text AS tokens
+        FROM provider_usage_fact`
+    expect(one).toEqual({ n: N, instants: 1, tokens: String((N * (N + 1)) / 2) })
+
+    // The provider revises the day down to its first 1,500 models.
+    await poll({ '2026-08-01': { usage: models(1500), cost: [] } })
+    const second = await transform('2026-08-01', '2026-08-01')
+    expect(second.factRowsUpserted).toBe(1500)
+    expect(second.factRowsPruned).toBe(N - 1500)
+    // Every row this run re-asserted, across all chunks, carries the one
+    // transaction instant the prune compared against.
+    const [two] = await t.client<{ n: number; instants: number; max: string }[]>`
+      SELECT COUNT(*)::int AS n, COUNT(DISTINCT pulled_at)::int AS instants, MAX(model) AS max
+        FROM provider_usage_fact`
+    expect(two).toEqual({ n: 1500, instants: 1, max: 'm-1499' })
+  }, 120_000)
 })

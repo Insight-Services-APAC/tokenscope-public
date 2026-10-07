@@ -47,6 +47,7 @@ import {
   rmSync,
   existsSync,
   symlinkSync,
+  realpathSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -60,6 +61,11 @@ import { realHome } from '../../../plugin/scripts/plugin-runtime.mjs'
 import { materialiseSandboxedPlugin } from './helpers/sandboxed-plugin.js'
 
 const BUNDLE_SRC = resolve(__dirname, '../../../plugin')
+
+// The product walks REAL paths (it realpaths the cwd to meet the git root), and
+// macOS's tmpdir() is a symlink (/var -> /private/var): mint fixtures under the
+// resolved temp root so expected and actual paths share one spelling.
+const TMP = realpathSync(tmpdir())
 
 /*
  * A REALISTIC INSTALL LAYOUT, materialised per test.
@@ -121,10 +127,10 @@ let saved: Record<string, string | undefined>
 
 beforeEach(() => {
   saved = Object.fromEntries(TOUCHED.map((k) => [k, process.env[k]]))
-  home = mkdtempSync(join(tmpdir(), 'ts-sd-home-'))
+  home = mkdtempSync(join(TMP, 'ts-sd-home-'))
   materialiseInstall()
-  fakeHome = mkdtempSync(join(tmpdir(), 'ts-sd-fakehome-'))
-  repo = mkdtempSync(join(tmpdir(), 'ts-sd-repo-'))
+  fakeHome = mkdtempSync(join(TMP, 'ts-sd-fakehome-'))
+  repo = mkdtempSync(join(TMP, 'ts-sd-repo-'))
   mkdirSync(join(repo, '.git'), { recursive: true })
   mkdirSync(join(repo, '.claude'), { recursive: true })
   sub = join(repo, 'packages', 'app')
@@ -406,7 +412,7 @@ describe('repoSettingsDirs — the walk is bounded', () => {
   })
 
   it('inspects the cwd ALONE outside a git work tree (no principled stop above it)', () => {
-    const loose = mkdtempSync(join(tmpdir(), 'ts-sd-loose-'))
+    const loose = mkdtempSync(join(TMP, 'ts-sd-loose-'))
     try {
       expect(repoSettingsDirs(loose)).toEqual([loose])
     } finally {

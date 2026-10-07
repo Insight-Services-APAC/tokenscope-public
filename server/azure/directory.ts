@@ -24,7 +24,75 @@
  * getDirectoryUserByOid() rather than trusting the client-supplied email /
  * display name (which would be spoofable).
  */
+import { resilientFetch, DeadlinePassedError } from '../utils/resilient-fetch'
+
 const GRAPH_SCOPE = 'https://graph.microsoft.com/.default'
+
+/** Per-attempt bound on the token mint and every Graph call (an unbounded fetch
+ *  hangs on a black-holed endpoint). */
+export const GRAPH_TIMEOUT_MS = 10_000
+
+/** Retries a WORKER's Graph call gets (network error, 5xx, 429 + Retry-After). */
+export const WORKER_GRAPH_RETRIES = 2
+
+/**
+ * How one Graph call is transported. The default — no options — is ONE attempt:
+ * that is what request handlers and sign-in get, so a person waiting on a page
+ * is never parked behind a backoff. Workers pass `retries` and their run
+ * `deadline` (epoch ms), past which no attempt and no wait is started.
+ */
+export interface GraphCallOptions {
+  retries?: number
+  deadline?: number
+}
+
+/** A non-2xx Graph (or token-endpoint) answer. The message keeps the `(status)`
+ *  shape callers match on. */
+export class GraphHttpError extends Error {
+  constructor(
+    readonly status: number,
+    /** The Graph path, or 'token' for the client-credentials mint. */
+    readonly path: string,
+    message = `Graph request failed (${status}) for ${path}.`,
+  ) {
+    super(message)
+    this.name = 'GraphHttpError'
+  }
+}
+
+/**
+ * A failure that says nothing about the person being looked up — retrying later
+ * may succeed: a 429 or 5xx (from Graph or the token endpoint), a network error,
+ * a per-attempt timeout or abort, or the caller's deadline having passed. Every
+ * other failure (a 4xx, a configuration error, a bug, a failed database write)
+ * is permanent as far as a retry queue is concerned.
+ */
+export function isTransientGraphFailure(err: unknown): boolean {
+  if (err instanceof GraphHttpError) return err.status === 429 || err.status >= 500
+  if (err instanceof DeadlinePassedError) return true
+  const name = typeof err === 'object' && err !== null ? (err as { name?: unknown }).name : undefined
+  if (name === 'TimeoutError' || name === 'AbortError') return true
+  // undici reports every network-layer failure as TypeError('fetch failed').
+  return err instanceof TypeError && err.message === 'fetch failed'
+}
+
+// A 404 from the TOKEN endpoint is a misconfigured mint, never "this person is
+// not in the directory": reading it as absence would place every identity on the
+// global bucket.
+const isGraphNotFound = (err: unknown): boolean =>
+  err instanceof GraphHttpError && err.status === 404 && err.path !== 'token'
+
+function transport(call: GraphCallOptions) {
+  return { timeoutMs: GRAPH_TIMEOUT_MS, retries: call.retries ?? 0, deadline: call.deadline }
+}
+
+/*
+ * The token mint's transport, fixed and independent of any caller. The mint is
+ * shared (single-flight below): every concurrent caller awaits the one request,
+ * so it must not carry the first caller's deadline (a worker past its deadline
+ * would fail a request handler's mint) or its retry count.
+ */
+const MINT_TRANSPORT = { timeoutMs: GRAPH_TIMEOUT_MS, retries: 1 }
 
 function graphBaseUrl(): string {
   return process.env.NUXT_GRAPH_BASE_URL?.replace(/\/$/, '') ?? 'https://graph.microsoft.com/v1.0'
@@ -103,14 +171,18 @@ async function mintGraphToken(): Promise<{ token: string; expiresAtMs: number }>
     scope: GRAPH_SCOPE,
     grant_type: 'client_credentials',
   })
-  const res = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body,
-  })
+  const res = await resilientFetch(
+    tokenUrl,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body,
+    },
+    MINT_TRANSPORT,
+  )
   if (!res.ok) {
     // Don't leak the response body (may echo client_id); surface status only.
-    throw new Error(`Graph client-credentials token mint failed (${res.status}).`)
+    throw new GraphHttpError(res.status, 'token', `Graph client-credentials token mint failed (${res.status}).`)
   }
   const json = (await res.json()) as { access_token?: string; expires_in?: number }
   if (!json.access_token) throw new Error('Graph token response had no access_token.')
@@ -123,7 +195,8 @@ async function mintGraphToken(): Promise<{ token: string; expiresAtMs: number }>
 async function getGraphToken(): Promise<string> {
   const now = Date.now()
   if (cached && cached.expiresAtMs - REFRESH_SKEW_MS > now) return cached.token
-  // Single-flight: collapse concurrent cold-start mints onto one request.
+  // Single-flight: collapse concurrent cold-start mints onto one request, sent
+  // on MINT_TRANSPORT whoever started it.
   if (!inFlight) {
     inFlight = mintGraphToken().finally(() => {
       inFlight = null
@@ -133,14 +206,19 @@ async function getGraphToken(): Promise<string> {
   return cached.token
 }
 
-async function graphGet<T>(path: string, search: URLSearchParams, advanced = false): Promise<T> {
+async function graphGet<T>(
+  path: string,
+  search: URLSearchParams,
+  advanced = false,
+  call: GraphCallOptions = {},
+): Promise<T> {
   const token = await getGraphToken()
   const url = `${graphBaseUrl()}${path}?${search.toString()}`
   const headers: Record<string, string> = { authorization: `Bearer ${token}` }
   // $search / $count on /users are advanced queries → ConsistencyLevel: eventual.
   if (advanced) headers['ConsistencyLevel'] = 'eventual'
-  const res = await fetch(url, { headers })
-  if (!res.ok) throw new Error(`Graph request failed (${res.status}) for ${path}.`)
+  const res = await resilientFetch(url, { headers }, transport(call))
+  if (!res.ok) throw new GraphHttpError(res.status, path)
   return (await res.json()) as T
 }
 
@@ -178,8 +256,27 @@ export function _resetOrgDataLatch(): void {
   orgDataUnavailable = false
 }
 
-function activeSelect(): string {
-  return orgDataUnavailable ? SELECT_BASE : SELECT_EXT
+/*
+ * The employeeOrgData degradation every user read shares: a 400 while the
+ * extended select is active is retried once on the base select, and the latch
+ * is set only when that retry SUCCEEDS — that is what proves the property was
+ * the problem. A 400 the base select also gets (a malformed filter, say) is the
+ * request's own fault: it is rethrown and the latch stays unset, so one bad
+ * request cannot strip the hints for the process lifetime. Transient errors
+ * (throttle, 5xx, network) are never retried here and never latch. Without the
+ * degradation a tenant that rejects the property would make every strict
+ * (worker) lookup throw on every run.
+ */
+async function withSelectDegradation<T>(run: (select: string) => Promise<T>): Promise<T> {
+  if (orgDataUnavailable) return await run(SELECT_BASE)
+  try {
+    return await run(SELECT_EXT)
+  } catch (err) {
+    if (!(err instanceof GraphHttpError) || err.status !== 400) throw err
+    const out = await run(SELECT_BASE)
+    orgDataUnavailable = true
+    return out
+  }
 }
 
 function toDirectoryUser(u: GraphUser): DirectoryUser {
@@ -261,10 +358,10 @@ export async function searchDirectory(query: string, limit = 15): Promise<Direct
   // $search wants quoted phrases; strip embedded quotes so we can't break out
   // of the search expression.
   const safe = q.replace(/"/g, '')
-  const mkParams = () =>
+  const mkParams = (select: string) =>
     new URLSearchParams({
       $search: `"displayName:${safe}" OR "mail:${safe}"`,
-      $select: activeSelect(),
+      $select: select,
       $top: String(Math.min(Math.max(limit, 1), 50)),
     })
   // Exclude B2B GUEST accounts (#EXT# UPNs). The people-picker assigns Insight
@@ -273,22 +370,12 @@ export async function searchDirectory(query: string, limit = 15): Promise<Direct
   // pickable. Mirrors the guest guard in getDirectoryUserByMailOrUpn (M1).
   const employeesOnly = (rows: GraphUser[]) =>
     rows.filter((u) => !(u.userPrincipalName ?? '').toUpperCase().includes('#EXT#'))
-  try {
-    const json = await graphGet<{ value: GraphUser[] }>('/users', mkParams(), true)
-    return employeesOnly(json.value ?? []).map(toDirectoryUser)
-  } catch (err) {
-    // employeeOrgData being REJECTED (a 400 — tenant policy / property not
-    // permitted in $select) must not break the picker: latch the
-    // degradation and retry with the base property set. Transient errors
-    // (throttle, 5xx, network) propagate untouched (R2 F4) — latching on
-    // those would silently strip the hints for the process lifetime.
-    const isSelectRejection =
-      !orgDataUnavailable && err instanceof Error && err.message.includes('(400)')
-    if (!isSelectRejection) throw err
-    orgDataUnavailable = true
-    const json = await graphGet<{ value: GraphUser[] }>('/users', mkParams(), true)
-    return employeesOnly(json.value ?? []).map(toDirectoryUser)
-  }
+  // employeeOrgData being REJECTED (a 400 — tenant policy / property not
+  // permitted in $select) must not break the picker; see withSelectDegradation.
+  const json = await withSelectDegradation((select) =>
+    graphGet<{ value: GraphUser[] }>('/users', mkParams(select), true),
+  )
+  return employeesOnly(json.value ?? []).map(toDirectoryUser)
 }
 
 /**
@@ -305,27 +392,41 @@ export async function searchDirectory(query: string, limit = 15): Promise<Direct
  * returns its default ordering, so on a large tenant the first page may skew.
  * Employees only (guests excluded). One page (no nextLink paging) — the diagnostic
  * is a directional "which attribute correlates to region", not a census.
- * TODO(fast-follow): 429 backoff in graphGet; per-field $select degradation.
+ * TODO(fast-follow): per-field $select degradation.
  */
 export async function sampleDirectoryUsers(limit = 200): Promise<DirectoryUser[]> {
   const top = Math.min(Math.max(limit, 1), 999)
   const notGuest = (u: GraphUser | MockDirectoryUser) =>
     !((u as { userPrincipalName?: string | null }).userPrincipalName ?? '').toUpperCase().includes('#EXT#')
   if (!isRealGraph()) return MOCK_DIRECTORY.filter(notGuest).slice(0, top)
-  const mkParams = () => new URLSearchParams({ $select: activeSelect(), $top: String(top) })
-  try {
-    const json = await graphGet<{ value: GraphUser[] }>('/users', mkParams())
-    return (json.value ?? []).filter(notGuest).map(toDirectoryUser)
-  } catch (err) {
-    const isSelectRejection = !orgDataUnavailable && err instanceof Error && err.message.includes('(400)')
-    if (!isSelectRejection) throw err
-    orgDataUnavailable = true
-    const json = await graphGet<{ value: GraphUser[] }>('/users', mkParams())
-    return (json.value ?? []).filter(notGuest).map(toDirectoryUser)
-  }
+  const json = await withSelectDegradation((select) =>
+    graphGet<{ value: GraphUser[] }>('/users', new URLSearchParams({ $select: select, $top: String(top) })),
+  )
+  return (json.value ?? []).filter(notGuest).map(toDirectoryUser)
 }
 
 export async function getDirectoryUserByMailOrUpn(email: string): Promise<DirectoryUser | null> {
+  // LENIENT: any Graph failure reads as "no match". Request handlers and sign-in
+  // rely on that; a worker must use the strict variant below, where a failure is
+  // not an absence.
+  try {
+    return await getDirectoryUserByMailOrUpnStrict(email)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The same lookup and the same decision, STRICT about failure: null only for a
+ * real absence — a 404, or a 200 with zero, more than one, or only guest matches —
+ * and a THROW on every other HTTP status and on a network error or timeout. For
+ * workers, where reading a throttled Graph as "not in the directory" would place a
+ * person on the global bucket.
+ */
+export async function getDirectoryUserByMailOrUpnStrict(
+  email: string,
+  call: GraphCallOptions = {},
+): Promise<DirectoryUser | null> {
   const e = email.trim().toLowerCase()
   if (!e || !e.includes('@')) return null
   if (!isRealGraph()) {
@@ -334,18 +435,23 @@ export async function getDirectoryUserByMailOrUpn(email: string): Promise<Direct
   }
   // Escape single quotes for the OData string literal (' → '').
   const lit = e.replace(/'/g, "''")
-  const params = new URLSearchParams({
-    $filter: `mail eq '${lit}' or userPrincipalName eq '${lit}'`,
-    $select: activeSelect(),
-    $top: '2', // we only ever accept exactly 1; 2 lets us DETECT ambiguity
-  })
+  const mkParams = (select: string) =>
+    new URLSearchParams({
+      $filter: `mail eq '${lit}' or userPrincipalName eq '${lit}'`,
+      $select: select,
+      $top: '2', // we only ever accept exactly 1; 2 lets us DETECT ambiguity
+    })
+  let json: { value: GraphUser[] }
   try {
-    const json = await graphGet<{ value: GraphUser[] }>('/users', params, true)
-    const rows = (json.value ?? []).filter((u) => !(u.userPrincipalName ?? '').toUpperCase().includes('#EXT#'))
-    return rows.length === 1 ? toDirectoryUser(rows[0]!) : null
-  } catch {
-    return null
+    json = await withSelectDegradation((select) =>
+      graphGet<{ value: GraphUser[] }>('/users', mkParams(select), true, call),
+    )
+  } catch (err) {
+    if (isGraphNotFound(err)) return null
+    throw err
   }
+  const rows = (json.value ?? []).filter((u) => !(u.userPrincipalName ?? '').toUpperCase().includes('#EXT#'))
+  return rows.length === 1 ? toDirectoryUser(rows[0]!) : null
 }
 
 // Mock manager edges (local dev + tests off-Azure): a small chain over MOCK_DIRECTORY
@@ -365,7 +471,10 @@ const MOCK_MANAGER_EDGES: Record<string, { oid: string; email: string }> = {
  * the caller aborts and retries next tick — a transient miss must never be cached as a
  * real top-of-chart null.
  */
-export async function getUserManager(oid: string): Promise<{ oid: string; email: string | null } | null> {
+export async function getUserManager(
+  oid: string,
+  call: GraphCallOptions = {},
+): Promise<{ oid: string; email: string | null } | null> {
   if (!isRealGraph()) {
     return MOCK_MANAGER_EDGES[oid] ?? null
   }
@@ -374,6 +483,8 @@ export async function getUserManager(oid: string): Promise<{ oid: string; email:
     const u = await graphGet<{ id?: string; mail?: string | null; userPrincipalName?: string | null }>(
       `/users/${encodeURIComponent(oid)}/manager`,
       search,
+      false,
+      call,
     )
     if (!u || !u.id) return null
     const email = (u.mail ?? u.userPrincipalName ?? '').toLowerCase() || null
@@ -381,7 +492,7 @@ export async function getUserManager(oid: string): Promise<{ oid: string; email:
   } catch (err) {
     // 404 = no manager (top of chart) or user-not-found → null. Throttle / 5xx / network
     // PROPAGATE (per-user worker isolation retries) and are NEVER cached as a real miss.
-    if (err instanceof Error && /\(404\)/.test(err.message)) return null
+    if (isGraphNotFound(err)) return null
     throw err
   }
 }
@@ -397,20 +508,39 @@ export async function getUserManager(oid: string): Promise<{ oid: string; email:
  * getDirectoryUserByMailOrUpn (M1), closing the oid→provision path too.
  */
 export async function getDirectoryUserByOid(oid: string): Promise<DirectoryUser | null> {
+  // LENIENT: a 404 (unknown oid) and a transient error both surface as null, so
+  // the request handlers return a clean 404/422 rather than a 500.
+  try {
+    return await getDirectoryUserByOidStrict(oid)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The same lookup and the same decision, STRICT about failure: null only for a
+ * 404 or a guest account; every other HTTP status, network error or timeout
+ * THROWS. For workers, where "not in the directory" must never be a Graph outage.
+ */
+export async function getDirectoryUserByOidStrict(
+  oid: string,
+  call: GraphCallOptions = {},
+): Promise<DirectoryUser | null> {
   if (!isRealGraph()) {
     const hit = MOCK_DIRECTORY.find((u) => u.oid === oid) ?? null
     return hit && !isGuestUpn(hit.userPrincipalName) ? hit : null
   }
-  const search = new URLSearchParams({ $select: activeSelect() })
+  let u: GraphUser
   try {
-    const u = await graphGet<GraphUser>(`/users/${encodeURIComponent(oid)}`, search)
-    if (!u || !u.id) return null
-    // Guest guard: treat an #EXT# UPN as not-found (callers 404/handle null).
-    if (isGuestUpn(u.userPrincipalName)) return null
-    return toDirectoryUser(u)
-  } catch {
-    // 404 (unknown oid) and transient errors both surface as null → the
-    // caller returns a clean 404/422 rather than a 500.
-    return null
+    u = await withSelectDegradation((select) =>
+      graphGet<GraphUser>(`/users/${encodeURIComponent(oid)}`, new URLSearchParams({ $select: select }), false, call),
+    )
+  } catch (err) {
+    if (isGraphNotFound(err)) return null
+    throw err
   }
+  if (!u || !u.id) return null
+  // Guest guard: treat an #EXT# UPN as not-found (callers 404/handle null).
+  if (isGuestUpn(u.userPrincipalName)) return null
+  return toDirectoryUser(u)
 }

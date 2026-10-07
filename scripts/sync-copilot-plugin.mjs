@@ -32,6 +32,15 @@ const FILES = [
   // un-gated extracted module drifts silently → split attribution (P0-2).
   { name: 'tokenscope-project.mjs', type: 'js' },
   { name: 'otel-headers-helper.sh', type: 'sh' },
+  // otel-headers-helper.ps1 (#408 S2) — the Windows twin of the .sh. Copilot on
+  // win32 spawns it in place of /bin/sh, so the vendored copy is a credential
+  // path too and must never drift. `#` comments, so it takes the sh-style note.
+  { name: 'otel-headers-helper.ps1', type: 'sh' },
+  // emit-helper-spawn.mjs (#408 S5/S7) — the ONE choice of interpreter + argv
+  // for spawning the helper (/bin/sh, or an absolute powershell.exe on win32).
+  // Copilot's mintBearer and status probe use it; a drifted copy could resolve
+  // the interpreter through PATH on one client only.
+  { name: 'emit-helper-spawn.mjs', type: 'js' },
   // endpoint-guard.mjs (S1) — the ONE endpoint validator (assertSafeEndpoint).
   // Dependency-free by design so it vendors verbatim; MUST stay
   // gated the same way tokenscope-project.mjs is — a second, un-gated guard
@@ -86,6 +95,10 @@ const FILES = [
   // forwarder and the usage extension. copilot-usage.mjs — the extension core.
   { name: 'copilot-emit.mjs', type: 'js' },
   { name: 'copilot-usage.mjs', type: 'js' },
+  // is-main.mjs — the ONE "launched directly?" guard. A drifted copy that went
+  // back to a string compare would make the Copilot scripts exit 0 having done
+  // nothing whenever their install path crosses a symlink.
+  { name: 'is-main.mjs', type: 'js' },
 ]
 
 // Single-line SYNC NOTE markers — the parity check strips lines starting with these.

@@ -26,6 +26,10 @@ export const telemetryRecoveryRequest = pgTable(
     lookbackDays: integer('lookback_days').notNull(),
     /** Resume point: how many of instanceIds are fully processed. */
     cursorIndex: integer('cursor_index').notNull().default(0),
+    /** Resume point inside the instance at cursorIndex: days of its window done (mig 0148). */
+    cursorDay: integer('cursor_day').notNull().default(0),
+    /** operator | scheduled (the daily 7-day pass, queued by the worker; mig 0148). */
+    kind: text('kind').notNull().default('operator'),
 
     status: text('status').notNull().default('pending'), // pending|running|succeeded|failed
     /** Operator's note — why this recovery was run. */

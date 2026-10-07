@@ -62,10 +62,22 @@ describe('command-frontmatter — allowed-tools is never the blanket Bash(node:*
     for (const file of commandFiles) {
       const content = readFileSync(join(COMMANDS_DIR, file), 'utf8')
       const fm = parseFrontmatter(content)
-      const bashEntries = (fm['allowed-tools'] ?? '').split(',').map((s) => s.trim()).filter((e) => e.startsWith('Bash('))
-      for (const entry of bashEntries) {
+      const entries = (fm['allowed-tools'] ?? '').split(',').map((s) => s.trim())
+      for (const entry of entries.filter((e) => e.startsWith('Bash('))) {
+        // node <script>.mjs, or (Windows without Node, #408) Windows PowerShell,
+        // by its ABSOLUTE system path, running ONE plugin .ps1 with the fixed flag set.
         expect(entry, `${file}'s Bash grant "${entry}" does not name a specific script`).toMatch(
-          /Bash\(node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/[\w.-]+\.mjs":\*\)/,
+          /^Bash\((?:node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/[\w.-]+\.mjs"|C:\/Windows\/System32\/WindowsPowerShell\/v1\.0\/powershell\.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/[\w.-]+\.ps1"):\*\)$/,
+        )
+      }
+      // The PowerShell tool (Windows without Git Bash): the same one-script
+      // invocation, exact, or with the `:*` prefix form for a script that takes
+      // arguments (the redeem's handoff code). Claude Code parses the PowerShell
+      // AST and requires EVERY subcommand of a compound command (`;`, `|`) to
+      // match a rule, so the prefix cannot approve a chained command.
+      for (const entry of entries.filter((e) => e.startsWith('PowerShell('))) {
+        expect(entry, `${file}'s PowerShell grant "${entry}" does not name a specific script`).toMatch(
+          /^PowerShell\(C:\/Windows\/System32\/WindowsPowerShell\/v1\.0\/powershell\.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/[\w.-]+\.ps1"(?::\*)?\)$/,
         )
       }
     }
@@ -125,5 +137,111 @@ describe('command-frontmatter — setup.md step 4 is a FIXED command, not the ol
   it('no longer defers to "the tool response is the authoritative command"', () => {
     const content = readFileSync(join(COMMANDS_DIR, 'setup.md'), 'utf8')
     expect(content).not.toMatch(/authoritative command/i)
+  })
+
+  it('the PowerShell lane redeem (#408) is the same fixed --handoff-code invocation, and is granted', () => {
+    const content = readFileSync(join(COMMANDS_DIR, 'setup.md'), 'utf8')
+    const blocks = fencedBashBlocks(content).filter((b) => b.includes('claude-redeem.ps1'))
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0].trim()).toBe(
+      'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/claude-redeem.ps1" --handoff-code <code>',
+    )
+    expect(parseFrontmatter(content)['allowed-tools']).toContain(
+      'Bash(C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/claude-redeem.ps1":*)',
+    )
+  })
+
+  it('every PowerShell-lane script is granted to the PowerShell tool too, in the Bash grant\'s shape', () => {
+    // On Windows the model may run the step through the PowerShell tool rather
+    // than Bash; without the grant the redeem stops on a permission prompt.
+    // Every command file, not only setup.md: the class is "a .ps1 granted to Bash only".
+    for (const file of readdirSync(COMMANDS_DIR).filter((f) => f.endsWith('.md'))) {
+      const fileTools = String(parseFrontmatter(readFileSync(join(COMMANDS_DIR, file), 'utf8'))['allowed-tools'] ?? '')
+      for (const [, cmd] of fileTools.matchAll(/Bash\(((?:[A-Za-z]:\/[^ ]*\/)?powershell\.exe [^)]*)\)/g)) {
+        const bare = cmd.replace(/:\*$/, '')
+        const grants = [`PowerShell(${cmd})`, `PowerShell(${bare})`]
+        expect(grants.some((g) => fileTools.includes(g)), `${file}: no PowerShell grant for ${bare}`).toBe(true)
+      }
+    }
+    const tools = String(parseFrontmatter(readFileSync(join(COMMANDS_DIR, 'setup.md'), 'utf8'))['allowed-tools'])
+    expect(tools).toContain(
+      'PowerShell(C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/claude-redeem.ps1":*)',
+    )
+  })
+})
+
+describe('command-frontmatter — setup.md step 0 picks the lane BEFORE the consent (#408 S6)', () => {
+  const content = readFileSync(join(COMMANDS_DIR, 'setup.md'), 'utf8')
+  const at = (s: string) => {
+    const i = content.indexOf(s)
+    expect(i, `setup.md does not contain ${JSON.stringify(s)}`).toBeGreaterThan(-1)
+    return i
+  }
+
+  it('the runtime check comes before step 1 (my_usage, which can start the OAuth consent)', () => {
+    expect(at('### 0. Detect the platform and runtime')).toBeLessThan(at('### 1. Ensure the MCP connection'))
+    expect(at('scripts/device-id.mjs" --tool claude-code')).toBeLessThan(at('### 1. Ensure the MCP connection'))
+  })
+
+  it('POSIX without Node stops before provision_emit and names the install line per OS', () => {
+    const step0 = content.slice(at('### 0.'), at('### 1.'))
+    expect(step0).toMatch(/STOP here/)
+    expect(step0).toMatch(/Do not call\s+`my_usage` or `provision_emit`/)
+    expect(step0).toContain('sudo apt-get install -y nodejs')
+    expect(step0).toContain('brew install node')
+    expect(step0).toMatch(/container/)
+  })
+
+  it('Windows without Node takes the PowerShell lane and explains emit-only before step 1', () => {
+    const step0 = content.slice(at('### 0.'), at('### 1.'))
+    expect(step0).toContain('scripts/device-id.ps1"')
+    expect(step0).toContain('emit-only')
+    expect(step0).toContain('winget install OpenJS.NodeJS.LTS')
+  })
+})
+
+describe('command-frontmatter — Windows PowerShell is never resolved through PATH', () => {
+  // The redeem invocation carries a one-time handoff code in argv. Claude Code
+  // runs it with the session's merged env, where a repository can set PATH, so
+  // a bare `powershell.exe` could resolve to a planted binary that captures and
+  // redeems the code. Every documented invocation and every grant names the
+  // absolute system path, in the unquoted forward-slash form that runs verbatim
+  // in both Git Bash and the PowerShell tool.
+  const ABSOLUTE = 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+  const SKILLS_DIR = join(process.cwd(), 'docs/skills/tokenscope')
+  const docs = [
+    ...commandFiles.map((f) => join(COMMANDS_DIR, f)),
+    ...readdirSync(SKILLS_DIR).filter((f) => f.endsWith('.md')).map((f) => join(SKILLS_DIR, f)),
+  ]
+  // An invocation is the interpreter name followed by a flag. Prose that only
+  // names the executable (the troubleshooting row) is not one.
+  const invocation = /\b(?:powershell|pwsh)(?:\.exe)?\s+-/gi
+
+  it.each(docs)('%s starts every PowerShell invocation with the absolute system path', (file) => {
+    const content = readFileSync(file, 'utf8')
+    for (const m of content.matchAll(invocation)) {
+      const start = m.index
+      const prefix = content.slice(Math.max(0, start - (ABSOLUTE.length - 'powershell.exe'.length)), start)
+      expect(`${prefix}${m[0]}`, `${file} runs PowerShell by bare name: ${JSON.stringify(m[0])}`).toMatch(
+        /^C:\/Windows\/System32\/WindowsPowerShell\/v1\.0\/powershell\.exe\s+-$/,
+      )
+    }
+  })
+
+  it.each(commandFiles)('%s grants PowerShell only by its absolute path', (file) => {
+    const entries = String(parseFrontmatter(readFileSync(join(COMMANDS_DIR, file), 'utf8'))['allowed-tools'] ?? '')
+      .split(',')
+      .map((s) => s.trim())
+    for (const entry of entries) {
+      const inner = /^(?:Bash|PowerShell)\((.*)\)$/.exec(entry)?.[1] ?? ''
+      if (!/powershell|pwsh/i.test(inner)) continue
+      expect(inner.startsWith(`${ABSOLUTE} `), `${file}: grant "${entry}" does not start with ${ABSOLUTE}`).toBe(true)
+    }
+  })
+
+  it('names the fallback for a Windows not installed on C:', () => {
+    for (const file of [join(COMMANDS_DIR, 'setup.md'), join(COMMANDS_DIR, 'status.md'), join(SKILLS_DIR, 'tokenscope-setup.md')]) {
+      expect(readFileSync(file, 'utf8'), file).toContain('$env:SystemRoot')
+    }
   })
 })

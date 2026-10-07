@@ -2,7 +2,7 @@
   "mcpServers": {
     "tokenscope": {
       "type": "http",
-      "url": "https://tokenscope.example.com/api/v1/mcp"
+      "url": "${user_config.server_url}/api/v1/mcp"
     }
   }
 }

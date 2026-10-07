@@ -1,0 +1,15 @@
+# Scripts run as-is on users' machines, and the plugin marketplace is installed
+# by a git clone. Under core.autocrlf=true (Git for Windows' default) a CRLF
+# checkout breaks a .sh under Git Bash or WSL ("$'\r': command not found") and
+# shifts every anchor the helper conformance mutations match on. LF everywhere;
+# Windows PowerShell 5.1 and node both read LF.
+*.sh  text eol=lf
+*.ps1 text eol=lf
+*.mjs text eol=lf
+
+# The rest of the shipped plugin trees, so a Windows checkout is byte-identical
+# to the one the parity and conformance checks ran against.
+plugin/**/*.json         text eol=lf
+plugin/**/*.md           text eol=lf
+copilot-plugin/**/*.json text eol=lf
+copilot-plugin/**/*.md   text eol=lf

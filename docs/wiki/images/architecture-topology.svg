@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" width="1000" height="640" role="img" aria-labelledby="t d">
+  <title id="t">VNet posture: the edge is the only public way into the app, and Key Vault, PostgreSQL and ACR answer only on private endpoints</title>
+  <desc id="d">Browsers and the client plugins reach ca-&lt;name&gt; only through Front Door Premium or your own WAF, which forwards to the internal environment VIP. Scheduled caj-ts jobs call the app with an HMAC-signed POST. The platform pulls the image from ACR and resolves Key Vault secrets with the app managed identity; the app connects to PostgreSQL with a password held in Key Vault. Redis is provisioned but nothing uses it. Devices send telemetry straight to the public ingest endpoint, the app reads it back by KQL, and platform logs go to log-ops-&lt;name&gt; when a separate ops workspace is on.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="640"/>
+  <rect class="zone" x="16" y="16" width="176" height="608" rx="10"/>
+  <text class="zlabel" x="30" y="38">INTERNET · EDGE</text>
+  <rect class="zone" x="212" y="16" width="464" height="608" rx="10"/>
+  <text class="zlabel" x="226" y="38">VNET</text>
+  <rect class="zone" x="696" y="16" width="288" height="608" rx="10"/>
+  <text class="zlabel" x="710" y="38">AZURE MONITOR</text>
+  <rect class="node" x="28" y="50" width="152" height="62" rx="6"/>
+  <text class="t" x="104" y="68.5" text-anchor="middle">Developer device</text>
+  <text class="s" x="104" y="85.5" text-anchor="middle">Claude Code · Copilot</text>
+  <text class="s" x="104" y="102.5" text-anchor="middle">MCP · bearer · OTLP</text>
+  <rect class="node acc" x="28" y="140" width="152" height="80" rx="6"/>
+  <text class="t" x="104" y="167.5" text-anchor="middle">Public edge</text>
+  <text class="s" x="104" y="184.5" text-anchor="middle">Front Door Premium</text>
+  <text class="s" x="104" y="201.5" text-anchor="middle">or your WAF · 443</text>
+  <rect class="node" x="28" y="250" width="152" height="50" rx="6"/>
+  <text class="t" x="104" y="271" text-anchor="middle">Browser</text>
+  <text class="s" x="104" y="288" text-anchor="middle">Entra sign-in</text>
+  <polyline class="e" points="104,112 104,134" marker-end="url(#ah)"/>
+  <polyline class="e" points="104,250 104,226" marker-end="url(#ah)"/>
+  <rect class="node env" x="226" y="92" width="436" height="200" rx="8"/>
+  <text class="sm" x="240" y="112">snet-container-apps · cae-&lt;name&gt;, internal VIP</text>
+  <rect class="node inner" x="256" y="124" width="392" height="64" rx="6"/>
+  <text class="tm" x="452" y="143.5" text-anchor="middle">ca-&lt;name&gt;</text>
+  <text class="s" x="452" y="160.5" text-anchor="middle">port 3000 · 0.5 CPU · 1 Gi (production 1 · 2 Gi)</text>
+  <text class="s" x="452" y="177.5" text-anchor="middle">identity: id-&lt;name&gt; (user-assigned)</text>
+  <rect class="node inner" x="480" y="226" width="168" height="52" rx="6"/>
+  <text class="t" x="564" y="248" text-anchor="middle">caj-ts-* · 32 jobs</text>
+  <text class="s" x="564" y="265" text-anchor="middle">HMAC POST run-worker</text>
+  <rect class="node env" x="226" y="320" width="436" height="226" rx="8"/>
+  <text class="sm" x="256" y="538">snet-private-endpoints · public access off</text>
+  <rect class="node" x="256" y="370" width="184" height="56" rx="6"/>
+  <text class="t" x="348" y="394" text-anchor="middle">Key Vault</text>
+  <text class="s" x="348" y="411" text-anchor="middle">app secrets</text>
+  <rect class="node" x="460" y="370" width="188" height="56" rx="6"/>
+  <text class="t" x="554" y="394" text-anchor="middle">PostgreSQL Flexible</text>
+  <text class="s" x="554" y="411" text-anchor="middle">app database</text>
+  <rect class="node" x="256" y="470" width="184" height="56" rx="6"/>
+  <text class="t" x="348" y="494" text-anchor="middle">ACR Premium</text>
+  <text class="s" x="348" y="511" text-anchor="middle">tokenscope image</text>
+  <rect class="node ghost" x="460" y="470" width="188" height="56" rx="6"/>
+  <text class="t" x="554" y="494" text-anchor="middle">Redis</text>
+  <text class="s ghost" x="554" y="511" text-anchor="middle">provisioned · not used</text>
+  <rect class="node" x="226" y="562" width="436" height="46" rx="6"/>
+  <text class="t" x="444" y="581" text-anchor="middle">snet-ampls · pe-ampls (optional)</text>
+  <text class="s" x="444" y="598" text-anchor="middle">private KQL path when query is private-only</text>
+  <rect class="node" x="710" y="50" width="260" height="56" rx="6"/>
+  <text class="t" x="840" y="74" text-anchor="middle">DCE + DCR</text>
+  <text class="s" x="840" y="91" text-anchor="middle">public OTLP ingest</text>
+  <rect class="node" x="710" y="122" width="260" height="70" rx="6"/>
+  <text class="tm" x="840" y="144.5" text-anchor="middle">log-&lt;name&gt;</text>
+  <text class="s" x="840" y="161.5" text-anchor="middle">OTelLogs</text>
+  <text class="s priv" x="840" y="178.5" text-anchor="middle">query by MI · private if AMPLS</text>
+  <rect class="node" x="710" y="380" width="260" height="76" rx="6"/>
+  <text class="tm" x="840" y="397" text-anchor="middle">log-ops-&lt;name&gt;</text>
+  <text class="s" x="840" y="414" text-anchor="middle">console · system logs</text>
+  <text class="s" x="840" y="431" text-anchor="middle">Key Vault · Postgres · ACR diagnostics</text>
+  <text class="s" x="840" y="448" text-anchor="middle">optional · portal query, Entra RBAC</text>
+  <polyline class="e accent" points="180,170 250,170" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="208" cy="170" r="10"/><text class="cnt accent" x="208" y="174" text-anchor="middle">1</text>
+  <polyline class="e" points="564,226 564,194" marker-end="url(#ah)"/>
+  <circle class="cn" cx="564" cy="210" r="10"/><text class="cnt" x="564" y="214" text-anchor="middle">2</text>
+  <polyline class="e" points="256,498 240,498 240,210 270,210 270,194" marker-end="url(#ah)"/>
+  <circle class="cn" cx="240" cy="440" r="10"/><text class="cnt" x="240" y="444" text-anchor="middle">3</text>
+  <polyline class="e" points="330,370 330,194" marker-end="url(#ah)"/>
+  <circle class="cn" cx="330" cy="280" r="10"/><text class="cnt" x="330" y="284" text-anchor="middle">4</text>
+  <polyline class="e" points="450,188 450,352 554,352 554,364" marker-end="url(#ah)"/>
+  <circle class="cn" cx="450" cy="270" r="10"/><text class="cnt" x="450" y="274" text-anchor="middle">5</text>
+  <polyline class="e" points="648,156 704,156" marker-end="url(#ah)"/>
+  <circle class="cn" cx="684" cy="156" r="10"/><text class="cnt" x="684" y="160" text-anchor="middle">6</text>
+  <polyline class="e" points="180,66 704,66" marker-end="url(#ah)"/>
+  <circle class="cn" cx="620" cy="66" r="10"/><text class="cnt" x="620" y="70" text-anchor="middle">7</text>
+  <text class="lbl" x="240" y="58">OTLP log events, not through the edge</text>
+  <polyline class="e" points="662,262 684,262 684,400 704,400" marker-end="url(#ah)"/>
+  <circle class="cn" cx="684" cy="320" r="10"/><text class="cnt" x="684" y="324" text-anchor="middle">8</text>
+  <polyline class="e" points="662,440 704,440" marker-end="url(#ah)"/>
+  <circle class="cn" cx="684" cy="440" r="10"/><text class="cnt" x="684" y="444" text-anchor="middle">9</text>
+</svg>

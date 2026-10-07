@@ -88,7 +88,7 @@ export async function runWentSilent(
      WHERE h.status = ${BEARER_AUTH_FAILED}
        AND h.resolved_at IS NULL
        AND ia.ts_actual_end IS NULL
-       AND NOT (t.revoked_at IS NOT NULL AND t.revoked_at > ia.ts_start)
+       AND NOT (t.emit_revoked_at IS NOT NULL AND t.emit_revoked_at > ia.ts_start)
      GROUP BY ia.instance_id, ia.teammate_id, t.email, t.display_name, ia.raw_project_code
   `)
 

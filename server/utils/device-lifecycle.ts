@@ -38,3 +38,28 @@ export async function endLiveDevicesOf(db: Db, teammateId: string): Promise<stri
   `)
   return [...rows].map((r) => r.instance_id)
 }
+
+/**
+ * Re-place every LIVE device of a teammate onto their new region and org unit,
+ * so records the joiner attributes from now on carry the new placement (the
+ * joiner stamps attribution_record.region_id / org_unit_id from this row).
+ * Ended devices keep the placement they emitted under, and nothing already
+ * attributed is touched. Same columns, same source as identity confirmation
+ * (confirm-instance.ts) re-places a device. cost_owning_unit_id is not placement:
+ * the joiner takes it from the attributed PROJECT, never from this row.
+ * Returns the re-placed instance ids. Must run in a transaction.
+ */
+export async function rehomeLiveDevicesOf(
+  db: Db,
+  teammateId: string,
+  placement: { regionId: string; orgUnitId: string },
+): Promise<string[]> {
+  await lockLiveDevicesOf(db, teammateId)
+  const rows = await db.execute<{ instance_id: string }>(sql`
+    UPDATE instance_attestation
+       SET region_id = ${placement.regionId}::uuid, org_unit_id = ${placement.orgUnitId}::uuid
+     WHERE teammate_id = ${teammateId}::uuid AND ts_actual_end IS NULL AND ts_purged IS NULL
+    RETURNING instance_id::text AS instance_id
+  `)
+  return [...rows].map((r) => r.instance_id).sort()
+}

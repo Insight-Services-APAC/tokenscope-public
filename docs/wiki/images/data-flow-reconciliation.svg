@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 490" width="1000" height="490" role="img" aria-labelledby="t d">
+  <title id="t">The API figure fixes the total for each teammate, day and tool; OTel fills in the detail, and the residual makes up the difference.</title>
+  <desc id="d">Worked example for one key. v_teammate_usage_daily says $100. Corroborated OTel in attribution_record, excluding sessions in open quarantine and self-billed rows, says $30. usage-reconciliation compares them every 2 hours. When the API figure is higher it writes unaccounted_usage of max(0, API minus OTel) = $70, a taggable worklist item with per-model children. When OTel is higher, over_emission records max(0, OTel minus API) and flags it only when the excess is above the larger of $25 and the API figure on a settled day; it is never spend. v_complete_usage shows arm 1 from attribution_record ($30) and arm 2 from unaccounted_usage ($70), which sum to the $100 API figure. Arm 3 reads ingest-only tools straight from v_teammate_usage_daily.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="490"/>
+  <rect class="zone" x="16" y="16" width="248" height="458" rx="10"/>
+  <text class="zlabel" x="30" y="36">ONE KEY: TEAMMATE · DAY · TOOL</text>
+  <rect class="zone" x="284" y="16" width="402" height="458" rx="10"/>
+  <text class="zlabel" x="298" y="36">USAGE-RECONCILIATION · EVERY 2 H</text>
+  <rect class="zone" x="696" y="16" width="288" height="458" rx="10"/>
+  <text class="zlabel" x="710" y="36">VIEW v_complete_usage</text>
+
+  <!-- inputs -->
+  <rect class="node" x="30" y="66" width="220" height="76" rx="6"/>
+  <text class="tm" x="44" y="88">v_teammate_usage_daily</text>
+  <text class="t" x="44" y="108">API says $100</text>
+  <text class="s" x="44" y="127">no session · no project</text>
+
+  <rect class="node" x="30" y="300" width="220" height="92" rx="6"/>
+  <text class="tm" x="44" y="322">attribution_record</text>
+  <text class="t" x="44" y="342">OTel says $30</text>
+  <text class="s" x="44" y="361">corroborated rows only: no open</text>
+  <text class="s" x="44" y="378">quarantine, no self-billed rows</text>
+
+  <!-- compare -->
+  <rect class="node" x="296" y="196" width="124" height="56" rx="28"/>
+  <text class="t" x="358" y="220" text-anchor="middle">compare</text>
+  <text class="s" x="358" y="237" text-anchor="middle">per key</text>
+
+  <!-- results -->
+  <rect class="node bad" x="450" y="66" width="220" height="92" rx="6"/>
+  <text class="tm" x="464" y="88">over_emission</text>
+  <text class="s" x="464" y="106">max(0, OTel − API)</text>
+  <text class="s" x="464" y="123">flagged if &gt; max($25, API)</text>
+  <text class="s bad" x="464" y="141">integrity flag, never spend</text>
+
+  <rect class="node" x="450" y="196" width="220" height="92" rx="6"/>
+  <text class="tm" x="464" y="218">unaccounted_usage</text>
+  <text class="t" x="464" y="238">max(0, API − OTel) = $70</text>
+  <text class="s" x="464" y="257">taggable worklist item</text>
+  <text class="s" x="464" y="274">+ per-model children, capped</text>
+
+  <!-- arms -->
+  <rect class="node" x="710" y="128" width="260" height="50" rx="6"/>
+  <text class="t" x="724" y="149">Arm 3 · provider-usage</text>
+  <text class="s" x="724" y="166">ingest-only tools, never taggable</text>
+  <rect class="node acc" x="710" y="217" width="260" height="50" rx="6"/>
+  <text class="t" x="724" y="238">Arm 2 · api-reconciled · $70</text>
+  <text class="s" x="724" y="255">per model, or a reason-typed row</text>
+  <rect class="node acc" x="710" y="335" width="260" height="50" rx="6"/>
+  <text class="t" x="724" y="356">Arm 1 · otel-emitted · $30</text>
+  <text class="s" x="724" y="373">session · project · model</text>
+
+  <rect class="node acc" x="710" y="404" width="260" height="56" rx="6"/>
+  <text class="t" x="840" y="427" text-anchor="middle">$30 + $70 = $100</text>
+  <text class="s acc" x="840" y="446" text-anchor="middle">arms 1 + 2 = the API figure</text>
+
+  <!-- 1 API operand -->
+  <polyline class="e" points="250,98 355,98 355,190" marker-end="url(#ah)"/>
+  <circle class="cn" cx="300" cy="98" r="10"/><text class="cnt" x="300" y="102" text-anchor="middle">1</text>
+  <!-- 2 OTel operand -->
+  <polyline class="e" points="250,322 355,322 355,258" marker-end="url(#ah)"/>
+  <circle class="cn" cx="300" cy="322" r="10"/><text class="cnt" x="300" y="326" text-anchor="middle">2</text>
+  <!-- 3 residual -->
+  <line class="e accent" x1="420" y1="236" x2="444" y2="236" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="432" cy="236" r="10"/><text class="cnt accent" x="432" y="240" text-anchor="middle">3</text>
+  <!-- 4 over-emission -->
+  <polyline class="e bad" points="390,196 390,112 444,112" marker-end="url(#ah-bad)"/>
+  <circle class="cn bad" cx="390" cy="150" r="10"/><text class="cnt bad" x="390" y="154" text-anchor="middle">4</text>
+  <!-- 5 arm 2 -->
+  <line class="e accent" x1="670" y1="242" x2="704" y2="242" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="686" cy="242" r="10"/><text class="cnt accent" x="686" y="246" text-anchor="middle">5</text>
+  <!-- 6 arm 1 -->
+  <line class="e accent" x1="250" y1="360" x2="704" y2="360" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="560" cy="360" r="10"/><text class="cnt accent" x="560" y="364" text-anchor="middle">6</text>
+  <!-- 7 arm 3 -->
+  <polyline class="e dashed" points="140,66 140,52 840,52 840,122" marker-end="url(#ah)"/>
+  <circle class="cn" cx="560" cy="52" r="10"/><text class="cnt" x="560" y="56" text-anchor="middle">7</text>
+</svg>

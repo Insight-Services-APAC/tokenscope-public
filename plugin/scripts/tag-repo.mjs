@@ -23,8 +23,15 @@ import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { parseTokenscope } from './tokenscope-reader.mjs'
-import { buildRepoResourceAttrs, mergeClaudeSettings, readDeviceEnrolment } from './env-builder.mjs'
-import { withinOwnInstall } from './plugin-runtime.mjs'
+import {
+  buildRepoResourceAttrs,
+  mergeClaudeSettings,
+  readDeviceEnrolment,
+  buildHelperCommand,
+  parseHelperCommand,
+  helperScriptName,
+} from './env-builder.mjs'
+import { withinOwnInstall, readHelperRecord, trustedStateDir } from './plugin-runtime.mjs'
 // The single .gitignore-hygiene helper, shared with the Copilot forwarder.
 // Import is side-effect-free (that module main()-guards) and tag-repo.mjs is not
 // vendored into the standalone Copilot distribution — see ensureRepoTagGitignored.
@@ -102,8 +109,8 @@ export function globalSettingsPath() {
 }
 
 /**
- * Read the device enrolment (session id + helper path) from the GLOBAL config.
- * Returns { sessionId, helperPath } or null if not enrolled / unreadable.
+ * Read the device enrolment (session id + helper command) from the GLOBAL config.
+ * Returns { sessionId, helperCommand, env } or null if not enrolled / unreadable.
  */
 export function readGlobalEnrolment() {
   const path = globalSettingsPath()
@@ -121,12 +128,11 @@ export function readGlobalEnrolment() {
 // at the top of this file — see the export statement near the imports.
 
 /**
- * Abs path to the otel-headers-helper.sh the repo pin should use.
+ * Abs path to the scripts dir whose helper the repo pin should run.
  *
  * Prefer the CURRENTLY-ACTIVE plugin version: Claude sets CLAUDE_PLUGIN_ROOT to
  * the live plugin dir when the hook/command runs, so
- * $CLAUDE_PLUGIN_ROOT/scripts/otel-headers-helper.sh is the active version's
- * helper. Writing THAT into the repo pin is what lets a plain `/plugin update`
+ * $CLAUDE_PLUGIN_ROOT/scripts/ holds the active version's helper. Writing THAT into the repo pin is what lets a plain `/plugin update`
  * auto-apply to every tagged repo on its NEXT launch WITHOUT a re-enrol (closes
  * ADR-0006's version-pinned-helper future-work): the self-heal re-points the repo
  * at the new active version each launch. Old cache versions persist (verified
@@ -153,18 +159,41 @@ export function readGlobalEnrolment() {
  * ITS to change, so do not depend on it here.
  * See docs/security-sprint/epic-mdash-remediation.md (Wave 1, §2.6).
  */
-function resolveHelperPath(enrolment) {
-  const active = process.env.CLAUDE_PLUGIN_ROOT
-    ? join(process.env.CLAUDE_PLUGIN_ROOT, 'scripts', 'otel-headers-helper.sh')
-    : null
-  if (active && existsSync(active) && withinOwnInstall(active)) return active
-  // The pinned enrolment path gets the SAME confinement. It comes from the
+function resolveHelperScriptsDir(pinnedDir, platform) {
+  const file = helperScriptName(platform)
+  const ok = (dir) => {
+    const script = dir ? join(dir, file) : null
+    return Boolean(script) && existsSync(script) && withinOwnInstall(script)
+  }
+  const active = process.env.CLAUDE_PLUGIN_ROOT ? join(process.env.CLAUDE_PLUGIN_ROOT, 'scripts') : null
+  if (ok(active)) return active
+  // The pinned enrolment dir gets the SAME confinement. It comes from the
   // global settings file, which a repo-moved HOME (or a poisoned settings file)
   // can choose — so accepting it unchecked was a bypass sitting one line below
   // the check it bypassed.
-  const pinned = enrolment?.helperPath
-  if (pinned && existsSync(pinned) && withinOwnInstall(pinned)) return pinned
-  return join(dirname(fileURLToPath(import.meta.url)), 'otel-headers-helper.sh')
+  if (ok(pinnedDir)) return pinnedDir
+  return dirname(fileURLToPath(import.meta.url))
+}
+
+/**
+ * The repo pin's helper: the SAME record the global command was built from, so
+ * the two cannot disagree about the state dir (#410), run from the scripts dir
+ * above, for the running platform. The global value is read back only to find
+ * its install and its `--state-dir`; a stored record must agree with that
+ * (readHelperRecord), and a pre-sprint value with none keeps what it carried.
+ */
+function repoHelper(enrolment, platform, storeDir) {
+  const parsed = parseHelperCommand(enrolment?.helperCommand)
+  const stored = readHelperRecord('claude-code', parsed?.stateDir ?? storeDir, parsed?.stateDir)
+  const sd = stored ? stored.stateDir : parsed?.stateDir
+  return {
+    record: {
+      tool: stored?.tool ?? parsed?.tool ?? 'claude-code',
+      platform,
+      ...(sd !== undefined ? { stateDir: sd } : {}),
+    },
+    scriptsDir: resolveHelperScriptsDir(parsed?.scriptDir, platform),
+  }
 }
 
 /**
@@ -223,7 +252,7 @@ export function resolveRepoRoot(cwd) {
  * divergence this sprint exists to remove.
  *
  * Importing is side-effect-free: copilot-forwarder.mjs runs `main()` only under
- * an `import.meta.url === process.argv[1]` guard. tag-repo.mjs is NOT vendored
+ * an `isMainModule(import.meta.url)` guard. tag-repo.mjs is NOT vendored
  * into the standalone Copilot distribution (see scripts/sync-copilot-plugin.mjs
  * FILES), so this cross-file import cannot reach a checkout where the target is
  * absent.
@@ -244,7 +273,7 @@ function ensureRepoTagGitignored(root) {
  * OTEL_RESOURCE_ATTRIBUTES with the device session id + the repo's code_hash.
  *
  * SELF-HEALING (ADR-0006): the target is re-derived from the CURRENT global
- * enrolment on every call — the helper path and the instance id are taken from
+ * enrolment on every call — the helper command and the instance id are taken from
  * global *as they are now*, NOT a snapshot frozen at pin time.
  *
  * The env block is an ALLOWLIST: OTEL_RESOURCE_ATTRIBUTES only. Every other key
@@ -261,10 +290,14 @@ function ensureRepoTagGitignored(root) {
  * no-op leaves the file — and its mtime — untouched). Merges any unrelated local
  * settings keys and preserves the 0o600 mode.
  *
+ * `platform` and `storeDir` (where the helper record is read) are injectable for
+ * tests; production takes the running platform and trustedStateDir(), never
+ * `TOKENSCOPE_STATE_DIR` (a repository's settings env can set it).
+ *
  * Returns { settingsPath, changed, healed, instanceDrifted }:
  *   - changed: whether the file was (re)written this call.
  *   - healed:  whether a stale pin was reconciled — i.e. the PREVIOUS repo env's
- *              helper path or instance differed from the current global one (a
+ *              helper command or instance differed from the current global one (a
  *              drift this rewrite just corrected). false when there was no
  *              previous repo env to compare or nothing drifted.
  *   - instanceDrifted: the INSTANCE half of `healed`, on its own. True only when
@@ -280,13 +313,14 @@ function ensureRepoTagGitignored(root) {
  * writing anything when the root cannot be resolved (not inside a git work
  * tree, or no `.git` found walking up) — refusing beats guessing a directory.
  */
-export function writeRepoTag({ cwd, enrolment, codeHash }) {
+export function writeRepoTag({ cwd, enrolment, codeHash, platform = process.platform, storeDir = trustedStateDir() }) {
   const root = resolveRepoRoot(cwd)
   if (!root) {
     return { settingsPath: null, changed: false, healed: false, instanceDrifted: false }
   }
   ensureRepoTagGitignored(root)
-  const helperPath = resolveHelperPath(enrolment)
+  const helper = repoHelper(enrolment, platform, storeDir)
+  const helperCommand = buildHelperCommand(helper.record, { scriptsDir: helper.scriptsDir })
   const claudeDir = join(root, '.claude')
   /*
    * REFUSE A SYMLINKED `.claude` (MDASH r3).
@@ -295,7 +329,7 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
    * repo can ship `.claude` as a link to any directory the developer can write.
    * `mkdirSync(..., { recursive: true })` SUCCEEDS on an existing link target,
    * and every write below then lands there — including settings.local.json,
-   * which carries the instance id and helper path. That is the same class as the
+   * which carries the instance id and helper command. That is the same class as the
    * `.gitignore` finding one function over.
    *
    * The file write itself is tmp+rename, which replaces the LINK rather than
@@ -352,7 +386,7 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   }
 
   // Detect drift BEFORE we overwrite: did the previous repo env pin a different
-  // helper path or a different instance than the current global one? If so this
+  // helper command or a different instance than the current global one? If so this
   // rewrite IS the reconcile (ADR-0006 decision 3).
   let healed = false
   // INSTANCE drift specifically, kept separate from `healed`. A helper-path move
@@ -369,7 +403,7 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
       typeof existing.otelHeadersHelper === 'string' ? existing.otelHeadersHelper : null
     const prevInstance = parseInstanceId(prevEnv.OTEL_RESOURCE_ATTRIBUTES)
     instanceDrifted = prevInstance != null && prevInstance !== enrolment.sessionId
-    healed = (prevHelper != null && prevHelper !== helperPath) || instanceDrifted
+    healed = (prevHelper != null && prevHelper !== helperCommand) || instanceDrifted
   }
 
   // Allowlist, never a copy of the device env (SS-CP-2).
@@ -381,7 +415,7 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   // behind by a pre-OAuth enrolment — cannot survive as a dead credential at rest.
   // Top-level non-env keys (permissions, etc.) are still preserved by
   // mergeClaudeSettings. (MEDIUM-1)
-  const target = mergeClaudeSettings(existing, helperPath, fullEnv, { replaceEnv: true })
+  const target = mergeClaudeSettings(existing, helper, fullEnv, { replaceEnv: true })
   const targetRaw = JSON.stringify(target, null, 2) + '\n'
 
   // Change-detect: only write when the serialised content actually differs, so a

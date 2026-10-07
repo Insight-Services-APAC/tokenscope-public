@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1010 610" width="1010" height="610" role="img" aria-labelledby="t d">
+  <title id="t">A worker trigger runs only with a fresh, valid HMAC signature over the exact request, and every authentication failure looks the same to the caller.</title>
+  <desc id="d">Lifelines for the cron job, the require-front-door middleware, verifyInternalRequest, the worker dispatch and the named worker. The job signs timestamp, method, path and body hash with HMAC-SHA256 and posts to the run-worker route with timestamp and signature headers. With a Front Door id set the edge check requires the matching X-Azure-FDID header. The signature check accepts a timestamp within 300 seconds and a constant-time signature match; any failure returns the same 401. Dispatch returns 404 for an unknown worker name before loading worker code, allows one run per worker at a time with 409 for a busy worker, then runs the worker and returns its result. The job exits 0 on success or a busy 409, and 1 otherwise.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+    .fr { fill: var(--panel); stroke: var(--fg2); stroke-width: 1; stroke-dasharray: 3 3; }
+    .frl { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; letter-spacing: .06em; fill: var(--fg2); }
+    .band { stroke: var(--line); stroke-width: 1; }
+    .halo { paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1010" height="610"/>
+  <rect class="node" x="15" y="20" width="170" height="46" rx="6"/>
+  <text class="t" x="100" y="40" text-anchor="middle">Cron job</text>
+  <text class="sm" x="100" y="57" text-anchor="middle">cron-trigger.mjs</text>
+  <line class="life" x1="100" y1="66" x2="100" y2="596"/>
+  <rect class="node" x="215" y="20" width="170" height="46" rx="6"/>
+  <text class="t" x="300" y="40" text-anchor="middle">Edge check</text>
+  <text class="sm" x="300" y="57" text-anchor="middle">require-front-door</text>
+  <line class="life" x1="300" y1="66" x2="300" y2="596"/>
+  <rect class="node" x="415" y="20" width="170" height="46" rx="6"/>
+  <text class="t" x="500" y="40" text-anchor="middle">Signature check</text>
+  <text class="sm" x="500" y="57" text-anchor="middle">verifyInternalRequest</text>
+  <line class="life" x1="500" y1="66" x2="500" y2="596"/>
+  <rect class="node" x="615" y="20" width="170" height="46" rx="6"/>
+  <text class="t" x="700" y="40" text-anchor="middle">Dispatch</text>
+  <text class="sm" x="700" y="57" text-anchor="middle">registry + lock</text>
+  <line class="life" x1="700" y1="66" x2="700" y2="596"/>
+  <rect class="node" x="815" y="20" width="170" height="46" rx="6"/>
+  <text class="t" x="900" y="40" text-anchor="middle">Named worker</text>
+  <text class="sm" x="900" y="57" text-anchor="middle">worker pool · Postgres</text>
+  <line class="life" x1="900" y1="66" x2="900" y2="596"/>
+  <polyline class="e" points="106,86 144,86 144,108 108,108" marker-end="url(#ah)"/>
+  <circle class="cn" cx="144" cy="97" r="10"/><text class="cnt" x="144" y="101" text-anchor="middle">1</text>
+  <text class="lbl halo" x="162" y="95">HMAC-SHA256 over</text>
+  <text class="lbl halo" x="162" y="109">ts, POST, path, sha256(body)</text>
+  <line class="e" x1="100" y1="158" x2="298" y2="158" marker-end="url(#ah)"/>
+  <text class="lbl halo" x="210" y="129" text-anchor="middle">POST /run-worker/{name}</text>
+  <text class="lbl halo" x="210" y="143" text-anchor="middle">X-Internal-Timestamp · -Signature</text>
+  <circle class="cn" cx="122" cy="158" r="10"/><text class="cnt" x="122" y="162" text-anchor="middle">2</text>
+  <polyline class="e" points="306,174 344,174 344,196 308,196" marker-end="url(#ah)"/>
+  <circle class="cn" cx="344" cy="185" r="10"/><text class="cnt" x="344" y="189" text-anchor="middle">3</text>
+  <text class="lbl halo" x="362" y="183">frontDoorId set: X-Azure-FDID</text>
+  <text class="lbl halo" x="362" y="197">must match, else 403</text>
+  <line class="e" x1="300" y1="228" x2="498" y2="228" marker-end="url(#ah)"/>
+  <text class="lbl halo" x="410" y="213" text-anchor="middle">next handler</text>
+  <circle class="cn" cx="322" cy="228" r="10"/><text class="cnt" x="322" y="232" text-anchor="middle">4</text>
+  <polyline class="e accent" points="506,244 544,244 544,266 508,266" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="544" cy="255" r="10"/><text class="cnt accent" x="544" y="259" text-anchor="middle">5</text>
+  <text class="s acc halo" x="562" y="253">timestamp within ±300 s</text>
+  <text class="s acc halo" x="562" y="267">signature equal, constant time</text>
+  <line class="e dashed bad" x1="500" y1="304" x2="102" y2="304" marker-end="url(#ah-bad)"/>
+  <text class="lbl halo" x="290" y="289" text-anchor="middle">any failure: the same 401</text>
+  <circle class="cn bad" cx="478" cy="304" r="10"/><text class="cnt bad" x="478" y="308" text-anchor="middle">6</text>
+  <line class="e" x1="500" y1="344" x2="698" y2="344" marker-end="url(#ah)"/>
+  <text class="lbl halo" x="610" y="329" text-anchor="middle">getWorker(name)</text>
+  <circle class="cn" cx="522" cy="344" r="10"/><text class="cnt" x="522" y="348" text-anchor="middle">7</text>
+  <line class="e dashed bad" x1="700" y1="384" x2="102" y2="384" marker-end="url(#ah-bad)"/>
+  <text class="lbl halo" x="390" y="369" text-anchor="middle">unknown name: 404, no worker code loaded</text>
+  <circle class="cn bad" cx="678" cy="384" r="10"/><text class="cnt bad" x="678" y="388" text-anchor="middle">8</text>
+  <polyline class="e" points="706,400 744,400 744,422 708,422" marker-end="url(#ah)"/>
+  <circle class="cn" cx="744" cy="411" r="10"/><text class="cnt" x="744" y="415" text-anchor="middle">9</text>
+  <text class="lbl halo" x="762" y="409">one run per worker: busy 409</text>
+  <text class="lbl halo" x="762" y="423">admin-disabled: skipped</text>
+  <line class="e" x1="700" y1="458" x2="898" y2="458" marker-end="url(#ah)"/>
+  <text class="lbl halo" x="810" y="443" text-anchor="middle">run</text>
+  <circle class="cn" cx="722" cy="458" r="10"/><text class="cnt" x="722" y="462" text-anchor="middle">10</text>
+  <line class="e dashed" x1="900" y1="490" x2="702" y2="490" marker-end="url(#ah)"/>
+  <text class="lbl halo" x="790" y="475" text-anchor="middle">result</text>
+  <circle class="cn" cx="878" cy="490" r="10"/><text class="cnt" x="878" y="494" text-anchor="middle">11</text>
+  <line class="e dashed" x1="700" y1="522" x2="102" y2="522" marker-end="url(#ah)"/>
+  <text class="lbl halo" x="390" y="507" text-anchor="middle">{ worker, duration_ms, result }</text>
+  <circle class="cn" cx="678" cy="522" r="10"/><text class="cnt" x="678" y="526" text-anchor="middle">12</text>
+  <polyline class="e" points="106,538 144,538 144,560 108,560" marker-end="url(#ah)"/>
+  <circle class="cn" cx="144" cy="549" r="10"/><text class="cnt" x="144" y="553" text-anchor="middle">13</text>
+  <text class="lbl halo" x="162" y="547">2xx or busy 409: exit 0</text>
+  <text class="lbl halo" x="162" y="561">else exit 1 · aborts after 200 s</text>
+</svg>

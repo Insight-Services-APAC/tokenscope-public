@@ -55,12 +55,14 @@ export interface TeammateDimensionSnapshotSql {
 /**
  * Three scalar-subquery SQL fragments resolving `teammateIdSql`'s CURRENT
  * region / org unit / nearest active cost-owning ancestor, for embedding
- * directly into an `actual_spend` INSERT's VALUES list alongside
+ * directly into a writer's INSERT (its VALUES or SELECT list) alongside
  * `DIMENSION_SOURCE_INGEST_SNAPSHOT`.
  *
  * `teammateIdSql` must be a single bound value (e.g. `` sql`${agg.teammateId}::uuid` ``)
- * — it is inlined into three independent subqueries, so a non-deterministic
- * expression would evaluate three times and could disagree with itself.
+ * or a plain column reference of the INSERT's own SELECT (provider-fact.ts
+ * passes `v.teammate_id`, its record set's uuid column) — it is inlined into
+ * three independent subqueries, so a non-deterministic expression would
+ * evaluate three times and could disagree with itself.
  */
 export function teammateDimensionSnapshotSql(teammateIdSql: SQL): TeammateDimensionSnapshotSql {
   return {

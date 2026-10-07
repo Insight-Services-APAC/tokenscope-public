@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" width="1000" height="620" role="img" aria-labelledby="t d">
+  <title id="t">TokenScope components: the app issues credentials and reads telemetry back, but device usage goes straight to Azure Monitor</title>
+  <desc id="d">A developer device connects to the MCP server with OAuth, redeems a one-time handoff at setup/redeem, and fetches an Azure Monitor ingest bearer from the bearer endpoint. It then sends OTLP log events directly to the data collection endpoint, which writes the OTelLogs table in log-&lt;name&gt;. Scheduled caj-ts jobs trigger the app's worker registry, whose read joiner queries OTelLogs by KQL and whose pollers pull the provider APIs; everything lands in PostgreSQL, which the dashboard reads.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="620"/>
+  <rect class="zone" x="16" y="16" width="190" height="588" rx="10"/>
+  <text class="zlabel" x="30" y="38">OUTSIDE AZURE</text>
+  <rect class="zone" x="270" y="16" width="356" height="588" rx="10"/>
+  <text class="zlabel" x="284" y="38">CONTAINER APPS ENVIRONMENT</text>
+  <rect class="zone" x="656" y="16" width="328" height="588" rx="10"/>
+  <text class="zlabel" x="670" y="38">AZURE SERVICES</text>
+  <rect class="node" x="30" y="56" width="162" height="64" rx="6"/>
+  <text class="t" x="111" y="75.5" text-anchor="middle">Developer device</text>
+  <text class="s" x="111" y="92.5" text-anchor="middle">Claude Code · Copilot CLI</text>
+  <text class="s" x="111" y="109.5" text-anchor="middle">TokenScope plugin</text>
+  <rect class="node" x="30" y="306" width="162" height="64" rx="6"/>
+  <text class="t" x="111" y="325.5" text-anchor="middle">Provider APIs</text>
+  <text class="s" x="111" y="342.5" text-anchor="middle">Anthropic Analytics</text>
+  <text class="s" x="111" y="359.5" text-anchor="middle">GitHub Copilot</text>
+  <rect class="node" x="30" y="428" width="162" height="54" rx="6"/>
+  <text class="t" x="111" y="451" text-anchor="middle">Browser</text>
+  <text class="s" x="111" y="468" text-anchor="middle">Entra sign-in</text>
+  <rect class="node env" x="282" y="110" width="332" height="390" rx="8"/>
+  <text class="tm" x="296" y="130">ca-&lt;name&gt;</text>
+  <text class="s" x="600" y="130" text-anchor="end">Nuxt · Nitro · :3000</text>
+  <rect class="node inner" x="296" y="142" width="304" height="44" rx="6"/>
+  <text class="t" x="448" y="160" text-anchor="middle">MCP server + OAuth 2.1</text>
+  <text class="sm" x="448" y="177" text-anchor="middle">/api/v1/mcp · /api/v1/oauth/*</text>
+  <rect class="node inner" x="296" y="194" width="304" height="44" rx="6"/>
+  <text class="t" x="448" y="212" text-anchor="middle">Setup redeem</text>
+  <text class="sm" x="448" y="229" text-anchor="middle">POST /api/v1/setup/redeem</text>
+  <rect class="node inner" x="296" y="246" width="304" height="44" rx="6"/>
+  <text class="t" x="448" y="264" text-anchor="middle">Bearer endpoint</text>
+  <text class="sm" x="448" y="281" text-anchor="middle">GET /api/v1/instances/{id}/bearer</text>
+  <rect class="node inner" x="296" y="306" width="304" height="64" rx="6"/>
+  <text class="t" x="448" y="325.5" text-anchor="middle">Worker registry · 33 workers</text>
+  <text class="sm" x="448" y="342.5" text-anchor="middle">azure-monitor-read · analytics-poll</text>
+  <text class="sm" x="448" y="359.5" text-anchor="middle">reconciliation-sync · provider-transform …</text>
+  <rect class="node inner" x="296" y="428" width="200" height="54" rx="6"/>
+  <text class="t" x="396" y="451" text-anchor="middle">Dashboard + REST API</text>
+  <text class="sm" x="396" y="468" text-anchor="middle">/api/v1/reports/*</text>
+  <rect class="node" x="282" y="530" width="332" height="54" rx="6"/>
+  <text class="t" x="448" y="553" text-anchor="middle">caj-ts-&lt;worker&gt; · 32 cron jobs</text>
+  <text class="sm" x="448" y="570" text-anchor="middle">same image · scripts/cron-trigger.mjs</text>
+  <rect class="node" x="676" y="56" width="288" height="56" rx="6"/>
+  <text class="t" x="820" y="80" text-anchor="middle">DCE + DCR</text>
+  <text class="s" x="820" y="97" text-anchor="middle">public OTLP ingest endpoint</text>
+  <rect class="node" x="676" y="150" width="288" height="56" rx="6"/>
+  <text class="tm" x="820" y="174" text-anchor="middle">log-&lt;name&gt;</text>
+  <text class="s" x="820" y="191" text-anchor="middle">OTelLogs table</text>
+  <rect class="node" x="676" y="400" width="288" height="100" rx="6"/>
+  <text class="t" x="820" y="429" text-anchor="middle">PostgreSQL Flexible Server</text>
+  <text class="sm" x="820" y="446" text-anchor="middle">instance_attestation · emit_handoff</text>
+  <text class="sm" x="820" y="463" text-anchor="middle">oauth_token · attribution_record</text>
+  <text class="sm" x="820" y="480" text-anchor="middle">actual_spend · provider_usage_fact …</text>
+  <polyline class="e accent" points="192,70 670,70" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="620" cy="70" r="10"/><text class="cnt accent" x="620" y="74" text-anchor="middle">4</text>
+  <text class="s acc" x="296" y="62">OTLP log events + ingest bearer</text>
+  <polyline class="e" points="192,88 222,88 222,164 290,164" marker-end="url(#ah)"/>
+  <circle class="cn" cx="222" cy="126" r="10"/><text class="cnt" x="222" y="130" text-anchor="middle">1</text>
+  <polyline class="e" points="192,100 238,100 238,216 290,216" marker-end="url(#ah)"/>
+  <circle class="cn" cx="238" cy="184" r="10"/><text class="cnt" x="238" y="188" text-anchor="middle">2</text>
+  <polyline class="e" points="192,112 254,112 254,268 290,268" marker-end="url(#ah)"/>
+  <circle class="cn" cx="254" cy="240" r="10"/><text class="cnt" x="254" y="244" text-anchor="middle">3</text>
+  <polyline class="e" points="820,112 820,144" marker-end="url(#ah)"/>
+  <circle class="cn" cx="820" cy="128" r="10"/><text class="cnt" x="820" y="132" text-anchor="middle">5</text>
+  <polyline class="e" points="560,530 560,376" marker-end="url(#ah)"/>
+  <circle class="cn" cx="560" cy="404" r="10"/><text class="cnt" x="560" y="408" text-anchor="middle">6</text>
+  <text class="lbl" x="572" y="519">HMAC POST</text>
+  <polyline class="e" points="600,322 640,322 640,178 670,178" marker-end="url(#ah)"/>
+  <circle class="cn" cx="640" cy="250" r="10"/><text class="cnt" x="640" y="254" text-anchor="middle">7</text>
+  <polyline class="e" points="192,338 290,338" marker-end="url(#ah)"/>
+  <circle class="cn" cx="240" cy="338" r="10"/><text class="cnt" x="240" y="342" text-anchor="middle">8</text>
+  <polyline class="e" points="614,450 670,450" marker-end="url(#ah)" marker-start="url(#ah)"/>
+  <circle class="cn" cx="642" cy="450" r="10"/><text class="cnt" x="642" y="454" text-anchor="middle">9</text>
+  <polyline class="e" points="192,455 290,455" marker-end="url(#ah)"/>
+  <circle class="cn" cx="240" cy="455" r="10"/><text class="cnt" x="240" y="459" text-anchor="middle">10</text>
+</svg>

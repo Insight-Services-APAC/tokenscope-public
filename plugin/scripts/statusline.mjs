@@ -64,8 +64,9 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isMainModule } from './is-main.mjs'
 import { spawn } from 'node:child_process'
-import { readEmitSentinel, trustedGlobalSettingsEnv, trustedStateDir } from './plugin-runtime.mjs'
+import { readEmitDegraded, readEmitSentinel, trustedGlobalSettingsEnv, trustedStateDir } from './plugin-runtime.mjs'
 
 const C = {
   green: '\x1b[32m',
@@ -269,6 +270,7 @@ export function formatStatusLine({
   sessionId,
   envLabel = null,
   color = true,
+  degraded = false,
 }) {
   const paint = (c, s) => (color ? `${c}${s}${C.reset}` : s)
   if (!configured) return paint(C.dim, 'TokenScope · not configured')
@@ -277,6 +279,10 @@ export function formatStatusLine({
   const line = (c, label) => `${paint(c, `TokenScope ${label}`)}${sid}${tag}`
   // 1. Auth itself broken — can't even mint a bearer. Root cause; outranks all.
   if (!emitting) return line(C.red, '✗ emit-auth failing')
+  // 1b. Emitting on the CACHED bearer because TokenScope is unreachable (#409):
+  //     nothing verified the credential, and /health is unreachable too, so
+  //     landing below cannot be trusted either. Amber, before landing.
+  if (degraded) return line(C.yellow, '⚠ emit-auth degraded')
   // 2-3. /health reachable: landing is the primary driver. A dead/revoked export
   //      is the WORST news and reads clearly not-working (red), regardless of MCP.
   if (landing === 'revoked') return line(C.red, '✗ enrolment revoked')
@@ -489,6 +495,9 @@ function main() {
       // sentinel — point it at an empty one and "no sentinel" reads as healthy
       // emission. Same forgery as the delivery cache above, on the other input.
       emitting: configured && !readEmitSentinel(process.env, trustedStateDir()),
+      // Degraded = the helper is handing back its CACHED bearer because TokenScope
+      // is unreachable (#409). Same trusted directory, same forgery argument.
+      degraded: configured && Boolean(readEmitDegraded(process.env, trustedStateDir())),
       mcpAuthed: isMcpAuthed(),
       // Landing = the delivery-confirmation state derived from the cached /health.
       landing,
@@ -503,9 +512,9 @@ function main() {
 }
 
 // Only run when invoked directly (not when imported by the unit test).
-// fileURLToPath comparison (the pattern every other script here uses): the raw
-// `file://${argv[1]}` template silently mismatches when the path percent-encodes
-// (space or non-ASCII in $HOME) → main() never runs, status line blank, zero diagnostics.
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// isMainModule (the guard every runnable script here uses): a raw string compare
+// silently mismatches when the path percent-encodes or crosses a symlink → main()
+// never runs, status line blank, zero diagnostics.
+if (isMainModule(import.meta.url)) {
   main()
 }

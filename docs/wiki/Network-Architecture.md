@@ -31,78 +31,37 @@ this page documents the private, VNet-integrated mode.
   makes it **private** (AMPLS + private endpoint,
   `publicNetworkAccessForQuery: Disabled`), after the Azure Monitor privatelink
   DNS zones exist.
+- **Platform logs** (Container Apps console/system logs, diagnostic settings,
+  log alert rules) share the telemetry workspace by default. With
+  `monitorQueryPrivateOnly` on they move to a second workspace, `log-ops-<name>`
+  (`separateOpsWorkspace`, which defaults to the same value): query privacy is
+  workspace-wide, and operators must be able to read crash logs from the portal.
+  That workspace's query path is public and governed by Entra RBAC. The full
+  picture, with the alerts that read it, is
+  [Deployment and Operations § Logs and monitoring](Deployment-and-Operations.md#logs-and-monitoring).
 
 ---
 
 ## 1. Topology
 
-```mermaid
-%%{init: {'flowchart': {'curve':'basis','nodeSpacing':45,'rankSpacing':55,'htmlLabels':true}}}%%
-flowchart TB
-    NET["Internet"]
-    WAF["(a) Your WAF / reverse proxy<br/>or (b) Front Door Premium + WAF<br/>(public) — 443"]
+![Only the edge is public: the app sits on an internal VIP and reaches its data plane through private endpoints, while devices send telemetry straight to Azure Monitor](images/network-architecture-topology.svg)
 
-    subgraph RG["Resource group — single region"]
-        subgraph VNET["VNet — IPAM-assigned (private)"]
-            subgraph SACA["snet-container-apps /27 — ACA-delegated"]
-                VIP["Internal ACA VIP<br/>(private; vnetConfiguration.internal=true)"]
-                APP["Container App<br/>Nuxt/Nitro · :3000"]
-            end
-            subgraph SPE["snet-private-endpoints /28"]
-                PEKV["PE: Key Vault"]
-                PEPG["PE: PostgreSQL"]
-                PERS["PE: Redis"]
-                PEACR["PE: ACR (Premium)"]
-            end
-            subgraph SAMPLS["snet-ampls /28 (optional)"]
-                PEAM["PE: Azure Monitor (AMPLS)<br/>Log Analytics QUERY"]
-            end
-            subgraph SBUILD["snet-build (optional)"]
-                RUN["Self-hosted runner or<br/>ACR Tasks agent pool"]
-            end
-        end
+1. Users and plugins reach the edge on 443: Front Door Premium (`enableFrontDoor`, `frontDoorSku='Premium'`) or your own WAF. This is the only public entrypoint.
+2. The edge forwards to the internal VIP of `cae-<name>` (`internal: true`). Front Door Premium arrives over Private Link, whose request is approved during the apply; your own WAF arrives over the VNet or a hub peering. Once `frontDoorId` is set, the app refuses requests without Front Door's `X-Azure-FDID` header.
+3. The app reaches Key Vault, PostgreSQL and the Premium registry through private endpoints in `snet-private-endpoints`. Secrets resolve as Key Vault references and images pull with the user-assigned identity `id-<name>`; PostgreSQL and Redis credentials come from Key Vault. Redis is provisioned with a private endpoint, but the app has no Redis client.
+4. A private registry refuses outside builds, so images are built from `snet-build` (`buildSubnetPrefix`) by a self-hosted runner or an ACR Tasks agent pool, and pushed through the registry's private endpoint.
+5. The app runs its KQL against `log-<name>`. With `monitorQueryPrivateOnly` the query goes through the Azure Monitor Private Link Scope endpoint in `snet-ampls`; otherwise it uses the public query endpoint under Log Analytics Reader.
+6. The environment's console and system logs go to `log-ops-<name>` by diagnostic setting when `separateOpsWorkspace` is on (it defaults to `monitorQueryPrivateOnly`). Without it they share `log-<name>`.
+7. Key Vault, PostgreSQL, registry and Front Door diagnostic settings write to the same ops workspace. Redis has none.
+8. Developer devices send OTLP to the public data collection endpoint, and the data collection rule writes `OTelLogs`. Telemetry never enters the VNet.
 
-        KV[("Key Vault<br/>public access Disabled")]
-        PG[("PostgreSQL Flex<br/>public access Disabled")]
-        RS[("Redis<br/>public access Disabled")]
-        ACR[("ACR Premium<br/>public access Disabled")]
-        LAW[("Log Analytics<br/>query Private, ingest Public")]
-        MI(["User-assigned MI<br/>KV · PG · Redis · ACR · Monitor"])
-    end
+*The edge is the only public resource. Every other path stays inside the VNet or behind a private endpoint, except telemetry ingestion, which is Azure Monitor's public endpoint by design.*
 
-    DNS["privatelink DNS zones<br/>vaultcore · postgres · redis · azurecr · monitor<br/>(self-created OR central/consumed)"]
-    HUB["Hub VNet<br/>(optional spoke→hub peering)"]
-
-    NET -->|"443 HTTPS"| WAF
-    WAF -->|"(a) VNet / hub or (b) Private Link → internal VIP, 443"| VIP --> APP
-    APP -.->|private| PEKV --> KV
-    APP -.->|private| PEPG --> PG
-    APP -.->|private| PERS --> RS
-    APP -.->|private| PEACR --> ACR
-    APP -.->|private KQL| PEAM --> LAW
-    PEKV -.-> DNS
-    PEPG -.-> DNS
-    PERS -.-> DNS
-    PEACR -.-> DNS
-    PEAM -.-> DNS
-    RUN -.->|"docker push (private)"| PEACR
-    MI -.federates.-> APP
-    VNET -.->|"optional, no overlap"| HUB
-
-    classDef public fill:#ffe3e3,stroke:#c92a2a,stroke-width:1px,color:#5c1a1a;
-    classDef private fill:#ebfbee,stroke:#2b8a3e,stroke-width:1px,color:#1b4332;
-    classDef ident fill:#e7f5ff,stroke:#1971c2,stroke-width:1px,color:#0b3d66;
-    classDef zone fill:#f8f9fa,stroke:#adb5bd,stroke-width:1px,color:#212529;
-    class NET,WAF public;
-    class VNET,SACA,SPE,SAMPLS,SBUILD,VIP,APP,KV,PG,RS,ACR,LAW,PEKV,PEPG,PERS,PEACR,PEAM,RUN private;
-    class MI ident;
-    class RG,DNS,HUB zone;
-```
-
-**Boundary legend:** red = internet-facing / public; green = private (VNet or
-private endpoint); blue = identity; grey = zone / shared. The **only** public box
-is the entrypoint (your WAF, or Front Door). Everything else lives in or behind
-the VNet.
+The template creates the four data-plane `privatelink` zones and links them to the
+VNet, or consumes them from a central hub when `centralDnsZonesSubscriptionId` and
+`centralDnsZonesResourceGroup` are set. It does not create the Azure Monitor
+`privatelink` zones: the AMPLS endpoint carries no DNS zone group, so whoever owns
+those zones registers its records.
 
 The network perimeter is the ingress control; the app still enforces Entra OIDC +
 RBAC, per-request scope checks in the queries and CSRF on every request.
@@ -120,7 +79,7 @@ non-owner app role; see Authentication and Security.)
 | I2b | Front Door Premium | Internal ACA VIP | 443 / HTTPS | Private (Private Link to the managed environment) | Private endpoint request approved during the apply; with `frontDoorId` set the app rejects requests without Front Door's `X-Azure-FDID` |
 | E1 | App | Key Vault | 443 / HTTPS | Private (PE) | User-assigned MI, *Key Vault Secrets User*; `publicNetworkAccess: Disabled` |
 | E2 | App | PostgreSQL Flexible Server | 5432 / TLS | Private (PE) | DB credentials from KV (`database-url`); `publicNetworkAccess: Disabled` |
-| E3 | App | Redis | 6380 / TLS | Private (PE) | Redis key from KV (`redis-url`); `publicNetworkAccess: Disabled` |
+| E3 | App | Redis | 6380 / TLS | Private (PE) | Provisioned and wired as `REDIS_URL` from KV (`redis-url`), but the app has no Redis client today; `publicNetworkAccess: Disabled` |
 | E4 | App | Azure Monitor / Log Analytics (KQL read) | 443 / HTTPS | Private (PE) — AMPLS, `queryAccessMode=PrivateOnly` | MI bearer (`monitor.azure.com`), *Log Analytics Reader*; query reachable only from inside the VNet |
 | P1 | ACA env | ACR image pull | 443 / HTTPS | Private (PE) | User-assigned MI, *AcrPull*; admin user disabled |
 | B1 | Build in `snet-build` (self-hosted runner or ACR Tasks agent pool) | ACR push | 443 / HTTPS | Private (PE) | Builds from inside the VNet; a private registry refuses outside builds |

@@ -42,8 +42,8 @@ Claude Code session, run these one at a time:
 /plugin install tokenscope@tokenscope
 ```
 
-Choose user scope when asked, then run `/tokenscope:setup`. Full walkthrough:
-[`plugin/README.md`](../plugin/README.md).
+When asked, choose **Install for you**. Then sign in, turn on tracking and
+restart, as in the [Quick start](../plugin/README.md#quick-start).
 
 ## GitHub Copilot
 

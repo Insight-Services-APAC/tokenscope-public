@@ -51,6 +51,7 @@ Optional during first bring-up (dev mode); required for real sign-in.
 | `NUXT_JOINER_INSTANCE_CAP`          | Max instances scanned per read tick (default 500). Raise this — not the liveness window — if `worker_run.result->>'selectionCapHit'` is non-null.                                                                                                                                                                                    |
 | `NUXT_JOINER_LIVE_BEARER_HOURS`     | How recently an open instance must have minted an ingest bearer to count as live and be re-scanned, regardless of enrolment age (default 336 = 14 days; min 1, max 2160 = 90 days). Widening is safe but enlarges the selection against `NUXT_JOINER_INSTANCE_CAP`; out-of-range values fall back to the default or clamp, and warn. |
 | `NUXT_AZURE_DCR_RESOURCE_ID`        | ARM resource id of the Data Collection Rule, for the ingest-coverage metrics probe (needs Monitoring Reader on the DCR; Bicep sets both). Unset = the probe reports unknown. |
+| `TELEMETRY_DAILY_CAP_GB`            | The telemetry workspace's daily ingestion cap in GB. Bicep sets it from the value that sets the cap. The `telemetry-cap` ops alert raises a critical at 80% of it; unset, empty or not positive = the alert cannot decide and stays indeterminate. |
 | `NUXT_COPILOT_NATIVE_OTEL`          | `true` enables the native Copilot GenAI read-side (default off).                                                                                                                                                                                                                                                                     |
 
 ## Directory placement (Microsoft Graph)
@@ -99,7 +100,7 @@ emit tool, so size the per-identity caps for tools-per-person, not people.
 `APP_PUBLIC_ORIGIN`, `AZURE_FRONT_DOOR_ID`, `AZURE_CLIENT_ID`,
 `AZURE_KEYVAULT_URL`, `APPLICATIONINSIGHTS_CONNECTION_STRING`, `GIT_COMMIT_SHA`,
 `NITRO_PORT`, `NODE_ENV`, `NUXT_SECURITY_RATE_LIMITER_IP_HEADER`
-(`x-azure-clientip` only when Front Door is enforced).
+(`x-azure-socketip` only when Front Door is enforced).
 
 `CONTAINER_APP_NAME`, `CONTAINER_APP_ENV_DNS_SUFFIX` and
 `CONTAINER_APP_HOSTNAME` are injected by the Container Apps platform itself (no

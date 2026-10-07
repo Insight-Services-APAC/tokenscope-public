@@ -460,10 +460,15 @@ describe('installStatusLine (non-clobber)', () => {
 })
 
 describe('reconcilePluginPaths (self-heal version-pinned settings on update)', () => {
+  // `exists` injected: these cases are about the move rules, not the disk. The
+  // helper is REBUILT (buildHelperCommand), so the healed value is a command.
   const A = {
     statuslinePath: '/h/.claude/plugins/cache/tokenscope/tokenscope/0.1.19/scripts/statusline.mjs',
-    helperPath: '/h/.claude/plugins/cache/tokenscope/tokenscope/0.1.19/scripts/otel-headers-helper.sh',
+    scriptsDir: '/h/.claude/plugins/cache/tokenscope/tokenscope/0.1.19/scripts',
+    platform: 'linux',
+    exists: () => true,
   }
+  const A_HELPER = '"/h/.claude/plugins/cache/tokenscope/tokenscope/0.1.19/scripts/otel-headers-helper.sh" --tool claude-code'
   const staleStatusCmd = 'node "/h/.claude/plugins/cache/tokenscope/tokenscope/0.1.14/scripts/statusline.mjs"'
   const staleHelper = '/h/.claude/plugins/cache/tokenscope/tokenscope/0.1.13/scripts/otel-headers-helper.sh'
 
@@ -475,13 +480,13 @@ describe('reconcilePluginPaths (self-heal version-pinned settings on update)', (
     expect(changed).toBe(true)
     expect(settings.statusLine.command).toBe(`node ${JSON.stringify(A.statuslinePath)}`)
     expect(settings.statusLine.padding).toBe(0) // preserves other statusLine fields
-    expect(settings.otelHeadersHelper).toBe(A.helperPath)
+    expect(settings.otelHeadersHelper).toBe(A_HELPER)
     expect(settings.env).toEqual({ X: '1' }) // untouched
   })
 
   it('is a no-op once both already point at the active version', () => {
     const { changed } = reconcilePluginPaths(
-      { statusLine: tokenscopeStatusLine(A.statuslinePath), otelHeadersHelper: A.helperPath },
+      { statusLine: tokenscopeStatusLine(A.statuslinePath), otelHeadersHelper: A_HELPER },
       A,
     )
     expect(changed).toBe(false)
@@ -494,7 +499,7 @@ describe('reconcilePluginPaths (self-heal version-pinned settings on update)', (
     )
     // statusLine left alone; only the (ours) otelHeadersHelper repointed
     expect(settings.statusLine.command).toBe('my-prompt.sh')
-    expect(settings.otelHeadersHelper).toBe(A.helperPath)
+    expect(settings.otelHeadersHelper).toBe(A_HELPER)
     expect(changed).toBe(true)
   })
 
@@ -535,7 +540,9 @@ describe('reconcilePluginPaths (self-heal version-pinned settings on update)', (
     // ping-pong with a cache-run peer sharing the same home).
     const cloneActive = {
       statuslinePath: '/h/.claude/plugins/marketplaces/tokenscope/plugin/scripts/statusline.mjs',
-      helperPath: '/h/.claude/plugins/marketplaces/tokenscope/plugin/scripts/otel-headers-helper.sh',
+      scriptsDir: '/h/.claude/plugins/marketplaces/tokenscope/plugin/scripts',
+      platform: 'linux',
+      exists: () => true,
     }
     const { changed } = reconcilePluginPaths(
       { statusLine: { type: 'command', command: staleStatusCmd }, otelHeadersHelper: staleHelper },
@@ -559,7 +566,7 @@ describe('reconcilePluginPaths (self-heal version-pinned settings on update)', (
   it('skips a path target that is null (does not exist on disk)', () => {
     const { changed } = reconcilePluginPaths(
       { otelHeadersHelper: staleHelper },
-      { statuslinePath: null, helperPath: null },
+      { statuslinePath: null, scriptsDir: null, platform: 'linux', exists: () => true },
     )
     expect(changed).toBe(false)
   })

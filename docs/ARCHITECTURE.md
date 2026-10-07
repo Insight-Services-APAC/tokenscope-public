@@ -102,7 +102,9 @@ One Bicep graph (`infra/`), two switches:
 - **`enablePrivateNetworking`** — VNet, private endpoints on Key Vault, Postgres,
   Redis and ACR, internal ingress on the Container Apps environment, private
   registry. Making the Log Analytics **query** path private as well is a separate
-  opt-in, `monitorQueryPrivateOnly`; ingestion stays public either way.
+  opt-in, `monitorQueryPrivateOnly`; ingestion stays public either way. By
+  default it also splits the platform's own logs into a portal-readable ops
+  workspace (`separateOpsWorkspace`).
 - **`enableFrontDoor`** + **`frontDoorSku`** — Azure Front Door with a WAF in front
   of the app. `Standard` fronts a public app (the sandbox posture). `Premium`
   reaches an internal (VNet) environment over Private Link and adds the managed

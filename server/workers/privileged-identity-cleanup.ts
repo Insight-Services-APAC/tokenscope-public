@@ -23,6 +23,36 @@
  *    instance_attestation AND no attribution_record AND no live oauth_token AND
  *    no active allocation. Anything else → flagged for an admin, never touched.
  *  - FAIL-OPEN. No patterns configured ⇒ nothing matches ⇒ nothing cleaned.
+ *  - A DIRECTORY FAILURE IS NOT A VERDICT. The oid lookup is the STRICT variant: a
+ *    Graph throttle, 5xx or timeout throws, and the row is counted in `errors` and
+ *    skipped — never a candidate, so it can never feed a deactivation. Only a
+ *    successful lookup whose UPN matches a pattern makes a row a candidate.
+ *  - DEADLINE. No new identity is started after PRIVILEGED_CLEANUP_BUDGET_MS, and
+ *    every directory lookup carries the same deadline (the shared token mint has
+ *    its own fixed bound, ~21 s), so a throttle burst cannot hold
+ *    the run (and its single-flight lock) for hours. What happens to the rows not
+ *    reached depends on the mode:
+ *      · REPORT resumes. The scan is a keyset walk by id; a run stopped early
+ *        (deadline or scan budget) persists the id of the last row it finished in
+ *        kv_store (mount 'privileged-identity-cleanup', key 'report-cursor') and
+ *        the next report run continues after it. A run that reaches the end
+ *        clears it, so the one after starts again from the first row. Without the
+ *        cursor every run would restart from the first id and a population larger
+ *        than one budget's worth would never have its tail examined.
+ *      · APPLY never resumes and never acts on a partial scan. The cap is a
+ *        statement about the WHOLE excluded population; a scan that sees only
+ *        part of it could let a pattern matching far more than the cap pass it
+ *        slice by slice. An apply run always scans from the first row, and if the
+ *        deadline or the scan limit stops it, or any row could not be judged (a
+ *        lookup or safety check threw), it ABORTS (mutates nothing, audited with
+ *        reason 'incomplete-scan'). An unreached or unjudged row is therefore
+ *        never a candidate, never counted toward the cap, never deactivated.
+ *        SCALE LIMIT, stated: one apply run does one sequential lookup per active
+ *        teammate inside the 150 s budget, so it completes up to roughly 1,000
+ *        active teammates at ~150 ms a lookup. Past that it aborts every time,
+ *        safely, mutating nothing; the fix then is an apply over the candidates
+ *        the report passes gathered (docs/design/scaling-to-1000-users.md,
+ *        Phase 2).
  *
  * Framing mirrors region-reenrichment's "only touch never-live rows" contract,
  * but stricter because the action (deactivate + de-own) is heavier than a move.
@@ -31,10 +61,41 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
 import type * as schema from '../../drizzle/schema'
 import { recordAuditEvent } from '../db/audit'
-import { getDirectoryUserByOid, type DirectoryUser } from '../azure/directory'
+import {
+  getDirectoryUserByOidStrict,
+  WORKER_GRAPH_RETRIES,
+  type DirectoryUser,
+} from '../azure/directory'
 import { isExcludedUpn, loadDirectoryExclusionPatterns } from '../utils/directory-exclusions'
+import { isUuid } from '../utils/uuid'
 
 type Db = PostgresJsDatabase<typeof schema>
+
+/** No new identity is started after this much of the run (the dispatch budget is
+ *  200 s; Graph calls in flight are bounded by the same deadline). */
+export const PRIVILEGED_CLEANUP_BUDGET_MS = 150_000
+
+const KV_MOUNT = 'privileged-identity-cleanup'
+const KV_REPORT_CURSOR_KEY = 'report-cursor'
+
+async function loadReportCursor(db: Db): Promise<string> {
+  const rows = await db.execute<{ value: string }>(sql`
+    SELECT value FROM kv_store WHERE mount = ${KV_MOUNT} AND key = ${KV_REPORT_CURSOR_KEY}`)
+  const v = [...rows][0]?.value
+  // Data at rest: anything but a uuid is ignored and the scan starts from the first row.
+  return v != null && isUuid(v) ? v : ''
+}
+
+async function saveReportCursor(db: Db, id: string): Promise<void> {
+  await db.execute(sql`
+    INSERT INTO kv_store (mount, key, value, expires_at, updated_at)
+    VALUES (${KV_MOUNT}, ${KV_REPORT_CURSOR_KEY}, ${id}, NULL, now())
+    ON CONFLICT (mount, key) DO UPDATE SET value = EXCLUDED.value, expires_at = NULL, updated_at = now()`)
+}
+
+async function clearReportCursor(db: Db): Promise<void> {
+  await db.execute(sql`DELETE FROM kv_store WHERE mount = ${KV_MOUNT} AND key = ${KV_REPORT_CURSOR_KEY}`)
+}
 
 export interface PrivilegedIdentityCleanupResult {
   mode: 'report' | 'apply'
@@ -54,6 +115,9 @@ export interface PrivilegedIdentityCleanupResult {
   aborted: boolean
   /** Stopped at the per-run scan budget before exhausting the population. */
   saturated: boolean
+  /** Stopped starting new identities at PRIVILEGED_CLEANUP_BUDGET_MS. Report mode
+   *  resumes from here next run; apply mode aborted (see the header). */
+  deadlineHit: boolean
   errors: number
 }
 
@@ -76,10 +140,18 @@ export async function runPrivilegedIdentityCleanup(
     cap?: Partial<Cap>
     lookupByOid?: (oid: string) => Promise<DirectoryUser | null>
     limit?: number
+    /** Test seams for the deadline. */
+    budgetMs?: number
+    now?: () => number
   },
 ): Promise<PrivilegedIdentityCleanupResult> {
   const mode = opts?.apply ? 'apply' : 'report'
-  const lookupByOid = opts?.lookupByOid ?? getDirectoryUserByOid
+  const now = opts?.now ?? Date.now
+  const deadline = now() + (opts?.budgetMs ?? PRIVILEGED_CLEANUP_BUDGET_MS)
+  // Worker transport: retries on throttle / 5xx / network, never past the run deadline.
+  const lookupByOid =
+    opts?.lookupByOid ??
+    ((oid: string) => getDirectoryUserByOidStrict(oid, { retries: WORKER_GRAPH_RETRIES, deadline }))
   const limit = opts?.limit ?? 20_000
   const PAGE = 500
   const cap: Cap = { maxAbs: opts?.cap?.maxAbs ?? 50, maxPct: opts?.cap?.maxPct ?? 0.1 }
@@ -92,6 +164,7 @@ export async function runPrivilegedIdentityCleanup(
     cleaned: 0,
     aborted: false,
     saturated: false,
+    deadlineHit: false,
     errors: 0,
   }
 
@@ -99,7 +172,13 @@ export async function runPrivilegedIdentityCleanup(
   if (patterns.length === 0) return result // fail-open: no policy → no cleanup
 
   const candidates: CandidateRow[] = []
-  let cursor = ''
+  // Report resumes from its cursor; apply always walks the whole population.
+  let cursor = mode === 'report' ? await loadReportCursor(db) : ''
+  // The id of the last row FINISHED — where a stopped report run resumes.
+  let lastDone: string | null = null
+  // Rows the scan could not judge (a lookup or safety check threw). Any of them
+  // makes an apply scan partial.
+  let scanErrors = 0
   scan: while (result.considered < limit) {
     const rows = await db.execute<{ id: string; entra_oid: string; email: string }>(sql`
       SELECT id::text AS id, entra_oid, email FROM teammate
@@ -118,6 +197,12 @@ export async function runPrivilegedIdentityCleanup(
         result.saturated = true
         break scan
       }
+      if (now() >= deadline) {
+        result.deadlineHit = true
+        break scan
+      }
+      const doneBefore = lastDone
+      lastDone = row.id
       result.considered++
       try {
         const dir = await lookupByOid(row.entra_oid)
@@ -182,9 +267,47 @@ export async function runPrivilegedIdentityCleanup(
         result.candidates++
         candidates.push({ id: row.id, entra_oid: row.entra_oid, email: row.email, upn: dir.upn })
       } catch {
-        result.errors++ // per-row isolation
+        result.errors++ // per-row isolation; a Graph failure lands here, never as "not excluded"
+        scanErrors++
+        if (now() >= deadline) {
+          // Cut off by the deadline mid-row: not finished, so a report run resumes AT it.
+          lastDone = doneBefore
+          result.deadlineHit = true
+          break scan
+        }
       }
     }
+  }
+
+  // The loop condition also ends a scan that reaches `limit` exactly at a page
+  // boundary, without the in-loop check firing; that is saturation too, or the
+  // cursor would be cleared and the rows past the limit never examined.
+  if (!result.deadlineHit && result.considered >= limit) result.saturated = true
+
+  if (mode === 'report') {
+    const stoppedEarly = result.deadlineHit || result.saturated
+    if (stoppedEarly && lastDone !== null) await saveReportCursor(db, lastDone)
+    else if (!stoppedEarly) await clearReportCursor(db)
+  }
+
+  // APPLY on a partial scan: abort before anything else (see the header). A scan
+  // is partial if the deadline stopped it, the scan limit stopped it, or any row
+  // could not be judged. The candidates found so far are not acted on and are
+  // not a cap verdict.
+  if (mode === 'apply' && (result.deadlineHit || result.saturated || scanErrors > 0)) {
+    result.aborted = true
+    await recordAuditEvent(db, {
+      eventType: 'privileged-identity-cleanup-aborted',
+      actorSystem: 'privileged-identity-cleanup-worker',
+      subjectKind: 'platform',
+      payload: {
+        candidates: candidates.length,
+        considered: result.considered,
+        scanErrors,
+        reason: 'incomplete-scan',
+      },
+    })
+    return result
   }
 
   if (mode === 'report' || candidates.length === 0) {
@@ -192,7 +315,14 @@ export async function runPrivilegedIdentityCleanup(
       eventType: 'privileged-identity-cleanup-report',
       actorSystem: 'privileged-identity-cleanup-worker',
       subjectKind: 'platform',
-      payload: { mode, considered: result.considered, excluded: result.excluded, candidates: result.candidates, flagged: result.flagged },
+      payload: {
+        mode,
+        considered: result.considered,
+        excluded: result.excluded,
+        candidates: result.candidates,
+        flagged: result.flagged,
+        deadlineHit: result.deadlineHit,
+      },
     })
     return result
   }

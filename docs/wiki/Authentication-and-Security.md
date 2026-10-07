@@ -19,42 +19,16 @@ Four caller classes, four authentication mechanisms — each carries a different
 | **Internal schedulers / workers** | **HMAC-SHA256** request signature | Key separate from the user-session HMAC key |
 | **Telemetry → Azure** | App-level **Managed Identity** bearer, `monitor.azure.com/.default` | Write-only, narrow-scope, same token every session — Azure never sees a TokenScope token |
 
-```mermaid
-flowchart TB
-    subgraph Browser["Browser user"]
-        U[Developer / Manager / Region admin / Global finance / Platform admin]
-    end
-    subgraph CLI["Claude Code CLI"]
-        C[claude binary + plugin]
-    end
-    subgraph Sched["Internal scheduler"]
-        W[Container Apps cron jobs]
-    end
+![Each caller class presents its own credential on its own route; only the telemetry write bypasses the app](images/authentication-and-security-trust-boundaries.svg)
 
-    WAF["Upstream WAF / edge<br/>(public entrypoint)"]
-    subgraph App["TokenScope (Container App, internal ingress / private VIP)"]
-        FD["require-front-door middleware<br/>(inert when no AZURE_FRONT_DOOR_ID)"]
-        OIDC["nuxt-oidc-auth cookie<br/>+ DB enrichment"]
-        RBAC["requireRole / requireRegionScope<br/>+ scope predicates"]
-        HMACI["verifyInternalRequest<br/>X-Internal-Signature"]
-        OAUTH["/api/v1/mcp + /oauth/*<br/>OAuth 2.1 (read/tag)"]
-        SETUP["/setup/redeem<br/>handoff-is-auth"]
-        BEARER["/bearer<br/>MI token mint"]
-        DB[(Postgres — scoped transaction)]
-    end
-    AZ["Azure Monitor (OTLP ingest)"]
+1. Browser users come through the public edge. The Entra OIDC cookie identifies them, and `requireRole`, `requireRegionScope` and the scope predicates decide what they may do. The OAuth consent (`POST /oauth/authorize`) also rides this cookie.
+2. CLI clients present three different credentials on three routes: an OAuth access token for the MCP tools, a one-time handoff code (or the plugin's enrollment secret on `/setup/enroll`) to obtain an emit credential, and that emit credential to fetch the Azure Monitor token.
+3. Cron jobs sign each trigger with the internal HMAC key and call the app's own address from inside the environment.
+4. With `frontDoorId` set, `require-front-door` rejects any request without the matching `X-Azure-FDID`, so `workerBaseUrl` must then be the Front Door endpoint and the jobs go out through it.
+5. Device telemetry goes straight to the Azure Monitor ingest endpoint with the managed-identity token the app minted. It never passes through the app.
+6. Workers run inside the app process. The read joiner queries `OTelLogs` with the app's managed identity.
 
-    U -->|HTTPS| WAF -->|VNet / private VIP| FD
-    C -->|OAuth consent + provision_emit handoff| WAF
-    C -->|OTLP + MI bearer| AZ
-    W -->|HMAC-signed| WAF
-    FD --> OIDC --> RBAC --> DB
-    FD --> HMACI
-    FD --> OAUTH
-    FD --> SETUP
-    FD --> BEARER -->|monitor.azure.com/.default| AZ
-    W -.read joiner.-> AZ
-```
+*Five credential routes lead into the app; the one write that bypasses it carries a write-only token the app issued.*
 
 **Authorization is enforced in the application.** The **app gate** (`requireRole`,
 `requireRegionScope`, per-resource scope predicates) is the authorization boundary:
@@ -64,29 +38,20 @@ resolved by `requireReportScope`.
 
 ## Web authentication (Entra OIDC)
 
-```mermaid
-sequenceDiagram
-    participant B as Browser
-    participant N as nuxt-oidc-auth
-    participant E as Entra
-    participant H as tryAuth / requireAuth
-    participant DB as Postgres
+![Every request re-reads the teammate behind the OIDC cookie, so revocation and deactivation apply on the next request](images/authentication-and-security-oidc-session.svg)
 
-    B->>N: sign-in
-    N->>E: OIDC (openid profile email offline_access)
-    E-->>N: id_token (oid, email, name)
-    N-->>B: encrypted OIDC cookie (only identity cookie)
-    Note over B,H: per request (Option C — no ts_session bridge)
-    B->>H: request + OIDC cookie
-    H->>H: decrypt, extract oid/email/name
-    H->>DB: lookup teammate by entra_oid
-    alt teammate missing
-        H->>DB: resolveOrCreateTeammate (JIT, ON CONFLICT DO NOTHING)
-        Note right of DB: role=platform-admin if email==BOOTSTRAP_ADMIN_EMAIL else developer<br/>region/org = first seeded#59; winner emits teammate-jit-created
-    end
-    H->>H: is_active check + revocation check (revoked_at vs issuedAt)
-    H-->>B: enriched Session (frozen, cached on event.context)
-```
+1. The browser starts sign-in at the `nuxt-oidc-auth` routes (`/auth/entra/*`).
+2. The module runs the Entra authorization with `openid profile email offline_access`.
+3. Entra returns the tokens. The module copies `oid`, `email`, `name`, `preferred_username` and `upn` into the session.
+4. The browser receives the encrypted session cookie, which is the only identity cookie.
+5. Every request carries that cookie to `tryAuth`.
+6. `tryAuth` decrypts it and reads the claims. Without `oid` or `email` there is no session.
+7. One query loads the teammate by `entra_oid`, together with `revoked_at` and `is_active`.
+8. On first sign-in only: a UPN on the directory-exclusion list is refused with 403; a bill-provisioned row with the same email is adopted; otherwise the teammate is inserted (`ON CONFLICT (entra_oid) DO NOTHING`) as `platform-admin` if the email matches `NUXT_BOOTSTRAP_ADMIN_EMAIL`, else `developer`, homed on the first region's `__UNPLACED__` unit, with a `teammate-jit-created` audit row.
+9. The session survives only if `is_active` is true and the cookie's login time is not earlier than `revoked_at`.
+10. The handler gets a frozen `Session` cached on the request, or `requireAuth` returns 401.
+
+*There is no second app cookie: identity is the OIDC cookie plus a database read on every request.*
 
 - Configured in `nuxt.config.ts` under the `entra` provider; OIDC enabled unless `NUXT_OIDC_AUTH_DEV_MODE === 'true'`.
 - Secrets (`clientId`, `clientSecret`, URLs) are build-time placeholders, overridden at boot by `NUXT_OIDC_PROVIDERS_ENTRA_*` env vars — `nuxt.config.ts` is evaluated at build with no secrets present, so reading `process.env` in provider config is deliberately avoided.
@@ -108,6 +73,16 @@ same person can sign in again a second later and hold a valid session.
 credential for that teammate, existing or newly minted, because there is no
 "after" to be on the right side of. Both tests fail closed — a missing teammate
 row, or an `is_active` that is not exactly `true`, denies.
+
+**Devices answer to a separate anchor, `emit_revoked_at`** (mig 0152, #414).
+A role change or region move bumps `revoked_at` only: cookie sessions and
+read/tag credentials are re-validated, but a device keeps emitting, because its
+emit credential carries no read scope and the RLS context of each emit request
+is read from the teammate row at that moment. Explicit revoke-sessions bumps
+both anchors and ends the teammate's devices. Device-bound emit credentials
+(`scope = 'tokenscope.emit'` with an `instance_id`) are judged against
+`emit_revoked_at` on refresh and on every `/instances/{id}/*` route, as are
+`/bearer`'s instance gate and the joiner.
 
 Deactivation is enforced on every credential path, not just the cookie:
 
@@ -131,29 +106,30 @@ keep refreshing a fresh access token indefinitely.
 > production denylist: demo / act-as / impersonation is enabled **only when the
 > deploy env ∈ {`local`, `sandbox`}** (`shared/env/deploy-env.ts` —
 > `DEMO_CAPABLE_ENVS`). Every other env — `dev`, `staging`, `production`, and
-> `unknown` (a dropped/unrecognised env identity) — **404s BEFORE any flag or
-> caller role is consulted**, so no single env flag
+> `unknown` (a dropped/unrecognised env identity) — **404s whatever any flag or
+> the caller's role says**, so no single env flag
 > (`NUXT_ALLOW_PERSONA_OVERRIDE`, `NUXT_OIDC_AUTH_DEV_MODE`) can re-open
 > impersonation. The mechanism below ships in code and is documented for
 > completeness; in any non-demo env it is refused at the structural floor.
 
-```mermaid
-flowchart TB
-    A["Admin: POST /api/v1/auth/dev-login"] --> FLOOR{env ∈ local/sandbox?<br/>(allowlist floor)}
-    FLOOR -->|no — dev/staging/production/unknown| R404F[404 — env-not-demo-capable<br/>before any flag/role]
-    FLOOR -->|yes| G{evaluatePersonaGate}
-    G -->|override off| R404[404 — override-disabled]
-    G -->|on, no session| R401[401]
-    G -->|on, wrong role| R403[403]
-    G -->|DEV_MODE=true OR<br/>ALLOW_PERSONA_OVERRIDE + Entra admin/platform-admin| OK[mint ts_persona_override cookie]
-    OK --> T["tryAuth returns persona identity<br/>+ impersonatorOid/Email/At"]
-    T --> AUD[persona-impersonation audit<br/>fail-closed if insert fails]
-```
+![Persona override is refused everywhere except local and sandbox, whatever the flags or the caller's role](images/authentication-and-security-persona-gate.svg)
+
+1. The structural floor. Unless `NUXT_DEPLOY_ENV` classifies as `local` or `sandbox`, the endpoint returns 404 whatever the flags or the caller's role; the gate decides on the environment first. An unset value on a deployed container classifies as `unknown`.
+2. With `NUXT_OIDC_AUTH_DEV_MODE=true` there is no Entra at all, so gates 3 to 5 are skipped.
+3. Otherwise `NUXT_ALLOW_PERSONA_OVERRIDE` must be `true`, or the endpoint returns 404.
+4. The caller must have a signed-in Entra session (401).
+5. The caller must be `admin` or `platform-admin` (403).
+6. The request must pass the same-origin check (403).
+7. The requested persona must be one of the fixed demo personas (400).
+8. The audit row is written before the cookie: `persona-impersonation` for an override, `dev-login` in dev mode. If the insert fails, the request fails and no cookie is set.
+9. The sidecar cookie is minted. On later requests it is read only on `local` or `sandbox`, and only while its `impersonatorOid` matches the live Entra identity.
+
+*The environment is checked first, so no flag can reopen impersonation on any other environment.*
 
 - **Allowlist floor first** (`server/auth/persona-override.ts` →
   `evaluatePersonaGate`): if the env is not demo-capable (`demoCapable=false`,
-  i.e. not `local`/`sandbox`), the gate returns `404` immediately — before any
-  flag or caller role. This replaced an older production-only denylist that only
+  i.e. not `local`/`sandbox`), the gate returns `404` first, whatever the flags
+  or the caller's role. This replaced an older production-only denylist that only
   refused the literal string `'production'` and left `dev`/`staging`/`''`
   failing OPEN.
 - HMAC-signed sidecar cookie `ts_persona_override` (`server/utils/persona-override-cookie.ts`), separate from the OIDC cookie; minted only when the gate is on (i.e. only in a demo-capable env). Wire format `base64url(payload).hex(HMAC-SHA256(payload))`, signed with `NUXT_SESSION_SECRET`; `httpOnly`, `sameSite=lax`, path `/`, `secure` on every deployed env.
@@ -413,37 +389,35 @@ Authorization is the app gate described above.
 
 ## MCP/CLI auth + telemetry (OAuth 2.1)
 
-```mermaid
-sequenceDiagram
-    participant Dev as Signed-in dev (browser)
-    participant API as TokenScope
-    participant CLI as Claude Code (MCP client)
-    participant AZ as Azure Monitor
+![The model only ever sees a five-minute handoff code; the durable emit credential moves between a local helper and the server](images/authentication-and-security-mcp-provisioning.svg)
 
-    CLI->>API: POST /api/v1/mcp (no token)
-    API-->>CLI: 401 + WWW-Authenticate (resource_metadata)
-    CLI->>Dev: open browser → /oauth/authorize (consent page)
-    Dev->>API: Approve → POST /oauth/authorize (cookie + CSRF) → { redirect_url, outcome }
-    CLI->>API: POST /oauth/token (code + PKCE verifier)
-    API-->>CLI: access token (tokenscope.read + tag) — MCP tools work
-    Note over CLI: tokenscope-setup prompt → provision_emit (read-scoped)
-    CLI->>API: provision_emit → short-TTL one-time handoff code (NOT the secret)
-    CLI->>API: POST /api/v1/setup/redeem { handoff_code } (handoff IS the auth)
-    Note right of API: consumeEmitHandoff: UPDATE … WHERE consumed_at IS NULL<br/>RETURNING → replay/concurrent = 0 rows → 401
-    API-->>CLI: durable emit credential + OTel config → ~/.claude/settings.json
-    Note over CLI: unassigned provision omits project.code_hash → untagged-spend worklist
-    loop telemetry (per session, ~29-min refresh)
-        CLI->>API: GET /api/v1/instances/[instanceId]/bearer (OAuth emit Bearer)
-        API-->>CLI: Azure MI bearer (monitor.azure.com/.default)
-        CLI->>AZ: OTLP + MI bearer
-    end
-```
+1. The client calls the MCP endpoint without a token.
+2. The server answers 401 with a `WWW-Authenticate` header that points at the protected-resource metadata.
+3. The client opens the consent page with a PKCE challenge.
+4. The teammate approves. `POST /oauth/authorize` uses the Entra cookie and the same-origin check, and returns the callback URL.
+5. The code reaches the client through its loopback callback, or through the page's Copy URL paste-back.
+6. The client posts the code and its PKCE verifier to `/oauth/token`.
+7. It receives an access token and a refresh token for the scopes it requested, `tokenscope.read` and `tokenscope.tag`. The MCP tools now work.
+8. The `tokenscope-setup` prompt calls the read-scoped `provision_emit` tool, which locates or creates the device's `instance_attestation`.
+9. It returns only a handoff code that expires in 5 minutes and works once. The durable credential never enters the chat.
+10. The client runs the local redeem helper with that code.
+11. The helper posts the code to `/api/v1/setup/redeem`. The code is the authentication; a replayed or concurrent redeem gets 401.
+12. The server returns the durable `tokenscope.emit` refresh token, bound to that device, and the OTel configuration.
+13. The helper writes them to `~/.claude/settings.json` with mode 0600. Claude reads OTel settings at startup, so it must be restarted.
+14. In every session Claude calls the `otelHeadersHelper` script, about every 29 minutes.
+15. When its cached access token is missing or near expiry, the helper refreshes it with the refresh token.
+16. It calls `/api/v1/instances/{instanceId}/bearer` with the emit access token. A credential bound to a different instance is refused.
+17. The server returns the app's managed-identity token for `https://monitor.azure.com/.default` and records the mint as a heartbeat.
+18. The helper hands Claude the `Authorization` header.
+19. Claude sends OTLP log events straight to Azure Monitor.
+
+*Steps 11 and 12 are the only place the durable emit credential travels, and they run outside the model.*
 
 ### OAuth 2.1 consent (read + tag)
 
 - The MCP client runs a client-initiated PKCE (S256) authorization-code flow against `/api/v1/oauth/{authorize,token,register,revoke}`. The **GET `/oauth/authorize`** gates the Entra session and validates `client_id`/`redirect_uri`, then 302s to the consent page (`app/pages/oauth/authorize.vue`); **POST `/oauth/authorize`** is the grant — the one cookie-bearing OAuth endpoint, so it **requires `assertSameOrigin`** (the cookieless token/register/revoke endpoints deliberately skip CSRF). It reuses `issueAuthCode` (teammate-bound, PKCE-carried).
 - **Callback delivery.** The POST returns the callback URL as data. On Approve with a loopback `http:` callback (RFC 8252 native apps — e.g. the GitHub Copilot App) the page opens a tab in the click handler and navigates it to the callback (a navigation, which Chrome's Local Network Access does not block); the consent page itself never navigates away. It then polls `POST /api/v1/oauth/code-status` (session + same-origin; reads the caller's own `oauth_auth_code.token_issued_at` — set only when `/oauth/token` issues a token, unlike `consumed_at`, which a failed exchange also sets) — redeemed → "Connected"; not confirmed within 8 s (the loopback is unreachable, e.g. a containerized client, or the tab was blocked or closed) → the page leads with the **Copy URL** paste-back, still flipping to Connected if the pasted code is later exchanged. Polling is ~35 requests over 2 min in the per-IP limiter the whole app shares; a failed poll (429, error, timeout) waits the slow 5 s interval. The grant request itself times out after 15 s and is cancelled if the page is left, and Approve/Deny are offered again. The tab is not auto-closed: under COOP `same-origin` the page loses its handle once the tab goes cross-origin, and relaxing COOP would let the loopback page navigate the consent tab. A loopback Deny / error callback is handed to the client the same way (so it stops waiting), without polling. Nothing can confirm a client received a deny/error (there is no code to poll), so the page always keeps **Copy URL** for it, plus **Open in a new tab** when it could not be sent (popup blocked, tab closed, or an `https:` callback, which is never auto-delivered). Nothing failing the `https:`/loopback scheme guard (`shared/oauth-callback.ts`) is ever opened.
-- Tokens are stored as HMAC hashes only (`oauth_token`); the raw value is returned once. Refresh is **non-rotating** — revoke (not rotation) is the control (ADR-0005). `requireOAuthBearer` joins `teammate.revoked_at` for the E2 revocation cascade and `teammate.is_active` for deactivation ([Revocation and deactivation](#revocation-and-deactivation)).
+- Tokens are stored as HMAC hashes only (`oauth_token`); the raw value is returned once. Refresh is **non-rotating** — revoke (not rotation) is the control (ADR-0005). `requireOAuthBearer` joins `teammate.revoked_at` (`emit_revoked_at` for a device-bound emit token) for the E2 revocation cascade and `teammate.is_active` for deactivation ([Revocation and deactivation](#revocation-and-deactivation)).
 - The granted scopes are `tokenscope.read` + `tokenscope.tag` (MCP tools). The separate `tokenscope.emit` credential is provisioned via the handoff below, never granted directly to the consent.
 - **Consent is refused on an assumed identity.** `POST /oauth/authorize` returns a JSON `403 access_denied` when the session carries a persona override, before the client/`redirect_uri` lookup, so the refusal cannot become a redirect and no code is issued. An OAuth consent mints a teammate-bound code that becomes a durable access/refresh token; granting one while acting as someone else would leave a credential outliving the impersonation and carrying the impersonated teammate's identity. (Persona override is confined to the demo-capable envs `local` and `sandbox` — see [Persona override](#persona-override-non-production-demo-impersonation--sidecar-path) — so no environment that authenticates against Entra reaches this refusal; it is what holds the property if impersonation is ever enabled on one that does.)
 
@@ -549,21 +523,23 @@ went-silent) **feeds** the revoke decision — it never performs it.
 
 ## Internal worker trigger (machine-to-machine HMAC)
 
-```mermaid
-sequenceDiagram
-    participant S as External scheduler (cron job)
-    participant V as verifyInternalRequest
-    participant Wk as Worker (joiner / reconcile / GC)
+![A worker trigger runs only with a fresh, valid HMAC signature over the exact request, and every authentication failure looks the same](images/authentication-and-security-worker-hmac.svg)
 
-    S->>S: sign — HMAC-SHA256 over<br/>{timestamp}<br/>{METHOD}<br/>{path}<br/>{sha256(body)}
-    S->>V: POST /internal/run-worker/{name}<br/>X-Internal-Signature (hex)<br/>X-Internal-Timestamp (unix s)
-    V->>V: timestamp within ±300s? constant-time signature compare
-    alt any failure (missing/malformed/stale/wrong)
-        V-->>S: identical 401 (prober can't distinguish)
-    else valid
-        V->>Wk: run
-    end
-```
+1. `scripts/cron-trigger.mjs` signs `{timestamp}\n{METHOD}\n{path}\n{sha256(body)}` with HMAC-SHA256. The body is `{}`, or `{"deepRescan":true}` when the job runs with `DEEP_RESCAN=true`.
+2. It posts to `/api/v1/internal/run-worker/{name}` with `X-Internal-Timestamp` (unix seconds) and `X-Internal-Signature` (hex).
+3. With `frontDoorId` set, `require-front-door` refuses a request without the matching `X-Azure-FDID` header (403), which is why the jobs then call the Front Door endpoint.
+4. The request reaches the run-worker handler.
+5. `verifyInternalRequest` accepts a timestamp within 300 seconds of the server clock and compares the signature in constant time.
+6. Missing, malformed, stale and wrong signatures all get the same 401.
+7. The handler looks the name up in the static worker registry.
+8. An unknown name gets 404 before any worker code loads.
+9. `dispatchWorker` allows one run per worker at a time. While a run is in progress, a second dispatch, a replay included, gets 409. A worker an admin has disabled is skipped.
+10. The worker runs on the worker database pool.
+11. It returns its result.
+12. The handler responds with `{ worker, duration_ms, result }`.
+13. The job exits 0 on success or on a 409 already-running, and 1 otherwise. It gives up after 200 seconds, below the job's 240-second replica timeout.
+
+*The signature binds the method, path and body to a 300-second window; inside that window a replay is accepted, and the single-run lock only stops it running alongside the original.*
 
 - `verifyInternalRequest` (`server/auth/internal-request.ts`). Key `NUXT_INTERNAL_WORKER_HMAC_KEY` is **deliberately separate** from `NUXT_HMAC_SESSION_KEY` — blast-radius separation (leaked worker key can't replay user sessions, vice-versa).
 - Both keys require ≥32 chars and ≥3.5 bits/byte Shannon entropy (long-but-trivial keys rejected).
@@ -627,9 +603,10 @@ your WAF/edge) is the edge control:
   do not set it; it is an operator-set environment variable.
 - `/api/health` is **exempt** — Container Apps' internal LB probes it directly (blocking it would loop-restart replicas).
 - Plain equality compare (AFD ID is DNS-discoverable, not a secret); logs record only path + a coarse header-present signal, never the expected/received ID.
-- With `frontDoorId` set, the rate limiter keys on Front Door's `X-Azure-ClientIP`
-  (`NUXT_SECURITY_RATE_LIMITER_IP_HEADER`) instead of the spoofable first
-  `X-Forwarded-For` hop.
+- With `frontDoorId` set, the rate limiter keys on Front Door's `X-Azure-SocketIP`
+  (`NUXT_SECURITY_RATE_LIMITER_IP_HEADER`), the TCP peer Front Door saw, instead
+  of the spoofable first `X-Forwarded-For` hop. Not `X-Azure-ClientIP`, which
+  follows a caller's `X-Forwarded-For`.
 
 ## Audit logging
 

@@ -64,6 +64,16 @@ export interface PlacementStore {
     regionId: string,
   ): Promise<boolean>
   /**
+   * The re-enrichment worker's write: move (or, when `target.orgUnitId` is the
+   * unit it is already on, only re-stamp the provenance of) a teammate chosen by a
+   * query and then held across directory awaits — COMPARE-AND-SET, in one
+   * transaction. Every fact the selection relied on is re-checked under locks:
+   * the rehome-safety predicate, that the teammate is still on
+   * `selectedOrgUnitId`, and the target for its kind. 'refused' is a SKIP; nothing
+   * was written. See the adapter.
+   */
+  placeTeammateIfStillSelected(input: CasPlacementInput): Promise<CasPlacementOutcome>
+  /**
    * Stamp `last_sync_at` on rows a pass LOOKED AT but did not move. Without it a
    * batched pass ordered oldest-sync-first re-reads the same head every time and
    * never reaches the tail.
@@ -82,6 +92,29 @@ export interface PlacementStore {
    *  now-existing teammate; idempotent. Returns the count replayed. */
   replayOwedBills(teammateId: string, email: string): Promise<number>
 }
+
+/**
+ * Where a compare-and-set placement may land, by kind:
+ *   - 'unit'         — a derived cost-owning unit; must still be active,
+ *                      cost-owning and in `regionId`;
+ *   - 'holding-node' — the `__UNPLACED__` holding node of `regionId`, or of the
+ *                      global holding region when `regionId` is null.
+ */
+export type CasPlacementTarget =
+  | { kind: 'unit'; orgUnitId: string; regionId: string }
+  | { kind: 'holding-node'; orgUnitId: string; regionId: string | null }
+
+export interface CasPlacementInput {
+  teammateId: string
+  /** The org_unit the teammate was on when the candidate query selected it. */
+  selectedOrgUnitId: string
+  target: CasPlacementTarget
+  provenance: PlacementProvenance | null
+  /** Names the writer on the audit row. */
+  actorSystem: string
+}
+
+export type CasPlacementOutcome = 'moved' | 'provenance-only' | 'refused'
 
 /**
  * The teammate's own direct manager as the derivation observed it.

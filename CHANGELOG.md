@@ -7,6 +7,42 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## v1.0.2 — 2026-10-07 (snapshot 21ce1514)
+
+- Claude Code and the Claude Desktop Code tab now report usage from Windows,
+  and Windows users can set up without installing Node (emit-only, through
+  Windows PowerShell); Copilot CLI and the Copilot App work on Windows too.
+  The plugin connects to your own deployment — set its server URL in the
+  plugin options — instead of a built-in host, a TokenScope deploy no longer
+  interrupts telemetry, and granting someone a role no longer stops their
+  devices reporting.
+- The plugins' hooks and commands now run when the install path goes through
+  a symlink or junction (for example a symlinked `~/.claude`); before, they
+  exited without doing anything or reporting an error.
+- Background workers now keep up as more people enrol: attribution reads
+  devices three at a time in fair rotation, provider usage is written in bulk,
+  and directory lookups are bounded and retried. New alerts warn when a worker
+  nears its time budget and when telemetry approaches the workspace's daily cap.
+  Behind Front Door the origin timeout default is now 240 s, so scheduled
+  workers are no longer reported failed at 60 s.
+- The daily re-read that recovers late telemetry no longer runs inside the
+  attribution worker: it is queued once a day on the telemetry recovery queue
+  and read one device-day at a time instead of a device's whole week at once.
+  Attribution no longer pauses while it runs, and an operator's recovery is
+  not blocked by it.
+- With private telemetry query on, the platform's own logs (container console
+  and system logs, diagnostic settings) now go to a separate workspace,
+  `log-ops-<name>`, that you can query from the Azure portal; the usage
+  telemetry stays private. In that workspace the console table is
+  `ContainerAppConsoleLogs` with a `Log` column (previously
+  `ContainerAppConsoleLogs_CL` with `Log_s`), so update saved queries.
+- The app container's CPU and memory are configurable (`appCpu`, `appMemory`).
+- New alerts fire when an app replica restarts more than once in 30 minutes, and
+  when the platform-log workspace receives no container log for an hour.
+- Connecting Claude Code or Copilot now takes four or five short steps in plain
+  English, and on Windows the TokenScope helper gives up on a stalled server
+  after 10 seconds instead of hanging.
+
 ## v1.0.1 — 2026-10-02 (snapshot f86a61cf)
 
 - Project pages gain a chargeback toggle showing each project's share of the

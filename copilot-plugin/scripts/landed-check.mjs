@@ -22,7 +22,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveStorePath, accessCachePath, readBoundAccessToken } from './device-store.mjs'
-import { fileURLToPath } from 'node:url'
+import { isMainModule } from './is-main.mjs'
 // endpoint-guard.mjs (S1/S2) — the ONE endpoint validator, vendored verbatim
 // (see scripts/sync-copilot-plugin.mjs). Do not write a second one; mirrors
 // plugin/scripts/landed-check.mjs's S1 fix 3 exactly (this file is a
@@ -142,6 +142,6 @@ export async function refreshLanded({ dir } = {}) {
 }
 
 // CLI: refresh from ~/.tokenscope/config.copilot-cli.json (best-effort, prints the result JSON).
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isMainModule(import.meta.url)) {
   refreshLanded().then((r) => process.stdout.write(`${JSON.stringify(r)}\n`))
 }

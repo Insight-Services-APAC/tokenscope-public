@@ -96,6 +96,9 @@ export const teammate = pgTable('teammate', {
   // role-change PATCH (auto-revoke) and the explicit revoke-sessions
   // endpoint; both go through the audit-row + UPDATE single tx.
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  // Mig 0152 (#414): the anchor device emission is judged against. Bumped by
+  // revoke-sessions and retirement only, never by a role or region change.
+  emitRevokedAt: timestamp('emit_revoked_at', { withTimezone: true }),
 })
 
 // Explicit cost-owning-unit ownership (mig 0048). The P&L owner is typically

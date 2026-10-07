@@ -41,7 +41,7 @@ import {
 } from '../../shared/ops-alert/conditions'
 import { isProbeErrorReason } from '../../shared/observability/probe-error-reason'
 import { decideAttributionStall } from '../usage/attribution-stall'
-import { DISPATCH_TIMEOUT_MS } from '../../shared/workers/dispatch-budget'
+import { DISPATCH_TIMEOUT_MS, classifyDispatchDuration } from '../../shared/workers/dispatch-budget'
 import { isWorkerScheduled } from '../../shared/workers/unscheduled'
 import {
   opsAlertNtfyUrl,
@@ -49,7 +49,7 @@ import {
   type OpsNotifyFn,
 } from '../observability/ops-notify'
 import { currentServerDeployEnv } from '../../shared/env/deploy-env'
-import { getTelemetryReader, type ReaderHealth } from '../azure/reader'
+import { getTelemetryReader, type IngestionLast24h, type ReaderHealth } from '../azure/reader'
 import { runNetworkCheck, type NetCheckReport } from '../azure/network-check'
 import { loadReaderRuns, loadLastFleetEmitMs, type ReaderRun } from './read-path-health'
 import { dispatchInbox } from '../notifications/dispatch'
@@ -216,6 +216,61 @@ export function isWorkerFailing(input: {
   return { failing: streak >= 2 && deadlineMissed, streak }
 }
 
+// ── Duration against the dispatch budget (scaling plan 0.3) ──────────────────
+
+// Runs consulted per worker: the two latest terminal runs with a recorded duration.
+export const DURATION_RUNS_PER_WORKER = 2
+
+/*
+ * A worker holds the duration condition when its two latest terminal runs with
+ * a valid duration BOTH classify `near` or `over` under classifyDispatchDuration
+ * (the one 80%-of-budget definition; no second threshold here). Fewer than two
+ * valid durations is not evidence, so it does not hold. Input is most-recent
+ * first; invalid durations (null, negative, non-finite) are skipped, not counted.
+ */
+export function isWorkerNearDispatchBudget(durationsMs: ReadonlyArray<number | null>): boolean {
+  const states = durationsMs
+    .map((d) => classifyDispatchDuration(d))
+    .filter((s) => s !== null)
+    .slice(0, DURATION_RUNS_PER_WORKER)
+  return states.length === DURATION_RUNS_PER_WORKER && states.every((s) => s === 'near' || s === 'over')
+}
+
+// ── Telemetry workspace daily cap (scaling plan 0.5) ─────────────────────────
+
+/** The fraction of the workspace's daily cap at which the cap condition holds. */
+export const TELEMETRY_CAP_FRACTION = 0.8
+/** Usage.Quantity is MB and Azure counts 1000 MB to the GB. */
+const MB_PER_GB = 1000
+
+/*
+ * The workspace's daily cap in GB, from TELEMETRY_DAILY_CAP_GB (container-app.bicep
+ * sets it from the value that sets the cap). Absent, non-numeric or not positive
+ * is null: no cap known, so the condition cannot be decided.
+ */
+export function telemetryDailyCapGbFromEnv(raw: string | undefined = process.env.TELEMETRY_DAILY_CAP_GB): number | null {
+  if (raw === undefined || raw.trim() === '') return null
+  const gb = Number(raw)
+  return Number.isFinite(gb) && gb > 0 ? gb : null
+}
+
+/*
+ * The cap verdict: 'hold' at or above TELEMETRY_CAP_FRACTION of the cap, 'clear'
+ * below it, and 'indeterminate' when either input is unknown. An unknown reading
+ * is never treated as zero ingestion, so it can neither raise nor clear.
+ */
+export function decideTelemetryCap(
+  reading: { megabytes: number | null } | null,
+  capGb: number | null,
+): { verdict: 'hold'; percentOfCap: number } | { verdict: 'clear' } | { verdict: 'indeterminate' } {
+  if (capGb === null || !(capGb > 0)) return { verdict: 'indeterminate' }
+  const mb = reading?.megabytes
+  if (typeof mb !== 'number' || !Number.isFinite(mb) || mb < 0) return { verdict: 'indeterminate' }
+  const capMb = capGb * MB_PER_GB
+  if (mb >= capMb * TELEMETRY_CAP_FRACTION) return { verdict: 'hold', percentOfCap: Math.floor((mb / capMb) * 100) }
+  return { verdict: 'clear' }
+}
+
 // ── The A3 state machine, as a pure decision step ─────────────────────────────
 
 /** Per-condition state persisted in the 'ops-alert' kv mount. */
@@ -223,8 +278,17 @@ export interface ConditionState {
   severity: 'critical' | 'warning'
   /** Consecutive runs observed active AT THE CURRENT severity (warning damping). */
   activeRuns: number
-  /** True once ANY notification for this episode got a 2xx. */
+  /** True once this episode was ANNOUNCED: a 2xx from the channel, or, for a
+   *  warning (never pushed), the state machine's announce step (its inbox write
+   *  is best-effort and does not gate this). */
   delivered: boolean
+  /**
+   * True once a notification for this episode reached the CHANNEL (a 2xx push);
+   * false when it was announced to the inbox only. Decides whether its recovery
+   * is pushed. Absent on state persisted before the field existed: read as
+   * pushed for a critical and not pushed for a warning (channelWasDelivered).
+   */
+  channelDelivered?: boolean
   /** Persisted ONLY after a 2xx (ar-M16); reminders key off it. */
   lastSentAtMs: number | null
   /** Consecutive clear runs while delivered (recovery needs one full clear run). */
@@ -290,6 +354,10 @@ export function decideConditionAction(
       // observed at one severity can never pre-satisfy another's damping.
       activeRuns: prior !== null && prior.severity === obs.severity ? prior.activeRuns + 1 : 1,
       delivered: prior?.delivered ?? false,
+      // State stored before `channelDelivered` existed resolves it NOW, against
+      // the severity it was delivered at, so a later severity change cannot
+      // flip whether its recovery is pushed.
+      ...(prior !== null && prior.delivered ? { channelDelivered: channelWasDelivered(prior) } : {}),
       lastSentAtMs: prior?.lastSentAtMs ?? null,
       clearRuns: 0,
     }
@@ -320,6 +388,16 @@ export function decideConditionAction(
     return { type: 'persist', state: { ...prior, activeRuns: 0, clearRuns: prior.clearRuns + 1 } }
   }
   return { type: 'send-recovery', transition: `${prior.severity}→recovered` }
+}
+
+/*
+ * Did this episode reach the channel? The recovery is pushed only if it did: a
+ * phone that never buzzed for the raise must not buzz for the all-clear. State
+ * persisted before `channelDelivered` existed falls back on severity, the rule
+ * that decided pushing then (only criticals were pushed).
+ */
+export function channelWasDelivered(state: ConditionState): boolean {
+  return state.channelDelivered ?? state.severity === 'critical'
 }
 
 // ── Probe bounding (ar-H6) ────────────────────────────────────────────────────
@@ -365,6 +443,7 @@ export function isConditionState(v: unknown): v is ConditionState {
     (o.severity === 'critical' || o.severity === 'warning') &&
     typeof o.activeRuns === 'number' && Number.isInteger(o.activeRuns) && o.activeRuns >= 0 &&
     typeof o.delivered === 'boolean' &&
+    (o.channelDelivered === undefined || typeof o.channelDelivered === 'boolean') &&
     (o.lastSentAtMs === null || (typeof o.lastSentAtMs === 'number' && Number.isFinite(o.lastSentAtMs))) &&
     typeof o.clearRuns === 'number' && Number.isInteger(o.clearRuns) && o.clearRuns >= 0
   )
@@ -520,7 +599,8 @@ type OpsAuditEvent =
   | 'ops-alert-failed'
   | 'ops-alert-reminded'
   | 'ops-alert-recovered'
-  /** A warning: state-machine-announced and written to the inbox, never pushed. */
+  /** A warning raise, or the recovery of an episode that was never pushed:
+   *  state-machine-announced and written to the inbox, never pushed. */
   | 'ops-alert-suppressed'
 
 async function auditOpsAlert(
@@ -560,7 +640,11 @@ export interface OpsAlertOpts {
   probes?: {
     telemetryRead?: () => Promise<ReaderHealth>
     network?: () => Promise<NetCheckReport>
+    /** The trailing 24 h's billable ingestion; default the configured telemetry reader. */
+    telemetryIngestion?: () => Promise<IngestionLast24h>
   }
+  /** The telemetry workspace's daily cap in GB; default TELEMETRY_DAILY_CAP_GB. null = unknown. */
+  telemetryDailyCapGb?: number | null
   /** ar-H6 per-probe budget: the ntfy send and each per-host TCP dial. */
   probeTimeoutMs?: number
   /**
@@ -581,6 +665,12 @@ export interface OpsAlertOpts {
     readerRuns?: () => Promise<ReaderRun[]>
     lastFleetEmitMs?: () => Promise<number | null>
   }
+  /**
+   * Injection for TESTS ONLY: replaces the duration lane's read (the workers
+   * holding the duration condition) so a test can force that lane alone to
+   * throw or hang. Production always uses evaluateDurations.
+   */
+  durationEvaluator?: () => Promise<string[]>
 }
 
 export interface OpsAlertRunResult {
@@ -599,11 +689,17 @@ export interface OpsAlertRunResult {
   >
   /** Evaluator lanes that could not produce a verdict this tick (budget/db). */
   indeterminate: string[]
+  /**
+   * The telemetry-cap evidence: the trailing 24 h's billable MB and the cap it was compared
+   * with. null for either means unknown (the lane is then indeterminate), never 0.
+   */
+  telemetryIngestion: { megabytesLast24h: number | null; capGb: number | null }
   sent: number
   reminders: number
   recoveries: number
   sendFailures: number
-  /** Warnings announced to the inbox but deliberately not pushed to ntfy. */
+  /** Warning raises, and recoveries of never-pushed episodes, handled in the
+   *  inbox but deliberately not pushed to ntfy. */
   suppressed: number
   /** Condition keys whose state-machine step threw (logged, loop continued). */
   keyErrors: number
@@ -618,11 +714,15 @@ export interface OpsAlertRunResult {
 }
 
 /** Which evaluator lane a condition key belongs to (indeterminate-skip routing). */
-function laneOf(key: string): 'telemetry' | 'network' | 'stall' | 'fleet' | 'other' {
+function laneOf(
+  key: string,
+): 'telemetry' | 'network' | 'stall' | 'fleet' | 'duration' | 'telemetry-cap' | 'other' {
   if (key === OPS_ALERT_CONDITION.telemetryRead) return 'telemetry'
   if (key === OPS_ALERT_CONDITION.probeNetwork) return 'network'
   if (key === OPS_ALERT_CONDITION.attributionStall) return 'stall'
+  if (key === OPS_ALERT_CONDITION.workerDuration) return 'duration'
   if (key === OPS_ALERT_CONDITION.workerFleet || key.startsWith('worker:')) return 'fleet'
+  if (key === OPS_ALERT_CONDITION.telemetryCap) return 'telemetry-cap'
   return 'other'
 }
 
@@ -667,6 +767,7 @@ export async function runOpsAlert(db: Db, opts: OpsAlertOpts = {}): Promise<OpsA
     disabled: false,
     conditions: {},
     indeterminate: [],
+    telemetryIngestion: { megabytesLast24h: null, capGb: null },
     sent: 0,
     reminders: 0,
     recoveries: 0,
@@ -722,10 +823,15 @@ export async function runOpsAlert(db: Db, opts: OpsAlertOpts = {}): Promise<OpsA
   const networkProbe =
     opts.probes?.network ??
     (() => runNetworkCheck(process.env, { concurrency: NETWORK_SWEEP_CONCURRENCY, tcpTimeoutMs: probeTimeoutMs }))
+  // Same reader and same bound on both ends as the telemetry read probe.
+  const ingestionProbe =
+    opts.probes?.telemetryIngestion ??
+    (() => getTelemetryReader().billableIngestionLast24h({ timeoutMs: telemetryProbeTimeoutMs }))
 
-  const [telemetry, network] = await Promise.all([
+  const [telemetry, network, ingestion] = await Promise.all([
     boundedCall(telemetryProbe, budget(telemetryProbeTimeoutMs)),
     boundedCall(networkProbe, budget(NETWORK_SWEEP_BUDGET_MS)),
+    boundedCall(ingestionProbe, budget(telemetryProbeTimeoutMs)),
   ])
 
   if (!telemetry.ok || !telemetry.value.ok) {
@@ -755,6 +861,25 @@ export async function runOpsAlert(db: Db, opts: OpsAlertOpts = {}): Promise<OpsA
     }
   }
 
+  // Telemetry cap (0.5). Unlike the probes above, a read that cannot answer is
+  // INDETERMINATE, not red: the condition is about volume, and an unknown volume
+  // must neither page nor clear a held condition.
+  const capGb = opts.telemetryDailyCapGb !== undefined ? opts.telemetryDailyCapGb : telemetryDailyCapGbFromEnv()
+  const cap = decideTelemetryCap(ingestion.ok ? ingestion.value : null, capGb)
+  result.telemetryIngestion = {
+    megabytesLast24h: ingestion.ok ? ingestion.value.megabytes : null,
+    capGb,
+  }
+  if (cap.verdict === 'hold') {
+    observations.set(OPS_ALERT_CONDITION.telemetryCap, {
+      severity: 'critical',
+      reason: 'ingestion-near-cap',
+      count: cap.percentOfCap,
+    })
+  } else if (cap.verdict === 'indeterminate') {
+    result.indeterminate.push('telemetry-cap')
+  }
+
   // ── DB-backed conditions — a timeout here is OUR database being slow, which
   // is not the condition under measurement: the lane goes INDETERMINATE and its
   // keys skip the state machine this tick (neither an alert nor a recovery may
@@ -764,11 +889,30 @@ export async function runOpsAlert(db: Db, opts: OpsAlertOpts = {}): Promise<OpsA
   // banner evaluates, so the operator page and the banner cannot disagree.
   const loadRuns = opts.stallLoaders?.readerRuns ?? (() => loadReaderRuns(db, STALL_RUN_LOAD))
   const loadEmit = opts.stallLoaders?.lastFleetEmitMs ?? (() => loadLastFleetEmitMs(db))
-  const stall = await boundedCall(async () => {
-    const runs = await loadRuns()
-    const lastFleetEmitMs = await loadEmit()
-    return decideAttributionStall({ runs, lastFleetEmitMs, nowMs, stallMinutes: thresholds.stallMinutes })
-  }, budget(probeTimeoutMs))
+
+  // opts.workers doubles as the key-vocabulary seam: the valid `worker:<name>`
+  // set (FIX below at loadStates) comes from the same source as the fleet under
+  // evaluation — listWorkerNames() in production, the injected fleet in tests.
+  const registryMod = opts.workers ? null : await import('./registry')
+  const allWorkers = opts.workers ?? registryMod!.WORKERS
+  const validWorkerNames: ReadonlySet<string> = new Set(
+    opts.workers ? opts.workers.map((w) => w.name) : registryMod!.listWorkerNames(),
+  )
+  const fleetWorkers = allWorkers.filter((w) => w.name !== OPS_ALERT_WORKER && isWorkerScheduled(w.name))
+  const durationEvaluator = opts.durationEvaluator ?? (() => evaluateDurations(db, fleetWorkers, nowMs))
+
+  // Three lanes, three bounded calls, in parallel: each has its own verdict, so a
+  // slow or failing read in one leaves the others' keys evaluated. The duration
+  // warning in particular must never cost the critical worker-fleet its verdict.
+  const [stall, fleet, duration] = await Promise.all([
+    boundedCall(async () => {
+      const runs = await loadRuns()
+      const lastFleetEmitMs = await loadEmit()
+      return decideAttributionStall({ runs, lastFleetEmitMs, nowMs, stallMinutes: thresholds.stallMinutes })
+    }, budget(probeTimeoutMs)),
+    boundedCall(() => evaluateFleet(db, fleetWorkers, nowMs), budget(probeTimeoutMs)),
+    boundedCall(durationEvaluator, budget(probeTimeoutMs)),
+  ])
   if (stall.ok) {
     if (stall.value !== null) {
       // The reason is the coverage basis the verdict fired on (D1):
@@ -785,19 +929,19 @@ export async function runOpsAlert(db: Db, opts: OpsAlertOpts = {}): Promise<OpsA
     result.indeterminate.push('stall')
   }
 
-  // opts.workers doubles as the key-vocabulary seam: the valid `worker:<name>`
-  // set (FIX below at loadStates) comes from the same source as the fleet under
-  // evaluation — listWorkerNames() in production, the injected fleet in tests.
-  const registryMod = opts.workers ? null : await import('./registry')
-  const allWorkers = opts.workers ?? registryMod!.WORKERS
-  const validWorkerNames: ReadonlySet<string> = new Set(
-    opts.workers ? opts.workers.map((w) => w.name) : registryMod!.listWorkerNames(),
-  )
-  const fleetWorkers = allWorkers.filter((w) => w.name !== OPS_ALERT_WORKER && isWorkerScheduled(w.name))
-  const fleet = await boundedCall(
-    () => evaluateFleet(db, fleetWorkers, nowMs),
-    budget(probeTimeoutMs),
-  )
+  if (duration.ok) {
+    if (duration.value.length > 0) {
+      // Warning: inbox and audit, never the phone. Count is how many workers hold.
+      observations.set(OPS_ALERT_CONDITION.workerDuration, {
+        severity: 'warning',
+        reason: 'near-dispatch-budget',
+        count: duration.value.length,
+      })
+    }
+  } else {
+    result.indeterminate.push('duration')
+  }
+
   if (fleet.ok) {
     for (const f of fleet.value) {
       // Per-worker: count is THIS worker's consecutive-failure streak.
@@ -853,8 +997,9 @@ export async function runOpsAlert(db: Db, opts: OpsAlertOpts = {}): Promise<OpsA
   for (const key of orderedKeys) {
     // A lane with no verdict this tick leaves its keys untouched — a state must
     // neither age toward reminders/recovery nor clear on an evaluation that
-    // never happened. (Only the DB-backed lanes can be indeterminate; the
-    // external probes fail RED by design — see the probe layer above.)
+    // never happened. (The DB-backed lanes and the telemetry cap can be
+    // indeterminate; the other external probes fail RED by design — see the
+    // probe layer above.)
     if (indeterminateLanes.has(laneOf(key))) continue
     // One key's DB hiccup must not blank the rest of the tick: log (condition
     // key only — never the channel) and continue to the next key.
@@ -931,9 +1076,13 @@ export async function runOpsAlert(db: Db, opts: OpsAlertOpts = {}): Promise<OpsA
              */
             state.delivered = true
             state.lastSentAtMs = nowMs
+            // Keep a true from an earlier push (a critical that de-escalated):
+            // the phone saw that episode, so it gets the recovery.
+            state.channelDelivered = state.channelDelivered === true
             result.suppressed += 1
           } else if (sendResult!.delivered) {
             state.delivered = true
+            state.channelDelivered = true
             state.lastSentAtMs = nowMs
             if (action.kind === 'reminder') result.reminders += 1
             else result.sent += 1
@@ -992,6 +1141,21 @@ export async function runOpsAlert(db: Db, opts: OpsAlertOpts = {}): Promise<OpsA
           break
         }
         case 'send-recovery': {
+          // decideConditionAction returns send-recovery only with a prior state.
+          if (!channelWasDelivered(prior!)) {
+            // Raised to the inbox only, so it recovers in the inbox only: no
+            // push, no notify budget. Resolve before delete, as below.
+            result.suppressed += 1
+            try {
+              await auditOpsAlert(db, 'ops-alert-suppressed', key, action.transition, null)
+            } catch {
+              consola.error(`[${OPS_ALERT_WORKER}] audit write failed for condition=${key}`)
+            }
+            result.inboxResolved += await resolveConditionInbox(db, key, now)
+            await deleteState(db, key)
+            result.statesDeleted += 1
+            break
+          }
           if (notifyBudgetSpent()) {
             result.notifyDeferred += 1
             break
@@ -1110,6 +1274,40 @@ async function evaluateFleet(
     if (verdict.failing) failing.push({ name: w.name, streak: verdict.streak })
   }
   return failing
+}
+
+/*
+ * Per worker, the latest DURATION_RUNS_PER_WORKER terminal runs that recorded a
+ * duration (a reaped run has none), inside the fleet lookback over the 0137
+ * (started_at) index. Returns the workers that hold isWorkerNearDispatchBudget.
+ */
+async function evaluateDurations(
+  db: Db,
+  workers: ReadonlyArray<{ name: string }>,
+  nowMs: number,
+): Promise<string[]> {
+  const lookbackStartIso = new Date(nowMs - FLEET_LOOKBACK_MS).toISOString()
+  const rows = await db.execute<{ worker_name: string; duration_ms: number | string }>(sql`
+    SELECT worker_name, duration_ms
+      FROM (
+        SELECT worker_name, duration_ms,
+               ROW_NUMBER() OVER (PARTITION BY worker_name ORDER BY started_at DESC, id DESC) AS rn
+          FROM worker_run
+         WHERE started_at > ${lookbackStartIso}::timestamptz
+           AND status <> 'running'
+           AND duration_ms IS NOT NULL
+           AND duration_ms >= 0
+      ) ranked
+     WHERE rn <= ${DURATION_RUNS_PER_WORKER}
+     ORDER BY worker_name, rn
+  `)
+  const byWorker = new Map<string, number[]>()
+  for (const r of rows) {
+    const list = byWorker.get(r.worker_name) ?? []
+    list.push(Number(r.duration_ms))
+    byWorker.set(r.worker_name, list)
+  }
+  return workers.filter((w) => isWorkerNearDispatchBudget(byWorker.get(w.name) ?? [])).map((w) => w.name)
 }
 
 /*

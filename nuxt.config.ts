@@ -190,13 +190,15 @@ export default defineNuxtConfig({
   // limit, and pinning a victim's IP exhausts their bucket. `ipHeader` (v2.5+)
   // names a single trustworthy header instead. The trust gate is the SAME as
   // getPublicRequestURL / require-front-door: only when AZURE_FRONT_DOOR_ID is
-  // enforced is every request guaranteed to have transited AFD, making AFD's
-  // X-Azure-ClientIP authoritative. That is a RUNTIME condition and this file
+  // enforced do requests carry AFD's headers, and the one to key on is
+  // X-Azure-SocketIP (the TCP peer AFD saw). X-Azure-ClientIP is NOT
+  // authoritative: it follows a caller's X-Forwarded-For (see
+  // server/api/v1/oauth/register.post.ts). That is a RUNTIME condition and this file
   // is evaluated at BUILD time (see the OIDC note above), so we declare the
   // ipHeader slot as an empty placeholder ('' → falls back to the default
   // resolution) and let the runtime-config overlay fill it: deployments that
   // set AZURE_FRONT_DOOR_ID must also set
-  //   NUXT_SECURITY_RATE_LIMITER_IP_HEADER=x-azure-clientip
+  //   NUXT_SECURITY_RATE_LIMITER_IP_HEADER=x-azure-socketip
   // (Bicep sets both together; without AFD the placeholder keeps local /
   // phase-1 behaviour unchanged).
   security: {
@@ -214,7 +216,7 @@ export default defineNuxtConfig({
     // nuxt-security defaults (150/5min). `ipHeader: ''` is a runtime-override
     // SLOT, not a working value: empty is falsy so nuxt-security falls back to
     // the spoofable first-XFF hop until the deployment sets
-    // NUXT_SECURITY_RATE_LIMITER_IP_HEADER=x-azure-clientip — wired in lockstep
+    // NUXT_SECURITY_RATE_LIMITER_IP_HEADER=x-azure-socketip — wired in lockstep
     // with AZURE_FRONT_DOOR_ID in infra/modules/container-app.bicep (CORE-4).
     rateLimiter:
       process.env.NUXT_OIDC_AUTH_DEV_MODE === 'true'
@@ -224,9 +226,11 @@ export default defineNuxtConfig({
 
   routeRules: {
     // /api/health is probed by Container Apps' internal LB directly (no AFD →
-    // no X-Azure-ClientIP). With ipHeader keying, every probe would share the
+    // no X-Azure-SocketIP). With ipHeader keying, every probe would share the
     // '' bucket and a 429'd health probe restart-loops the replicas — exempt
-    // it (it is also the one path require-front-door excludes).
+    // it (it is also the one path require-front-door excludes). nuxt-security
+    // matches the path without its query, so this also covers the liveness
+    // probe's /api/health?probe=live.
     '/api/health': { security: { rateLimiter: false } },
   },
 

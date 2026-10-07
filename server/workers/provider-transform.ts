@@ -173,7 +173,7 @@ import {
   accumulate,
   blankFact,
   nonNegInt,
-  upsertProviderUsageFact,
+  upsertProviderUsageFacts,
   type Db,
   type DerivedFacts,
   type FactRow,
@@ -244,6 +244,10 @@ export interface ProviderTransformResult {
   unresolvedActorRows: number
   /** Sources where the prune was refused because identity resolution looked broken. */
   prunesSkipped: number
+  /** Wall time in the arms' derives, summed across sources. */
+  deriveMs: number
+  /** Wall time in the fact upsert and the prune, summed across sources. */
+  writeMs: number
   window: { startingAt: string; endingAt: string }
 }
 
@@ -551,6 +555,8 @@ async function transformSource(
   factRowsPruned: number
   unresolvedActorRows: number
   pruneSkipped: boolean
+  deriveMs: number
+  writeMs: number
 }> {
   const derive = armFor(source)
   if (!derive) throw new Error(unclaimedSourceMessage(source))
@@ -570,7 +576,9 @@ async function transformSource(
   if (!clock) throw new Error('provider-transform: could not read the DB clock for the prune marker')
   const runStarted = clock.run_started
 
+  const deriveStarted = Date.now()
   const derived = await derive(db, source, opts)
+  const deriveMs = Date.now() - deriveStarted
 
   /*
    * THE PRUNE GUARD IS EVALUATED BEFORE THE FIRST UPSERT — see the module
@@ -597,14 +605,20 @@ async function transformSource(
       factRowsPruned: 0,
       unresolvedActorRows: derived.unresolvedActorRows,
       pruneSkipped: true,
+      deriveMs,
+      writeMs: 0,
     }
   }
 
-  let factRowsUpserted = 0
-  for (const f of derived.facts.values()) {
-    await upsertProviderUsageFact(db, f)
-    factRowsUpserted += 1
-  }
+  /*
+   * ONE set-based write over every derived fact (chunked inside
+   * upsertProviderUsageFacts). The map is keyed by grainKey, so no two facts
+   * share a conflict key — which a multi-row ON CONFLICT DO UPDATE requires.
+   */
+  const writeStarted = Date.now()
+  const factRows = [...derived.facts.values()]
+  await upsertProviderUsageFacts(db, factRows)
+  const factRowsUpserted = factRows.length
 
   /*
    * GUARDED PRUNE — rows the provider revised away, mirroring
@@ -644,6 +658,8 @@ async function transformSource(
     factRowsPruned: Number([...pruned][0]?.n ?? 0),
     unresolvedActorRows: derived.unresolvedActorRows,
     pruneSkipped: false,
+    deriveMs,
+    writeMs: Date.now() - writeStarted,
   }
 }
 
@@ -659,6 +675,8 @@ export async function runProviderTransform(
     factRowsPruned: 0,
     unresolvedActorRows: 0,
     prunesSkipped: 0,
+    deriveMs: 0,
+    writeMs: 0,
     window: { startingAt: opts.startingAt, endingAt: opts.endingAt },
   }
 
@@ -698,6 +716,8 @@ export async function runProviderTransform(
     result.factRowsPruned += perSource.factRowsPruned
     result.unresolvedActorRows += perSource.unresolvedActorRows
     if (perSource.pruneSkipped) result.prunesSkipped += 1
+    result.deriveMs += perSource.deriveMs
+    result.writeMs += perSource.writeMs
   }
 
   return result

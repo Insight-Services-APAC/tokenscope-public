@@ -16,7 +16,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { accessCachePath, readBoundAccessToken } from './device-store.mjs'
-import { fileURLToPath } from 'node:url'
+import { isMainModule } from './is-main.mjs'
 import { trustedStateDir, trustedGlobalSettingsEnv } from './plugin-runtime.mjs'
 import { assertSafeEndpoint } from './endpoint-guard.mjs'
 
@@ -155,7 +155,7 @@ export async function refreshLanded({ env = {}, stateDir } = {}) {
 // Resolved through homedir() it was a repo-moved HOME's choice of destination —
 // nothing repairs HOME on this path, because neutraliseRepoHome runs only in
 // the SessionStart hook.
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isMainModule(import.meta.url)) {
   refreshLanded({ env: trustedGlobalSettingsEnv() }).then((r) =>
     process.stdout.write(`${JSON.stringify(r)}\n`),
   )

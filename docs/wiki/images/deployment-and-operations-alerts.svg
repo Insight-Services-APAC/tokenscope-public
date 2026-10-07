@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 582" width="1000" height="582" role="img" aria-labelledby="t d">
+  <title id="t">Azure Monitor alerts keep evaluating when the app is down, and one of them watches the app&#x27;s own alerting</title>
+  <desc id="d">Left: rules Azure Monitor evaluates without the app. Replicas below 1 and per-replica restarts on the container app, Postgres is_db_alive, a dead-man on the caj-ts-ops-alert job&#x27;s successful executions, a log alert on security audit-write failures and a log alert on the ops workspace going silent all go to the action group, which notifies only when an alert email is configured. Four App Insights metric alerts also exist but receive no app telemetry. Right: the caj-ts-ops-alert cron job triggers the ops-alert worker inside the app, which evaluates telemetry-read, telemetry-cap, attribution-stall, probe-network, worker-fleet and worker-duration conditions, pushes critical ones to an ntfy topic and records every condition in Postgres, the admin inbox and the audit log.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="582"/>
+  <rect class="zone" x="16" y="20" width="470" height="432" rx="10"/>
+  <text class="zlabel" x="30" y="42">AZURE MONITOR · RUNS WITHOUT THE APP</text>
+  <rect class="zone" x="516" y="20" width="468" height="432" rx="10"/>
+  <text class="zlabel" x="530" y="42">TOKENSCOPE · NEEDS THE APP AND POSTGRES</text>
+  <rect class="zone" x="16" y="472" width="968" height="96" rx="10"/>
+  <text class="zlabel" x="30" y="494">WHERE IT GOES</text>
+
+  <rect class="node" x="36" y="56" width="430" height="44" rx="6"/>
+  <circle class="cn" cx="58" cy="78" r="10"/><text class="cnt" x="58" y="82" text-anchor="middle">1</text>
+  <text class="t" x="78" y="74">Replicas &lt; 1</text>
+  <text class="s" x="78" y="91">ca-&lt;name&gt; · maximum over 15 min · Sev 1</text>
+
+  <rect class="node" x="36" y="108" width="430" height="44" rx="6"/>
+  <circle class="cn" cx="58" cy="130" r="10"/><text class="cnt" x="58" y="134" text-anchor="middle">2</text>
+  <text class="t" x="78" y="126">RestartCount &gt; 1, per replica</text>
+  <text class="s" x="78" y="143">ca-&lt;name&gt; · total over 30 min · Sev 1</text>
+
+  <rect class="node" x="36" y="160" width="430" height="44" rx="6"/>
+  <circle class="cn" cx="58" cy="182" r="10"/><text class="cnt" x="58" y="186" text-anchor="middle">3</text>
+  <text class="t" x="78" y="178">is_db_alive &lt; 1</text>
+  <text class="s" x="78" y="195">Postgres · maximum over 15 min · Sev 1</text>
+
+  <rect class="node acc" x="36" y="212" width="430" height="44" rx="6"/>
+  <circle class="cn accent" cx="58" cy="234" r="10"/><text class="cnt accent" x="58" y="238" text-anchor="middle">4</text>
+  <text class="t" x="78" y="230">Dead-man: no successful run</text>
+  <text class="s" x="78" y="247">caj-ts-ops-alert executions · 1 h window · Sev 1</text>
+
+  <rect class="node" x="36" y="264" width="430" height="44" rx="6"/>
+  <circle class="cn" cx="58" cy="286" r="10"/><text class="cnt" x="58" y="290" text-anchor="middle">5</text>
+  <text class="t" x="78" y="282">Security audit write failed</text>
+  <text class="s" x="78" y="299">log alert · log-ops-&lt;name&gt; · every 15 min over 30 min · Sev 1</text>
+
+  <rect class="node acc" x="36" y="316" width="430" height="44" rx="6"/>
+  <circle class="cn accent" cx="58" cy="338" r="10"/><text class="cnt accent" x="58" y="342" text-anchor="middle">6</text>
+  <text class="t" x="78" y="334">Platform logs silent</text>
+  <text class="s" x="78" y="351">no console line in log-ops-&lt;name&gt; for 1 h · Sev 2</text>
+
+  <rect class="node ghost" x="36" y="368" width="430" height="62" rx="6"/>
+  <circle class="cn" cx="58" cy="390" r="10"/><text class="cnt" x="58" y="394" text-anchor="middle">7</text>
+  <text class="t" x="78" y="386">App Insights metric alerts × 4</text>
+  <text class="s" x="78" y="403">5xx · response time · exceptions · dependencies · Sev 2–3</text>
+  <text class="s ghost" x="78" y="420">the app sends App Insights no telemetry</text>
+
+  <rect class="node" x="536" y="56" width="428" height="44" rx="6"/>
+  <text class="tm" x="556" y="74">caj-ts-ops-alert</text>
+  <text class="s" x="556" y="91">cron 9,24,39,54 · HMAC-signed POST to run-worker</text>
+
+  <rect class="node" x="536" y="136" width="428" height="100" rx="6"/>
+  <text class="tm" x="556" y="157">ca-&lt;name&gt; · ops-alert worker</text>
+  <text class="s" x="556" y="177">telemetry-read · telemetry-cap · attribution-stall</text>
+  <text class="s" x="556" y="195">probe-network · worker-fleet · worker-duration · worker:&lt;name&gt;</text>
+  <text class="s" x="556" y="219">two runs at one severity before it speaks</text>
+
+  <rect class="node" x="760" y="290" width="204" height="62" rx="6"/>
+  <text class="t" x="862" y="312" text-anchor="middle">Postgres</text>
+  <text class="sm" x="862" y="330" text-anchor="middle">kv_store · inbox_item</text>
+  <text class="sm" x="862" y="344" text-anchor="middle">audit_event</text>
+
+  <rect class="node" x="36" y="504" width="300" height="50" rx="6"/>
+  <text class="t" x="186" y="525" text-anchor="middle">Action group ag-&lt;name&gt;</text>
+  <text class="s" x="186" y="542" text-anchor="middle">email · none configured: portal only</text>
+
+  <rect class="node" x="356" y="504" width="300" height="50" rx="6"/>
+  <text class="t" x="506" y="525" text-anchor="middle">ntfy topic</text>
+  <text class="s" x="506" y="542" text-anchor="middle">critical only · NUXT_OPS_ALERT_NTFY_URL</text>
+
+  <rect class="node" x="676" y="504" width="288" height="50" rx="6"/>
+  <text class="t" x="820" y="525" text-anchor="middle">Admin inbox + audit log</text>
+  <text class="s" x="820" y="542" text-anchor="middle">every severity · platform admins</text>
+
+  <!-- 4 dead-man watches the job -->
+  <polyline class="e accent" points="466,234 498,234 498,78 530,78" marker-end="url(#ah-acc)"/>
+  <text class="lbl" x="494" y="150" text-anchor="end" transform="rotate(-90 494 150)">watches</text>
+  <!-- 8 cron triggers worker -->
+  <line class="e" x1="750" y1="100" x2="750" y2="130" marker-end="url(#ah)"/>
+  <circle class="cn" cx="770" cy="116" r="10"/><text class="cnt" x="770" y="120" text-anchor="middle">8</text>
+  <!-- rules to action group -->
+  <line class="e" x1="186" y1="452" x2="186" y2="498" marker-end="url(#ah)"/>
+  <!-- 9 worker pages ntfy -->
+  <polyline class="e" points="600,236 600,498" marker-end="url(#ah)"/>
+  <circle class="cn" cx="600" cy="346" r="10"/><text class="cnt" x="600" y="350" text-anchor="middle">9</text>
+  <!-- 10 worker writes state, inbox, audit -->
+  <line class="e" x1="862" y1="236" x2="862" y2="284" marker-end="url(#ah)"/>
+  <line class="e" x1="862" y1="352" x2="862" y2="498" marker-end="url(#ah)"/>
+  <circle class="cn" cx="882" cy="260" r="10"/><text class="cnt" x="882" y="264" text-anchor="middle">10</text>
+</svg>

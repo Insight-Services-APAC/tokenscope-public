@@ -30,6 +30,18 @@
 export const PLUGIN_VERSION_HEADER = 'x-tokenscope-plugin-version'
 /** Header the client puts its agent CLI version in (Claude Code / Copilot CLI). */
 export const CLIENT_VERSION_HEADER = 'x-tokenscope-client-version'
+/**
+ * Header the client puts its platform in, as `<os>-<arch>` in Node's
+ * process.platform / process.arch vocabulary (e.g. `darwin-arm64`, `win32-x64`).
+ */
+export const CLIENT_PLATFORM_HEADER = 'x-tokenscope-client-platform'
+/**
+ * Header the client puts its launch surface in: Claude Code's
+ * CLAUDE_CODE_ENTRYPOINT (`cli`, `sdk-cli`, ...) or Copilot's `app` / `cli`.
+ */
+export const CLIENT_SURFACE_HEADER = 'x-tokenscope-client-surface'
+/** Header the setup redeem puts its mode in: `full` (Node redeem) or `emit-only`. */
+export const SETUP_MODE_HEADER = 'x-tokenscope-setup-mode'
 
 /*
  * Max stored length. A version string is a handful of characters; 40 leaves room
@@ -78,12 +90,16 @@ export interface ClientVersionClaim {
   pluginVersion: string | null
   /** The agent CLI version the client claimed, or null if not reported. */
   cliVersion: string | null
+  /** The client's `<os>-<arch>`, or null if not reported. */
+  platform: string | null
+  /** The client's launch surface, or null if not reported. */
+  surface: string | null
   /** True when at least one usable value was reported — the "write it" signal. */
   reported: boolean
 }
 
 /**
- * Read both version headers off a header bag (lower-cased keys, as h3/node give
+ * Read the version, platform and surface headers off a header bag (lower-cased keys, as h3/node give
  * them) and sanitise each independently.
  *
  * Independent on purpose: a client that reports a good plugin version and a
@@ -106,5 +122,28 @@ export function readClientVersionHeaders(
   }
   const pluginVersion = pick(PLUGIN_VERSION_HEADER)
   const cliVersion = pick(CLIENT_VERSION_HEADER)
-  return { pluginVersion, cliVersion, reported: pluginVersion !== null || cliVersion !== null }
+  const platform = pick(CLIENT_PLATFORM_HEADER)
+  const surface = pick(CLIENT_SURFACE_HEADER)
+  return {
+    pluginVersion,
+    cliVersion,
+    platform,
+    surface,
+    reported: pluginVersion !== null || cliVersion !== null || platform !== null || surface !== null,
+  }
+}
+
+export type SetupMode = 'full' | 'emit-only'
+
+/**
+ * The setup mode a redeem claims. A closed set: anything other than exactly
+ * `full` or `emit-only` (absent, repeated-and-joined, differently cased) is null.
+ * Same trust model as the version headers — client-asserted, diagnostic only.
+ */
+export function readSetupModeHeader(
+  headers: Record<string, string | string[] | undefined> | undefined | null,
+): SetupMode | null {
+  const raw = headers?.[SETUP_MODE_HEADER]
+  const v = (Array.isArray(raw) ? raw[0] : raw)?.trim()
+  return v === 'full' || v === 'emit-only' ? v : null
 }

@@ -47,6 +47,22 @@ jobs:
             fi
           done
 
+          # Diagrams keep their directory: pages reference them as images/<file>, which the
+          # wiki serves from the wiki repo's own images/ folder. Only plain names of web
+          # image types are copied, so nothing else under images/ reaches the wiki.
+          if [ -d docs/wiki/images ]; then
+            mkdir -p wiki/images
+            for f in docs/wiki/images/*; do
+              [ -e "$f" ] || continue
+              name=$(basename "$f")
+              if ! [ -f "$f" ] || ! [[ "$name" =~ ^[A-Za-z0-9_-]+\.(svg|png)$ ]]; then
+                echo "::error::docs/wiki/images may hold only files named ^[A-Za-z0-9_-]+\\.(svg|png)\$ (got: $name)"
+                exit 1
+              fi
+              cp "$f" wiki/images/
+            done
+          fi
+
           # 2. For each subdirectory with .md files, copy each file to wiki/<subdir>-<file>.md
           #    AND rewrite same-dir bare references in that file at copy time.
           #    Bare same-dir reference: [X](Some-Page.md) or [X](./Some-Page.md) — no other
@@ -60,6 +76,7 @@ jobs:
           for dir in docs/wiki/*/; do
             [ -d "$dir" ] || continue
             prefix=$(basename "$dir")
+            [ "$prefix" = images ] && continue
             for f in "$dir"*.md; do
               [ -f "$f" ] || continue
               name=$(basename "$f")
@@ -81,9 +98,12 @@ jobs:
 
           # 3. Cross-subdir references: (P/...) and (../P/...) -> (P-...).
           #    These appear in Home.md, _Sidebar.md, and in cross-subdir links.
+          #    images/ is not a page directory: rewriting (images/ to (images- would break
+          #    every diagram reference.
           for dir in docs/wiki/*/; do
             [ -d "$dir" ] || continue
             prefix=$(basename "$dir")
+            [ "$prefix" = images ] && continue
             find wiki -name '*.md' -exec sed -i \
               -e "s|(${prefix}/README\.md|(${prefix}-Overview.md|g" \
               -e "s|(\.\./${prefix}/README\.md|(${prefix}-Overview.md|g" \

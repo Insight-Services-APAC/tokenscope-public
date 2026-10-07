@@ -816,10 +816,10 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222');
 
       -- A teammate revoked AFTER the enrolment below, for the E2 bypass check.
-      INSERT INTO teammate (id, entra_oid, email, region_id, org_unit_id, revoked_at)
+      INSERT INTO teammate (id, entra_oid, email, region_id, org_unit_id, revoked_at, emit_revoked_at)
         VALUES ('${REVOKED_TEAMMATE}', 'oid-revoked', 'revoked@i.com',
                 '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222',
-                NOW() - INTERVAL '1 day');
+                NOW() - INTERVAL '1 day', NOW() - INTERVAL '1 day');
 
       INSERT INTO instance_attestation
         (instance_id, principal_oid, principal_email, teammate_id, project_code_hash,
@@ -889,7 +889,7 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
     expect(await selectRecentJoinableSessionIds(t.db)).not.toContain(AGED_LIVE_REVOKED)
   })
 
-  it('CAP ORDERING: a live aged instance outranks a NEWER, less-recently-active one and survives the cap', async () => {
+  it('CAP ORDERING: among never-read devices, a live aged instance outranks a NEWER, less-recently-active one', async () => {
     // R1 caught the earlier version of this test being VACUOUS: with fewer
     // joinable rows than the limit the LIMIT never truncated, so it passed with
     // the ORDER BY reverted. This version forces truncation — it inserts its own
@@ -941,9 +941,12 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
     }
   })
 
-  it('CAP ORDERING: a burst of recently-closed instances never evicts a live one (the standing R1 invariant)', async () => {
+  it('CAP ORDERING: among never-read devices, a burst of recently-closed instances never evicts a live one (R1)', async () => {
     // Pre-existing invariant, previously unpinned: closed rows sort after open
-    // ones, so a wave of closures cannot starve a still-emitting instance.
+    // ones, so a wave of closures cannot starve a still-emitting instance. Since
+    // mig 0149 this holds within one joiner_read_at (here: all NULL); across read
+    // times the least-recently-read device goes first, and the rotation is what
+    // stops a live device being starved (see the ROTATION tests below).
     const LIVE = '77777777-0000-0000-0000-0000000000d0'
     const closed = ['d1', 'd2', 'd3'].map((s) => `77777777-0000-0000-0000-0000000000${s}`)
     await t.client.unsafe(`

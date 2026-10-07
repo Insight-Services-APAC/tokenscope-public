@@ -1,27 +1,20 @@
 /*
- * registry azure-monitor-read — operator-forceable deep-rescan threading.
+ * registry azure-monitor-read — deepRescan threading.
  *
- * The gatherer already supports a deepRescan mode (ignore the per-instance
- * watermark, re-read the full window). Today it is ONLY auto-decided via
- * shouldDeepRescan. This test pins the NEW behaviour: the registry entry uses
- * ctx.opts.deepRescan when the operator forces it (through the signed run-worker
- * body), and falls back to shouldDeepRescan when no opt is passed.
- *
- * We assert on the exact `deepRescan` value the entry threads into runReadJoiner
- * — the single point where the two sources of truth converge. The gatherer
- * internals (selectRecentJoinableSessionIds / shouldDeepRescan / runReadJoiner)
- * and getTelemetryReader are stubbed so this is a pure unit test of the registry
- * glue (no DB, no Azure).
+ * Scheduled ticks never deep-read: the daily re-read is telemetry-recovery's
+ * scheduled request (docs/design/bounded-daily-deep-read.md). Only an operator's
+ * signed run-worker body forces a full-window read here. This pins the exact
+ * `deepRescan` value the entry threads into runReadJoiner; the gatherer and
+ * getTelemetryReader are stubbed (no DB, no Azure).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // vi.mock is hoisted above imports, so the mock fns must be created inside
 // vi.hoisted() (which is hoisted with it) — a plain top-level const would be in
 // the temporal dead zone when the factory runs.
-const { runReadJoiner, shouldDeepRescan, selectJoinableInstances, recordJoinerSelectionCap } =
+const { runReadJoiner, selectJoinableInstances, recordJoinerSelectionCap } =
   vi.hoisted(() => ({
     runReadJoiner: vi.fn(async () => ({ deepRescan: false })),
-    shouldDeepRescan: vi.fn(async () => false),
     selectJoinableInstances: vi.fn(async () => ({ ids: ['inst-1'], capHit: null as number | null })),
     recordJoinerSelectionCap: vi.fn(async () => ({ raised: 0, skippedExisting: 0, autoResolved: 0 })),
   }))
@@ -31,7 +24,6 @@ const { runReadJoiner, shouldDeepRescan, selectJoinableInstances, recordJoinerSe
 // it (R2 caught exactly that on the zero-session path).
 vi.mock('../../../server/workers/azure-monitor-reader', () => ({
   runReadJoiner,
-  shouldDeepRescan,
   selectJoinableInstances,
   recordJoinerSelectionCap,
 }))
@@ -80,46 +72,29 @@ function threadedDeepRescan(): boolean {
 describe('registry azure-monitor-read — deepRescan threading', () => {
   beforeEach(() => {
     runReadJoiner.mockClear()
-    shouldDeepRescan.mockClear()
     selectJoinableInstances.mockClear()
     selectJoinableInstances.mockResolvedValue({ ids: ['inst-1'], capHit: null })
-    shouldDeepRescan.mockResolvedValue(false)
   })
 
-  it('forces deepRescan=true from ctx.opts.deepRescan, WITHOUT consulting shouldDeepRescan', async () => {
+  it('forces deepRescan=true from ctx.opts.deepRescan', async () => {
     await azureMonitorRead().run(fakeDb, { runId: null, opts: { deepRescan: true } })
     expect(threadedDeepRescan()).toBe(true)
-    // The operator override short-circuits the auto decision (?? never evaluates it).
-    expect(shouldDeepRescan).not.toHaveBeenCalled()
   })
 
-  it('honours an explicit ctx.opts.deepRescan=false override (still bypasses shouldDeepRescan)', async () => {
-    // shouldDeepRescan WOULD say true, but the explicit false wins.
-    shouldDeepRescan.mockResolvedValue(true)
+  it('honours an explicit ctx.opts.deepRescan=false', async () => {
     await azureMonitorRead().run(fakeDb, { runId: null, opts: { deepRescan: false } })
     expect(threadedDeepRescan()).toBe(false)
-    expect(shouldDeepRescan).not.toHaveBeenCalled()
   })
 
-  it('falls back to shouldDeepRescan when no opts are passed (auto path, true)', async () => {
-    shouldDeepRescan.mockResolvedValue(true)
+  it('never deep-reads on an unforced tick: no opts, no ctx.opts, no ctx', async () => {
     await azureMonitorRead().run(fakeDb, { runId: null })
-    expect(shouldDeepRescan).toHaveBeenCalledTimes(1)
-    expect(threadedDeepRescan()).toBe(true)
-  })
-
-  it('falls back to shouldDeepRescan when ctx.opts is absent (auto path, false)', async () => {
-    shouldDeepRescan.mockResolvedValue(false)
-    await azureMonitorRead().run(fakeDb, { runId: null, opts: undefined })
-    expect(shouldDeepRescan).toHaveBeenCalledTimes(1)
     expect(threadedDeepRescan()).toBe(false)
-  })
-
-  it('falls back to shouldDeepRescan when ctx itself is absent', async () => {
-    shouldDeepRescan.mockResolvedValue(true)
+    runReadJoiner.mockClear()
+    await azureMonitorRead().run(fakeDb, { runId: null, opts: undefined })
+    expect(threadedDeepRescan()).toBe(false)
+    runReadJoiner.mockClear()
     await azureMonitorRead().run(fakeDb)
-    expect(shouldDeepRescan).toHaveBeenCalledTimes(1)
-    expect(threadedDeepRescan()).toBe(true)
+    expect(threadedDeepRescan()).toBe(false)
   })
 })
 
@@ -127,10 +102,8 @@ describe('registry azure-monitor-read — selection cap-hit + recovery threading
   beforeEach(() => {
     getTelemetryReader.mockClear()
     runReadJoiner.mockClear()
-    shouldDeepRescan.mockClear()
     selectJoinableInstances.mockClear()
     recordJoinerSelectionCap.mockClear()
-    shouldDeepRescan.mockResolvedValue(false)
     selectJoinableInstances.mockResolvedValue({ ids: ['inst-1'], capHit: null })
   })
 
@@ -252,5 +225,67 @@ describe('registry azure-monitor-read — selection cap-hit + recovery threading
       rejectedEmittingEmail: 0,
       rejectedOrganizationId: 0,
     })
+    expect(res.devicesSelected).toBe(0)
+    expect(res.devicesAttempted).toBe(0)
+    expect(res.deadlineHit).toBe(false)
+    expect(res.oldestReadAgeMinutes).toBeNull()
+    expect(res.devicesNeverRead).toBe(0)
+    expect(res.rotationStampFailed).toBe(false)
+    expect(res.heapUsedPeakMb).toBeNull()
+  })
+})
+
+describe('registry azure-monitor-read — the joiner deadline is measured from the tick start', () => {
+  beforeEach(() => {
+    runReadJoiner.mockClear()
+    selectJoinableInstances.mockClear()
+  })
+
+  it('passes the time the tick BEGAN — before the coverage probe and the selection — as startedAtMs', async () => {
+    let nowMs = 1_000_000
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    // The selection takes 9 s; the deadline must still count from before it.
+    selectJoinableInstances.mockImplementationOnce(async () => {
+      nowMs += 9_000
+      return { ids: ['inst-1'], capHit: null }
+    })
+    try {
+      await azureMonitorRead().run(fakeDb, { runId: null })
+    } finally {
+      clock.mockRestore()
+    }
+    const opts = runReadJoiner.mock.calls[0]![2] as { startedAtMs?: number }
+    expect(opts.startedAtMs).toBe(1_000_000)
+  })
+})
+
+describe('registry azure-monitor-read — which runs stamp the read rotation (mig 0149)', () => {
+  beforeEach(() => {
+    runReadJoiner.mockClear()
+    selectJoinableInstances.mockClear()
+    selectJoinableInstances.mockResolvedValue({ ids: ['inst-1'], capHit: null })
+  })
+
+  function threadedStamp(): boolean | undefined {
+    expect(runReadJoiner).toHaveBeenCalledTimes(1)
+    return (runReadJoiner.mock.calls[0]![2] as { stampReadAt?: boolean }).stampReadAt
+  }
+
+  it('the scheduled tick stamps', async () => {
+    await azureMonitorRead().run(fakeDb, { runId: null })
+    expect(threadedStamp()).toBe(true)
+  })
+
+  it('an operator-scoped run does not', async () => {
+    await azureMonitorRead().run(fakeDb, {
+      runId: null,
+      opts: { sessionIds: ['11111111-1111-4111-8111-111111111111'] },
+    })
+    expect(threadedStamp()).toBe(false)
+  })
+
+  it('a forced deep read does not, even over the scheduled selection', async () => {
+    await azureMonitorRead().run(fakeDb, { runId: null, opts: { deepRescan: true } })
+    expect(threadedStamp()).toBe(false)
   })
 })

@@ -253,12 +253,109 @@ exit 0
 
   it('never puts the emit credential in a version header', () => {
     // Guards the deliberate unquoted expansion of $VERSION_HEADER_ARGS: the header
-    // arguments must carry nothing but the two version tokens.
+    // arguments must carry nothing but the version / platform / surface tokens.
     const r = runHelper({ TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'SECRET-REFRESH-VALUE', CLAUDE_CODE_EXECPATH: '/versions/2.1.212/claude' })
     expect(r.status).toBe(0)
     const argv = bearerArgv()
     expect(argv).not.toContain('SECRET-REFRESH-VALUE')
     expect(argv).toContain('X-TokenScope-Plugin-Version:9.9.9')
+  })
+})
+
+/** Stub `uname` (found first via --tool-dir) so the platform is the test's choice, not the runner's. */
+function stubUname(sys: string, machine: string) {
+  const p = join(stubDir, 'uname')
+  writeFileSync(p, `#!/bin/sh\ncase "$1" in -s) echo '${sys}' ;; -m) echo '${machine}' ;; esac\n`)
+  chmodSync(p, 0o755)
+}
+
+/** Same as runHelper, on an explicit lane. */
+function runHelperTool(tool: 'claude-code' | 'copilot-cli', env: Record<string, string> = {}) {
+  return spawnSync('sh', [helperPath, '--state-dir', stateDir, '--tool-dir', stubDir, '--tool', tool], {
+    encoding: 'utf8',
+    env: {
+      PATH: `${stubDir}:${process.env.PATH}`,
+      HOME: tmp,
+      TOKENSCOPE_BEARER_ENDPOINT: 'https://stub.local/api/v1/instances/x/bearer',
+      TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'rt',
+      TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://stub.local/api/v1/oauth/token',
+      TOKENSCOPE_OAUTH_CLIENT_ID: 'cid',
+      STUB_ARGV: argvLog,
+      ...env,
+    },
+  })
+}
+
+describe('otel-headers-helper — client platform + surface headers (#412)', () => {
+  it.each([
+    ['Linux', 'x86_64', 'linux-x64'],
+    ['Linux', 'aarch64', 'linux-arm64'],
+    ['Darwin', 'arm64', 'darwin-arm64'],
+    ['Darwin', 'x86_64', 'darwin-x64'],
+    ['MINGW64_NT-10.0-26100', 'x86_64', 'win32-x64'],
+    ['MSYS_NT-10.0', 'x86_64', 'win32-x64'],
+  ])('maps uname %s/%s to Node vocabulary %s', (sys, machine, expected) => {
+    stubUname(sys, machine)
+    const r = runHelper()
+    expect(r.status).toBe(0)
+    expect(bearerArgv()).toContain(`X-TokenScope-Client-Platform:${expected}`)
+  })
+
+  it.each([
+    ['FreeBSD', 'x86_64'],
+    ['Linux', 'riscv64'],
+  ])('OMITS the platform header for an unrecognised %s/%s — never guesses', (sys, machine) => {
+    stubUname(sys, machine)
+    const r = runHelper()
+    expect(r.status).toBe(0)
+    expect(bearerArgv()).toContain('/bearer')
+    expect(bearerArgv()).not.toContain('X-TokenScope-Client-Platform')
+  })
+
+  it('sends CLAUDE_CODE_ENTRYPOINT verbatim as the surface on the claude-code lane', () => {
+    runHelper({ CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' })
+    expect(bearerArgv()).toContain('X-TokenScope-Client-Surface:sdk-cli')
+  })
+
+  it('OMITS the surface when CLAUDE_CODE_ENTRYPOINT is absent', () => {
+    runHelper()
+    expect(bearerArgv()).toContain('/bearer')
+    expect(bearerArgv()).not.toContain('X-TokenScope-Client-Surface')
+  })
+
+  it('DROPS a junk entrypoint rather than sending it', () => {
+    const r = runHelper({ CLAUDE_CODE_ENTRYPOINT: 'cli; echo pwned' })
+    expect(r.status).toBe(0)
+    expect(bearerArgv()).not.toContain('pwned')
+    expect(bearerArgv()).not.toContain('X-TokenScope-Client-Surface')
+  })
+
+  it("ignores AI_AGENT on the claude-code lane (it is Copilot's surface signal)", () => {
+    runHelper({ AI_AGENT: 'github_copilot_app_agent' })
+    expect(bearerArgv()).toContain('/bearer')
+    expect(bearerArgv()).not.toContain('X-TokenScope-Client-Surface')
+  })
+
+  it.each([
+    ['github_copilot_app_agent', 'app'],
+    ['github_copilot_cli_agent', 'cli'],
+  ])('copilot-cli lane: AI_AGENT=%s → surface %s', (agent, surface) => {
+    const r = runHelperTool('copilot-cli', { AI_AGENT: agent, CLAUDE_CODE_ENTRYPOINT: 'entrypoint-must-not-win' })
+    expect(r.status).toBe(0)
+    expect(bearerArgv()).toContain(`X-TokenScope-Client-Surface:${surface}`)
+    expect(bearerArgv()).not.toContain('entrypoint-must-not-win')
+  })
+
+  it('copilot-cli lane: an absent or foreign AI_AGENT sends NO surface (no default to cli)', () => {
+    // The forwarder mints without AI_AGENT even on an App device; a `cli` default
+    // would overwrite a true `app` reading on every such mint.
+    expect(runHelperTool('copilot-cli').status).toBe(0)
+    expect(bearerArgv()).toContain('/bearer')
+    expect(bearerArgv()).not.toContain('X-TokenScope-Client-Surface')
+    writeFileSync(argvLog, '')
+    expect(runHelperTool('copilot-cli', { AI_AGENT: 'claude-code_2-1-211_agent' }).status).toBe(0)
+    expect(bearerArgv()).toContain('/bearer')
+    expect(bearerArgv()).not.toContain('X-TokenScope-Client-Surface')
   })
 })
 

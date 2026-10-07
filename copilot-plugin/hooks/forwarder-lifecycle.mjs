@@ -18,6 +18,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isMainModule } from '../scripts/is-main.mjs'
 import * as fs from 'node:fs'
 // enroll.mjs owns the ONE state-dir resolver on this side (TOKENSCOPE_STATE_DIR pin,
 // else ~/.tokenscope under the PASSWD home). Imported rather than re-derived so the
@@ -78,7 +79,7 @@ function spawnForwarder() {
 
 // Only dispatch when invoked directly (node forwarder-lifecycle.mjs <action>) so unit
 // tests can import resolveProjectDir() without triggering enrol / spawn / process.exit.
-const isDirectRun = !!process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+const isDirectRun = isMainModule(import.meta.url)
 
 if (isDirectRun && (action === 'start' || action === '--start')) {
   // EMIT-ON-INSTALL: on a FRESH install of the real (publish-injected) plugin,

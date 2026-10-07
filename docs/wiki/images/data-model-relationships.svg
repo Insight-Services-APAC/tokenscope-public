@@ -1,0 +1,175 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 670" width="1000" height="670" role="img" aria-labelledby="t d">
+  <title id="t">Spend attaches to a person through the instance: attribution_record references instance_attestation, which references teammate, and the project only by its own foreign key.</title>
+  <desc id="d">Twenty tables grouped into org, identity and instance, projects, spend and governance. Each card lists the table's foreign keys. Highlighted arrows draw the spine: instance_attestation references teammate, attribution_record references instance_attestation and project. Dashed lines and notes mark links the code relies on without a foreign key: attribution_record.rate_card_id, allocation.scope_id and provider_org's role in the billing lane.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="670"/>
+  <rect class="zone" x="16" y="16" width="220" height="280" rx="10"/>
+  <text class="zlabel" x="30" y="38">ORG</text>
+  <rect class="zone" x="256" y="16" width="490" height="280" rx="10"/>
+  <text class="zlabel" x="270" y="38">IDENTITY · INSTANCE</text>
+  <rect class="zone" x="766" y="16" width="218" height="280" rx="10"/>
+  <text class="zlabel" x="780" y="38">PROJECTS</text>
+  <rect class="zone" x="16" y="326" width="590" height="328" rx="10"/>
+  <text class="zlabel" x="30" y="348">SPEND</text>
+  <rect class="zone" x="626" y="326" width="358" height="328" rx="10"/>
+  <text class="zlabel" x="640" y="348">GOVERNANCE</text>
+
+  <!-- org -->
+  <rect class="node" x="32" y="56" width="188" height="46" rx="6"/>
+  <text class="tm" x="44" y="76">region</text>
+  <text class="s" x="44" y="93">top of the org tree</text>
+  <rect class="node" x="32" y="120" width="188" height="62" rx="6"/>
+  <text class="tm" x="44" y="140">org_unit</text>
+  <text class="sm" x="44" y="157">region_id → region</text>
+  <text class="sm" x="44" y="173">parent_id → org_unit</text>
+
+  <!-- identity -->
+  <rect class="node" x="272" y="56" width="214" height="62" rx="6"/>
+  <text class="tm" x="284" y="76">teammate</text>
+  <text class="sm" x="284" y="93">region_id → region</text>
+  <text class="sm" x="284" y="109">org_unit_id → org_unit</text>
+  <rect class="node" x="272" y="134" width="214" height="46" rx="6"/>
+  <text class="tm" x="284" y="154">teammate_identity_map</text>
+  <text class="sm" x="284" y="171">teammate_id → teammate</text>
+  <rect class="node" x="272" y="196" width="214" height="62" rx="6"/>
+  <text class="tm" x="284" y="216">emit_handoff</text>
+  <text class="sm" x="284" y="233">teammate_id → teammate</text>
+  <text class="sm" x="284" y="249">instance_id → instance_att…</text>
+
+  <rect class="node acc" x="506" y="56" width="222" height="46" rx="6"/>
+  <text class="tm" x="516" y="76">instance_attestation</text>
+  <text class="sm acc" x="516" y="93">teammate_id → teammate</text>
+  <rect class="node" x="506" y="118" width="222" height="46" rx="6"/>
+  <text class="tm" x="516" y="138">instance_attestation_health</text>
+  <text class="sm" x="516" y="155">instance_id → instance_att…</text>
+  <rect class="node" x="506" y="180" width="222" height="78" rx="6"/>
+  <text class="tm" x="516" y="200">oauth_token</text>
+  <text class="sm" x="516" y="217">teammate_id → teammate</text>
+  <text class="sm" x="516" y="233">instance_id → instance_att…</text>
+  <text class="sm" x="516" y="249">client_id → oauth_client</text>
+
+  <!-- projects -->
+  <rect class="node" x="782" y="56" width="186" height="62" rx="6"/>
+  <text class="tm" x="794" y="76">project_assignment</text>
+  <text class="sm" x="794" y="93">project_id → project</text>
+  <text class="sm" x="794" y="109">teammate_id → teammate</text>
+  <rect class="node" x="782" y="134" width="186" height="46" rx="6"/>
+  <text class="tm" x="794" y="154">repo_project_map</text>
+  <text class="sm" x="794" y="171">project_id → project</text>
+  <rect class="node acc" x="782" y="212" width="186" height="62" rx="6"/>
+  <text class="tm" x="794" y="232">project</text>
+  <text class="sm" x="794" y="249">region_id → region</text>
+  <text class="sm" x="794" y="265">cost_owning_unit_id → …</text>
+
+  <!-- spend -->
+  <rect class="node acc" x="32" y="366" width="270" height="112" rx="6"/>
+  <text class="tm" x="44" y="386">attribution_record</text>
+  <text class="sm acc" x="44" y="403">instance_id → instance_attestation</text>
+  <text class="sm" x="44" y="419">teammate_id → teammate</text>
+  <text class="sm acc" x="44" y="435">project_id → project</text>
+  <text class="sm" x="44" y="451">region · org_unit · cou ids</text>
+  <text class="sm" x="44" y="467">rate_card_id, no FK</text>
+  <rect class="node" x="32" y="510" width="270" height="62" rx="6"/>
+  <text class="tm" x="44" y="530">rate_card</text>
+  <text class="sm" x="44" y="547">region_id → region</text>
+  <text class="sm" x="44" y="563">cou_id → org_unit</text>
+  <rect class="node" x="32" y="588" width="270" height="46" rx="6"/>
+  <text class="tm" x="44" y="608">rate_line</text>
+  <text class="sm" x="44" y="625">rate_card_id → rate_card</text>
+
+  <rect class="node" x="320" y="366" width="270" height="78" rx="6"/>
+  <text class="tm" x="332" y="386">actual_spend</text>
+  <text class="sm" x="332" y="403">teammate_id → teammate</text>
+  <text class="sm" x="332" y="419">provider_org_id → provider_org</text>
+  <text class="sm" x="332" y="435">region · org_unit · cou ids</text>
+  <rect class="node" x="320" y="460" width="270" height="94" rx="6"/>
+  <text class="tm" x="332" y="480">provider_org</text>
+  <text class="sm" x="332" y="497">region_id → region</text>
+  <text class="sm" x="332" y="513">cost_owning_unit_id → org_unit</text>
+  <text class="sm" x="332" y="529">provider_enterprise_id → …</text>
+  <text class="s" x="332" y="546">read by the joiner for the lane, no FK</text>
+
+  <!-- governance -->
+  <rect class="node" x="642" y="366" width="326" height="46" rx="6"/>
+  <text class="tm" x="654" y="386">audit_event</text>
+  <text class="sm" x="654" y="403">actor_teammate_id → teammate</text>
+  <rect class="node" x="642" y="424" width="326" height="78" rx="6"/>
+  <text class="tm" x="654" y="444">allocation</text>
+  <text class="sm" x="654" y="461">audit_event_id → audit_event</text>
+  <text class="sm" x="654" y="477">teammate_id · created_by → teammate</text>
+  <text class="sm" x="654" y="493">scope_id, no FK: teammate|project|cou|region</text>
+  <rect class="node" x="642" y="514" width="326" height="62" rx="6"/>
+  <text class="tm" x="654" y="534">sync_conflict</text>
+  <text class="sm" x="654" y="551">audit_event_id → audit_event</text>
+  <text class="sm" x="654" y="567">decided_by → teammate</text>
+  <rect class="node" x="642" y="588" width="326" height="46" rx="6"/>
+  <text class="tm" x="654" y="608">inbox_item</text>
+  <text class="sm" x="654" y="625">recipient_teammate_id · ack_by → teammate</text>
+
+  <!-- spine -->
+  <line class="e accent" x1="506" y1="79" x2="492" y2="79" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="496" cy="118" r="9"/><text class="cnt accent" x="496" y="122" text-anchor="middle">1</text>
+  <polyline class="e accent" points="170,366 170,311 742,311 742,79 732,79" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="742" cy="200" r="9"/><text class="cnt accent" x="742" y="204" text-anchor="middle">2</text>
+  <polyline class="e accent" points="742,311 875,311 875,280" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="820" cy="311" r="10"/><text class="cnt accent" x="820" y="315" text-anchor="middle">3</text>
+  <line class="e dashed" x1="110" y1="478" x2="110" y2="504" marker-end="url(#ah)"/>
+  <circle class="cn" cx="140" cy="492" r="10"/><text class="cnt" x="140" y="496" text-anchor="middle">4</text>
+</svg>

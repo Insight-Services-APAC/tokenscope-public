@@ -58,28 +58,19 @@ own error:
   filter. Recent figures are provisional and will move under the 31-day revision
   window, but they are present.
 
-```mermaid
-flowchart TB
-    API["<b>Provider API</b> — Anthropic · GitHub<br/>COMPLETE within an onboarded scope<br/>COARSE: day grain, no session<br/><b>Answers: HOW MUCH?</b>"]
-    OTEL["<b>OTel telemetry</b> — TokenScope plugin<br/>INCOMPLETE: enrolled devices only<br/>FINE: session, project, model, event<br/><b>Answers: WHOSE WORK?</b>"]
+| | **Provider API** (Anthropic, GitHub) | **OTel telemetry** (TokenScope plugin) |
+|---|---|---|
+| Coverage | complete within an onboarded scope | enrolled devices only |
+| Grain | day, no session | event: session, project, model |
+| Answers | **how much** was spent | **whose work** it was |
+| Becomes | the amount every figure reconciles to | the detail on that amount |
 
-    API ==>|"the amount"| TRUTH["<b>What was spent</b><br/>bill-anchored · every teammate in scope"]
-    OTEL -.->|"the story"| DETAIL["<b>What it was spent on</b><br/>session · project · activity · model"]
+Both meet in the §A reconciliation, per (teammate, day, tool), and
+`v_complete_usage` is the result: complete, and as detailed as the estate
+allows (§3.2 draws it).
 
-    TRUTH --> REC{"§A reconciliation<br/>per teammate · day · tool"}
-    DETAIL --> REC
-    REC --> COMPLETE["<b>v_complete_usage</b><br/>complete AND as detailed<br/>as the estate allows"]
-
-    style API fill:#1f6feb,color:#fff,stroke:#1f6feb
-    style OTEL fill:#d40e8c,color:#fff,stroke:#d40e8c
-    style TRUTH fill:#0d3a6f,color:#fff,stroke:#1f6feb
-    style DETAIL fill:#6f0d4a,color:#fff,stroke:#d40e8c
-    style COMPLETE fill:#1a7f37,color:#fff,stroke:#1a7f37
-    style REC fill:#7d4e00,color:#fff,stroke:#bf8700
-```
-
-The solid line carries money. The dashed line carries meaning. **A design that
-sums the two lines is wrong**, and a chart that puts them side by side without
+The API column carries money. The OTel column carries meaning. **A design that
+sums the two is wrong**, and a chart that puts them side by side without
 saying which is which is misleading.
 
 ### Why the coverage looks the way it does
@@ -122,14 +113,14 @@ explicitly.
 | | **§A — usage completeness** | **§B — billing / chargeback** |
 |---|---|---|
 | Question | "Is my usage fully shown, and whose was it?" | "Who pays for this?" |
-| Grain | teammate · day · tool | cost centre · month |
+| Grain | teammate · day · tool | Business Unit · month |
 | Anthropic source | `actual_spend` → `v_teammate_usage_daily` | `actual_spend`, per teammate |
 | Copilot source | `reconciliation_record` | `copilot_pool_bill` |
 | Uses OTel? | Yes — for the detail axis | **Never** |
 | Surface | `v_complete_usage` | `v_finance_chargeback_month` |
 
 **A §B fact never settles a §A question, and vice versa.** Copilot billing
-being *pooled per cost centre* (§B) says nothing about whether per-*user* usage
+being *pooled per Business Unit* (§B) says nothing about whether per-*user* usage
 is available (§A — it is, and we already store it).
 
 ---
@@ -141,43 +132,32 @@ is available (§A — it is, and we already store it).
 The wiki has long said "two ingestion paths." There are three live paths writing
 three different tables, plus two dormant lanes.
 
-```mermaid
-flowchart LR
-    subgraph CLIENTS["Developer machines (~5% enrolled)"]
-        CC["Claude Code"]
-        CP["Copilot CLI"]
-    end
+![Three provider-API paths cover every teammate in an onboarded scope; the OTel path covers enrolled devices only](images/data-flow-ingest-paths.svg)
 
-    subgraph PROV["Provider APIs (every teammate in an onboarded scope)"]
-        ANT["Anthropic<br/>Enterprise Analytics"]
-        GH["GitHub Copilot<br/>metrics + billing"]
-    end
+1. Enrolled devices send `api_request` log events to `OTelLogs`.
+   `azure-monitor-read` reads them with KQL every 5 minutes, joined on
+   `tokenscope.instance_id`, and writes one `attribution_record` row per event
+   and token type.
+2. `analytics-poll` pulls Anthropic usage and cost reports at `bucket_width=1d`
+   every 15 minutes, re-reading a trailing 30-day window, into `actual_spend`.
+   The provider rows ride along verbatim in `actual_spend.raw_payload`.
+3. `reconciliation-sync` reads GitHub's per-user `ai_credit/usage` hourly into
+   `reconciliation_record`. It also reconciles Anthropic orgs into the same
+   table, but only the GitHub rows feed §A usage.
+4. The same run writes whole-month Copilot seat rows into `actual_spend`
+   (`tool = 'copilot-cli'`). They are showback only and kept out of every §A
+   and §B operand by tool name.
+5. `copilot-pool-bill` reads the enterprise billing usage report daily into
+   `copilot_pool_bill`, and writes `copilot_overage_allocation` in the same run.
+6. `v_teammate_usage_daily` is the §A usage truth: Anthropic rows from
+   `actual_spend` plus GitHub rows from `reconciliation_record`. It excludes the
+   Copilot seat rows from step 4.
+7. `provider-transform` derives the API lane, `provider_usage_fact`, hourly
+   from `actual_spend.raw_payload` and `reconciliation_record.raw`. This is
+   where the model dimension of API-reported money comes from.
 
-    CC & CP -->|"OTLP api_request<br/>log events"| LAW[("Azure Log Analytics<br/><b>OTelLogs</b>")]
-    LAW -->|"KQL, joined on<br/>tokenscope.instance_id"| RJ["read joiner<br/><i>azure-monitor-read</i> · 5 min"]
-    RJ --> AR[("<b>attribution_record</b><br/>per event · token type · model")]
-
-    ANT -->|"usage + cost reports<br/>bucket_width=1d"| AP["<i>analytics-poll</i> · 15 min"]
-    AP --> AS[("<b>actual_spend</b><br/>per teammate · day · tool")]
-    AP -.->|"pre-Zod page bodies"| RAW[("raw_provider_batch<br/>raw_provider_page")]
-
-    GH -->|"per-user daily credits"| RS["<i>reconciliation-sync</i>"]
-    RS --> RR[("<b>reconciliation_record</b><br/>per teammate · day · category")]
-    GH -->|"enterprise billing usage"| CPB["<i>copilot-pool-bill</i>"]
-    CPB --> PB[("<b>copilot_pool_bill</b><br/>per org · month")]
-
-    AS --> VTD[["v_teammate_usage_daily"]]
-    RR --> VTD
-
-    style AR fill:#d40e8c,color:#fff,stroke:#d40e8c
-    style AS fill:#1f6feb,color:#fff,stroke:#1f6feb
-    style RR fill:#1f6feb,color:#fff,stroke:#1f6feb
-    style PB fill:#7d4e00,color:#fff,stroke:#bf8700
-    style RAW fill:#57606a,color:#fff,stroke:#57606a
-```
-
-Magenta is OTel (detail). Blue is API (§A truth). Amber is the §B bill. Grey is
-raw capture.
+*Every money table is written by a scheduled worker reading a provider; only
+`attribution_record` depends on a device being enrolled.*
 
 Two further lanes exist and are **not** shown because they are dormant or
 non-monetary: the native-GenAI Copilot read (`server/azure/reader.ts:552-589`,
@@ -199,28 +179,31 @@ most consequential provider limitation in the system:
 > (`unaccounted-reconciliation.ts:119`), because the API side already arrives at
 > that grain. The rationale is stated at `:14`.
 
-```mermaid
-flowchart TB
-    A["<b>API says</b><br/>teammate · day · tool<br/>$100"]
-    O["<b>OTel says</b><br/>same key, corroborated rows<br/>$30 — with model, session, project"]
+![The API figure fixes the total for each teammate, day and tool; OTel fills in the detail, and the residual makes up the difference](images/data-flow-reconciliation.svg)
 
-    A --> CMP{compare}
-    O --> CMP
+1. The API operand: `v_teammate_usage_daily` for the key, here $100. It has no
+   session and no project.
+2. The OTel operand: corroborated `attribution_record` rows for the same key,
+   here $30. Both directions share this operand
+   (`server/usage/corroborated-otel.ts`). It leaves out sessions in an open
+   `api-uncorroborated` quarantine and, since mig 0119, self-billed rows.
+3. API above OTel, the normal case: `usage-reconciliation` writes
+   `unaccounted_usage` = max(0, API − OTel) = $70, a taggable worklist item,
+   with its per-model `unaccounted_usage_model` children in the same
+   transaction.
+4. OTel above API: `over_emission` holds max(0, OTel − API). It flags only an
+   excess above max($25, API) on a settled day, plus a weaker no-bill lane. It
+   is an integrity signal and never spend.
+5. Arm 2 (`api-reconciled`) shows the residual, per model where the
+   subtraction names one, otherwise as a reason-typed remainder row.
+6. Arm 1 (`otel-emitted`) shows OTel rows directly, with session, project and
+   model. It drops quarantined sessions but keeps self-billed rows, so a
+   personal-subscription day sits above the API figure by exactly those rows.
+7. Arm 3 (`provider-usage`) reads ingest-only tools straight from
+   `v_teammate_usage_daily`. They never reach steps 3 and 4.
 
-    CMP -->|"API > OTel<br/>(the normal case)"| U["<b>unaccounted_usage</b><br/>max(0, API − OTel) = $70<br/><i>taggable worklist item</i><br/>no model · no session"]
-    CMP -->|"OTel > API<br/>(the anomaly)"| OE["<b>over_emission</b><br/>max(0, OTel − API)<br/><i>integrity flag, not spend</i>"]
-
-    O --> ARM1["v_complete_usage arm 1<br/><i>otel-emitted</i>"]
-    U --> ARM2["v_complete_usage arm 2<br/><i>api-reconciled</i>"]
-
-    ARM1 --> INV["<b>$30 + $70 = $100</b><br/>shown = billed"]
-    ARM2 --> INV
-
-    style A fill:#1f6feb,color:#fff,stroke:#1f6feb
-    style O fill:#d40e8c,color:#fff,stroke:#d40e8c
-    style INV fill:#1a7f37,color:#fff,stroke:#1a7f37
-    style OE fill:#a40e26,color:#fff,stroke:#a40e26
-```
+*Arm 2 is the API figure minus the OTel detail, so arms 1 and 2 add back to
+the bill.*
 
 **The invariant, stated precisely** (imprecision here is what makes people
 propose designs that break it):
@@ -274,20 +257,27 @@ named bucket rather than as zero or as "untagged"
 Chargeback never reads OTel. The two providers bill differently and are charged
 differently, and this asymmetry is the whole content of §B:
 
-```mermaid
-flowchart LR
-    subgraph ANTHROPIC["Anthropic — bills PER USER"]
-        A1["actual_spend<br/>per teammate · day"] --> A2["v_finance_bill_chargeback"] --> A3["charged to the<br/><b>teammate's</b> cost centre"]
-    end
+![Anthropic is charged per teammate to their Business Unit; Copilot is charged per org pool to Business Units, never to a person](images/data-flow-chargeback.svg)
 
-    subgraph COPILOT["GitHub Copilot — bills a POOLED allowance"]
-        C1["copilot_pool_bill<br/>per org · month"] --> C2["copilot_overage_allocation<br/>policy-weighted split"] --> C3["charged to a<br/><b>cost centre</b>, never a person"]
-    end
+1. `v_finance_bill_chargeback` reads Anthropic `actual_spend`, drops
+   `chargeback_exempt` rows, and homes each row to the nearest cost-owning
+   ancestor of the teammate's placement.
+2. Copilot seat rows in `actual_spend` never enter: every Copilot tool is
+   excluded by name.
+3. Anthropic rows reach `v_finance_chargeback_month` rolled up to the month.
+4. `copilot_pool_bill` splits into three lanes in
+   `v_finance_copilot_pool_chargeback`. `copilot-license` is homed to the org's
+   Business Unit. `copilot-usage` follows `copilot_overage_allocation`, which
+   splits the overage by seat-holders' usage, and falls back to the org's
+   Business Unit until an allocation exists (a `WHERE NOT EXISTS` keeps the two
+   exclusive).
+5. The licence and usage lanes are the Copilot charge, at Business Unit, tool
+   and month grain, with no person column.
+6. `copilot-unclassified` is carried in the view so it stays visible, and every
+   chargeable total excludes it.
 
-    A3 & C3 --> M[["v_finance_chargeback_month"]]
-
-    style M fill:#7d4e00,color:#fff,stroke:#bf8700
-```
+*The asymmetry comes from the bills: Anthropic invoices per user, GitHub
+invoices a pool.*
 
 Three consequences that are enforced, not conventional:
 
@@ -356,20 +346,19 @@ allocated by largest-remainder so the parts sum to the whole exactly
 Pinned on rung 2 and NULL on provider-priced, both asserted at
 `tests/integration/azure/joiner-provider-cost.test.ts:230`, `:360`, `:440`.
 
-```mermaid
-flowchart LR
-    S["one api_request span<br/>provider cost: <b>$0.40</b>"] --> M["MAX per span<br/><i>never SUM</i>"]
-    M --> D{"split across<br/>token-type rows"}
-    RC["rate card<br/><i>weights only</i>"] -.-> D
-    D --> R1["input<br/>$0.10"]
-    D --> R2["output<br/>$0.24"]
-    D --> R3["cache-read<br/>$0.04"]
-    D --> R4["cache-write<br/>$0.02"]
-    R1 & R2 & R3 & R4 --> SUM["Σ = <b>$0.40</b> exactly<br/><i>largest-remainder, order-independent</i>"]
+| token-type row | rate-card weight share | allocated |
+|---|---|---|
+| input | 25% | $0.10 |
+| output | 60% | $0.24 |
+| cache-read | 10% | $0.04 |
+| cache-write | 5% | $0.02 |
+| **span total** | | **$0.40**, the provider's own figure |
 
-    style SUM fill:#1a7f37,color:#fff,stroke:#1a7f37
-    style RC fill:#57606a,color:#fff,stroke:#57606a
-```
+An illustrative span: the provider sends $0.40 for one `api_request`, taken
+once per span as `MAX`, never `SUM`
+(`server/workers/azure-monitor-reader.ts:1517-1525`). The rate card supplies
+only the weights. The split is largest-remainder in integer micro-dollars, so
+the rows add back to the provider total exactly, whatever order they arrive in.
 
 If **any** token type has no rate line, no split is defensible, so the whole
 provider total lands on one deterministic carrier row rather than being guessed
@@ -508,7 +497,7 @@ What each hop does when it breaks, and what a reader sees as a result.
 
 | hop | failure | behaviour | visible as |
 |---|---|---|---|
-| LAW → joiner | event lands late | absorbed only within a **5-minute** watermark overlap; older events need the ~24 h deep rescan or an operator `telemetry-recovery` run | spend appears hours late, then reconciles |
+| LAW → joiner | event lands late | absorbed only within a **5-minute** watermark overlap; older events wait for the daily `telemetry-recovery` pass or an operator recovery | spend appears hours late, then reconciles |
 | Joiner | no rate line for any token type | whole span total lands on one carrier row | token-type split distorted; total correct |
 | Joiner | rung 3 — no provider cost, no card | **span not written at all** | usage silently missing from OTel; the API residual absorbs it |
 | Joiner | membership gate fails | row **is** written, `project_id` NULL | spend appears as unallocated, never lost |

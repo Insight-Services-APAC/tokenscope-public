@@ -26,6 +26,22 @@
  *     call; the probe is cheap (cached ~30-day access token → a single /bearer
  *     GET), so we always run the live, self-healing check.
  *
+ * THE HOOK COMMAND (hooks.json) IS A sh/PowerShell POLYGLOT (#408 S5):
+ *
+ *   node "<root>/hooks/session-start.mjs"; LASTEXITCODE=$?; exit $(( $LASTEXITCODE * !!($LASTEXITCODE - 127) ))
+ *
+ * Claude Code runs a shell-form hook with `sh -c` on POSIX, Git Bash on Windows,
+ * or PowerShell on Windows without Git Bash, and hooks.json has one command for
+ * all of them. A hook that exits non-zero is shown as a "hook error" notice
+ * every session; exit 0 sends stderr to the debug log only. So a device with no
+ * `node` (Windows emit-only) must see exit 0:
+ *   - sh/bash: `$?` is node's status; 127 (not found) maps to 0 and every other
+ *     status is kept, so a crash here is still visible.
+ *   - PowerShell (5.1 or 7): `LASTEXITCODE=$?` is just a failed command name
+ *     (stderr, debug log), `$LASTEXITCODE` is node's exit code, or $null when
+ *     `node` did not resolve, and `$null * ...` exits 0.
+ * Verified under sh, bash and pwsh 7 by tests/unit/plugin/hooks-command.test.ts.
+ *
  * Fail-OPEN throughout: any error exits 0 with no output, and a warning is the
  * ONLY thing ever written to stdout (a SessionStart hook's top-level
  * `systemMessage` is shown to the developer; `additionalContext` goes to the
@@ -35,11 +51,15 @@ import { existsSync, realpathSync, readFileSync, rmSync, chmodSync } from 'node:
 import { homedir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isMainModule } from '../scripts/is-main.mjs'
 import { resolveRepoProjectCode, computeCodeHash, readGlobalEnrolment, writeRepoTag, resolveRepoRoot } from '../scripts/tag-repo.mjs'
-import { reconcilePluginPaths } from '../scripts/env-builder.mjs'
+import { reconcilePluginPaths, parseHelperCommand } from '../scripts/env-builder.mjs'
+import { assertConfinedPath } from '../scripts/argv-guard.mjs'
 import {
   readSettingsEnv,
   readEmitSentinel,
+  readEmitDegraded,
+  degradedExpiryNote,
   runEmitHelper,
   stateDir,
   globalSettingsEnv,
@@ -48,6 +68,10 @@ import {
   realHome,
   migrateStoredEndpoints,
   casWriteFile,
+  readHelperRecord,
+  readSettingsFilesList,
+  readIsolatedSettingsFiles,
+  trustedStateDir,
 } from '../scripts/plugin-runtime.mjs'
 import { refreshLanded } from '../scripts/landed-check.mjs'
 import { checkRepoProjectBillable } from '../scripts/project-check.mjs'
@@ -465,32 +489,101 @@ export function hookStateDir(cwd = process.cwd()) {
  * GC'd) lingers. Change-detecting + atomic; fail-OPEN. The new paths take effect
  * on the NEXT launch (Claude reads these at startup), so this self-heals within
  * one relaunch of any update. Idempotent once reconciled.
+ *
+ * The helper is rebuilt from its record for THIS platform (reconcilePluginPaths),
+ * so the same pass moves a pre-sprint bare `.sh` path to the quoted form, keeps
+ * its `--state-dir`, and moves a Windows device onto the PowerShell helper.
+ * After the global file it does the same for every session-scoped settings file
+ * a `claude-redeem --settings-path` listed in `storeDir` (and in the state dir
+ * the global helper names, when that differs): nothing else would reach them.
+ * Then every file `storeDir`'s isolated index pairs with ANOTHER state dir
+ * (`--settings-path S --state-dir X`), rebuilt only while its own helper still
+ * names that state dir, so the record it is rebuilt from is X's.
+ * A listed path must still be a `settings.json` inside `home`; anything else in
+ * the list is skipped, not followed.
+ *
+ * `storeDir` defaults to trustedStateDir(), NOT stateDir(): the list names files
+ * this hook rewrites, and `TOKENSCOPE_STATE_DIR` can be set by a repository's
+ * settings env, so it must not choose the list.
  */
 export function selfHealPluginPaths({
   settingsPath = join(homedir(), '.claude', 'settings.json'),
   scriptsDir = resolve(HOOK_DIR, '..', 'scripts'),
+  storeDir = trustedStateDir(),
+  platform = process.platform,
+  home = realHome(),
 } = {}) {
-  if (!existsSync(settingsPath)) return
-  // casWriteFile: re-derived from the CURRENT bytes on each attempt, so a stale
-  // snapshot can never roll back a rotated refresh token.
-  casWriteFile(settingsPath, (raw) => {
-    if (raw === null) return null
-    let settings
-    try {
-      settings = JSON.parse(raw)
-    } catch {
-      return null // unparseable — NEVER clobber (would wipe the emit credential)
-    }
-    // Only ever repoint to a target that actually exists — never create a phantom path.
-    const statuslinePath = join(scriptsDir, 'statusline.mjs')
-    const helperPath = join(scriptsDir, 'otel-headers-helper.sh')
-    const { settings: next, changed } = reconcilePluginPaths(settings, {
-      statuslinePath: existsSync(statuslinePath) ? statuslinePath : null,
-      helperPath: existsSync(helperPath) ? helperPath : null,
+  const tool = 'claude-code'
+  const recordFor = (dir) => (sd) => readHelperRecord(tool, sd ?? dir, sd)
+  const statuslineTarget = join(scriptsDir, 'statusline.mjs')
+  // `onlyStateDir`: rebuild only a helper that names exactly this --state-dir.
+  const heal = (path, onlyStateDir = undefined) => {
+    if (!existsSync(path)) return null
+    let helper = null
+    // casWriteFile: re-derived from the CURRENT bytes on each attempt, so a stale
+    // snapshot can never roll back a rotated refresh token.
+    casWriteFile(path, (raw) => {
+      if (raw === null) return null
+      let settings
+      try {
+        settings = JSON.parse(raw)
+      } catch {
+        return null // unparseable — NEVER clobber (would wipe the emit credential)
+      }
+      if (onlyStateDir !== undefined && parseHelperCommand(settings?.otelHeadersHelper)?.stateDir !== onlyStateDir) {
+        return null
+      }
+      // Only ever repoint to a target that actually exists — never create a phantom path.
+      const { settings: next, changed } = reconcilePluginPaths(settings, {
+        statuslinePath: existsSync(statuslineTarget) ? statuslineTarget : null,
+        scriptsDir,
+        platform,
+        recordFor: recordFor(storeDir),
+        // A value with no --state-dir runs with the default one, which is
+        // where the emit-only redeem put its helper snapshot.
+        defaultStateDir: storeDir,
+      })
+      helper = next.otelHeadersHelper
+      if (!changed) return null
+      return `${JSON.stringify(next, null, 2)}\n`
     })
-    if (!changed) return null
-    return `${JSON.stringify(next, null, 2)}\n`
-  })
+    return helper
+  }
+
+  const globalHelper = heal(settingsPath)
+  const dirs = [storeDir]
+  const named = parseHelperCommand(globalHelper)?.stateDir
+  if (named && named !== storeDir) dirs.push(named)
+  const seen = new Set([settingsPath])
+  const confined = (listed) => {
+    try {
+      return assertConfinedPath(listed, { flag: 'settings-files', roots: [home], allowedBasenames: ['settings.json'] })
+    } catch {
+      return null
+    }
+  }
+  for (const dir of dirs) {
+    for (const listed of readSettingsFilesList(tool, dir)) {
+      const real = confined(listed)
+      if (!real || seen.has(real)) continue
+      seen.add(real)
+      try {
+        heal(real)
+      } catch {
+        /* one unreadable file must not stop the rest */
+      }
+    }
+  }
+  for (const { file, stateDir: entryDir } of readIsolatedSettingsFiles(tool, storeDir)) {
+    const real = confined(file)
+    if (!real || seen.has(real)) continue
+    seen.add(real)
+    try {
+      heal(real, entryDir)
+    } catch {
+      /* one unreadable file must not stop the rest */
+    }
+  }
 }
 
 /**
@@ -580,6 +673,22 @@ function warnFor(http) {
 }
 
 /**
+ * The exit-0-but-degraded notice (#409): the helper handed back its CACHED
+ * Azure bearer because TokenScope was unreachable, so this session is emitting
+ * but nothing verified the credential. Informational unless the cache is known
+ * to be expired, in which case exports are probably being refused and it reads
+ * as a warning. Exported for the formatter test.
+ */
+export function degradedNotice(degraded, nowSec = Math.floor(Date.now() / 1000)) {
+  const reason = (degraded && degraded.reason) || 'TokenScope unreachable'
+  const note = degradedExpiryNote(degraded, nowSec)
+  const expired = /EXPIRED/.test(note)
+  return expired
+    ? `⚠ TokenScope: TokenScope is unreachable (${reason}) and the cached Azure bearer has expired — telemetry is probably NOT being accepted. Run /tokenscope:status; spend may be going untracked until TokenScope is reachable.`
+    : `ℹ TokenScope: TokenScope is unreachable (${reason}) — this session is emitting on the cached Azure bearer (${note}). Nothing to do unless it persists; run /tokenscope:status to check.`
+}
+
+/**
  * Job 2: decide whether to warn. Returns a warning string, or null (healthy,
  * not-enrolled, throttled-healthy, or only transiently unverifiable).
  */
@@ -632,16 +741,24 @@ function emissionHealthWarning() {
     timeoutMs: PROBE_TIMEOUT_MS,
   })
   if (!ran) return null
-  // Exit 0 = healthy (the helper only exits 0 via the /bearer-200 path, which mints
-  // a bearer + clears the sentinel). A null exit = killed (timeout) before
-  // completing → couldn't verify. BOTH stay silent, and crucially we do NOT read
-  // the sentinel in either case — so a STALE sentinel (a prior or since-resolved
-  // failure) can never cry wolf. Only a genuine NON-ZERO exit code means the helper
-  // ran and failed THIS run, writing a fresh sentinel (adversarial R: MEDIUM-1).
-  if (status === 0 || status === null) return null
+  // A null exit = killed (timeout) before completing → couldn't verify; stays
+  // silent, and the sentinel is NOT read, so a STALE sentinel (a prior or
+  // since-resolved failure) can never cry wolf. Only a genuine NON-ZERO exit code
+  // means the helper ran and failed THIS run, writing a fresh sentinel
+  // (adversarial R: MEDIUM-1).
+  if (status === null) return null
+  // Exit 0 is healthy EXCEPT on the cached-bearer path (#409): the helper hands
+  // back its cached Azure bearer when TokenScope is unreachable and writes the
+  // degraded marker on every such run (a clean mint clears it), so a marker
+  // present right after THIS run's exit 0 is fresh, never stale, and the
+  // credential was not verified. Say so once; otherwise stay silent.
+  if (status === 0) {
+    const degraded = readEmitDegraded(env, dir)
+    return degraded ? degradedNotice(degraded) : null
+  }
   // Live failure (even after the helper's in-run retry). Warn only on a DEFINITE
   // auth failure (http > 0); a network error (fresh sentinel http 0) stays SILENT.
-  const http = sentinelHttp(readEmitSentinel(env))
+  const http = sentinelHttp(readEmitSentinel(env, dir)) // where the helper was pinned to write it
   if (http && http !== 0) return warnFor(http)
   return null
 }
@@ -908,7 +1025,7 @@ export { emissionHealthWarning, warnFor, sentinelHttp, projectBillabilityWarning
 
 // CLI entry guard: run the hook ONLY when invoked as the entry script (Claude's
 // SessionStart). Importing the module (unit tests) must NOT run main / exit.
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
+const isMain = isMainModule(import.meta.url)
 if (isMain) {
   // AWAIT the full async chain before exiting: emit-on-install enrol POST + the
   // landed refresh are async, and a fresh install must finish enrolling (and then

@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 450" width="1000" height="450" role="img" aria-labelledby="t d">
+  <title id="t">With TokenScope's client settings no prompt or response text leaves the device, but Claude Code attaches the signed-in email to its events, and that email reaches Log Analytics and a column on attribution_record.</title>
+  <desc id="d">Four zones: developer device, Azure Monitor, the VNet and the browser. Each hop lists what it carries. Token counts, cost, model, session id and TokenScope's resource attributes travel the whole way. Claude Code's user.email and organization.id attributes, marked as personal data, are stored in OTelLogs, read by the joiner and written to attribution_record.emitting_email and emitting_org_id. Entra identity lives in the teammate tables. The dashboard reads both under Entra sign-in and the application's role and scope checks. Prompt and response text is not emitted.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="450"/>
+  <rect class="zone" x="16" y="16" width="190" height="418" rx="10"/>
+  <text class="zlabel" x="30" y="38">DEVELOPER DEVICE</text>
+  <rect class="zone" x="226" y="16" width="190" height="418" rx="10"/>
+  <text class="zlabel" x="240" y="38">AZURE MONITOR</text>
+  <rect class="zone" x="436" y="16" width="360" height="418" rx="10"/>
+  <text class="zlabel" x="450" y="38">VNET</text>
+  <rect class="zone" x="816" y="16" width="168" height="418" rx="10"/>
+  <text class="zlabel" x="830" y="38">BROWSER</text>
+
+  <rect class="node" x="31" y="56" width="160" height="50" rx="6"/>
+  <text class="t" x="111" y="77" text-anchor="middle">Claude Code</text>
+  <text class="s" x="111" y="94" text-anchor="middle">api_request log events</text>
+  <rect class="node" x="241" y="56" width="160" height="50" rx="6"/>
+  <text class="tm" x="321" y="77" text-anchor="middle">log-&lt;name&gt;</text>
+  <text class="s" x="321" y="94" text-anchor="middle">OTelLogs table</text>
+  <rect class="node" x="451" y="56" width="150" height="50" rx="6"/>
+  <text class="t" x="526" y="77" text-anchor="middle">Read joiner</text>
+  <text class="s" x="526" y="94" text-anchor="middle">KQL · managed identity</text>
+  <rect class="node" x="636" y="56" width="145" height="50" rx="6"/>
+  <text class="t" x="708" y="77" text-anchor="middle">Postgres</text>
+  <text class="s" x="708" y="94" text-anchor="middle">private endpoint</text>
+  <rect class="node" x="831" y="56" width="138" height="50" rx="6"/>
+  <text class="t" x="900" y="77" text-anchor="middle">Dashboard</text>
+  <text class="s" x="900" y="94" text-anchor="middle">OIDC · scope checks</text>
+
+  <line class="e" x1="191" y1="81" x2="235" y2="81" marker-end="url(#ah)"/>
+  <circle class="cn" cx="216" cy="81" r="10"/><text class="cnt" x="216" y="85" text-anchor="middle">1</text>
+  <line class="e" x1="401" y1="81" x2="445" y2="81" marker-end="url(#ah)"/>
+  <circle class="cn" cx="426" cy="81" r="10"/><text class="cnt" x="426" y="85" text-anchor="middle">2</text>
+  <line class="e" x1="601" y1="81" x2="630" y2="81" marker-end="url(#ah)"/>
+  <circle class="cn" cx="614" cy="81" r="10"/><text class="cnt" x="614" y="85" text-anchor="middle">3</text>
+  <line class="e" x1="781" y1="81" x2="825" y2="81" marker-end="url(#ah)"/>
+  <circle class="cn" cx="806" cy="81" r="10"/><text class="cnt" x="806" y="85" text-anchor="middle">4</text>
+
+  <!-- carries panels -->
+  <rect class="node inner" x="31" y="140" width="160" height="200" rx="6"/>
+  <text class="zlabel" x="41" y="160">EMITS</text>
+  <text class="sm" x="41" y="180">input · output ·</text>
+  <text class="sm" x="41" y="196">cache tokens</text>
+  <text class="sm" x="41" y="212">cost_usd · model</text>
+  <text class="sm" x="41" y="228">session.id</text>
+  <text class="sm" x="41" y="244">instance_id</text>
+  <text class="sm" x="41" y="260">project.code_hash</text>
+  <text class="sm acc" x="41" y="288">user.email</text>
+  <text class="sm acc" x="41" y="304">organization.id</text>
+  <text class="s acc" x="41" y="324">attached by Claude</text>
+
+  <rect class="node inner" x="241" y="140" width="160" height="200" rx="6"/>
+  <text class="zlabel" x="251" y="160">STORES</text>
+  <text class="s" x="251" y="180">every attribute</text>
+  <text class="s" x="251" y="196">as emitted</text>
+  <text class="sm acc" x="251" y="288">user.email</text>
+  <text class="sm acc" x="251" y="304">organization.id</text>
+  <text class="s" x="251" y="324">retention: workspace</text>
+
+  <rect class="node inner" x="451" y="140" width="150" height="200" rx="6"/>
+  <text class="zlabel" x="461" y="160">READS</text>
+  <text class="s" x="461" y="180">api_request rows for</text>
+  <text class="s" x="461" y="196">one instance_id</text>
+  <text class="s" x="461" y="220">teammate from</text>
+  <text class="sm" x="461" y="236">instance_attestation</text>
+  <text class="s" x="461" y="252">never from the email</text>
+  <text class="sm acc" x="461" y="288">user.email</text>
+  <text class="s acc" x="461" y="304">billing-lane evidence</text>
+
+  <rect class="node inner" x="636" y="140" width="145" height="200" rx="6"/>
+  <text class="zlabel" x="644" y="160">HOLDS</text>
+  <text class="sm" x="644" y="180">attribution_record</text>
+  <text class="s" x="644" y="196">tokens · cost · model</text>
+  <text class="s" x="644" y="212">teammate · project FKs</text>
+  <text class="sm acc" x="644" y="236">emitting_email</text>
+  <text class="sm acc" x="644" y="252">emitting_org_id</text>
+  <text class="sm acc" x="644" y="288">teammate</text>
+  <text class="s acc" x="644" y="304">entra_oid · email</text>
+  <text class="sm acc" x="640" y="320">teammate_identity_map</text>
+
+  <rect class="node inner" x="831" y="140" width="138" height="200" rx="6"/>
+  <text class="zlabel" x="841" y="160">SHOWS</text>
+  <text class="s" x="841" y="180">rows inside the</text>
+  <text class="s" x="841" y="196">viewer's region</text>
+  <text class="s" x="841" y="212">and unit scope</text>
+  <text class="s acc" x="841" y="288">names and emails</text>
+  <text class="s acc" x="841" y="304">of teammates</text>
+  <text class="s acc" x="841" y="320">in scope</text>
+
+  <!-- not emitted -->
+  <rect class="node bad" x="31" y="364" width="160" height="50" rx="6"/>
+  <text class="s bad" x="111" y="385" text-anchor="middle">prompt · response text</text>
+  <text class="s bad" x="111" y="401" text-anchor="middle">file paths · code</text>
+  <line class="e bad" x1="191" y1="389" x2="330" y2="389"/>
+  <line class="x" x1="221" y1="380" x2="239" y2="398"/><line class="x" x1="239" y1="380" x2="221" y2="398"/>
+  <circle class="cn bad" cx="290" cy="389" r="10"/><text class="cnt bad" x="290" y="393" text-anchor="middle">5</text>
+  <text class="s" x="346" y="385">not emitted by default: TokenScope never sets OTEL_LOG_USER_PROMPTS.</text>
+  <text class="s" x="346" y="401">A client default: ingestion stores whatever a client sends.</text>
+</svg>

@@ -11,6 +11,23 @@ Device onboarding is an MCP OAuth flow: connect the MCP (one browser consent),
 then run the `tokenscope-setup` prompt, which provisions emitting via a
 secret-isolating handoff (`provision_emit` → `/api/v1/setup/redeem`).
 
+## Where it works
+
+| Surface | Supported | How usage arrives |
+| --- | --- | --- |
+| Claude Code CLI — macOS, Linux, WSL, containers | Yes | Telemetry via `otel-headers-helper.sh` (`sh` + `curl`); setup needs Node |
+| Claude Code CLI — Windows | Yes | Telemetry via `otel-headers-helper.ps1` (Windows PowerShell 5.1); setup with Node, or emit-only via PowerShell |
+| Claude Desktop **Code tab** (local sessions) — macOS, Windows | Yes | Same settings, plugin and helper as the CLI on that OS |
+| Claude Code in VS Code / JetBrains | Yes (same engine and settings) | As the CLI on that OS |
+| Claude Desktop Code tab **WSL / cloud** sessions; claude.ai/code | No plugin | Anthropic Analytics API `claude_code` lane: per user, per day, untagged |
+| Claude Desktop chat, Cowork, claude.ai, Chrome, Office, Slack | No plugin | Anthropic Analytics API: per user, per day, per surface; billing only, never tagged |
+
+The helper is chosen per platform at setup and again at every session start
+(`buildHelperCommand` in `plugin/scripts/env-builder.mjs`); both helpers read and
+write the same files, so a device moves between them without re-enrolling. Why
+two native helpers rather than one runtime: ADR-0015 (client runtime native per OS).
+Copilot's equivalent table is in [Copilot CLI Client](Copilot-CLI-Client.md).
+
 ## Connect + emission flow
 
 Two distinct developer actions: **connect + provision the device once** (one
@@ -20,42 +37,18 @@ OAuth consent → global config), then **tag each repo** with a committed
 **project** is an emitted per-event claim, membership-gated at join (see
 ADR-0004).
 
-```mermaid
-flowchart TD
-    subgraph MCP["Connect the MCP (one OAuth consent)"]
-        A["Developer: /mcp → tokenscope"]
-        B["browser PKCE consent → /oauth/authorize<br/>Approve read + tag scopes"]
-        C["access token (tokenscope.read + tag)<br/>— the MCP tools now work"]
-        A --> B --> C
-    end
+![One consent connects the device, a local helper redeems the emit credential outside the chat, and a committed .tokenscope file tags the repo on a later launch](images/claude-code-client-onboarding.svg)
 
-    subgraph Setup["Provision emitting (ONCE per device)"]
-        D["run the tokenscope-setup MCP prompt"]
-        E["provision_emit tool (read-scoped)<br/>locate/create instance_attestation<br/>→ short-TTL one-time handoff code + redeem URL<br/>(NOT the durable secret — never via chat)"]
-        F["local emit-redeem helper:<br/>POST /api/v1/setup/redeem { handoff_code }<br/>process→server, single-use atomic claim"]
-        G["response: instance_id (DEVICE_SID),<br/>bearer_endpoint, OAuth emit credential,<br/>telemetry.claude{ OTEL_* }"]
-        H["write GLOBAL ~/.claude/settings.json<br/>shared OTel plumbing + bearer helper<br/>+ tokenscope.instance_id — NO project"]
-        D --> E --> F --> G --> H
-    end
+1. `/mcp` opens a browser consent at `/api/v1/oauth/authorize`. The PKCE exchange at `/api/v1/oauth/token` gives the MCP client a `tokenscope.read` + `tag` token, and the MCP tools start working.
+2. The `tokenscope-setup` prompt calls `provision_emit`. It locates or creates this device's `instance_attestation` and returns a single-use handoff code that expires in about five minutes. The code passes through the chat; the durable credential never does.
+3. The agent runs the redeem helper for its lane (see [Setup lanes](#setup-lanes-node-or-powershell-on-windows)): `plugin/scripts/claude-redeem.mjs`, or `claude-redeem.ps1` on Windows without Node. It POSTs the code to `/api/v1/setup/redeem`. The response carries `instance_id`, `bearer_endpoint`, the durable `tokenscope.emit` refresh token and `telemetry.claude`. The script writes them to `~/.claude/settings.json` and to the device store `~/.tokenscope/config.claude-code.json`.
+4. The `project` prompt writes a one-line `.tokenscope` file holding the project code; the developer commits it. The plugin's `SessionStart` hook reads it, computes `sha256(code)` and writes `OTEL_RESOURCE_ATTRIBUTES` (the global `tokenscope.instance_id`, `project.code_hash`, `tool`) plus `otelHeadersHelper` into the repo's gitignored `.claude/settings.local.json`. The repo file carries no credential.
+5. Claude Code reads its settings once, at startup. The session in which the hook writes the repo file still emits under the old attributes; the next launch carries the project claim.
+6. Claude Code gets its export headers from the headers helper for its OS (`otel-headers-helper.sh` on POSIX, `otel-headers-helper.ps1` on Windows; ADR-0015). It trades the refresh token for a `tokenscope.emit` access token and calls `GET /api/v1/instances/{id}/bearer`, which returns an Azure Monitor token minted from the app's managed identity.
+7. Claude Code sends OTLP `api_request` log events, with that bearer, to the data collection endpoint. The DCR lands them in `OTelLogs`.
+8. The read joiner (`azure-monitor-read`) queries `OTelLogs` by `tokenscope.instance_id`. It takes the teammate from `instance_attestation` and bills the project only if that teammate is a current member; otherwise the spend stays untagged and an `attribution-spill-unauthorized` audit event is written.
 
-    subgraph Repo["Per repo (travels with the repo)"]
-        P[".tokenscope file committed (project code)"]
-        Q["project MCP prompt (or SessionStart hook)"]
-        R["inject project.code_hash = sha256(code)<br/>(+ DEVICE_SID) into repo-local settings"]
-        S["restart claude<br/>(telemetry config read at STARTUP)"]
-        P --> Q --> R --> S
-    end
-
-    subgraph Azure["Azure Monitor"]
-        I["Claude Code emits OTLP api_request<br/>LOG events → DCR logs endpoint"]
-        J["OTelLogs table<br/>teammate ← DEVICE_SID (attestation),<br/>project ← emitted code_hash claim"]
-        I --> J
-    end
-
-    C -.tools authorised.-> D
-    H -.global plumbing in place.-> Q
-    S --> I
-```
+*The model sees the handoff code and nothing durable: the emit credential travels only between `claude-redeem.mjs` and the server.*
 
 - **One consent authenticates AND provisions.** Connecting the MCP runs the
   browser PKCE consent (read + tag). The `tokenscope-setup` prompt then calls the
@@ -67,15 +60,17 @@ flowchart TD
   durable secret never enters the LLM's context (the secret-isolating handoff;
   the single audited read→emit crossing, ADR-0005 E1).
 - **Per-repo project travels with the repo.** Each repo commits a `.tokenscope`
-  file (the project code). The `project` MCP prompt (or the `SessionStart` hook)
-  resolves it and injects `project.code_hash = sha256(code)` (with the DEVICE_SID)
-  into the **repo-local** settings, so the project rides along with the repo
-  across every ephemeral session — no per-repo token, no re-provision. The
-  repo-local block carries the bearer and OAuth destinations but **neither the
+  file (the project code), which the `project` MCP prompt writes. The
+  `SessionStart` hook resolves it and writes `project.code_hash = sha256(code)`
+  (with the DEVICE_SID) into the **repo-local** settings, so the project rides
+  along with the repo across every ephemeral session — no per-repo token, no
+  re-provision. The repo-local block carries the resource attributes and the
+  `otelHeadersHelper` path but **neither the
   telemetry-enabling keys** (they apply from user settings; see "Project tag in the
   repo file" below) **nor the durable OAuth refresh token** — the emit helper reads
-  that from the device's own store first (`~/.tokenscope/config.claude-code.json`,
-  0600 in a 0700 dir; `~/.claude/settings.json` only while no store exists), so
+  that from the device's own store first (`~/.tokenscope/config.claude-code.json`:
+  0600 in a 0700 dir on POSIX, the profile's own ACL on Windows;
+  `~/.claude/settings.json` only while no store exists), so
   the durable credential is not planted in every tagged working tree.
 - **Membership-gated attribution.** The joiner resolves the **teammate from the
   attestation by DEVICE_SID** (unspoofable per-event) and takes the **project
@@ -89,6 +84,49 @@ flowchart TD
 - The **OAuth `tokenscope.emit` access token is the bearer-helper credential**
   (minted by the helper via the refresh-token grant), not a static OTLP header —
   Azure rejects the TokenScope token directly.
+
+### Setup lanes: Node, or PowerShell on Windows
+
+`/tokenscope:setup` starts with a runtime check (step 0) before the OAuth consent,
+so a device that cannot finish setup stops before `provision_emit` spends a
+handoff code. It runs `node device-id.mjs`, which also reports `platform` and the
+`node` version.
+
+| Device | Lane | Setup helpers | What works |
+| --- | --- | --- | --- |
+| Node on PATH (any OS) | Node | `device-id.mjs`, `claude-redeem.mjs` | Everything |
+| macOS, Linux, WSL, container, no Node | none | — | Setup stops at step 0 and names the install line: `sudo apt-get install -y nodejs`, `brew install node`, or Node in the container image |
+| Windows, no Node | PowerShell (emit-only) | `device-id.ps1`, `claude-redeem.ps1` (Windows PowerShell 5.1, ships with Windows) | Emitting, and the MCP tools (tagging, `my_usage`). Not the status line, `/tokenscope:backfill`, the repo pin from `.tokenscope`, or the session-start self-heal; `/tokenscope:status` uses its PowerShell probe. The emit helper runs from a snapshot copied to `<state>\helper\scripts\` at setup: it survives a plugin update but is not refreshed by one, so re-run setup after updating (once Node is installed the self-heal moves the command onto the active install) |
+
+On the PowerShell lane setup tells the user what emit-only means before the
+consent, and the redeem's own output repeats it with the way out:
+`winget install OpenJS.NodeJS.LTS`, then re-run setup.
+
+The setup and status commands start Windows PowerShell by its absolute path,
+`C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`, never a bare
+`powershell.exe`: the redeem carries the one-time handoff code in argv, and the
+model runs it with the session's environment, where a repository can set `PATH`.
+The forward-slash, unquoted form runs verbatim in both Git Bash and the
+PowerShell tool. On a Windows installed on another drive the model substitutes
+that drive letter (`$env:SystemRoot`).
+
+`claude-redeem.ps1` is a port of `claude-redeem.mjs`, not a reduced version. It
+takes the same arguments under the same argv rules (unknown flags refused,
+`--api-base` may only select a known origin, `--settings-path` / `--state-dir`
+confined to the profile and refused inside a git repository), writes the same
+v2 store and the same `settings.json` merge (refuses non-JSON, keeps unrelated
+keys, replaces the env block on a cross-environment move), and records
+`--settings-path` targets the same way. The differences are the platform in the
+helper record (`win32`, so `otelHeadersHelper` is the
+`"<absolute>\powershell.exe" … -File otel-headers-helper.ps1` command) and the `X-TokenScope-Setup-Mode: emit-only`
+header, which the server stores beside the device for diagnostics only.
+`tests/unit/plugin/claude-redeem-ps1.test.ts` runs both redeems on the same
+fixtures and compares the files they write byte for byte.
+
+One divergence is deliberate: the Node redeem resolves symlinks before its
+profile-containment check, while Windows PowerShell 5.1 cannot resolve a
+junction's target, so the PowerShell redeem refuses any link below the profile
+in a `--settings-path` / `--state-dir` value.
 
 ## Client surfaces: MCP tools + prompts, plus local commands
 
@@ -138,18 +176,19 @@ sparse-checks-out only those two dirs but requires the standalone `claude` CLI.
 
 | Command                            | What it does                                                                                                                                                                                                                                                                                             | Backing                                                                  |
 | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `/tokenscope:setup`                | Set up TokenScope on this device — connect + provision emitting in one OAuth consent. The **local counterpart** to the `tokenscope-setup` MCP prompt: it calls `provision_emit`/`my_usage` and runs the local redeem helper, so the durable emit credential is redeemed process→process, never via chat. | `provision_emit` + `my_usage` (MCP) + local `device-id.mjs` and `claude-redeem.mjs` |
-| `/tokenscope:status`               | Report whether your sessions are emitting **and** whether the MCP is connected — the 3-state verdict (🟢 emit+MCP / 🟡 emit-only / 🔴 not emitting). A Copilot CLI emission failure on the same machine is reported separately (`copilot_lane_failure`), never as a Claude one.                                                                                                                                                     | local emit probe (`otel-headers-helper.sh` → `/bearer`) + MCP-auth probe |
+| `/tokenscope:setup`                | Set up TokenScope on this device — connect + provision emitting in one OAuth consent. The **local counterpart** to the `tokenscope-setup` MCP prompt: it calls `provision_emit`/`my_usage` and runs the local redeem helper, so the durable emit credential is redeemed process→process, never via chat. | `provision_emit` + `my_usage` (MCP) + local `device-id.mjs` and `claude-redeem.mjs` (their `.ps1` twins on Windows without Node) |
+| `/tokenscope:status`               | Report whether your sessions are emitting **and** whether the MCP is connected — the 3-state verdict (🟢 emit+MCP / 🟡 emit-only / 🔴 not emitting). A Copilot CLI emission failure on the same machine is reported separately (`copilot_lane_failure`), never as a Claude one.                                                                                                                                                     | local emit probe (the OS's headers helper → `/bearer`) + MCP-auth probe |
 | `/tokenscope:statusline [on\|off]` | Install/remove the status line (Claude Code's own emission health + MCP-connection state + session id; a failing Copilot CLI emitter on the same machine never turns it red).                                                                                                                                                                                                                    | local-only                                                               |
 | `/tokenscope:backfill`             | Re-emit recent local Claude usage that may have been dropped (short emission-gap catch-up).                                                                                                                                                                                                              | local-only                                                               |
 
 Each script resolves the API base via `api-base.mjs`, most explicit first: the
 caller's explicit argument, else `TOKENSCOPE_API_BASE` **but only when it names
-loopback**, else the MCP server's **registered origin** (discovered from
-configuration the user wrote, never from the repository), else the **baked
-deployment default** (the API base is part of the plugin, since the marketplace
-ships it per-deployment). `plugin/.mcp.json` reads the same base for the MCP
-server.
+loopback**, else the plugin's **`server_url` option** as the user configured it
+(read from managed and user settings, never from the repository), else the MCP
+server's **registered origin** (discovered from configuration the user wrote),
+else the **packaged default**. `plugin/.mcp.json` is
+`${user_config.server_url}/api/v1/mcp`, so Claude Code puts the same configured
+value (or the same default) into the MCP server's URL.
 
 **Neither of the two channels a repository or a model can reach may name a
 destination.** Claude Code merges a project's `.claude/settings.local.json` env
@@ -157,7 +196,8 @@ over the global one, so `TOKENSCOPE_API_BASE` is something a cloned repository
 can set and nothing downstream can tell that value apart from one the developer
 exported — hence loopback-only, for every script, with no opt-out flag. And on
 the redeem path `--api-base` may only **select** an origin the device already
-knows (loopback, the baked default, or the discovered registration), never
+knows (loopback, the packaged default, the configured `server_url`, or the
+discovered registration), never
 introduce one, because that argv is composed by a model under a prefix
 `allowed-tools` grant that pre-approves every tail. The redeem request carries a
 live single-use handoff code whose answer is a durable emit credential, so it is
@@ -165,11 +205,11 @@ the one call that must not be steerable. Local dev against
 `http://localhost:3450` still works: to be served by loopback something must
 already be running on the machine, and whoever registered an MCP server there is
 discovered from their own configuration anyway. When resolution fails, the remedy
-is to register the server with the CLI — not to pass a flag, which on a device
-that discovered nothing can only accept loopback values.
+is to set `server_url` (or register the server with the CLI) — not to pass a flag,
+which on a device that knows nothing can only accept loopback values.
 
-`status` (emission probe) invokes the real emit path
-(`otel-headers-helper.sh`). Reads and tagging are now over MCP and authenticate
+`status` (emission probe) invokes the real emit path (the headers helper for the
+OS: `otel-headers-helper.sh`, or `otel-headers-helper.ps1` on Windows). Reads and tagging are now over MCP and authenticate
 with the connection's **`tokenscope.read`/`tag` OAuth** grant — a client
 authenticates as itself, never via a borrowed browser cookie.
 
@@ -183,33 +223,40 @@ vendored `copilot-plugin/` copies byte-identical to their sources.
 
 ### Installing for your own deployment
 
-The API base is **baked into the plugin per deployment**, by design: an off-box
-`TOKENSCOPE_API_BASE` is ignored (only loopback, e.g. `http://localhost:3450`, is
-honoured, for local dev), because a cloned repository can set that variable. So
-the plugin in this repository points at the maintainers' deployment. To point
-developers at yours, either:
+**Claude Code: set the plugin's `server_url`.** In Claude Code run `/plugin`,
+choose **tokenscope**, then **Configure**, and paste the server URL from your
+deployment's Connect dialog. No fork. Claude Code saves it in user settings as
+`pluginConfigs["tokenscope@<marketplace>"].options.server_url` and substitutes it
+into the plugin's MCP URL; the scripts read the same entry from
+`~/.claude/settings.json` (or from managed settings, which outrank it, so an
+organisation can set it for every device).
 
-1. **Fork and set your host (recommended).** In your fork, set your deployment's
-   URL (`https://<your-host>`) in all four places that must agree:
-   - `plugin/scripts/api-base.mjs` — `DEFAULT_API_BASE`
-   - `plugin/.mcp.json` — the literal `url`
-   - `copilot-plugin/.mcp.json` — the literal `url` (Copilot does not expand `${VAR}`)
-   - `copilot-plugin/scripts/enroll.mjs` — its own `DEFAULT_API_BASE`
+Only the user or the organisation can set it. Claude Code ignores `pluginConfigs`
+in project and local settings from 2.1.207, and the scripts never read the
+`CLAUDE_PLUGIN_OPTION_SERVER_URL` variable it exports to hooks, because a
+repository's `env` reaches hook processes too. On Claude Code older than 2.1.207 a
+cloned repository can still move the MCP server's URL through its own settings;
+the scripts, which carry the credentials, ignore it.
 
-   Then run `npm run sync:copilot-plugin` and `npm run check:copilot-plugin-sync`
-   (it fails if the four hosts disagree or a vendored copy is stale), bump the
-   plugin versions (`plugin/.claude-plugin/plugin.json`,
-   `copilot-plugin/plugin.json` and both entries in
-   `.claude-plugin/marketplace.json`; an installed plugin only updates when the
-   number increases), and have developers add **your fork** as the marketplace.
-2. **Register the MCP server yourself.** Keep the published plugin and register
-   your server at user scope:
-   `claude mcp add --transport http --scope user tokenscope https://<your-host>/api/v1/mcp`.
-   The scripts discover that registration (it is configuration the developer
-   wrote, not something a repository can supply) and prefer it over the baked
-   default.
-   The plugin's own bundled MCP entry (`plugin/.mcp.json`) still names the baked
-   host, so this leaves two `tokenscope` servers side by side; a fork avoids that.
+The internal build defaults `server_url` to the maintainers' Dev deployment, so
+existing installs need nothing. The public build ships no default: an
+unconfigured install reports *"URL is unset or invalid — open /plugin manage and
+configure"* for the MCP server, and the setup helpers stop with *"No TokenScope
+server is configured"*.
+
+**Copilot CLI** has no plugin options. Register the server with
+`copilot mcp add --transport http tokenscope https://<your-host>/api/v1/mcp` (the
+Connect dialog shows it); the Copilot scripts discover that registration.
+
+**Changing the packaged default** means editing six places that
+`npm run check:copilot-plugin-sync` holds together:
+`plugin/.claude-plugin/plugin.json` (`userConfig.server_url.default`),
+`plugin/scripts/api-base.mjs` (`DEFAULT_API_BASE`), `copilot-plugin/.mcp.json`,
+`copilot-plugin/scripts/enroll.mjs` and `shared/connect.ts`
+(`CLAUDE_PLUGIN_DEFAULT_ORIGIN`, `COPILOT_PLUGIN_BUNDLED_ORIGIN`). The Claude
+default may be empty (the public build), and then the Connect dialog always
+shows the step that points the plugin at the deployment. The check also fails if `plugin/.mcp.json` is anything
+other than the `server_url` template. Bump both plugin versions with it.
 
 ## Plugin trust boundary
 
@@ -301,7 +348,8 @@ The load-bearing detail. Claude Code emits OTLP **directly** to Azure Monitor �
   `https://monitor.azure.com/.default`. It is refreshed dynamically by
   `otelHeadersHelper` (configured in settings, **not** an env var — there is no
   `OTEL_*_HEADERS_HELPER` env). Claude runs the helper at startup and every
-  ~29 min; `plugin/scripts/otel-headers-helper.sh` mints a short-lived OAuth
+  ~29 min; the helper for the OS (`plugin/scripts/otel-headers-helper.sh`, or
+  `otel-headers-helper.ps1` on Windows; ADR-0015) mints a short-lived OAuth
   `tokenscope.emit` access token and presents it to `TOKENSCOPE_BEARER_ENDPOINT`
   (`/api/v1/instances/{instanceId}/bearer`) to mint the Azure token. grpc cannot use the helper.
   **The helper takes its state dir as an argument (`--state-dir`), never from
@@ -378,10 +426,11 @@ The Content-Length forwarder that worked around the chunked-OTLP regression in C
 | MCP endpoint                       | `server/api/v1/mcp/[...].ts`                                                 |
 | Local commands                     | `plugin/commands/{setup,status,statusline,backfill}.md`                      |
 | Local scripts                      | `plugin/scripts/{status,statusline,statusline-toggle,backfill,tag-repo}.mjs` |
-| Device-identity accessor           | `plugin/scripts/device-id.mjs`                                               |
+| Device-identity accessor           | `plugin/scripts/device-id.mjs` (`device-id.ps1` on Windows without Node)     |
+| Redeem, Windows without Node       | `plugin/scripts/claude-redeem.ps1` (+ `ps-json.ps1`)                         |
 | Redeem-argv validator              | `plugin/scripts/argv-guard.mjs`                                              |
 | OTel env/settings builder          | `plugin/scripts/env-builder.mjs`                                             |
-| Bearer-refresh helper              | `plugin/scripts/otel-headers-helper.sh`                                      |
+| Bearer-refresh helper              | `plugin/scripts/otel-headers-helper.sh` (POSIX), `otel-headers-helper.ps1` (Windows) |
 | Emit-handoff redeem                | `server/api/v1/setup/redeem.post.ts`                                         |
 | OAuth 2.1 routes                   | `server/api/v1/oauth/*.ts`                                                   |
 | Retroactive assign                 | `server/api/v1/me/sessions/[sid]/assign`                                     |

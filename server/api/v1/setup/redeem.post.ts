@@ -36,10 +36,12 @@
  * comes from a credential the server issued — the opposite of /setup/enroll's
  * caller-supplied `claimed_email`.
  */
-import { createError, defineEventHandler, readValidatedBody, setResponseHeaders } from 'h3'
+import { createError, defineEventHandler, getRequestHeaders, readValidatedBody, setResponseHeaders } from 'h3'
 import { assertTrustedPublicOrigin } from '../../../utils/public-url'
 import { z } from 'zod'
-import { sql } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
+import { schema } from '../../../db'
+import { readSetupModeHeader } from '../../../utils/client-version'
 import { withDeferredMachineRls } from '../../../db/machine-rls'
 import { issueEmitCredential } from '../../../auth/emit-credential'
 import {
@@ -163,6 +165,32 @@ export default defineEventHandler(async (event) => {
       subjectId: claimed.instanceId,
       payload: { oauth_emit_credential: true, tool: att.tool ?? 'claude-code' },
     })
+
+    // SETUP MODE (mig 0150): which redeem configured this device — `full` (the
+    // Node redeem) or `emit-only` (the PowerShell redeem on a Windows device
+    // without Node). CLIENT-ASSERTED, a diagnostic hint ONLY: nothing gates on it.
+    //
+    // Here, not earlier: the handoff has been consumed and checked against the
+    // attestation, so only the device this code was minted for can write it, and
+    // the identity is adopted, so the write runs in the same RLS context as the
+    // /bearer version capture.
+    //
+    // Written on EVERY redeem, NULL when the redeem stated no recognised mode.
+    // Unlike the /bearer fields this does overwrite: a redeem replaces the
+    // device's credential and configuration, so an older mode would describe a
+    // setup that no longer exists. In a savepoint for the same reason as
+    // bearer.get.ts: a failed diagnostic write must not abort the redeem.
+    const setupMode = readSetupModeHeader(getRequestHeaders(event))
+    try {
+      await tx.transaction(async (sp) => {
+        await sp
+          .update(schema.instanceAttestation)
+          .set({ setupMode })
+          .where(eq(schema.instanceAttestation.instanceId, claimed.instanceId))
+      })
+    } catch {
+      /* setup mode is a diagnostic hint */
+    }
 
     return { claimed, att, emit, tool }
   })

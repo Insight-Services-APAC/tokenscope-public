@@ -92,6 +92,7 @@ export const ADMIN_NAV: AdminNavGroup[] = [
       { label: 'Directory exclusions', to: '/admin/policies/directory-exclusions', access: 'admin', icon: 'people', testid: 'directory-exclusions' },
       { label: 'Rate cards', to: '/admin/rate-cards', access: 'admin', icon: 'price', testid: 'rate-cards' },
       { label: 'Provider governance', to: '/admin/policies/provider-governance', access: 'org-wide', icon: 'shield', testid: 'provider-governance' },
+      { label: 'Client connection', to: '/admin/policies/client-connection', access: 'platform', icon: 'link', testid: 'client-connection' },
     ],
   },
   {

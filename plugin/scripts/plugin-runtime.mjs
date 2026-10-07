@@ -50,6 +50,9 @@ import {
   attrsTool,
   attrsInstance,
   assertStoreConsistent,
+  assertHelperRecord,
+  settingsFilesPath,
+  isolatedSettingsFilesPath,
 } from './device-store.mjs'
 import https from 'node:https'
 import http from 'node:http'
@@ -57,6 +60,7 @@ import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 // Re-exported so existing importers keep one name, and so mcp-origin.mjs can
 // reach it without importing this module (copilot-plugin does not vendor it).
 import { realHome } from './real-home.mjs'
+import { emitHelperSpawn, helperScriptName } from './emit-helper-spawn.mjs'
 export { realHome }
 export {
   TOOLS,
@@ -94,7 +98,7 @@ export { assertSafeEndpoint } from './endpoint-guard.mjs'
  * and the documented local-dev override (`http://localhost:3450`) must keep
  * working end-to-end through this shared POST path.
  */
-export function httpsPostJson(urlStr, body, { timeoutMs = 30_000, allowLoopback = true } = {}) {
+export function httpsPostJson(urlStr, body, { timeoutMs = 30_000, allowLoopback = true, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     let url
     try {
@@ -116,6 +120,7 @@ export function httpsPostJson(urlStr, body, { timeoutMs = 30_000, allowLoopback 
         port: url.port || undefined,
         path: url.pathname + url.search,
         headers: {
+          ...headers,
           'Content-Type': 'application/json',
           'Content-Length': bodyBuf.length,
           Accept: 'application/json',
@@ -221,9 +226,9 @@ export function resolveScriptsDir() {
   return own
 }
 
-/** Absolute path to the bundled otel-headers-helper.sh (the real emit path). */
-export function resolveHelperPath() {
-  return join(resolveScriptsDir(), 'otel-headers-helper.sh')
+/** Absolute path to the bundled headers helper for `platform` (the real emit path). */
+export function resolveHelperPath(platform = process.platform) {
+  return join(resolveScriptsDir(), helperScriptName(platform))
 }
 
 /**
@@ -292,6 +297,88 @@ function readJsonObject(path) {
 /** This lane's v2 store, or null. */
 export function readDeviceStore(tool, dir = trustedStateDir()) {
   return readJsonObject(deviceStorePath(tool, dir))
+}
+
+/**
+ * The helper record the store in `dir` persisted, or null.
+ *
+ * Accepted ONLY when it names the same state dir as the command being rebuilt
+ * (`stateDir`, undefined for none). The command's `--state-dir` is what says
+ * which store the file belongs to; a record that disagreed with it would be a
+ * different enrolment's, and rebuilding from it would drop or swap the state
+ * dir — #410 in the other direction.
+ */
+export function readHelperRecord(tool, dir, stateDir) {
+  try {
+    const record = assertHelperRecord(readDeviceStore(tool, dir)?.helper, tool)
+    return record.stateDir === stateDir ? record : null
+  } catch {
+    return null
+  }
+}
+
+/** Bounded so a long-lived device cannot grow session start's work without limit. */
+const SETTINGS_FILES_MAX = 32
+
+/** The session-scoped settings files listed in `dir` (raw, UNVALIDATED), or []. */
+export function readSettingsFilesList(tool, dir) {
+  const files = readJsonObject(settingsFilesPath(tool, dir))?.files
+  return Array.isArray(files) ? files.filter((f) => typeof f === 'string' && f) : []
+}
+
+/**
+ * Add `settingsPath` to the list in `dir`, newest last, oldest dropped past the
+ * cap. The list holds paths only, never a credential; 0600 anyway, like
+ * everything else in the state dir.
+ */
+export function recordSettingsFile(tool, dir, settingsPath) {
+  return casWriteFile(settingsFilesPath(tool, dir), (raw) => {
+    let files = []
+    try {
+      const parsed = raw === null ? null : JSON.parse(raw)
+      if (Array.isArray(parsed?.files)) files = parsed.files.filter((f) => typeof f === 'string' && f)
+    } catch {
+      /* unreadable list: start over rather than refuse the enrolment */
+    }
+    const next = [...files.filter((f) => f !== settingsPath), settingsPath].slice(-SETTINGS_FILES_MAX)
+    const body = `${JSON.stringify({ version: 1, tool, files: next }, null, 2)}\n`
+    return body === raw ? null : body
+  })
+}
+
+/** One `{ file, stateDir }` entry of the isolated index, or null when malformed. */
+function isolatedEntry(e) {
+  return e && typeof e === 'object' && typeof e.file === 'string' && e.file && typeof e.stateDir === 'string' && e.stateDir
+    ? { file: e.file, stateDir: e.stateDir }
+    : null
+}
+
+/** The isolated index in `dir` (raw, UNVALIDATED paths), or []. */
+export function readIsolatedSettingsFiles(tool, dir) {
+  const entries = readJsonObject(isolatedSettingsFilesPath(tool, dir))?.entries
+  return Array.isArray(entries) ? entries.map(isolatedEntry).filter(Boolean) : []
+}
+
+/**
+ * Add `settingsPath`, enrolled in `stateDir`, to the isolated index in `dir` (the
+ * trusted default store). Paths only, never a credential. One entry per file,
+ * newest last: a re-run with another state dir replaces the old pairing.
+ */
+export function recordIsolatedSettingsFile(tool, dir, settingsPath, stateDir) {
+  return casWriteFile(isolatedSettingsFilesPath(tool, dir), (raw) => {
+    let entries = []
+    try {
+      const parsed = raw === null ? null : JSON.parse(raw)
+      if (Array.isArray(parsed?.entries)) entries = parsed.entries.map(isolatedEntry).filter(Boolean)
+    } catch {
+      /* unreadable index: start over rather than refuse the enrolment */
+    }
+    const next = [...entries.filter((e) => e.file !== settingsPath), { file: settingsPath, stateDir }].slice(
+      -SETTINGS_FILES_MAX,
+    )
+    const body = `${JSON.stringify({ version: 1, tool, entries: next }, null, 2)}\n`
+    return body === raw ? null : body
+  })
 }
 
 /**
@@ -706,6 +793,40 @@ export function emitSentinelName(tool) {
 }
 
 /**
+ * The helper's "emitting on the cached Azure bearer" marker (#409): TokenScope
+ * was unreachable on the helper's last run, so it handed back the bearer it had
+ * cached and the credential was NOT verified. Written on every such run and
+ * cleared by the next clean mint, so a marker present right after an exit-0 run
+ * is fresh, never stale. Separate from the failure sentinel because emission
+ * continues. Shape: { ts, reason, expires_at } (expires_at 0 = unknown).
+ */
+export function emitDegradedName(tool) {
+  return `emit-degraded.${tool}.json`
+}
+
+/** Read the degraded marker (or null). Same directory rules as readEmitSentinel. */
+export function readEmitDegraded(env = process.env, dir = stateDir(env), tool = 'claude-code') {
+  try {
+    return JSON.parse(readFileSync(join(dir, emitDegradedName(tool)), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * One phrase for the degraded marker's expiry, shared by every reader so the
+ * status, the status line and the session-start notice never disagree.
+ */
+export function degradedExpiryNote(degraded, nowSec = Math.floor(Date.now() / 1000)) {
+  const exp = Number(degraded && degraded.expires_at)
+  if (!Number.isFinite(exp) || exp <= 0) return 'cached bearer expiry unknown'
+  const iso = new Date(exp * 1000).toISOString()
+  return exp <= nowSec
+    ? `cached bearer EXPIRED at ${iso} — exports are probably being refused`
+    : `cached bearer valid until ${iso}`
+}
+
+/**
  * Invoke the REAL emit path (otel-headers-helper.sh) and classify the result
  * WITHOUT surfacing the bearer it prints. Returns { ran, status, hasAuth }:
  *   - ran:     false if the helper binary is missing (nothing executed)
@@ -723,7 +844,9 @@ export function emitSentinelName(tool) {
  *
  * `/bin/sh`, not `sh`: the interpreter is resolved by the OS from PATH when the
  * command is a bare name, and PATH is one of the variables a repository can set
- * (same capture). An absolute path is not steerable.
+ * (same capture). An absolute path is not steerable. On Windows the .ps1 runs
+ * under an absolute powershell.exe for the same reason (emit-helper-spawn.mjs);
+ * if none is found the helper is reported as not run (`ran: false`).
  *
  * THE DEFAULT IS `trustedStateDir()`, NOT `stateDir()`. `stateDir()` honours a
  * `TOKENSCOPE_STATE_DIR` process-level pin, which is right for a deployment or
@@ -745,18 +868,28 @@ export function emitSentinelName(tool) {
  * function argument is safe for the same reason `--state-dir` is: anyone able to
  * pass one is already executing our code.
  */
+/*
+ * `platform` and `powershell` are arguments for the same reason: tests inject
+ * win32 (and `pwsh` in place of powershell.exe) to drive the Windows branch on
+ * Linux. On win32 the .ps1 runs under Windows PowerShell; see emit-helper-spawn.mjs.
+ */
 export function runEmitHelper({
   env = process.env,
   timeoutMs,
   stateDir: dir,
   helperPath,
   tool = 'claude-code',
+  platform = process.platform,
+  powershell,
 } = {}) {
-  const helper = helperPath ?? resolveHelperPath()
+  const helper = helperPath ?? resolveHelperPath(platform)
   if (!existsSync(helper)) return { ran: false, status: null, hasAuth: false }
-  const res = spawnSync('/bin/sh', [helper, '--state-dir', dir ?? trustedStateDir(), '--tool', tool], {
+  const spawn = emitHelperSpawn({ helper, stateDir: dir ?? trustedStateDir(), tool, platform, env, powershell })
+  if (!spawn) return { ran: false, status: null, hasAuth: false }
+  const res = spawnSync(spawn.file, spawn.args, {
     encoding: 'utf8',
     env,
+    windowsHide: true,
     ...(timeoutMs ? { timeout: timeoutMs } : {}),
   })
   let hasAuth = false

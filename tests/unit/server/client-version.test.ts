@@ -10,6 +10,10 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
+  CLIENT_PLATFORM_HEADER,
+  CLIENT_SURFACE_HEADER,
+  SETUP_MODE_HEADER,
+  readSetupModeHeader,
   sanitizeClientVersion,
   readClientVersionHeaders,
   MAX_CLIENT_VERSION_LENGTH,
@@ -76,7 +80,7 @@ describe('readClientVersionHeaders', () => {
       [PLUGIN_VERSION_HEADER]: '0.1.27',
       [CLIENT_VERSION_HEADER]: '2.1.212',
     })
-    expect(c).toEqual({ pluginVersion: '0.1.27', cliVersion: '2.1.212', reported: true })
+    expect(c).toEqual({ pluginVersion: '0.1.27', cliVersion: '2.1.212', platform: null, surface: null, reported: true })
   })
 
   it('treats the two fields INDEPENDENTLY — one bad value must not blind the other', () => {
@@ -105,6 +109,37 @@ describe('readClientVersionHeaders', () => {
 
   it('ignores unrelated headers', () => {
     const c = readClientVersionHeaders({ authorization: 'Bearer secret', 'user-agent': '1.2.3' })
-    expect(c).toEqual({ pluginVersion: null, cliVersion: null, reported: false })
+    expect(c).toEqual({ pluginVersion: null, cliVersion: null, platform: null, surface: null, reported: false })
+  })
+
+  it('reads platform and surface independently, and either alone counts as reported (#412)', () => {
+    expect(readClientVersionHeaders({ [CLIENT_PLATFORM_HEADER]: 'win32-x64' })).toMatchObject({
+      platform: 'win32-x64',
+      surface: null,
+      reported: true,
+    })
+    expect(readClientVersionHeaders({ [CLIENT_SURFACE_HEADER]: 'sdk-cli' })).toMatchObject({
+      platform: null,
+      surface: 'sdk-cli',
+      reported: true,
+    })
+    const junk = readClientVersionHeaders({ [CLIENT_PLATFORM_HEADER]: 'win32 x64', [CLIENT_SURFACE_HEADER]: 'cli' })
+    expect(junk).toMatchObject({ platform: null, surface: 'cli' })
+  })
+})
+
+describe('readSetupModeHeader — a closed set (mig 0150)', () => {
+  it.each(['full', 'emit-only', ' full '])('accepts %j', (v) => {
+    expect(readSetupModeHeader({ [SETUP_MODE_HEADER]: v })).toBe(v.trim())
+  })
+
+  it.each(['degraded', 'FULL', 'emit_only', '', 'full,emit-only'])('maps %j to null', (v) => {
+    expect(readSetupModeHeader({ [SETUP_MODE_HEADER]: v })).toBeNull()
+  })
+
+  it('is null when absent, and takes the first of a repeated header', () => {
+    expect(readSetupModeHeader({})).toBeNull()
+    expect(readSetupModeHeader(undefined)).toBeNull()
+    expect(readSetupModeHeader({ [SETUP_MODE_HEADER]: ['emit-only', 'full'] })).toBe('emit-only')
   })
 })

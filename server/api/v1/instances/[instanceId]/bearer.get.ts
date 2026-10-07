@@ -33,7 +33,7 @@
  *     device starts raising false "your emit credential failed" signals. Phase 2
  *     must answer that before it enables `teammate`.
  */
-import { createError, defineEventHandler, getRouterParam, getRequestHeaders } from 'h3'
+import { createError, defineEventHandler, getRouterParam, getRequestHeaders, setResponseHeader, type H3Event } from 'h3'
 import { eq, sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { z } from 'zod'
@@ -72,7 +72,7 @@ function instanceLifecycleSilent(row: InstanceRow): boolean {
   // nuance as assertInstanceLive — `=== false`, never `!== true`.
   if (row.teammateId !== null && row.teammateIsActive === false) return true
   return Boolean(
-    row.teammateRevokedAt && row.tsStart && row.teammateRevokedAt.getTime() > row.tsStart.getTime(),
+    row.teammateEmitRevokedAt && row.tsStart && row.teammateEmitRevokedAt.getTime() > row.tsStart.getTime(),
   )
 }
 
@@ -83,7 +83,7 @@ interface InstanceRow {
   tsActualEnd: Date | null
   tsPurged: Date | null
   tsStart: Date | null
-  teammateRevokedAt: Date | null
+  teammateEmitRevokedAt: Date | null
   /** NULL when the LEFT JOIN found no owner at all — not the same as `false`. */
   teammateIsActive: boolean | null
 }
@@ -109,8 +109,10 @@ async function loadInstance(
       tsActualEnd: schema.instanceAttestation.tsActualEnd,
       tsPurged: schema.instanceAttestation.tsPurged,
       tsStart: schema.instanceAttestation.tsStart,
-      // E2 (ADR-0005): the emit-path analogue of isRevoked().
-      teammateRevokedAt: schema.teammate.revokedAt,
+      // E2 (ADR-0005): the emit-path analogue of isRevoked(). The DEVICE anchor
+      // (mig 0152, #414) — revoke-sessions and retirement bump it, a role or
+      // region change does not, so a benign admin action leaves the device live.
+      teammateEmitRevokedAt: schema.teammate.emitRevokedAt,
       // Deactivation — the OTHER axis. See assertInstanceLive.
       teammateIsActive: schema.teammate.isActive,
     })
@@ -124,7 +126,7 @@ async function loadInstance(
 
 /**
  * Shared lifecycle gate (ts_actual_end + teammate deactivation + E2
- * teammate.revoked_at).
+ * teammate.emit_revoked_at).
  *
  * THE DEACTIVATION ARM HERE IS DEFENCE IN DEPTH, AND ONLY THAT — said plainly
  * so nobody reads a live control into it. `requireOAuthBearer` already refuses a
@@ -143,7 +145,7 @@ async function loadInstance(
  * working exactly as designed. See the test in
  * tests/integration/instances/bearer-deactivated-teammate.test.ts.
  *
- * Both arms exist because `revoked_at` and `is_active` are INDEPENDENT axes
+ * Both arms exist because `emit_revoked_at` and `is_active` are INDEPENDENT axes
  * (ADR-0005 §E2 versus the retirement worker), and a function calling itself the
  * lifecycle gate while reasoning on only one of them is precisely how the emit
  * path came to miss deactivation in the first place: privileged-identity-cleanup
@@ -168,10 +170,11 @@ function assertInstanceLive(row: InstanceRow): void {
   if (row.teammateId !== null && row.teammateIsActive === false) {
     throw createError({ statusCode: 401, statusMessage: 'Session revoked' })
   }
-  // E2: a teammate revoked AFTER this instance was enrolled (revoked_at >
-  // ts_start) must stop emitting immediately — offboarding / force-revoke /
-  // re-scope. An instance enrolled AFTER a revocation (re-enrol) is fine.
-  if (row.teammateRevokedAt && row.tsStart && row.teammateRevokedAt.getTime() > row.tsStart.getTime()) {
+  // E2: a teammate revoked AFTER this instance was enrolled (emit_revoked_at >
+  // ts_start) must stop emitting immediately — retirement / force-revoke. A
+  // re-scope does not bump it (#414). An instance enrolled AFTER a revocation
+  // (re-enrol) is fine.
+  if (row.teammateEmitRevokedAt && row.tsStart && row.teammateEmitRevokedAt.getTime() > row.tsStart.getTime()) {
     throw createError({ statusCode: 401, statusMessage: 'Session revoked' })
   }
 }
@@ -191,7 +194,7 @@ export default defineEventHandler(async (event) => {
   // Authenticating first kills the unauthenticated existence oracle (AUTH-7):
   // an unauthenticated caller gets 401 for existing AND non-existing ids alike.
   //
-  // Validate the token (signature/expiry/revocation + E2 teammate.revoked_at vs
+  // Validate the token (signature/expiry/revocation + E2 teammate anchor vs
   // issuance) and require the tokenscope.emit scope. requireOAuthBearer throws a
   // 401 on any failure (incl. "not recognised" / missing header).
   //
@@ -275,9 +278,11 @@ export default defineEventHandler(async (event) => {
     })
     .where(eq(schema.instanceAttestation.instanceId, sid))
 
-  // CLIENT VERSION (mig 0092): the client states its plugin and CLI versions in
-  // request headers; recording them here costs nothing extra per live device and
-  // captures the version of the code that ACTUALLY minted this bearer.
+  // CLIENT VERSION (mig 0092) + PLATFORM / SURFACE (mig 0150): the client states
+  // its plugin and CLI versions, `<os>-<arch>` and launch surface in request
+  // headers; recording them here costs nothing extra per live device and
+  // captures the version of the code that ACTUALLY minted this bearer. The rules
+  // below apply to all four fields alike.
   //
   // The values are CLIENT-ASSERTED and are stored as diagnostic hints ONLY. Note
   // where this write sits: AFTER requireOAuthBearer, AFTER the ownership check.
@@ -313,6 +318,8 @@ export default defineEventHandler(async (event) => {
           .set({
             ...(claim.pluginVersion !== null ? { clientPluginVersion: claim.pluginVersion } : {}),
             ...(claim.cliVersion !== null ? { clientCliVersion: claim.cliVersion } : {}),
+            ...(claim.platform !== null ? { clientPlatform: claim.platform } : {}),
+            ...(claim.surface !== null ? { clientSurface: claim.surface } : {}),
             clientVersionAt: new Date(),
           })
           .where(eq(schema.instanceAttestation.instanceId, sid))
@@ -325,13 +332,22 @@ export default defineEventHandler(async (event) => {
     return row
   })
 
-  return mintFor(row)
+  return mintFor(event, row)
 })
 
-async function mintFor(row: InstanceRow) {
+/** Response header carrying the minted bearer's expiry, epoch seconds. */
+export const BEARER_EXPIRES_AT_HEADER = 'X-TokenScope-Bearer-Expires-At'
+
+async function mintFor(event: H3Event, row: InstanceRow) {
   const obo = await mintAzureMonitorBearer({
     principalOid: row.principalOid,
     sessionId: row.instanceId,
   })
+  // The body is printed VERBATIM by the helper as Claude Code's header JSON, so
+  // the expiry travels as a response header instead. The helper caches the
+  // bearer against it and, when this endpoint is unreachable, keeps handing the
+  // cached bearer back until Azure itself rejects it (#409) — the expiry is
+  // diagnostics for the sentinel/status, never a gate on that fallback.
+  setResponseHeader(event, BEARER_EXPIRES_AT_HEADER, String(Math.floor(Date.now() / 1000) + obo.expiresInSeconds))
   return { Authorization: `Bearer ${obo.bearer}` }
 }

@@ -111,39 +111,16 @@ Two reports per UTC day, fetched **serially** (a shared 60-RPM org-wide cap,
 `analytics-poller.ts:485-487`), aggregated in memory by
 `${teammateId}:${day}:${tool}`, then upserted.
 
-```mermaid
-flowchart LR
-    subgraph U["user_usage_report"]
-        U1["uncached_input_tokens"]
-        U2["output_tokens"]
-        U3["model · cache_creation.*<br/>cache_read_input_tokens<br/>requests · server_tool_use"]
-        U4["total_tokens"]
-    end
-    subgraph C["user_cost_report"]
-        C1["amount (cents string)"]
-        C2["cost_type"]
-        C3["model"]
-        C4["currency · list_amount<br/>token_type"]
-    end
+![actual_spend keeps three summed numbers per teammate, day and tool; every other dimension of the Anthropic reports reaches provider_usage_fact only through actual_spend.raw_payload](images/data-lineage-anthropic-fields.svg)
 
-    U1 --> AGG["aggregate by<br/>teammate · day · tool"]
-    U2 --> AGG
-    C1 -->|"exclude web_search<br/>+ code_execution"| AGG
-    C2 -.->|filter only| AGG
-    AGG --> AS[("actual_spend")]
+1. `analytics-poll` (every 15 minutes, re-polling 30 days) reads both reports and binds each row to a teammate by `lower(actor.email)`.
+2. It writes one `actual_spend` row per teammate, day and tool: Σ `uncached_input_tokens`, Σ `output_tokens`, Σ cost, and the verbatim usage and cost rows as `raw_payload`.
+3. A row whose email binds no teammate is queued to `pending_placement`; `placement-sync` replays it into `actual_spend` once the person is placed.
+4. `provider-transform` (hourly, same 30-day window) reads `raw_payload`, not the summed columns.
+5. It writes `provider_usage_fact`: a token row with all four token lanes, `requests` and `web_search_requests`, and a cost row with `cost_usd`, `cost_type` and `currency`, both keyed by `model` and `context_window`.
+6. `web_search` and `code_execution` cost rows are skipped before `raw_payload` is built (`analytics-poller.ts:556`), so neither table holds them yet.
 
-    AS -->|"raw_payload<br/>{day, usage[], cost[]}"| PT["provider-transform<br/>(hourly)"]
-    U3 -.->|via raw_payload| PT
-    C3 -.->|via raw_payload| PT
-    PT --> PUF[("provider_usage_fact")]
-
-    U4 --> X["<b>DISCARDED</b>"]
-    C4 --> X
-
-    style X fill:#a40e26,color:#fff,stroke:#a40e26
-    style AS fill:#1f6feb,color:#fff,stroke:#1f6feb
-    style PUF fill:#1f6feb,color:#fff,stroke:#1f6feb
-```
+*If a dimension is not in `raw_payload`, the API lane cannot have it: the summed columns on `actual_spend` carry no model, cache or request detail.*
 
 **Stored:**
 
@@ -172,17 +149,24 @@ lands them on `provider_usage_fact` (migs 0118/0122):
 | `requests` (usage report) | `provider_usage_fact.requests` on the token row |
 | `server_tool_use.web_search_requests` | `provider_usage_fact.web_search_requests` (mig 0122) |
 | `cost_type` | `provider_usage_fact.cost_type` on the cost row (pre-#226 payloads stamped `tokens`) |
+| `context_window` (both reports) | `provider_usage_fact.context_window` on both rows (mig 0127) |
+| `currency` (cost report) | `provider_usage_fact.currency` on the cost row (`provider-transform.ts:480`); `actual_spend` assumes USD and never checks it |
 
-**Discarded — parsed and never read:**
+**Kept only inside `actual_spend.raw_payload` (no column; nothing reads it):**
+the row schemas are `.passthrough()` and the poller stores the rows verbatim.
 
 | field | why it matters |
 |---|---|
-| `total_tokens` | derivable; not stored on either table |
-| `list_amount` | list-vs-net discount invisible |
-| `token_type` | cost collapsed across token types |
-| `currency` | **USD is assumed and never checked** |
-| `actor.user_id` | identity binds on email only; the provider's stable id is dropped |
-| `data_refreshed_at` | written to `raw_provider_batch` only — no `actual_spend` row records whether its figure was still moving (`provider_usage_fact` carries the column, but this source has none to fill it with) |
+| `total_tokens` | derivable from the token lanes |
+| `list_amount` | list-vs-net discount invisible in any column |
+| `token_type` | cost collapsed across token types in the columns |
+| `actor.user_id` | identity binds on email only; the provider's stable id sits in the JSON unused |
+
+**Not stored at all:**
+
+| field | why it matters |
+|---|---|
+| `data_refreshed_at` | parsed on the envelope and dropped: no `actual_spend` row records whether its figure was still moving (`provider_usage_fact` carries the column, but this source has none to fill it with) |
 | time-of-day | `date.slice(0,10)`; day grain only |
 
 The **envelope** is a non-passthrough `z.object` — undeclared envelope keys are
@@ -499,8 +483,8 @@ provider transform's lock (9) is acquired last and alone, keyed on its
 `(provider_org, surface)` ownership domain.
 
 **Late-arriving telemetry** older than the 5-minute overlap is recovered only by
-the ~24 h deep rescan or an operator-scoped `telemetry-recovery` run. An ordinary
-tick will not find it.
+the daily `telemetry-recovery` pass or an operator recovery. An ordinary tick
+will not find it.
 
 ---
 
@@ -536,7 +520,7 @@ tables plus the live `teammate` row.
 |---|---|---|
 | `teammate` | Entra / placement rules | **live** — always current |
 | `actual_spend` | teammate at INSERT | **no** — omitted from every `ON CONFLICT SET` |
-| `attribution_record` | `instance_attestation` at join | no (except identity confirmation) |
+| `attribution_record` | `instance_attestation` at join (a device row is re-placed onto the teammate's placement by identity confirmation and by the admin region move, live devices only, #414) | no (except identity confirmation) |
 | `reconciliation_record` | teammate at insert | no |
 | `unaccounted_usage` | teammate at first write | **no** — placement omitted from the `ON CONFLICT SET` list (issue #44 closed) |
 | `over_emission` | teammate at first write | **no** — placement was never in its `SET` list |
@@ -611,41 +595,17 @@ waits on another.** Convergence is by repetition: each run is idempotent, so a
 run that sees stale upstream data simply produces the right answer on the next
 tick.
 
-```mermaid
-flowchart LR
-    subgraph W5["every ~5 min"]
-        J["azure-monitor-read<br/><i>joiner</i>"]
-    end
-    subgraph W15["every ~15 min"]
-        P["analytics-poll"]
-        AGG["aggregate-rollup"]
-    end
-    subgraph W1H["hourly"]
-        PT["provider-transform<br/><i>30-day revision window</i>"]
-    end
-    subgraph W2H["every 2 h"]
-        UR["usage-reconciliation<br/><i>35-day window</i>"]
-    end
-    subgraph WD["daily / on demand"]
-        PS["placement-sync"]
-        CB["copilot-bill"]
-        CPB["copilot-pool-bill"]
-        RS["reconciliation-sync"]
-    end
+![Every worker runs on its own cron and nothing orders them; usage-reconciliation converges on four upstream tables whenever it next runs](images/data-lineage-worker-dependencies.svg)
 
-    J -.->|"attribution_record"| AGG
-    J -.->|"attribution_record"| UR
-    P -.->|"actual_spend"| UR
-    P -.->|"actual_spend.raw_payload"| PT
-    RS -.->|"reconciliation_record"| PT
-    PT -.->|"provider_usage_fact<br/><i>the api_m operand</i>"| UR
-    UR -.->|"same txn"| CH["unaccounted_usage_model"]
-    PS -.->|"binds owed bills"| UR
-    RS -.->|"reconciliation_record"| UR
-    CPB -.->|"same txn"| ALLOC["copilot_overage_allocation"]
+Cron expressions are the ones `infra/modules/worker-jobs.bicep` schedules (UTC).
 
-    style UR fill:#7d4e00,color:#fff,stroke:#bf8700
-```
+1. Spend for an unbound email waits in `pending_placement` until `placement-sync` replays it into `actual_spend`.
+2. `provider-transform` and `usage-reconciliation` both read `actual_spend` and `reconciliation_record`: the transform reads `raw_payload` and `raw`, the reconciliation reads the summed values through `v_teammate_usage_daily`. `reconciliation-sync` also writes Copilot bill rows into `actual_spend` through the `copilot-bill` writer, which is not a scheduled worker of its own.
+3. `provider_usage_fact` is the `api_m` operand of the per-model split. The transform runs hourly and the reconciliation every two hours, so a split can be computed before the key's facts have landed.
+4. `unaccounted_usage` and its `unaccounted_usage_model` children are replaced in one transaction.
+5. `copilot_pool_bill` and `copilot_overage_allocation` are written in one transaction.
+
+*Arrows are data dependencies, not execution order: each worker reads whatever its upstream tables hold when its own cron fires.*
 
 Dotted arrows are **data** dependencies, not execution order. Two consequences
 that have caused real incidents:

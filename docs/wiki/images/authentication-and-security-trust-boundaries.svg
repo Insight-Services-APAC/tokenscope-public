@@ -1,0 +1,192 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 600" width="1100" height="600" role="img" aria-labelledby="t d">
+  <title id="t">Each caller class presents its own credential on its own route; only the telemetry write bypasses the app, with a write-only token the app minted.</title>
+  <desc id="d">Callers on the left: browser users, Claude Code and Copilot clients. Browser and CLI traffic crosses Front Door or a WAF, passes the require-front-door middleware, and lands on one of five routes: Entra OIDC cookie to the role and scope gate; OAuth access token to the MCP tools; handoff code or enrolment secret to the emit-credential mint; emit access token to the managed-identity token mint; HMAC signature to the worker registry. Cron jobs inside the Container Apps environment call the HMAC route directly, or through Front Door when a Front Door id is enforced. All routes read and write PostgreSQL over a private endpoint. Workers read OTelLogs in Log Analytics with the app&#x27;s managed identity. Device telemetry goes straight to the Azure Monitor ingest endpoint with the managed-identity token, never through the app.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+    .fr { fill: var(--panel); stroke: var(--fg2); stroke-width: 1; stroke-dasharray: 3 3; }
+    .frl { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; letter-spacing: .06em; fill: var(--fg2); }
+    .band { stroke: var(--line); stroke-width: 1; }
+    .halo { paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1100" height="600"/>
+  <rect class="zone" x="16" y="16" width="190" height="534" rx="10"/>
+  <text class="zlabel" x="30" y="38">CALLERS</text>
+  <rect class="zone" x="226" y="16" width="130" height="534" rx="10"/>
+  <text class="zlabel" x="240" y="38">PUBLIC EDGE</text>
+  <rect class="zone" x="376" y="16" width="490" height="534" rx="10"/>
+  <text class="zlabel" x="390" y="38">CONTAINER APPS ENVIRONMENT</text>
+  <rect class="zone" x="886" y="16" width="198" height="250" rx="10"/>
+  <text class="zlabel" x="900" y="38">DATA</text>
+  <rect class="zone" x="886" y="282" width="198" height="268" rx="10"/>
+  <text class="zlabel" x="900" y="304">AZURE MONITOR</text>
+
+  <!-- callers -->
+  <rect class="node" x="30" y="78" width="162" height="52" rx="6"/>
+  <text class="t" x="111" y="100" text-anchor="middle">Browser user</text>
+  <text class="s" x="111" y="117" text-anchor="middle">Entra sign-in · any role</text>
+  <rect class="node" x="30" y="222" width="162" height="52" rx="6"/>
+  <text class="t" x="111" y="244" text-anchor="middle">CLI clients</text>
+  <text class="s" x="111" y="261" text-anchor="middle">Claude Code · Copilot CLI</text>
+
+  <!-- edge -->
+  <rect class="node" x="238" y="66" width="106" height="342" rx="6"/>
+  <text class="t" x="291" y="222" text-anchor="middle">Front Door</text>
+  <text class="t" x="291" y="239" text-anchor="middle">or your WAF</text>
+  <text class="s" x="291" y="258" text-anchor="middle">HTTPS · 443</text>
+
+  <!-- app -->
+  <rect class="node env" x="386" y="48" width="470" height="372" rx="8"/>
+  <text class="tm" x="400" y="66">ca-&lt;name&gt;</text>
+  <rect class="node inner" x="398" y="78" width="26" height="332" rx="5"/>
+  <text class="sm" transform="translate(415,244) rotate(-90)" text-anchor="middle">require-front-door</text>
+
+  <!-- lane 1 OIDC -->
+  <rect class="node" x="440" y="82" width="210" height="44" rx="6"/>
+  <text class="t" x="545" y="100" text-anchor="middle">Entra OIDC cookie</text>
+  <text class="s" x="545" y="116" text-anchor="middle">teammate re-read per request</text>
+  <rect class="node inner" x="668" y="82" width="180" height="44" rx="6"/>
+  <text class="t" x="758" y="100" text-anchor="middle">requireRole · scopes</text>
+  <text class="s" x="758" y="116" text-anchor="middle">deny = 403 + audit row</text>
+  <!-- lane 2 OAuth -->
+  <rect class="node" x="440" y="170" width="210" height="44" rx="6"/>
+  <text class="t" x="545" y="188" text-anchor="middle">OAuth 2.1 access token</text>
+  <text class="s" x="545" y="204" text-anchor="middle">/api/v1/mcp · read + tag</text>
+  <rect class="node inner" x="668" y="170" width="180" height="44" rx="6"/>
+  <text class="t" x="758" y="188" text-anchor="middle">MCP tools</text>
+  <text class="s" x="758" y="204" text-anchor="middle">scope checked per token</text>
+  <!-- lane 3 handoff -->
+  <rect class="node" x="440" y="226" width="210" height="44" rx="6"/>
+  <text class="t" x="545" y="244" text-anchor="middle">Handoff code · enrol secret</text>
+  <text class="s" x="545" y="260" text-anchor="middle">/setup/redeem · /setup/enroll</text>
+  <rect class="node inner" x="668" y="226" width="180" height="44" rx="6"/>
+  <text class="t" x="758" y="244" text-anchor="middle">Emit credential</text>
+  <text class="s" x="758" y="260" text-anchor="middle">tokenscope.emit only</text>
+  <!-- lane 4 bearer -->
+  <rect class="node" x="440" y="282" width="210" height="44" rx="6"/>
+  <text class="t" x="545" y="300" text-anchor="middle">Emit access token</text>
+  <text class="s" x="545" y="316" text-anchor="middle">/instances/{id}/bearer</text>
+  <rect class="node inner" x="668" y="282" width="180" height="44" rx="6"/>
+  <text class="t" x="758" y="300" text-anchor="middle">MI token mint</text>
+  <text class="s" x="758" y="316" text-anchor="middle">monitor.azure.com scope</text>
+  <!-- lane 5 HMAC -->
+  <rect class="node" x="440" y="356" width="210" height="44" rx="6"/>
+  <text class="t" x="545" y="374" text-anchor="middle">HMAC signature</text>
+  <text class="s" x="545" y="390" text-anchor="middle">/internal/run-worker/{name}</text>
+  <rect class="node inner" x="668" y="356" width="180" height="44" rx="6"/>
+  <text class="t" x="758" y="374" text-anchor="middle">Worker registry</text>
+  <text class="s" x="758" y="390" text-anchor="middle">runs in the app process</text>
+
+  <!-- cron jobs -->
+  <rect class="node" x="440" y="462" width="210" height="50" rx="6"/>
+  <text class="t" x="545" y="483" text-anchor="middle">Cron jobs</text>
+  <text class="sm" x="545" y="500" text-anchor="middle">caj-&lt;name&gt;-*</text>
+
+  <!-- data / monitor -->
+  <rect class="node private" x="900" y="152" width="170" height="56" rx="6"/>
+  <text class="t" x="985" y="175" text-anchor="middle">PostgreSQL</text>
+  <text class="s priv" x="985" y="193" text-anchor="middle">private endpoint</text>
+  <rect class="node" x="900" y="408" width="170" height="56" rx="6"/>
+  <text class="tm" x="985" y="431" text-anchor="middle">log-&lt;name&gt;</text>
+  <text class="s" x="985" y="449" text-anchor="middle">OTelLogs · KQL read</text>
+  <rect class="node" x="900" y="484" width="170" height="52" rx="6"/>
+  <text class="t" x="985" y="505" text-anchor="middle">DCE + DCR</text>
+  <text class="s" x="985" y="522" text-anchor="middle">OTLP log ingest</text>
+
+  <!-- 1 browser -->
+  <line class="e" x1="192" y1="104" x2="236" y2="104" marker-end="url(#ah)"/>
+  <line class="e" x1="344" y1="104" x2="396" y2="104" marker-end="url(#ah)"/>
+  <circle class="cn" cx="215" cy="104" r="10"/><text class="cnt" x="215" y="108" text-anchor="middle">1</text>
+  <!-- 2 CLI -->
+  <line class="e" x1="192" y1="248" x2="236" y2="248" marker-end="url(#ah)"/>
+  <line class="e" x1="344" y1="248" x2="396" y2="248" marker-end="url(#ah)"/>
+  <circle class="cn" cx="215" cy="248" r="10"/><text class="cnt" x="215" y="252" text-anchor="middle">2</text>
+  <!-- strip to lanes -->
+  <line class="e" x1="424" y1="104" x2="438" y2="104" marker-end="url(#ah)"/>
+  <line class="e" x1="424" y1="192" x2="438" y2="192" marker-end="url(#ah)"/>
+  <line class="e" x1="424" y1="248" x2="438" y2="248" marker-end="url(#ah)"/>
+  <line class="e" x1="424" y1="304" x2="438" y2="304" marker-end="url(#ah)"/>
+  <line class="e" x1="424" y1="378" x2="438" y2="378" marker-end="url(#ah)"/>
+  <!-- lane to handler -->
+  <line class="e" x1="650" y1="104" x2="666" y2="104" marker-end="url(#ah)"/>
+  <line class="e" x1="650" y1="192" x2="666" y2="192" marker-end="url(#ah)"/>
+  <line class="e" x1="650" y1="248" x2="666" y2="248" marker-end="url(#ah)"/>
+  <line class="e" x1="650" y1="304" x2="666" y2="304" marker-end="url(#ah)"/>
+  <line class="e" x1="650" y1="378" x2="666" y2="378" marker-end="url(#ah)"/>
+  <!-- bus to postgres -->
+  <polyline class="e" points="848,104 876,104 876,378 848,378"/>
+  <line class="e" x1="848" y1="192" x2="876" y2="192"/>
+  <line class="e" x1="848" y1="248" x2="876" y2="248"/>
+  <line class="e" x1="848" y1="304" x2="876" y2="304"/>
+  <line class="e" x1="876" y1="180" x2="898" y2="180" marker-end="url(#ah)"/>
+  <!-- 3 cron internal -->
+  <polyline class="e" points="440,476 411,476 411,412" marker-end="url(#ah)"/>
+  <circle class="cn" cx="425" cy="476" r="10"/><text class="cnt" x="425" y="480" text-anchor="middle">3</text>
+  <!-- 4 cron via front door when enforced -->
+  <polyline class="e dashed" points="440,500 291,500 291,410" marker-end="url(#ah)"/>
+  <circle class="cn" cx="360" cy="500" r="10"/><text class="cnt" x="360" y="504" text-anchor="middle">4</text>
+  <text class="lbl" x="388" y="534">via Front Door when frontDoorId is set</text>
+  <!-- 6 joiner reads LAW -->
+  <polyline class="e" points="758,400 758,436 898,436" marker-end="url(#ah)"/>
+  <circle class="cn" cx="830" cy="436" r="10"/><text class="cnt" x="830" y="440" text-anchor="middle">6</text>
+  <!-- DCE to LAW -->
+  <line class="e" x1="985" y1="484" x2="985" y2="466" marker-end="url(#ah)"/>
+  <!-- 5 OTLP bypasses app -->
+  <polyline class="e accent" points="111,274 111,572 985,572 985,540" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="550" cy="572" r="10"/><text class="cnt accent" x="550" y="576" text-anchor="middle">5</text>
+  <text class="s acc" x="568" y="566">OTLP log events + MI token, never through the app</text>
+</svg>

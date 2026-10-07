@@ -19,7 +19,7 @@
  */
 import { PROBE_ERROR_REASONS, type ProbeErrorReason } from '../observability/probe-error-reason'
 
-/** The fixed condition keys (A2.1–A2.4 + the A7 deploy-time channel test). */
+/** The fixed condition keys (A2.1–A2.4, the scaling-plan additions, and the A7 deploy-time channel test). */
 export const OPS_ALERT_CONDITION = {
   /** A2.1 — the reader probe: a bounded read of the joiner's real table failed (ar-H1). */
   telemetryRead: 'telemetry-read',
@@ -29,6 +29,17 @@ export const OPS_ALERT_CONDITION = {
   workerFleet: 'worker-fleet',
   /** A2.1 — runNetworkCheck: an expectPrivate host failed DNS/TCP. */
   probeNetwork: 'probe-network',
+  /**
+   * Workers whose two latest measured runs both sat near or past the dispatch
+   * budget (classifyDispatchDuration; docs/design/scaling-to-1000-users.md 0.3).
+   */
+  workerDuration: 'worker-duration',
+  /**
+   * The telemetry workspace's billable ingestion over the trailing 24 hours is at
+   * or above 80% of its daily cap; past the cap Azure drops OTLP rows until the
+   * cap's next reset (docs/design/scaling-to-1000-users.md 0.5).
+   */
+  telemetryCap: 'telemetry-cap',
   /** A7 — the deploy-time live channel validation ping (ar-M21). Never raised by the worker. */
   channelTest: 'channel-test',
 } as const
@@ -113,6 +124,17 @@ const OPS_ALERT_OWN_REASONS = [
   'workers-failing',
   /** worker:<name>: one worker's consecutive-failure streak (+count). */
   'worker-failing',
+  /**
+   * worker-duration: workers whose two latest runs with a recorded duration
+   * both classified near or over the dispatch budget (+count = how many).
+   */
+  'near-dispatch-budget',
+  /**
+   * telemetry-cap: billable ingestion into the telemetry workspace over the
+   * trailing 24 hours is at or above 80% of its daily cap (+count = percent of
+   * the cap used).
+   */
+  'ingestion-near-cap',
   /** inbox-aging: unacknowledged admin-routed alerts past the age bar (+count). */
   'items-aged',
   /** channel-test: the A7 deploy-time live-channel ping, not an outage. */
@@ -150,7 +172,7 @@ export interface OpsAlertPayload {
   env: string
   /** UTC ISO-8601 instant of the evaluation. */
   ts: string
-  /** Aggregate count where one exists (failing workers, aged items, failing hosts). */
+  /** Aggregate number where one exists (failing workers, failing hosts, workers near the budget, percent of the telemetry cap used). */
   count?: number
 }
 

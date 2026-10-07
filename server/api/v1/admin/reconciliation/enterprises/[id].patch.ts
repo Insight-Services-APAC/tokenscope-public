@@ -19,7 +19,7 @@ import { requireRole } from '../../../../../auth/rbac'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
-import { recomputeGovernanceVerdicts } from '../../../../../governance/recompute'
+import { recomputeScopeNewestFirst } from '../../../../../governance/recompute'
 import { persistCopilotOverageAllocation } from '../../../../../governance/copilot-overage-allocation'
 import { lockGovernanceCutoverForBillingEdit } from '../../../../../governance/cutover'
 import { requireUuidParam } from '../../../../../utils/require-uuid-param'
@@ -202,15 +202,19 @@ export default defineEventHandler(async (event) => {
       userAgent: ua,
     })
 
-    // A `billing` edit must change chargeability for every OPEN-period row
-    // this enterprise governs, IMMEDIATELY (design §4.1 "governance edits take
-    // effect immediately") — never wait for the next worker tick. Closed
-    // periods are structurally excluded by recomputeGovernanceVerdicts itself.
-    // Pre-activation this is a no-op (the legacy heuristic ignores `billing`
-    // entirely), matching today's behaviour exactly.
-    if (has('billing')) {
-      await recomputeGovernanceVerdicts(tx, { providerEnterpriseId: id })
-    }
+    // A `billing` edit recomputes the rows this enterprise governs, in every
+    // period, NEWEST FIRST in the request for up to GOVERNANCE_PATCH_BUDGET_MS,
+    // so the current month reflects it on commit (design §4.1) — unless a month
+    // it touches is locked elsewhere, in which case the in-request recompute is
+    // skipped rather than waited for. Either way, rows this request does not
+    // reach (`complete: false`) are converged by the governance-recompute
+    // worker's ascending sweep, which revisits every row within
+    // (ceil(N / R) + 1) × 15 min (the bound its header derives). The billing
+    // edit commits regardless. Pre-activation this is a no-op (the legacy
+    // heuristic ignores `billing` entirely).
+    const governanceRecompute = has('billing')
+      ? await recomputeScopeNewestFirst(tx, { providerEnterpriseId: id })
+      : { complete: true }
 
     // ADR-0011 D7 ("dead governance is a defect... ships with the reader that
     // consumes it"): an `overageAllocationPolicy` edit must change the persisted
@@ -241,6 +245,8 @@ export default defineEventHandler(async (event) => {
       }
     }
 
-    return { id, updated: true }
+    // `governanceRecompute` is always present (additive): `complete: true` when
+    // billing was not edited, since no recompute is owed by this request.
+    return { id, updated: true, governanceRecompute }
   })
 })

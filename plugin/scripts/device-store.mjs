@@ -10,7 +10,7 @@
  * Why per-tool at all, and the source/binding rules the readers below implement:
  * docs/design/device-store-per-tool-sections.md.
  */
-import { join } from 'node:path'
+import { join, posix, win32 } from 'node:path'
 import { existsSync } from 'node:fs'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 
@@ -36,6 +36,58 @@ export function deviceStorePath(tool, dir) {
  */
 export function accessCachePath(tool, dir) {
   return join(dir, `oauth-access.${assertTool(tool)}.json`)
+}
+
+/**
+ * The session-scoped settings files a redeem wrote for this lane:
+ * `<dir>/settings-files.<tool>.json`. `claude-redeem --settings-path` lists its
+ * target here so session start can rebuild that file's `otelHeadersHelper` the
+ * same way it rebuilds the global one; nothing else would ever find the file.
+ */
+export function settingsFilesPath(tool, dir) {
+  return join(dir, `settings-files.${assertTool(tool)}.json`)
+}
+
+/**
+ * The index, in the TRUSTED default store, of session-scoped settings files
+ * whose enrolment lives in ANOTHER state dir (`--settings-path S --state-dir X`):
+ * `<trusted>/isolated-settings-files.<tool>.json`, entries `{ file, stateDir }`.
+ * Session start reads only the trusted store and the dir the global helper
+ * names, so S listed in X alone would never be found again.
+ */
+export function isolatedSettingsFilesPath(tool, dir) {
+  return join(dir, `isolated-settings-files.${assertTool(tool)}.json`)
+}
+
+/**
+ * The ONE shape of the helper record, `{ tool, platform, stateDir? }`, which
+ * `buildHelperCommand` (env-builder.mjs) turns into the `otelHeadersHelper`
+ * command and which a store persists as `helper`. Strict, because a value that
+ * passes here ends up quoted into a command line a shell runs every ~29 min:
+ * a closed key set, a closed tool set, a lower-case platform token, and an
+ * absolute state dir with no quote or control character. Returns a fresh,
+ * normalised copy (no `stateDir` key when absent).
+ */
+export function assertHelperRecord(record, tool = undefined) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) throw new Error('helper record is not an object')
+  for (const k of Object.keys(record)) {
+    if (!['tool', 'platform', 'stateDir'].includes(k)) throw new Error(`helper record has unknown field ${k}`)
+  }
+  assertTool(record.tool)
+  if (tool !== undefined && record.tool !== tool) throw new Error(`helper record names tool "${record.tool}", not "${tool}"`)
+  if (typeof record.platform !== 'string' || !/^[a-z0-9]{1,16}$/.test(record.platform)) {
+    throw new Error('helper record platform is not a platform name')
+  }
+  const out = { tool: record.tool, platform: record.platform }
+  if (record.stateDir !== undefined) {
+    const d = record.stateDir
+    // eslint-disable-next-line no-control-regex
+    if (typeof d !== 'string' || !d || /[\u0000-\u001f\u0022]/.test(d)) throw new Error('helper record stateDir is not usable')
+    const abs = record.platform === 'win32' ? win32.isAbsolute(d) : posix.isAbsolute(d)
+    if (!abs) throw new Error('helper record stateDir is not absolute')
+    out.stateDir = d
+  }
+  return out
 }
 
 /**
@@ -146,6 +198,8 @@ export function readBoundAccessToken(cache, bearerEndpoint) {
  * endpoint addresses that instance; both endpoints are https or loopback; and
  * every field the helper reads survives its sed extraction (no `"`, `\` or
  * control character — the shell would read a different value than JS wrote).
+ * A ninth, outside the helper's read: an optional `helper` record must pass
+ * assertHelperRecord for this lane.
  *
  * Throws naming the FIELD, never its value: the refresh token is among them,
  * and an endpoint is server-supplied and untrusted (endpoint-guard.mjs).
@@ -179,5 +233,8 @@ export function assertStoreConsistent(tool, store) {
   if (ai !== instance) throw new Error(`resource attributes name instance "${ai}", not "${instance}"`)
   const bi = bearerInstance(s.bearer_endpoint)
   if (bi !== instance) throw new Error(`bearer endpoint addresses instance "${bi}", not "${instance}"`)
+  // OPTIONAL, and checked only when present: a pre-sprint store has none, and
+  // the emit helper never reads it. When present it must be this lane's.
+  if (s.helper !== undefined) assertHelperRecord(s.helper, tool)
   return s
 }

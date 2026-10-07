@@ -72,7 +72,8 @@ export default defineEventHandler(async (event) => {
     // row comes back regardless of which region it belongs to. The explicit
     // requireRegionScope call right below is the actual gate.
     //
-    // The version columns are client-asserted (mig 0092) and are shown here as
+    // The version columns (mig 0092) and platform / surface / setup mode (mig
+    // 0150) are client-asserted and are shown here as
     // diagnostic hints, never as a basis for any decision this endpoint makes.
     // They are the first thing an operator wants once the verdict says 'client'.
     const instRows = await db.execute<{
@@ -84,6 +85,9 @@ export default defineEventHandler(async (event) => {
       client_plugin_version: string | null
       client_cli_version: string | null
       client_version_at: string | null
+      client_platform: string | null
+      client_surface: string | null
+      setup_mode: string | null
     }>(sql`
       SELECT ia.instance_id::text        AS instance_id,
              ia.region_id::text          AS region_id,
@@ -92,7 +96,10 @@ export default defineEventHandler(async (event) => {
              ia.ts_actual_end::text      AS ts_actual_end,
              ia.client_plugin_version    AS client_plugin_version,
              ia.client_cli_version       AS client_cli_version,
-             ia.client_version_at::text  AS client_version_at
+             ia.client_version_at::text  AS client_version_at,
+             ia.client_platform          AS client_platform,
+             ia.client_surface           AS client_surface,
+             ia.setup_mode               AS setup_mode
         FROM instance_attestation ia
         LEFT JOIN teammate t ON t.id = ia.teammate_id
        WHERE ia.instance_id = ${instanceId}::uuid
@@ -200,6 +207,11 @@ export default defineEventHandler(async (event) => {
             clientPluginVersion: inst.client_plugin_version,
             clientCliVersion: inst.client_cli_version,
             clientVersionAt: inst.client_version_at,
+            // CLIENT-ASSERTED as well (mig 0150). Platform / surface follow the
+            // version rules; setupMode is the latest setup redeem's own claim.
+            clientPlatform: inst.client_platform,
+            clientSurface: inst.client_surface,
+            setupMode: inst.setup_mode,
           }
         : null,
       ingest: presence

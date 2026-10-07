@@ -53,7 +53,7 @@
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { isMainModule } from './is-main.mjs'
 import { execFileSync } from 'node:child_process'
 import { encodeExportLogsServiceRequest } from './otlp-logs.mjs'
 import {
@@ -64,6 +64,7 @@ import {
 } from './plugin-runtime.mjs'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 import { resolveRepoRoot } from './tag-repo.mjs'
+import { emitHelperSpawn, helperScriptName } from './emit-helper-spawn.mjs'
 
 // Re-export so existing callers (tests, file-forwarder) can import from here.
 export { encodeExportLogsServiceRequest } from './otlp-logs.mjs'
@@ -389,9 +390,9 @@ export function buildOtlpLogsPayload(records, resourceAttrs) {
  * / _STATE_DIR / _API_BASE, and the safe env is what closes that.
  */
 function mintBearer(pluginRoot, env, stateDirOverride = undefined, toolDirOverride = undefined) {
-  const helper = join(pluginRoot, 'scripts', 'otel-headers-helper.sh')
+  const helper = join(pluginRoot, 'scripts', helperScriptName(process.platform))
   if (!existsSync(helper)) {
-    throw new Error(`otel-headers-helper.sh not found at ${helper} (is CLAUDE_PLUGIN_ROOT set?)`)
+    throw new Error(`${helperScriptName(process.platform)} not found at ${helper} (is CLAUDE_PLUGIN_ROOT set?)`)
   }
   // A test must never drive the real state dir (same guard as
   // writeSharedCredentialStore). Covers in-process imports only; callers pass a
@@ -404,19 +405,22 @@ function mintBearer(pluginRoot, env, stateDirOverride = undefined, toolDirOverri
       'refusing to run the emit helper against the REAL state dir from a test — pass an explicit stateDir',
     )
   }
+  // State dir as an ARGUMENT and the interpreter absolute (`/bin/sh`, or
+  // powershell.exe on Windows) — the helper no longer reads
+  // TOKENSCOPE_STATE_DIR, and a bare name would be resolved through a PATH a
+  // repository can set. See emit-helper-spawn.mjs.
+  const spawn = emitHelperSpawn({ helper, stateDir, tool: 'claude-code', env })
+  if (!spawn) throw new Error('Windows PowerShell (powershell.exe) not found — cannot run the headers helper')
+  // --tool-dir is trusted by the same argument as --state-dir; tests use it
+  // to stub the passwd lookup. The .sh's seam only: the .ps1 refuses it.
+  if (toolDirOverride && process.platform !== 'win32') spawn.args.push('--tool-dir', toolDirOverride)
   let stdout
   try {
-    // State dir as an ARGUMENT and `/bin/sh` absolute — the helper no longer
-    // reads TOKENSCOPE_STATE_DIR, and a bare `sh` would be resolved through a
-    // PATH a repository can set. See otel-headers-helper.sh's header.
-    const helperArgs = [helper, '--state-dir', stateDir, '--tool', 'claude-code']
-    // --tool-dir is trusted by the same argument as --state-dir; tests use it
-    // to stub the passwd lookup.
-    if (toolDirOverride) helperArgs.push('--tool-dir', toolDirOverride)
-    stdout = execFileSync('/bin/sh', helperArgs, {
+    stdout = execFileSync(spawn.file, spawn.args, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'inherit'],
       env,
+      windowsHide: true,
     })
   } catch {
     // The helper already printed a loud, sanitised reason to stderr.
@@ -598,7 +602,7 @@ export function withLaunchResourceAttrs(env, cwd, resolve = launchResourceAttrs)
 }
 
 // CLI entry (guarded so tests can import the pure helpers without running).
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
+const isMain = isMainModule(import.meta.url)
 if (isMain) {
   ;(async () => {
     try {

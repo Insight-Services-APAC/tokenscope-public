@@ -492,9 +492,9 @@ export function createMcpServer(dbOverride?: Db, publicOrigin?: string): McpServ
         //     exit 0 with no output, falsely reporting success while burning the
         //     one-time handoff.
         //   - POSIX `sh` is required. On a native-Windows Copilot install without a
-        //     POSIX environment this command cannot run as-is; `redeem_url` +
-        //     `handoff_code` are returned alongside it so the client still has
-        //     everything needed to redeem by other means.
+        //     POSIX environment this command cannot run as-is; the note names the
+        //     helper to run instead (never a raw call to `redeem_url`, whose
+        //     response is the durable credential).
         // Defence in depth for the shell interpolation above. randomBytes(32)
         // .toString('base64url') yields only [A-Za-z0-9_-], so this never fires
         // today; it exists so that a change to mintEmitHandoff's encoding fails
@@ -537,9 +537,15 @@ export function createMcpServer(dbOverride?: Db, publicOrigin?: string): McpServ
           redeem_command: redeemCommand,
           // The POSIX-shell caveat is named HERE, not just in redeem_command's
           // source comment: an agent on a native-Windows install would otherwise
-          // see `sh` fail and have no way to know the fallback is already in
-          // this same payload.
-          note: `Run the local emit-redeem helper to finish provisioning — execute redeem_command in a shell (process→server, NOT through this chat). It redeems the handoff and writes the credential to disk itself. redeem_command needs a POSIX shell; if none is available (e.g. native Windows), instead run the plugin's ${emitTool === 'copilot-cli' ? 'copilot-redeem.mjs' : 'claude-redeem.mjs'} directly with --handoff-code <handoff_code>, or POST {handoff_code} to redeem_url from the local machine. The durable emit credential is NOT returned here and must never be requested through this chat.`,
+          // see `sh` fail and not know which helper to run instead. It names
+          // HELPERS only: the redeem response carries the durable refresh token,
+          // so anything that calls redeem_url other than a helper (a model's own
+          // POST, curl) prints that token into the transcript.
+          note: `Run the local emit-redeem helper to finish provisioning — execute redeem_command in a shell (process→server, NOT through this chat). It redeems the handoff and writes the credential to disk itself. redeem_command needs a POSIX shell; if none is available (e.g. native Windows), run the plugin's helper directly with --handoff-code <handoff_code>: ${
+            emitTool === 'copilot-cli'
+              ? 'node <plugin>/scripts/copilot-redeem.mjs'
+              : 'node <plugin>/scripts/claude-redeem.mjs, or on Windows without Node: C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <plugin>/scripts/claude-redeem.ps1 (that absolute path, never a bare powershell.exe, which resolves on a PATH the repository can change; if Windows is on another drive, use that drive letter)'
+          }. Never call redeem_url yourself (no POST, curl or fetch): its response is the durable emit credential, and it would land in this chat. The durable emit credential is NOT returned here and must never be requested through this chat.`,
         })
       }),
   )

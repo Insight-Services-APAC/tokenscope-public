@@ -85,8 +85,8 @@ beforeAll(async () => {
       VALUES ('${BU}', '${REGION}', 'ag.svc'::ltree, 'ag-svc', 'AG Services', 'bu', true);
     INSERT INTO teammate (id, entra_oid, email, region_id, org_unit_id, role)
       VALUES ('${TEAM}', 'oid-ag', 'dev.ag@example.com', '${REGION}', '${BU}', 'platform-admin');
-    INSERT INTO teammate (id, entra_oid, email, region_id, org_unit_id, revoked_at)
-      VALUES ('${REVOKED_TEAM}', 'oid-ag-rev', 'gone@example.com', '${REGION}', '${BU}', NOW() - INTERVAL '1 day');
+    INSERT INTO teammate (id, entra_oid, email, region_id, org_unit_id, revoked_at, emit_revoked_at)
+      VALUES ('${REVOKED_TEAM}', 'oid-ag-rev', 'gone@example.com', '${REGION}', '${BU}', NOW() - INTERVAL '1 day', NOW() - INTERVAL '1 day');
   `)
 }, 180_000)
 

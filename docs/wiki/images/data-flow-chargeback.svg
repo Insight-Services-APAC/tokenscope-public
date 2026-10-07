@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 440" width="1000" height="440" role="img" aria-labelledby="t d">
+  <title id="t">Anthropic is charged per teammate to their Business Unit; Copilot is charged per org pool to Business Units, never to a person.</title>
+  <desc id="d">Two provider lanes feed v_finance_chargeback_month. Anthropic: actual_spend rows go through v_finance_bill_chargeback, which drops chargeback_exempt rows and every Copilot tool, and homes each teammate's spend to the nearest cost-owning ancestor of their placement. Copilot seat rows in actual_spend are showback only and are excluded by name. Copilot: copilot_pool_bill, read off the enterprise bill per org and month, splits into three lanes: copilot-license homed to the org's Business Unit; copilot-usage split by seat-holder usage through copilot_overage_allocation, or homed to the org's Business Unit until an allocation exists; and copilot-unclassified, which is visible but never charged. The monthly view has no person column on Copilot rows.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="440"/>
+  <rect class="zone" x="16" y="16" width="724" height="178" rx="10"/>
+  <text class="zlabel" x="30" y="38">ANTHROPIC · BILLS PER USER</text>
+  <rect class="zone" x="16" y="210" width="724" height="214" rx="10"/>
+  <text class="zlabel" x="30" y="232">GITHUB COPILOT · BILLS A POOLED ALLOWANCE</text>
+  <rect class="zone" x="760" y="16" width="224" height="408" rx="10"/>
+  <text class="zlabel" x="774" y="38">§B SURFACE</text>
+
+  <!-- Anthropic -->
+  <rect class="node" x="30" y="54" width="210" height="50" rx="6"/>
+  <text class="tm" x="44" y="75">actual_spend</text>
+  <text class="s" x="44" y="92">Anthropic rows · teammate · day</text>
+  <rect class="node" x="30" y="128" width="210" height="50" rx="6"/>
+  <text class="tm" x="44" y="149">actual_spend · copilot-cli</text>
+  <text class="s" x="44" y="166">seat rows, showback only</text>
+
+  <rect class="node" x="290" y="54" width="300" height="70" rx="6"/>
+  <text class="tm" x="304" y="76">v_finance_bill_chargeback</text>
+  <text class="s" x="304" y="94">drops chargeback_exempt and Copilot tools</text>
+  <text class="s acc" x="304" y="112">→ the teammate's Business Unit</text>
+
+  <!-- Copilot -->
+  <rect class="node" x="30" y="282" width="210" height="70" rx="6"/>
+  <text class="tm" x="44" y="304">copilot_pool_bill</text>
+  <text class="s" x="44" y="322">per org · month</text>
+  <text class="s" x="44" y="340">net read off the bill, not priced</text>
+
+  <rect class="node" x="290" y="248" width="300" height="46" rx="6"/>
+  <text class="tm" x="304" y="267">copilot-license</text>
+  <text class="s acc" x="304" y="284">licence net → the org's Business Unit</text>
+  <rect class="node" x="290" y="304" width="300" height="62" rx="6"/>
+  <text class="tm" x="304" y="323">copilot-usage</text>
+  <text class="s acc" x="304" y="340">overage net → seat-holders' Business Units</text>
+  <text class="s" x="304" y="356">via copilot_overage_allocation, else org-homed</text>
+  <rect class="node bad" x="290" y="374" width="300" height="44" rx="6"/>
+  <text class="tm" x="304" y="392">copilot-unclassified</text>
+  <text class="s bad" x="304" y="409">counted and alerted, never charged</text>
+
+  <!-- surface -->
+  <rect class="node acc" x="774" y="150" width="198" height="104" rx="6"/>
+  <text class="tm" x="786" y="176" style="font-size:11px">v_finance_chargeback_month</text>
+  <text class="s" x="786" y="198">Business Unit · tool · month</text>
+  <text class="s" x="786" y="218">Anthropic: from teammates</text>
+  <text class="s acc" x="786" y="238">Copilot: no person column</text>
+
+  <!-- 1 anthropic -->
+  <line class="e" x1="240" y1="79" x2="284" y2="79" marker-end="url(#ah)"/>
+  <circle class="cn" cx="262" cy="79" r="10"/><text class="cnt" x="262" y="83" text-anchor="middle">1</text>
+  <!-- 2 seat rows blocked -->
+  <polyline class="e bad" points="240,153 440,153 440,130" marker-end="url(#ah-bad)"/>
+  <circle class="cn bad" cx="300" cy="153" r="10"/><text class="cnt bad" x="300" y="157" text-anchor="middle">2</text>
+  <line class="x" x1="380" y1="144" x2="398" y2="162"/><line class="x" x1="398" y1="144" x2="380" y2="162"/>
+  <!-- 3 anthropic to surface -->
+  <polyline class="e accent" points="590,89 680,89 680,180 768,180" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="680" cy="134" r="10"/><text class="cnt accent" x="680" y="138" text-anchor="middle">3</text>
+  <!-- 4 pool lanes -->
+  <polyline class="e" points="240,300 264,300 264,271 284,271" marker-end="url(#ah)"/>
+  <line class="e" x1="240" y1="335" x2="284" y2="335" marker-end="url(#ah)"/>
+  <polyline class="e" points="240,344 264,344 264,396 284,396" marker-end="url(#ah)"/>
+  <circle class="cn" cx="264" cy="370" r="10"/><text class="cnt" x="264" y="374" text-anchor="middle">4</text>
+  <!-- 5 copilot to surface -->
+  <polyline class="e accent" points="590,271 680,271 680,224 768,224" marker-end="url(#ah-acc)"/>
+  <polyline class="e accent" points="590,335 680,335 680,271"/>
+  <circle class="cn accent" cx="680" cy="303" r="10"/><text class="cnt accent" x="680" y="307" text-anchor="middle">5</text>
+  <!-- 6 unclassified visible -->
+  <polyline class="e dashed" points="590,396 720,396 720,240 768,240" marker-end="url(#ah)"/>
+  <circle class="cn bad" cx="720" cy="330" r="10"/><text class="cnt bad" x="720" y="334" text-anchor="middle">6</text>
+</svg>

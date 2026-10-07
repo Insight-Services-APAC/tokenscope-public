@@ -1,10 +1,16 @@
 /*
- * GET /api/health — liveness + readiness probe target.
+ * GET /api/health — container and Front Door probe target.
  *
- * Pointed at by the ACA container probes (infra/modules/container-app.bicep).
- * Returns 200 + {status:'ok'} when the process is alive AND can reach
- * the DB. Returns 503 if the DB ping fails — Container Apps reads the
- * status code to decide replica health.
+ * Two answers, chosen by the query (infra/modules/container-app.bicep):
+ *   - `?probe=live` (the Liveness probe): 200 + {status:'ok'} without touching
+ *     the database. Liveness restarts the replica, so a saturated pool or a
+ *     Postgres blip must not fail it.
+ *   - the bare path (Startup, Readiness, the Front Door origin probe): 200 +
+ *     {status:'ok'} when the DB answers `SELECT 1`, 503 when it does not.
+ *     Container Apps reads the status code to decide replica health.
+ *
+ * The query keeps both path exemptions working: require-front-door and
+ * nuxt-security's per-route rules each compare the path without its query.
  *
  * NO RLS LANE, deliberately (docs/design/rls-enforcement.md; tracked as an
  * explicit residue in scripts/check-handler-rls-context.mjs). The probe is
@@ -15,12 +21,15 @@
  * marked unhealthy the moment auth is misconfigured, which is the opposite of
  * what a liveness probe is for.
  */
-import { defineEventHandler, setResponseStatus } from 'h3'
+import { defineEventHandler, getQuery, setResponseStatus } from 'h3'
 import { useRuntimeConfig } from 'nitropack/runtime'
 import { sql } from 'drizzle-orm'
 import { consola } from 'consola'
 
 export default defineEventHandler(async (event) => {
+  if (getQuery(event).probe === 'live') {
+    return { status: 'ok', version: String(useRuntimeConfig().public.appVersion || 'unknown') }
+  }
   // Lazy DB import — keeps the probe usable even if the DB module is
   // mid-init at first boot.
   try {

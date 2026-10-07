@@ -601,7 +601,7 @@ describe('identity, homing and the write pattern', () => {
   it('a re-transform after a reorg does NOT re-home the github rows', async () => {
     /*
      * The shared upsert's SET-list omission, proven on the SECOND arm. Both arms
-     * go through `upsertProviderUsageFact`, so a homing column added to that SET
+     * go through `upsertProviderUsageFacts`, so a homing column added to that SET
      * list turns this AND the Anthropic suite's twin red at once — which is the
      * reason the statement is shared rather than written per arm.
      *

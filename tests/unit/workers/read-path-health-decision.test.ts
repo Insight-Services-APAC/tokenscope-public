@@ -319,6 +319,17 @@ describe('decideReadPathAlert — ALL-FAULT (unchanged: covers the errored-every
     ]
     expect(decideReadPathAlert(base({ runs }))).toEqual({ fire: true, reason: 'all-fault' })
   })
+
+  it('counts the devices the run STARTED: every started device failed, the deadline left the rest unstarted', () => {
+    // A wedged workspace times every read out, so the joiner's deadline stops it
+    // after a few devices: 6 of 120 selected, all 6 failed. Against the
+    // selection size (120) that is not "all faulted", and the storm would not page.
+    const wedged = { ...run(0, 2 * MIN, 'rows-arrived', { sessionsProcessed: 120, errors: 6 }), devicesAttempted: 6 }
+    expect(decideReadPathAlert(base({ runs: [wedged] }))).toEqual({ fire: true, reason: 'all-fault' })
+    // One healthy started device is enough not to call it a storm.
+    const partial = { ...wedged, errors: 5 }
+    expect(decideReadPathAlert(base({ runs: [partial, run(10, 17 * MIN)] }))).toEqual({ fire: false, reason: null })
+  })
 })
 
 describe('decideReadPathAlert — NO-SUCCESS (unchanged: covers a throwing reader)', () => {

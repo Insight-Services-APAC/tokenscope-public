@@ -182,6 +182,38 @@ describe('assertStoreConsistent — the writer-side mirror of what the helper re
     expect(() => assertStoreConsistent('claude-code', { ...ok(), ...patch })).toThrow(re)
   })
 
+  // The optional `helper` record (S1 of #408): accepted when well-formed, and
+  // adding it never lets through a store the checks above refuse.
+  it('accepts a store carrying a well-formed helper record', () => {
+    for (const helper of [
+      { tool: 'claude-code', platform: 'linux' },
+      { tool: 'claude-code', platform: 'darwin', stateDir: '/Users/jo do/.ts-sandbox' },
+      { tool: 'claude-code', platform: 'win32', stateDir: 'C:\\Users\\Jo Do\\.tokenscope' },
+    ]) {
+      expect(() => assertStoreConsistent('claude-code', { ...ok(), helper })).not.toThrow()
+    }
+  })
+
+  it.each([
+    ['not an object', 'x'],
+    ['another lane', { tool: 'copilot-cli', platform: 'linux' }],
+    ['an unknown field', { tool: 'claude-code', platform: 'linux', script: '/evil.sh' }],
+    ['no platform', { tool: 'claude-code' }],
+    ['a platform that is not a name', { tool: 'claude-code', platform: 'linux; rm -rf' }],
+    ['a relative state dir', { tool: 'claude-code', platform: 'linux', stateDir: '.ts' }],
+    ['a state dir with a quote', { tool: 'claude-code', platform: 'linux', stateDir: '/a"b' }],
+    ['a state dir with a newline', { tool: 'claude-code', platform: 'linux', stateDir: '/a\nb' }],
+    ['a relative state dir on win32', { tool: 'claude-code', platform: 'win32', stateDir: 'relative\\x' }],
+  ])('rejects a helper record with %s', (_l, helper) => {
+    expect(() => assertStoreConsistent('claude-code', { ...ok(), helper })).toThrow(/helper record/)
+  })
+
+  it('a helper record does not rescue a store the other checks refuse', () => {
+    const helper = { tool: 'claude-code', platform: 'linux' }
+    expect(() => assertStoreConsistent('claude-code', { ...ok(), helper, oauth_refresh_token: '' })).toThrow(/no oauth_refresh_token/)
+    expect(() => assertStoreConsistent('claude-code', { ...ok(), helper, bearer_endpoint: 'https://h/api/v1/instances/i-9/bearer' })).toThrow(/addresses instance/)
+  })
+
   it('accepts loopback http endpoints (a local dev server)', () => {
     expect(() =>
       assertStoreConsistent('claude-code', {

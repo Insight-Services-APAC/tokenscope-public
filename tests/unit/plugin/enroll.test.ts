@@ -29,6 +29,7 @@ import {
   computeDeviceBinding,
 } from '../../../plugin/scripts/enroll.mjs'
 import { resolveEnrollmentSecret } from '../../../plugin/scripts/enrollment-secret.mjs'
+import { DEFAULT_API_BASE } from '../../../plugin/scripts/api-base.mjs'
 
 // A complete, valid enroll response — shape mirrors /setup/redeem (so the redeem
 // writer is reused verbatim): top-level oauth_* + a telemetry.claude bundle whose
@@ -73,7 +74,11 @@ const baseOpts = () => ({
   claimedEmail: 'dev@example.com',
   deviceBinding: 'host:machine',
   settingsPath: join(dir, 'settings.json'),
-  helperPath: '/plugin/scripts/otel-headers-helper.sh',
+  scriptsDir: '/plugin/scripts',
+  platform: 'linux',
+  // The real reader opens the passwd home's settings file; nothing configured
+  // here unless a test says so.
+  configuredOrigin: () => null,
 })
 
 describe('isEnrolled', () => {
@@ -194,12 +199,13 @@ describe('enrollIfNeeded — decision logic', () => {
       device_binding: 'host:machine',
     })
 
-    // Wrote via the redeem writer: (settingsPath, helperPath, envBlock) with the
+    // Wrote via the redeem writer: (settingsPath, helper, envBlock) with the
     // durable OAuth emit credential + the instance-id-bearing resource attrs.
     expect(writeSettings).toHaveBeenCalledTimes(1)
-    const [settingsPath, helperPath, envBlock] = writeSettings.mock.calls[0]
+    const [settingsPath, helper, envBlock] = writeSettings.mock.calls[0]
     expect(settingsPath).toBe(join(dir, 'settings.json'))
-    expect(helperPath).toBe('/plugin/scripts/otel-headers-helper.sh')
+    // The default store, so a record with no state dir (buildHelperCommand).
+    expect(helper).toEqual({ record: { tool: 'claude-code', platform: 'linux' }, scriptsDir: '/plugin/scripts' })
     expect(envBlock.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBe('rt_provisional_secret')
     expect(envBlock.TOKENSCOPE_BEARER_ENDPOINT).toBe(FAKE_ENROLL_RESPONSE.telemetry.claude.otel_headers_helper_url)
     expect(envBlock.OTEL_RESOURCE_ATTRIBUTES).toContain('tokenscope.instance_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
@@ -275,12 +281,32 @@ describe('enrollIfNeeded — decision logic', () => {
         post,
         writeSettings,
       })
+      if (!DEFAULT_API_BASE) {
+        // The public build packages no server (#415): nothing to POST to at all.
+        expect(post).not.toHaveBeenCalled()
+        return
+      }
       expect(post).toHaveBeenCalledTimes(1)
       const [url, body] = post.mock.calls[0]
-      expect(url).toBe('https://tokenscope.example.com/api/v1/setup/enroll')
+      expect(url).toBe(`${DEFAULT_API_BASE}/api/v1/setup/enroll`)
       expect(url).not.toContain('attacker')
       // Name what would have leaked, so a future reader sees the stake.
       expect(body.enrollment_secret).toBe('BUNDLED_SECRET')
+    })
+
+    it('enrols against the user’s configured server_url, above a discovered registration', async () => {
+      const post = vi.fn().mockResolvedValue(FAKE_ENROLL_RESPONSE)
+      await enrollIfNeeded({
+        ...baseOpts(),
+        apiBase: null,
+        configuredOrigin: () => 'https://ts-configured.example.com',
+        discoverOrigin: () => 'https://ts-own.example.com',
+        env: {},
+        post,
+        writeSettings: vi.fn(),
+      })
+      const [url] = post.mock.calls[0]
+      expect(url).toBe('https://ts-configured.example.com/api/v1/setup/enroll')
     })
 
     it('prefers the operator’s own registered MCP origin over the env var', async () => {

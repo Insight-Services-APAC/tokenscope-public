@@ -45,8 +45,9 @@ extension-permission grant.
    the stale threshold is dead and its files are adopted. Spooled records older
    than 7 days are dropped.
 5. Sending goes through `copilot-plugin/scripts/copilot-emit.mjs`: the per-tool credential
-   store, the bearer mint (`otel-headers-helper.sh`) and a guarded HTTPS POST of
-   OTLP-logs **protobuf** to the Azure Monitor DCE.
+   store, the bearer mint (`otel-headers-helper.sh`, or `otel-headers-helper.ps1`
+   on Windows) and a guarded HTTPS POST of OTLP-logs **protobuf** to the Azure
+   Monitor DCE.
 6. A per-checkpoint comparison of Copilot's own cost total against the recorded
    calls writes a **drift** verdict under `~/.tokenscope/copilot-usage-drift/`,
    which the `status` skill reports.
@@ -55,6 +56,22 @@ Each batch carries resource attributes `tokenscope.instance_id`,
 `tool=copilot-cli`, `copilot.surface` (`cli` or `app`),
 `tokenscope.emitter=extension`, and, when resolved, `project.code_hash` and
 `github.org`.
+
+**Windows.** Copilot CLI and the Copilot App on Windows are supported (#408;
+proven under `pwsh` on Linux, first real-Windows run is the pilot's). Nothing
+extra is installed: setup (`copilot-redeem.mjs`) and the extension run in
+Copilot's own Node, and the bearer mint runs the PowerShell twin of the helper
+under the Windows PowerShell 5.1 that ships with Windows, as
+`<SystemRoot>\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile
+-NonInteractive -ExecutionPolicy Bypass -File otel-headers-helper.ps1 --state-dir
+<dir> --tool copilot-cli`. No admin rights are needed: `-ExecutionPolicy Bypass`
+applies to that one process (a Group Policy execution policy overrides it, and on
+such a machine the mint fails and `status` shows emission failing). `powershell.exe` is never resolved through `PATH`:
+`C:\Windows` is tried first and `%SystemRoot%` only when it has the
+`<drive>:\Windows` shape, because the environment is not trusted; the reasoning
+is in `copilot-plugin/scripts/emit-helper-spawn.mjs`, the one module every
+helper spawn (mint, status probe, Claude-lane probe and backfill) goes through.
+The `status` skill's emission probe uses the same spawn.
 
 **Https-only egress.** Every credential-bearing call routes through the same
 `assertSafeEndpoint()` validator the Claude lane uses: the file is vendored
@@ -226,19 +243,26 @@ into `copilot-plugin/.mcp.json` and `copilot-plugin/scripts/enroll.mjs`, so a
 self-hosted deployment needs its own copy — see "Installing for your own
 deployment" below.
 
-**Individual/Pro (manual):** in a terminal:
+**Individual/Pro (manual):** about 5 minutes, once per computer.
 
-```bash
-copilot plugin marketplace add <owner>/<repo>
-copilot plugin install tokenscope-copilot@tokenscope
-```
+1. **Install the plugin.** In a terminal, run these one at a time:
 
-Then run the `tokenscope-setup` skill inside a `copilot` session (type `/` to
-list TokenScope's skills). **Start a new `copilot` session** so the usage
-extension loads, then **verify** with the `status` skill (Copilot CLI has no
-always-on status line): it confirms emitting, landing and attribution, and
-reports `usage_capture.enabled: false` when the extension would not load.
-Ingestion takes ~4–5 min.
+   ```bash
+   copilot plugin marketplace add <owner>/<repo>
+   copilot plugin install tokenscope-copilot@tokenscope
+   ```
+
+2. **Sign in and turn on tracking.** Start `copilot`, type `/` and run the
+   `tokenscope-setup` skill. Approve the sign-in in your browser.
+3. **Restart `copilot`.**
+4. **Check it works.** After a few minutes of use, run the `status` skill. Green
+   means you're done.
+
+Why: the usage extension loads only when a session starts, hence the restart.
+Copilot CLI has no always-on status line, so the `status` skill is the check: it
+confirms emitting, landing and attribution, and reports
+`usage_capture.enabled: false` when the extension would not load. Ingestion
+takes ~4–5 min.
 
 **Enterprise-managed (Business/Enterprise):** in your organisation's
 <!-- docs-check: ignore (a path in your organisation's repository, not this one) -->
@@ -280,8 +304,13 @@ because a cloned repository can set it. Either:
 
 1. **Fork and set your host (recommended).** Set `https://<your-host>` in
    `copilot-plugin/.mcp.json` (a literal URL: Copilot does not expand `${VAR}`),
-   `copilot-plugin/scripts/enroll.mjs` (`DEFAULT_API_BASE`),
-   `plugin/scripts/api-base.mjs` (`DEFAULT_API_BASE`) and `plugin/.mcp.json`.
+   `copilot-plugin/scripts/enroll.mjs` (`DEFAULT_API_BASE`) and
+   `shared/connect.ts` (`COPILOT_PLUGIN_BUNDLED_ORIGIN`). If you also ship the Claude Code
+   plugin with that default, set it in `plugin/scripts/api-base.mjs`
+   (`DEFAULT_API_BASE`), `plugin/.claude-plugin/plugin.json`
+   (`userConfig.server_url.default`) and `shared/connect.ts`
+   (`CLAUDE_PLUGIN_DEFAULT_ORIGIN`); Claude Code users can instead set the
+   plugin's server URL themselves (see the Claude Code Client page).
    Run `npm run sync:copilot-plugin` and `npm run check:copilot-plugin-sync`
    (it fails if the hosts disagree), bump the plugin versions
    (`copilot-plugin/plugin.json`, `plugin/.claude-plugin/plugin.json` and both

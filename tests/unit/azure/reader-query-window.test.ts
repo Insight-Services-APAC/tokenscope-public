@@ -39,7 +39,17 @@ vi.mock('@azure/identity', () => ({
 }))
 
 /* eslint-disable import/first */
-import { LogAnalyticsReader, isoDuration } from '../../../server/azure/reader'
+import {
+  LogAnalyticsReader,
+  isoDuration,
+  buildSessionUsageKql,
+  buildSessionUsageKqlGenAI,
+  buildSignalUsageKql,
+  eventWindowClause,
+  WINDOWED_QUERY_TIMEOUT_S,
+  JOINER_QUERY_TIMEOUT_S,
+  JOINER_QUERY_ABORT_MS,
+} from '../../../server/azure/reader'
 /* eslint-enable import/first */
 
 const SID = '11111111-1111-4111-8111-111111111111'
@@ -112,6 +122,93 @@ describe('LogAnalyticsReader — emitted query window', () => {
       const expected = isoDuration(reader.appliedLookbackDays, DURATIONS)
       expect(sentDurations().every((d) => d === expected)).toBe(true)
     }
+  })
+})
+
+describe('LogAnalyticsReader — an instance-day window', () => {
+  const from = new Date('2026-09-26T08:26:00.000Z')
+  const to = new Date('2026-09-27T08:26:00.000Z')
+
+  it('sends the window itself as the timespan on every call site, not a lookback from now', async () => {
+    // A recovery request fixes its windows when it is queued; a lookback measured
+    // from the tick's clock would clip the first day's early hours once the
+    // request resumes later.
+    const saved = process.env.NUXT_COPILOT_NATIVE_OTEL
+    process.env.NUXT_COPILOT_NATIVE_OTEL = 'true'
+    try {
+      const reader = new LogAnalyticsReader('ws', { lookbackDays: 7 })
+      await reader.getSessionUsage(SID, undefined, undefined, { from, to })
+      await reader.getSignalUsage(SID, undefined, undefined, { from, to })
+      const spans = queryWorkspace.mock.calls.map((c) => (c as unknown as [string, string, unknown])[2])
+      expect(spans).toHaveLength(3) // Claude, native GenAI, signals
+      for (const span of spans) expect(span).toEqual({ startTime: from, endTime: to })
+      // Each windowed query carries a server timeout below the 200 s dispatch budget.
+      const options = queryWorkspace.mock.calls.map((c) => (c as unknown as [string, string, unknown, unknown])[3])
+      for (const o of options) {
+        expect(o).toEqual({ serverTimeoutInSeconds: WINDOWED_QUERY_TIMEOUT_S, abortSignal: expect.any(AbortSignal) })
+      }
+      const kql = queryWorkspace.mock.calls.map((c) => (c as unknown as [string, string])[1])
+      for (const q of kql) expect(q).toContain(eventWindowClause({ from, to }))
+    } finally {
+      if (saved === undefined) delete process.env.NUXT_COPILOT_NATIVE_OTEL
+      else process.env.NUXT_COPILOT_NATIVE_OTEL = saved
+    }
+  })
+
+  it('bounds every KQL lane with >= from and < to', () => {
+    const closed = eventWindowClause({ from, to })
+    expect(closed).toBe(
+      '| where TimeGenerated >= datetime(2026-09-26T08:26:00.000Z) and TimeGenerated < datetime(2026-09-27T08:26:00.000Z)',
+    )
+    expect(eventWindowClause(undefined)).toBe('')
+    for (const kql of [
+      buildSessionUsageKql(SID, undefined, { from, to }),
+      buildSessionUsageKqlGenAI(SID, undefined, { from, to }),
+      buildSignalUsageKql(SID, undefined, { from, to }),
+    ]) {
+      expect(kql).toContain(closed)
+    }
+  })
+})
+
+describe('LogAnalyticsReader — every joiner query is bounded', () => {
+  // The scheduled tick's deadline only holds if no single query can outlive it:
+  // the service default is 3 minutes, past the 200 s dispatch budget on its own.
+  it('sends a 40 s server timeout and a fresh 45 s client abort on the usage, GenAI and signal queries', async () => {
+    const saved = process.env.NUXT_COPILOT_NATIVE_OTEL
+    process.env.NUXT_COPILOT_NATIVE_OTEL = 'true'
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      const reader = new LogAnalyticsReader('ws', {})
+      await reader.getSessionUsage(SID, new Date('2026-10-01T00:00:00Z'))
+      await reader.getSignalUsage(SID, new Date('2026-10-01T00:00:00Z'))
+      const options = queryWorkspace.mock.calls.map(
+        (c) => (c as unknown as [string, string, unknown, { serverTimeoutInSeconds: number; abortSignal: AbortSignal }])[3],
+      )
+      expect(options).toHaveLength(3) // Claude usage, native GenAI, signals
+      for (const o of options) {
+        expect(o.serverTimeoutInSeconds).toBe(JOINER_QUERY_TIMEOUT_S)
+        expect(o.abortSignal).toBeInstanceOf(AbortSignal)
+      }
+      expect(JOINER_QUERY_TIMEOUT_S).toBe(40)
+      expect(JOINER_QUERY_ABORT_MS).toBe(45_000)
+      // One signal per query: AbortSignal.timeout starts its clock when created,
+      // so a shared one would expire on the device's later queries.
+      expect(new Set(options.map((o) => o.abortSignal)).size).toBe(3)
+      expect(timeout.mock.calls).toEqual([[JOINER_QUERY_ABORT_MS], [JOINER_QUERY_ABORT_MS], [JOINER_QUERY_ABORT_MS]])
+    } finally {
+      timeout.mockRestore()
+      if (saved === undefined) delete process.env.NUXT_COPILOT_NATIVE_OTEL
+      else process.env.NUXT_COPILOT_NATIVE_OTEL = saved
+    }
+  })
+
+  it('a query the client aborts is a thrown read, which the joiner counts as that device\'s error', async () => {
+    queryWorkspace.mockImplementationOnce(async () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    })
+    const reader = new LogAnalyticsReader('ws', {})
+    await expect(reader.getSessionUsage(SID, new Date('2026-10-01T00:00:00Z'))).rejects.toThrow(/timeout/)
   })
 })
 

@@ -36,6 +36,7 @@ const Query = z.object({
 interface Row extends Record<string, unknown> {
   id: string
   status: string
+  kind: 'operator' | 'scheduled'
   lookback_days: number
   instance_count: number
   cursor_index: number
@@ -69,6 +70,7 @@ export default defineEventHandler(async (event) => {
     const rows = await db.execute<Row>(sql`
       SELECT r.id::text                        AS id,
              r.status                          AS status,
+             r.kind                            AS kind,
              r.lookback_days                   AS lookback_days,
              cardinality(r.instance_ids)       AS instance_count,
              r.cursor_index                    AS cursor_index,
@@ -95,6 +97,7 @@ export default defineEventHandler(async (event) => {
       return {
         id: r.id,
         status: r.status,
+        kind: r.kind,
         lookbackDays: Number(r.lookback_days),
         instanceCount: total,
         // Progress over the SCOPE, so "80% of 40 devices" is legible without the
@@ -113,11 +116,20 @@ export default defineEventHandler(async (event) => {
       }
     })
 
+    // Queue state, not the history page: daily rows can push a long operator
+    // recovery off the page. One operator recovery at a time (mig 0148), and the
+    // enqueue's own pre-check is global, so this is too; the daily pass never
+    // blocks the button.
+    const [busy] = await db.execute<{ in_flight: boolean }>(sql`
+      SELECT EXISTS (
+        SELECT 1 FROM telemetry_recovery_request
+         WHERE kind = 'operator' AND status IN ('pending', 'running')
+      ) AS in_flight
+    `)
+
     return {
       requests,
-      // The queue serialises globally (mig 0093), so this is the single fact that
-      // decides whether the enqueue button should be offered at all.
-      inFlight: requests.some((r) => r.status === 'pending' || r.status === 'running'),
+      inFlight: Boolean(busy?.in_flight),
     }
   })
 })

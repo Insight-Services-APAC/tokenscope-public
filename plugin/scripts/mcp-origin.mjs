@@ -155,10 +155,11 @@ export function discoverMcpOrigin(scriptsDir, { client, home = realHome() } = {}
     // the same defect wearing a different hat. User-scope config is written by
     // the human who ran the registration; a repo is not.
     ...ownFirst,
-    // Whatever shipped in the bundle. This is the BAKED default: correct for a
-    // stock install, wrong for a custom registration, hence last. Both plugins
-    // ship a literal URL here; a ${VAR} template is never expanded (it would let
-    // a repository choose where a credential goes) and yields null.
+    // Whatever shipped in the bundle: correct for a stock install, wrong for a
+    // custom registration, hence last. Copilot's bundle ships a literal URL.
+    // Claude's ships `${user_config.server_url}/api/v1/mcp` (#415), which is not
+    // a URL, so it yields null here; api-base.mjs reads that option from the
+    // user's settings file instead. No template is ever expanded here.
     () => originFromMcpConfig(join(scriptsDir, '..', '.mcp.json')),
     () => originFromMcpConfig(join(scriptsDir, '.mcp.json')),
   ]

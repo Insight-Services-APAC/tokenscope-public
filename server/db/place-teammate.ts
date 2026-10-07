@@ -66,7 +66,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { requireRegionScope } from '../auth/rbac'
 import { recordAuditEvent } from './audit'
 import { assertOrgUnitInRegion } from './org-units'
-import { stripProvenanceKeys } from '../reconciliation/placement-provenance'
+import { PLACEMENT_AUDIT_EVENT, stripProvenanceKeys } from '../reconciliation/placement-provenance'
 import { rehomePlacement, type RehomePlacementRange, type RehomePlacementResult } from '../governance/rehome-placement'
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
@@ -76,9 +76,6 @@ type Tx = PostgresJsDatabase<Record<string, unknown>>
  * product rule per surface, never a relaxation of the region checks.
  */
 export type PlacementTargetPolicy = 'any-active-unit' | 'cost-owning-only'
-
-/** The audit event type. ONE type for both surfaces: it is the same fact. */
-export const PLACEMENT_AUDIT_EVENT = 'teammate-org-unit-changed'
 
 export interface PlaceTeammateOpts {
   teammateId: string

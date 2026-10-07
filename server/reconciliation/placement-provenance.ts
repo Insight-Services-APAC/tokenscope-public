@@ -17,6 +17,8 @@
  * (never re-derived) or admin placements silently re-derived away.
  */
 import { sql, type SQL } from 'drizzle-orm'
+import { HOLDING_UNIT_TYPE } from '../../shared/placement/holding-nodes'
+import { rehomeSafePredicate } from './rehome-safety'
 
 /** Placed by the Entra manager-chain walk → a cost-owning unit. */
 export const PLACED_VIA_MANAGER_CHAIN = 'manager-chain'
@@ -34,6 +36,21 @@ export const DERIVED_PLACEMENT_VIAS = [PLACED_VIA_MANAGER_CHAIN, PLACED_VIA_ATTR
 export type DerivedPlacementVia = (typeof DERIVED_PLACEMENT_VIAS)[number]
 
 /**
+ * THE re-enrichment candidate predicate: a rehome-safe teammate (no live
+ * credential; rehomeSafePredicate) who is EITHER on a holding node OR placed by a
+ * derivation (a DERIVED_PLACEMENT_VIAS provenance). `t` is the teammate, `ou` its
+ * CURRENT org_unit. One definition, used by the worker's selection
+ * (server/workers/region-reenrichment.ts) and re-applied by its compare-and-set
+ * write (placeTeammateIfStillSelected): an admin move that ends on the very unit
+ * the person was selected on (U → V → U) leaves the unit unchanged but strips
+ * the provenance, and only this predicate can see that.
+ */
+export function reenrichmentCandidatePredicate(t: SQL, ou: SQL): SQL {
+  return sql`((${ou}.unit_type = ${HOLDING_UNIT_TYPE} OR ${t}.metadata->>'placedVia' IN ${[...DERIVED_PLACEMENT_VIAS]})
+    AND ${rehomeSafePredicate(t)})`
+}
+
+/**
  * The metadata keys a placement provenance occupies. A manual placement strips
  * ALL of them; a derived placement rewrites them wholesale. Listed once so a new
  * key cannot be written by the setter and left behind by the stripper.
@@ -44,6 +61,22 @@ export const PLACEMENT_PROVENANCE_KEYS = [
   'placedAttribute',
   'placedAt',
 ] as const
+
+/**
+ * The audit event type for a teammate's org_unit changing. ONE type for every
+ * writer that moves someone (the admin per-row and bulk doors in
+ * server/db/place-teammate.ts, and the re-enrichment worker's compare-and-set
+ * move): it is the same fact, told apart by `actorSystem`.
+ */
+export const PLACEMENT_AUDIT_EVENT = 'teammate-org-unit-changed'
+
+/**
+ * The audit event type for a DERIVED teammate's provenance changing while their
+ * org_unit does not (the re-enrichment worker's provenance-only write: a
+ * different owner or attribute now derives the same unit). Written only when the
+ * provenance actually differs, so an unchanged re-derivation adds no row.
+ */
+export const PLACEMENT_PROVENANCE_AUDIT_EVENT = 'teammate-placement-provenance-changed'
 
 /** What derived this home. Discriminated so each kind carries only its own facts. */
 export type PlacementProvenance =

@@ -327,6 +327,7 @@ export async function confirmProvisionalInstance(
       const retired = await tx.execute<{ id: string }>(sql`
         UPDATE teammate
            SET revoked_at = now(),
+               emit_revoked_at = now(),
                ended_at   = now(),
                is_active  = false
          WHERE id = ${priorShadowTeammateId}::uuid

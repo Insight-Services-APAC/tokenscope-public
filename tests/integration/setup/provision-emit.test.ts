@@ -150,8 +150,8 @@ async function provision(client: Client, instanceId?: string) {
 }
 
 /** A bodied POST h3 event for the redeem endpoint (mirrors enrolment.test.ts). */
-function ev(body: unknown) {
-  const headers: Record<string, string> = { host: 'localhost:3450' }
+function ev(body: unknown, extraHeaders: Record<string, string | string[]> = {}) {
+  const headers: Record<string, string | string[]> = { host: 'localhost:3450', ...extraHeaders }
   return {
     method: 'POST',
     path: '/x',
@@ -187,8 +187,8 @@ function ev(body: unknown) {
     },
   }
 }
-async function redeem(body: unknown) {
-  return redeemHandler(ev(body) as unknown as Parameters<typeof redeemHandler>[0])
+async function redeem(body: unknown, extraHeaders: Record<string, string | string[]> = {}) {
+  return redeemHandler(ev(body, extraHeaders) as unknown as Parameters<typeof redeemHandler>[0])
 }
 function bearerEvFor(token: string) {
   return {
@@ -313,6 +313,29 @@ describe('provision_emit MCP tool', () => {
     const { body } = await provision(client)
     expect(body.redeem_url).toBe('/api/v1/setup/redeem')
     expect(String(body.redeem_command ?? '')).not.toContain('--api-base')
+  })
+
+  it('the note names the local helpers and never suggests calling redeem_url directly', async () => {
+    // A raw POST to redeem_url returns the durable refresh token into the
+    // transcript, so the only fallback offered is a helper.
+    const client = await connectClient(bearerTeammate({ teammateId }))
+    const claude = String((await provision(client)).body.note ?? '')
+    const copilotRes = await client.callTool({ name: 'provision_emit', arguments: { tool: 'copilot-cli' } })
+    const copilot = String(parseToolJson(copilotRes).note ?? '')
+    await client.close()
+
+    expect(claude).toContain('claude-redeem.mjs')
+    expect(claude).toContain('C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <plugin>/scripts/claude-redeem.ps1')
+    // A bare interpreter name resolves on a PATH the repository can set; the
+    // note carries the handoff code's helper, so it names the absolute path only.
+    expect(claude).not.toMatch(/(?<!\/WindowsPowerShell\/v1\.0\/)powershell\.exe\s+-/)
+    expect(copilot).toContain('copilot-redeem.mjs')
+    expect(copilot).not.toContain('claude-redeem')
+    for (const note of [claude, copilot]) {
+      expect(note).not.toMatch(/\bPOST \{?handoff_code/i)
+      expect(note).not.toMatch(/to redeem_url from/i)
+      expect(note).toMatch(/Never call redeem_url yourself/)
+    }
   })
 
   it('is idempotent for a repeated instance_id — reuses the instance, no unbounded creds/handoffs', async () => {
@@ -471,6 +494,44 @@ describe('setup/redeem endpoint', () => {
        WHERE instance_id = ${id}::uuid AND revoked_at IS NOT NULL`
     expect(Number(revoked[0]!.n)).toBeGreaterThanOrEqual(1)
   })
+
+  async function setupModeOf(instanceId: string): Promise<string | null> {
+    const [row] = await t.client<{ setup_mode: string | null }[]>`
+      SELECT setup_mode FROM instance_attestation WHERE instance_id = ${instanceId}::uuid`
+    return row!.setup_mode
+  }
+
+  it('records X-TokenScope-Setup-Mode (mig 0150) — and the LATEST redeem wins, including a silent one', async () => {
+    const first = await freshHandoff()
+    await redeem({ handoff_code: first.handoff_code }, { 'x-tokenscope-setup-mode': 'emit-only' })
+    expect(await setupModeOf(first.instance_id)).toBe('emit-only')
+
+    // Re-setup of the SAME device with Node installed: the mode describes the
+    // configuration that now exists, not the one it replaced.
+    const client = await connectClient(bearerTeammate({ teammateId }))
+    const { body: second } = await provision(client, first.instance_id)
+    await client.close()
+    expect(second.instance_id).toBe(first.instance_id)
+    await redeem({ handoff_code: second.handoff_code as string }, { 'x-tokenscope-setup-mode': 'full' })
+    expect(await setupModeOf(first.instance_id)).toBe('full')
+
+    // A redeem that states no mode leaves NULL, not the previous setup's mode.
+    const c2 = await connectClient(bearerTeammate({ teammateId }))
+    const { body: third } = await provision(c2, first.instance_id)
+    await c2.close()
+    await redeem({ handoff_code: third.handoff_code as string })
+    expect(await setupModeOf(first.instance_id)).toBeNull()
+  })
+
+  it.each(['degraded', 'FULL', 'full; DROP TABLE x', ''])(
+    'an unrecognised setup mode %j is stored as NULL and the redeem still succeeds',
+    async (mode) => {
+      const { instance_id, handoff_code } = await freshHandoff()
+      const out = (await redeem({ handoff_code }, { 'x-tokenscope-setup-mode': mode })) as { instance_id: string }
+      expect(out.instance_id).toBe(instance_id)
+      expect(await setupModeOf(instance_id)).toBeNull()
+    },
+  )
 
   it('rejects an unknown handoff (401)', async () => {
     await expect(

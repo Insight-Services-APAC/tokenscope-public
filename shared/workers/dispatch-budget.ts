@@ -27,7 +27,10 @@
  *   - scripts/cron-trigger.mjs         (its fallback when the env is unset)
  *   - the diagnostics read path        (classifies each run against it)
  * and tests/unit/workers/dispatch-budget-lockstep.test.ts asserts all three
- * agree, because drift between them is exactly the failure above.
+ * agree, because drift between them is exactly the failure above. With Front
+ * Door enforced the jobs call through it, so its origin timeout
+ * (afdOriginResponseTimeoutSeconds) is a fourth ceiling; the same test asserts
+ * it is not below this budget.
  */
 
 /**

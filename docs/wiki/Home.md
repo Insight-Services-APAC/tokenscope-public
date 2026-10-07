@@ -20,22 +20,15 @@ wiki is _what is actually running_.
 
 ## The system at a glance
 
-```mermaid
-flowchart LR
-    CC["Claude Code / Copilot CLI<br/>(provisioned via provision_emit → setup/redeem)"]
-    AM["Azure Monitor<br/>→ Log Analytics (OTelLogs)"]
-    JOIN["read-joiner worker<br/>membership gate + org lane"]
-    DB[("PostgreSQL<br/>attribution_record")]
-    APP["TokenScope web app<br/>budgets · rollups · untagged worklist"]
-    POLL["Analytics API poller<br/>(batch truth)"]
+![TokenScope at a glance: telemetry says whose work it was, the provider APIs say how much, and TokenScope reconciles the two](images/home-at-a-glance.svg)
 
-    CC -- "OTLP logs (Claude api_request /<br/>Copilot usage extension)" --> AM
-    AM -- "KQL" --> JOIN
-    JOIN --> DB
-    POLL --> DB
-    DB --> APP
-    APP -- "retroactive tag / enrol" --> CC
-```
+1. Claude Code and the Copilot CLI send OTLP usage log events straight to Azure Monitor, which stores them in the `OTelLogs` table. Each event names the device's enrolment and, when the repo is tagged, the project.
+2. TokenScope's read joiner queries `OTelLogs` by KQL every five minutes.
+3. The plugin talks to TokenScope over MCP: it enrols the device once, and later tags sessions to projects.
+4. TokenScope pulls complete daily usage and bills from the Anthropic Analytics API and the GitHub Copilot APIs. These cover every teammate in an onboarded scope, enrolled or not.
+5. The dashboard serves budgets, rollups, the untagged worklist and chargeback.
+
+_Telemetry carries the detail, the provider APIs carry the amount, and TokenScope reconciles them per teammate and day._
 
 TokenScope joins AI-tool usage telemetry to project financials so every token of
 spend is attributed to a project (or spills to a named cost-owning unit). It

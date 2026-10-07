@@ -22,13 +22,51 @@ import {
 } from '../../shared/placement/holding-nodes'
 import { teammateDimensionSnapshotSql, DIMENSION_SOURCE_INGEST_SNAPSHOT } from './dimension-snapshot'
 import { captureDirectorySnapshot } from './directory-snapshot'
-import { PLACED_VIA_MANAGER_CHAIN, stripProvenanceKeys } from './placement-provenance'
+import {
+  PLACED_VIA_MANAGER_CHAIN,
+  PLACEMENT_AUDIT_EVENT,
+  PLACEMENT_PROVENANCE_AUDIT_EVENT,
+  reenrichmentCandidatePredicate,
+  stripProvenanceKeys,
+  type PlacementProvenance,
+} from './placement-provenance'
 import { rehomeSafePredicate } from './rehome-safety'
 import { eligibleUnitOwnerPredicate } from './unit-owner-eligibility'
 import { parseActualSpendSourceOrgRef } from './source-org-ref'
 import { loadGovernanceResolutionContext, resolveAnthropicVerdict, resolveGithubVerdict } from '../governance/verdict'
+import { recordAuditEvent } from '../db/audit'
 
 type Db = PostgresJsDatabase<typeof schema>
+
+/*
+ * DERIVED-placement provenance on teammate.metadata. Set so a later pass can
+ * re-derive the person when the thing that derived them changes — their Entra
+ * manager, or the curated rule that named the unit; cleared on a non-unit home.
+ * Merge/strip only the keys in PLACEMENT_PROVENANCE_KEYS (preserve other metadata).
+ * One writer for the store's plain setter and the compare-and-set placement.
+ */
+async function writePlacementProvenance(
+  db: Pick<Db, 'execute'>,
+  teammateId: string,
+  prov: PlacementProvenance | null,
+): Promise<void> {
+  if (prov) {
+    await db.execute(sql`
+      UPDATE teammate
+      SET metadata = (coalesce(metadata, '{}'::jsonb) ${stripProvenanceKeys()})
+        || jsonb_build_object(
+             'placedVia', ${prov.via}::text,
+             ${prov.via === PLACED_VIA_MANAGER_CHAIN ? sql`'placedOwnerOid', ${prov.ownerOid}::text,` : sql`'placedAttribute', ${prov.attribute}::text,`}
+             'placedAt', now())
+      WHERE id = ${teammateId}::uuid`)
+  } else {
+    await db.execute(sql`
+      UPDATE teammate
+      SET metadata = (coalesce(metadata, '{}'::jsonb) ${stripProvenanceKeys()})
+      WHERE id = ${teammateId}::uuid
+        AND metadata ? 'placedVia'`)
+  }
+}
 
 export function makePlacementStore(db: Db): PlacementStore {
   return {
@@ -46,12 +84,12 @@ export function makePlacementStore(db: Db): PlacementStore {
       //
       // rehome_safe (mig-0068 cross-region safety): a (re)home can move the teammate to
       // a DIFFERENT region (cost-centre match or derived region), which changes their RLS
-      // scope. The admin region-PATCH runs a revoke cascade (revoked_at + end instances +
-      // revoke OAuth) for exactly this reason; the worker's homeTeammate does NOT. So the
+      // scope. The admin region-PATCH runs a revoke cascade (revoked_at + revoke interactive
+      // OAuth, #414) for exactly this reason; the worker's homeTeammate does NOT. So the
       // worker may only auto-move a teammate that is (a) a never-adopted bill placeholder
       // AND (b) has NO live emit instance AND no live OAuth credential — i.e. no live
-      // session to re-scope (mirrors the admin region-PATCH revoke cascade, which ends
-      // both). Anything with a real oid or a live credential is left for the admin worklist.
+      // session to re-scope (stricter than the admin region-PATCH cascade, which no
+      // longer ends devices). Anything with a real oid or a live credential is left for the admin worklist.
       const rows = await db.execute<{ id: string; on_unplaced: boolean; rehome_safe: boolean }>(sql`
         SELECT t.id::text AS id,
                (ou.unit_type = ${HOLDING_UNIT_TYPE}) AS on_unplaced,
@@ -280,6 +318,122 @@ export function makePlacementStore(db: Db): PlacementStore {
       })
     },
 
+    async placeTeammateIfStillSelected({ teammateId, selectedOrgUnitId, target, provenance, actorSystem }) {
+      /*
+       * COMPARE-AND-SET for the re-enrichment worker. It selects a candidate by
+       * query, then awaits the directory and a manager chain — seconds, more under
+       * throttling — before writing. In that window someone can sign in (a live
+       * credential: no longer rehome-safe), an admin can move the person by hand,
+       * and the target can be retired or un-flagged as cost-owning. Writing the
+       * stale decision would re-scope a live session with no revoke cascade,
+       * undo an admin's placement, or home spend on a dead unit.
+       *
+       * homeTeammateIfStillDerivable cannot be reused: it requires a same-region
+       * cost-owning target, and these moves cross regions and land on holding
+       * nodes. Its LOCK ORDER is reused exactly — teammate FOR UPDATE, then the
+       * target FOR SHARE (as server/db/place-teammate.ts) — and so is its reason:
+       * FOR UPDATE conflicts with the FOR KEY SHARE that an instance_attestation /
+       * oauth_token INSERT takes on the teammate, so a credential created during
+       * the awaits is either visible to the re-check below or waits for our commit.
+       *
+       * The re-check is the SAME candidate predicate the selection used
+       * (reenrichmentCandidatePredicate: rehome-safe, AND on a holding node or
+       * placed by a derivation), plus "still on the unit it was selected on", plus
+       * the target for its kind. The candidate predicate is what refuses an admin
+       * move that ended on the selected unit (U → V → U): the unit compares equal,
+       * but the manual placement stripped the derived provenance. Then:
+       *   - unit:         active, cost-owning, in the derived region;
+       *   - holding-node: the __UNPLACED__ holding node of the expected region
+       *                   (the global holding region when regionId is null).
+       * Any miss → 'refused', nothing written.
+       *
+       * The provenance-only case (target = the unit it is already on) runs through
+       * the same checks: a re-stamped derivation on someone who just signed in, or
+       * was just placed by an admin, would mark an assertion re-derivable.
+       */
+      return await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT 1 FROM teammate WHERE id = ${teammateId}::uuid FOR UPDATE`)
+        await tx.execute(sql`SELECT 1 FROM org_unit WHERE id = ${target.orgUnitId}::uuid FOR SHARE`)
+        const targetStillValid =
+          target.kind === 'unit'
+            ? sql`ou.retired_at IS NULL AND ou.is_cost_owning_unit AND ou.region_id = ${target.regionId}::uuid`
+            : sql`ou.unit_type = ${HOLDING_UNIT_TYPE} AND ou.code = ${UNPLACED_UNIT_CODE}
+                  AND ou.region_id = ${
+                    target.regionId === null
+                      ? sql`(SELECT r.id FROM region r WHERE r.code = ${UNASSIGNED_REGION_CODE})`
+                      : sql`${target.regionId}::uuid`
+                  }`
+        const still = await tx.execute<{ via: string | null; owner_oid: string | null; attribute: string | null }>(sql`
+          SELECT t.metadata->>'placedVia' AS via,
+                 t.metadata->>'placedOwnerOid' AS owner_oid,
+                 t.metadata->>'placedAttribute' AS attribute
+          FROM teammate t
+          JOIN org_unit cur ON cur.id = t.org_unit_id
+          WHERE t.id = ${teammateId}::uuid
+            AND t.org_unit_id = ${selectedOrgUnitId}::uuid
+            AND ${reenrichmentCandidatePredicate(sql`t`, sql`cur`)}
+            AND EXISTS (
+              SELECT 1 FROM org_unit ou
+              WHERE ou.id = ${target.orgUnitId}::uuid AND ${targetStillValid}
+            )`)
+        const before = [...still][0]
+        if (!before) return 'refused'
+
+        const moving = target.orgUnitId !== selectedOrgUnitId
+        // org_unit_id only; region_id follows via the mig-0066 trigger.
+        await tx.execute(
+          moving
+            ? sql`UPDATE teammate SET org_unit_id = ${target.orgUnitId}::uuid, last_sync_at = now()
+                  WHERE id = ${teammateId}::uuid`
+            : sql`UPDATE teammate SET last_sync_at = now() WHERE id = ${teammateId}::uuid`,
+        )
+        await writePlacementProvenance(tx, teammateId, provenance)
+        if (moving) {
+          // In the same transaction as the move: an audit row for a move that
+          // rolled back, or a move with no audit row, are both worse than neither.
+          await recordAuditEvent(tx as unknown as PostgresJsDatabase<Record<string, unknown>>, {
+            eventType: PLACEMENT_AUDIT_EVENT,
+            actorSystem,
+            subjectKind: 'teammate',
+            subjectId: teammateId,
+            payload: {
+              previousOrgUnitId: selectedOrgUnitId,
+              newOrgUnitId: target.orgUnitId,
+              targetKind: target.kind,
+              placedVia: provenance?.via ?? null,
+              sessionsRevoked: false,
+            },
+          })
+        }
+        if (!moving) {
+          // A provenance-only write is audited when — and only when — it changes
+          // the stored provenance (placedAt aside, which every write restamps), in
+          // the same transaction. An unchanged re-derivation every 6 hours would
+          // otherwise be an audit row per person per run that says nothing.
+          const after = {
+            via: provenance?.via ?? null,
+            owner_oid: provenance?.via === PLACED_VIA_MANAGER_CHAIN ? provenance.ownerOid : null,
+            attribute: provenance && provenance.via !== PLACED_VIA_MANAGER_CHAIN ? provenance.attribute : null,
+          }
+          const prior = { via: before.via, owner_oid: before.owner_oid, attribute: before.attribute }
+          if (prior.via !== after.via || prior.owner_oid !== after.owner_oid || prior.attribute !== after.attribute) {
+            await recordAuditEvent(tx as unknown as PostgresJsDatabase<Record<string, unknown>>, {
+              eventType: PLACEMENT_PROVENANCE_AUDIT_EVENT,
+              actorSystem,
+              subjectKind: 'teammate',
+              subjectId: teammateId,
+              payload: {
+                orgUnitId: selectedOrgUnitId,
+                before: { placedVia: prior.via, placedOwnerOid: prior.owner_oid, placedAttribute: prior.attribute },
+                after: { placedVia: after.via, placedOwnerOid: after.owner_oid, placedAttribute: after.attribute },
+              },
+            })
+          }
+        }
+        return moving ? 'moved' : 'provenance-only'
+      })
+    },
+
     async stampPlacementAttempt(teammateIds) {
       if (teammateIds.length === 0) return
       // The batching cursor. A pass that leaves an unresolved / errored /
@@ -294,26 +448,7 @@ export function makePlacementStore(db: Db): PlacementStore {
     },
 
     async setPlacementProvenance(teammateId, prov) {
-      // DERIVED-placement provenance on teammate.metadata. Set so a later pass can
-      // re-derive the person when the thing that derived them changes — their Entra
-      // manager, or the curated rule that named the unit; cleared on a non-unit home.
-      // Merge/strip only the keys in PLACEMENT_PROVENANCE_KEYS (preserve other metadata).
-      if (prov) {
-        await db.execute(sql`
-          UPDATE teammate
-          SET metadata = (coalesce(metadata, '{}'::jsonb) ${stripProvenanceKeys()})
-            || jsonb_build_object(
-                 'placedVia', ${prov.via}::text,
-                 ${prov.via === PLACED_VIA_MANAGER_CHAIN ? sql`'placedOwnerOid', ${prov.ownerOid}::text,` : sql`'placedAttribute', ${prov.attribute}::text,`}
-                 'placedAt', now())
-          WHERE id = ${teammateId}::uuid`)
-      } else {
-        await db.execute(sql`
-          UPDATE teammate
-          SET metadata = (coalesce(metadata, '{}'::jsonb) ${stripProvenanceKeys()})
-          WHERE id = ${teammateId}::uuid
-            AND metadata ? 'placedVia'`)
-      }
+      await writePlacementProvenance(db, teammateId, prov)
     },
 
     async captureDirectorySnapshot(teammateId, snap) {

@@ -5,13 +5,13 @@
  * provisioning + cost-centre placement, owed-bill replay (M-B), and the
  * bind-or-adopt sign-in path (H2 — bill row then login = ONE teammate, no 500).
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import { makePlacementStore, enqueueOwedBill } from '../../../server/reconciliation/placement-store'
 import { provisionAndPlace } from '../../../server/reconciliation/placement-service'
 import { resolveOrCreateTeammate } from '../../../server/auth/jit-teammate'
 import { runPlacementSync } from '../../../server/workers/placement-sync'
-import type { DirectoryUser } from '../../../server/azure/directory'
+import { _resetGraphTokenCache, type DirectoryUser } from '../../../server/azure/directory'
 
 let t: TestDb
 let apacOrgUnit = ''
@@ -171,6 +171,115 @@ describe('runPlacementSync (drain worker, end-to-end)', () => {
     const [tm] = await t.client<{ region_code: string }[]>`
       SELECT r.code AS region_code FROM teammate tm JOIN region r ON r.id=tm.region_id WHERE lower(tm.email)='nodir@example.com'`
     expect(tm!.region_code).toBe('__unassigned__')
+  })
+
+  /*
+   * The DEFAULT wiring, not an injected lookup: real-mode Graph behind a stubbed
+   * fetch. A throttled lookup used to read as "not in the directory" and provision
+   * the person onto the GLOBAL bucket; the strict lookup throws instead, so the
+   * person is skipped (nothing written, bill still queued) and the next is placed.
+   */
+  it('a THROTTLED Graph lookup skips that identity — nothing provisioned, bill still queued — and the next is placed', async () => {
+    await enqueueOwedBill(t.db, { provider: 'anthropic', actualSource: 'anthropic-analytics-api:o1', email: 'throttled-sync@example.com', tool: 'claude-code', date: '2026-06-12', costUsd: 1 })
+    await enqueueOwedBill(t.db, { provider: 'anthropic', actualSource: 'anthropic-analytics-api:o1', email: 'fine-sync@example.com', tool: 'claude-code', date: '2026-06-13', costUsd: 2 })
+    const env = {
+      NUXT_GRAPH_DIRECTORY_MODE: 'graph',
+      NUXT_GRAPH_BASE_URL: 'https://graph.example.test/v1.0',
+      NUXT_OIDC_PROVIDERS_ENTRA_CLIENT_ID: 'cid',
+      NUXT_OIDC_PROVIDERS_ENTRA_CLIENT_SECRET: 'secret',
+      NUXT_OIDC_PROVIDERS_ENTRA_TOKEN_URL: 'https://login.example.test/token',
+    }
+    for (const [k, v] of Object.entries(env)) vi.stubEnv(k, v)
+    _resetGraphTokenCache()
+    vi.stubGlobal('fetch', async (input: string) => {
+      const url = decodeURIComponent(String(input))
+      if (url.startsWith(env.NUXT_OIDC_PROVIDERS_ENTRA_TOKEN_URL)) {
+        return new Response(JSON.stringify({ access_token: 'tok', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('throttled-sync')) return new Response(null, { status: 429, headers: { 'retry-after': '0' } })
+      return new Response(JSON.stringify({ value: [{
+        id: '9a1e0000-0000-4000-8000-00000000f1e0', displayName: 'Fine', mail: 'fine-sync@example.com',
+        userPrincipalName: 'fine-sync@example.com', department: null, jobTitle: null, companyName: null,
+        country: null, officeLocation: null, state: null, employeeOrgData: { costCenter: 'CC-4310', division: null },
+      }] }), { status: 200 })
+    })
+    try {
+      const r = await runPlacementSync(t.db)
+      expect(r.errors).toBe(1)
+      expect(r.provisioned).toBe(1)
+    } finally {
+      vi.unstubAllGlobals()
+      vi.unstubAllEnvs()
+      _resetGraphTokenCache()
+    }
+    const throttled = await t.client`SELECT 1 FROM teammate WHERE lower(email) = 'throttled-sync@example.com'`
+    expect(throttled).toHaveLength(0) // never provisioned onto the global bucket
+    const queued = await t.client`SELECT 1 FROM pending_placement WHERE identity_email = 'throttled-sync@example.com' AND placed_at IS NULL`
+    expect(queued).toHaveLength(1)
+    const [fine] = await t.client<{ ou: string }[]>`SELECT org_unit_id::text AS ou FROM teammate WHERE lower(email) = 'fine-sync@example.com'`
+    expect(fine!.ou).toBe(apacOrgUnit)
+  })
+})
+
+describe('runPlacementSync — run deadline', () => {
+  const bill = (email: string, date: string) =>
+    enqueueOwedBill(t.db, { provider: 'anthropic', actualSource: 'anthropic-analytics-api:o1', email, tool: 'claude-code', date, costUsd: 1 })
+
+  it('stops starting identities at the budget; the unreached one stays queued and the NEXT run places it', async () => {
+    await bill('dl-sync-1@example.com', '2026-06-01')
+    await bill('dl-sync-2@example.com', '2026-06-02')
+    await bill('dl-sync-3@example.com', '2026-06-03')
+    // A fake clock: every lookup costs 100 s of the 150 s budget. Identity one
+    // starts at 0, two at 100 s, three would start at 200 s.
+    let clock = 0
+    const seen: string[] = []
+    const r = await runPlacementSync(t.db, {
+      now: () => clock,
+      lookupDirectory: async (e) => {
+        seen.push(e)
+        clock += 100_000
+        return dir(e, 'CC-4310')
+      },
+    })
+    expect(seen).toEqual(['dl-sync-1@example.com', 'dl-sync-2@example.com'])
+    expect(r).toMatchObject({ emailsConsidered: 3, placed: 2, deadlineHit: true })
+    const queued = await t.client`SELECT 1 FROM pending_placement WHERE identity_email = 'dl-sync-3@example.com' AND placed_at IS NULL`
+    expect(queued).toHaveLength(1)
+
+    const r2 = await runPlacementSync(t.db, { lookupDirectory: async (e) => dir(e, 'CC-4310') })
+    expect(r2).toMatchObject({ emailsConsidered: 1, placed: 1, deadlineHit: false })
+  })
+
+  it('the DEFAULT wiring hands the deadline to Graph: no retry wait is started past it', async () => {
+    await bill('dl-graph@example.com', '2026-06-04')
+    const env = {
+      NUXT_GRAPH_DIRECTORY_MODE: 'graph',
+      NUXT_GRAPH_BASE_URL: 'https://graph.example.test/v1.0',
+      NUXT_OIDC_PROVIDERS_ENTRA_CLIENT_ID: 'cid',
+      NUXT_OIDC_PROVIDERS_ENTRA_CLIENT_SECRET: 'secret',
+      NUXT_OIDC_PROVIDERS_ENTRA_TOKEN_URL: 'https://login.example.test/token',
+    }
+    for (const [k, v] of Object.entries(env)) vi.stubEnv(k, v)
+    _resetGraphTokenCache()
+    let graphCalls = 0
+    vi.stubGlobal('fetch', async (input: string) => {
+      if (String(input).startsWith(env.NUXT_OIDC_PROVIDERS_ENTRA_TOKEN_URL)) {
+        return new Response(JSON.stringify({ access_token: 'tok', expires_in: 3600 }), { status: 200 })
+      }
+      graphCalls += 1
+      // No retry-after: the worker transport would back off 1 s, then 2 s.
+      return new Response(null, { status: 503 })
+    })
+    try {
+      // 500 ms of budget: the first 1 s backoff would end past the deadline.
+      const r = await runPlacementSync(t.db, { budgetMs: 500 })
+      expect(r.errors).toBe(1)
+    } finally {
+      vi.unstubAllGlobals()
+      vi.unstubAllEnvs()
+      _resetGraphTokenCache()
+    }
+    expect(graphCalls).toBe(1)
   })
 })
 

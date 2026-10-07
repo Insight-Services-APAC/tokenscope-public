@@ -54,7 +54,7 @@ const pinnedInstalled = (version: string) => pinnedUnder(versionsDir, version)
 function enrolment({ instance = 'inst-A', helper = pinned('0.1.3'), env } = {}) {
   return {
     sessionId: instance,
-    helperPath: helper,
+    helperCommand: helper,
     env: env ?? {
       // The real redeem env (claude-redeem.mjs buildClaudeDeviceEnv).
       CLAUDE_CODE_ENABLE_TELEMETRY: '1',
@@ -70,6 +70,9 @@ function enrolment({ instance = 'inst-A', helper = pinned('0.1.3'), env } = {}) 
     },
   }
 }
+
+/** The command buildHelperCommand writes for a POSIX helper script with no state dir. */
+const cmd = (script: string) => `"${script}" --tool claude-code`
 
 function readRepo(cwd: string) {
   return JSON.parse(readFileSync(join(cwd, '.claude', 'settings.local.json'), 'utf8'))
@@ -104,7 +107,7 @@ const REFUSED = [
 describe('writeRepoTag change-detection', () => {
   // The active-version helper resolution reads process.env.CLAUDE_PLUGIN_ROOT.
   // Neutralise it here so these tests deterministically exercise the
-  // enrolment.helperPath fallback they assert (the active-version preference has
+  // enrolment.helperCommand fallback they assert (the active-version preference has
   // its own tests below).
   const savedPluginRoot = process.env.CLAUDE_PLUGIN_ROOT
   beforeEach(() => {
@@ -306,7 +309,7 @@ describe('writeRepoTag change-detection', () => {
   it('prefers the ACTIVE plugin helper (CLAUDE_PLUGIN_ROOT) over the version-pinned global one — upgrade auto-follow, no re-enrol', () => {
     /*
      * The active root must be INSIDE our own install for this to apply — see
-     * resolveHelperPath's confinement note (MDASH §2.6). In production the new
+     * resolveHelperScriptsDir's confinement note (MDASH §2.6). In production the new
      * version is a sibling directory under the same versions dir, so it
      * qualifies; here the shipped bundle itself stands in for it, which is the
      * only in-install path a test can point at without inventing one.
@@ -320,7 +323,7 @@ describe('writeRepoTag change-detection', () => {
       codeHash: CODE_HASH,
     })
     expect(r.changed).toBe(true)
-    expect(readRepo(cwd).otelHeadersHelper).toBe(join(activeRoot, 'scripts', 'otel-headers-helper.sh'))
+    expect(readRepo(cwd).otelHeadersHelper).toBe(cmd(join(activeRoot, 'scripts', 'otel-headers-helper.sh')))
   })
 
   it('REFUSES a CLAUDE_PLUGIN_ROOT outside our own install, falling back to the pinned path (MDASH §2.6)', () => {
@@ -336,7 +339,7 @@ describe('writeRepoTag change-detection', () => {
     process.env.CLAUDE_PLUGIN_ROOT = evilRoot
     const pinnedPath = pinned('0.1.1')
     writeRepoTag({ cwd, enrolment: enrolment({ helper: pinnedPath }), codeHash: CODE_HASH })
-    expect(readRepo(cwd).otelHeadersHelper).toBe(pinnedPath)
+    expect(readRepo(cwd).otelHeadersHelper).toBe(cmd(pinnedPath))
     expect(readRepo(cwd).otelHeadersHelper).not.toContain(evilRoot)
   })
 
@@ -361,7 +364,47 @@ describe('writeRepoTag change-detection', () => {
       enrolment: enrolment({ helper: pinned('0.1.3') }),
       codeHash: CODE_HASH,
     })
-    expect(readRepo(cwd).otelHeadersHelper).toBe(pinned('0.1.3'))
+    expect(readRepo(cwd).otelHeadersHelper).toBe(cmd(pinned('0.1.3')))
+  })
+
+  /*
+   * S1/S8 of #408 (#410). The global value is a COMMAND now. On 8f5d8293 it was
+   * existsSync'd as a path, so any value with arguments failed the check, the
+   * pin fell back to this module's own dir, and the state dir was dropped.
+   */
+  it('builds the repo pin from the same record as the global command, --state-dir included', () => {
+    const global = `${cmd(pinned('0.1.3'))} --state-dir /srv/ts-sandbox`
+    writeRepoTag({ cwd, enrolment: enrolment({ helper: global }), codeHash: CODE_HASH, storeDir: join(cwd, 'state') })
+    expect(readRepo(cwd).otelHeadersHelper).toBe(global)
+  })
+
+  it('a pre-sprint bare path with a hand-added --state-dir keeps it in the repo pin', () => {
+    writeRepoTag({
+      cwd,
+      enrolment: enrolment({ helper: `${pinned('0.1.3')} --state-dir /srv/ts-sandbox` }),
+      codeHash: CODE_HASH,
+      storeDir: join(cwd, 'state'),
+    })
+    expect(readRepo(cwd).otelHeadersHelper).toBe(`${cmd(pinned('0.1.3'))} --state-dir /srv/ts-sandbox`)
+  })
+
+  it('platform win32 pins the PowerShell helper', () => {
+    const ps1 = pinned('0.1.3').replace(/\.sh$/, '.ps1')
+    writeFileSync(ps1, '# stub\n')
+    try {
+      writeRepoTag({
+        cwd,
+        enrolment: enrolment({ helper: pinned('0.1.3') }),
+        codeHash: CODE_HASH,
+        platform: 'win32',
+        storeDir: join(cwd, 'state'),
+      })
+      const pin = readRepo(cwd).otelHeadersHelper
+      expect(pin).toMatch(/^"C:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".*otel-headers-helper\.ps1" --tool claude-code$/)
+      expect(pin).toContain('0.1.3')
+    } finally {
+      rmSync(ps1, { force: true })
+    }
   })
 
   it('preserves the 0o600 mode and merges unrelated local settings keys', () => {
@@ -405,7 +448,7 @@ function writeGlobal(home: string, { instance = 'inst-A', helper = pinned('0.1.3
   const e = enrolment({ instance, helper })
   writeFileSync(
     join(home, '.claude', 'settings.json'),
-    JSON.stringify({ otelHeadersHelper: e.helperPath, env: e.env }, null, 2) + '\n',
+    JSON.stringify({ otelHeadersHelper: e.helperCommand, env: e.env }, null, 2) + '\n',
   )
 }
 
@@ -513,6 +556,14 @@ describe('session-start hook (end-to-end)', () => {
     writeGlobal(home, { helper: pinnedInstalled('0.1.3') })
     runHook(home, repo)
     expect(readRepo(repo).otelHeadersHelper).toContain('0.1.3') // healed, not skipped
+  })
+
+  it('the real hook rebuilds the repo pin from the same record as the global one (S8)', () => {
+    // A pre-sprint global: the bare path plus a hand-added state dir.
+    const sandbox = join(home, 'ts sandbox')
+    writeGlobal(home, { helper: `${pinnedInstalled('0.1.1')} --state-dir ${JSON.stringify(sandbox)}` })
+    runHook(home, repo)
+    expect(readRepo(repo).otelHeadersHelper).toBe(`${cmd(pinnedInstalled('0.1.1'))} --state-dir "${sandbox}"`)
   })
 
   it('the real hook leaves a git-tracked repo file untouched and says why', () => {

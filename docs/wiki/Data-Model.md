@@ -78,48 +78,18 @@ read any table:
 
 ## Entity relationships
 
-```mermaid
-erDiagram
-    region ||--o{ org_unit : contains
-    region ||--o{ teammate : "homes"
-    org_unit ||--o{ org_unit : "parent_of"
-    org_unit ||--o{ teammate : "member_of"
+![Spend attaches to a person through the instance: attribution_record references instance_attestation, which references teammate, and the project only by its own foreign key](images/data-model-relationships.svg)
 
-    teammate ||--o{ teammate_identity_map : "aliased_by"
-    teammate ||--o{ instance_attestation : "attests"
-    teammate ||--o{ oauth_token : "grants"
-    teammate ||--o{ emit_handoff : "provisions_via"
-    teammate ||--o{ project_assignment : "assigned_to"
-    teammate ||--o{ actual_spend : "incurs"
+Each card lists the table's foreign keys as `column → table`, from the migrations. `cou` is `cost_owning_unit_id`, which references `org_unit`.
 
-    instance_attestation ||--o{ attribution_record : "sourced_from"
-    instance_attestation ||--o{ instance_attestation_health : "monitored_by"
-    instance_attestation ||--o{ emit_handoff : "redeemed_for"
-    instance_attestation ||--o{ oauth_token : "emit_bound_to"
+1. `instance_attestation.teammate_id → teammate`: the device enrolment belongs to one teammate (migration 0001, as `session_attestation`; renamed in 0019).
+2. `attribution_record.instance_id → instance_attestation`: every OTel ledger row names the instance that emitted it (migration 0055).
+3. `attribution_record.project_id → project`: the project is a separate key on the row, set by the membership-gated claim or a later tag, never derived through the instance.
+4. `attribution_record.rate_card_id` has no foreign key. The joiner stamps it with `rate_card_version` when it prices a row with the card; it is a pinned reference, not a constraint.
 
-    project ||--o{ repo_project_map : "mapped_from"
-    project ||--o{ project_assignment : "staffs"
-    project ||--o{ attribution_record : "billed_to"
-    org_unit ||--o{ project : "owns_pl"
+Three more links the code relies on carry no foreign key: `allocation.scope_id` names a teammate, project, unit or region according to `scope_type` (migration 0131 checks the type, not the target); `provider_org` decides a row's reconciliation lane and fidelity tier when the joiner reads it, with no column on `attribution_record` pointing back; and `audit_event` is referenced by `allocation` and `sync_conflict`, but not by `project_assignment`.
 
-    rate_card ||--o{ rate_line : "priced_by"
-    rate_card ||--o{ attribution_record : "prices"
-    provider_org ||..o{ attribution_record : "classifies_lane"
-
-    project ||--o{ allocation : "budgeted_by"
-    teammate ||--o{ allocation : "capped_by"
-
-    audit_event ||--o{ allocation : "justifies"
-    audit_event ||--o{ project_assignment : "justifies"
-    audit_event ||--o{ sync_conflict : "resolves"
-    teammate ||--o{ inbox_item : "receives"
-    teammate ||--o{ sync_conflict : "decides"
-```
-
-The spine of the diagram is the attribution flow:
-**teammate → instance_attestation → attribution_record → project / rate_card**,
-with `provider_org` deciding the fidelity lane and `audit_event` standing
-beside every governance write.
+*The spend tables also carry their own region and unit foreign keys for row-level security; the cards list them without drawing them.*
 
 ## Identity
 
@@ -189,7 +159,8 @@ carries a durable role.
 | `ended_at` | TIMESTAMPTZ | soft-delete; attribution history is preserved |
 | `metadata` | JSONB | |
 | `source` / `is_pinned` / `last_sync_at` | provenance triple | |
-| `revoked_at` | TIMESTAMPTZ | active-session / emit-cascade revocation anchor (mig 0006, ADR-0005 §E2) — any session issued at or before this instant is treated as cleared by the validate-session middleware; written by role-change, region-change, and explicit revoke endpoints. **Overloaded: NOT an eligibility/offboarding flag.** Because benign role/region changes bump it too, assignability (project-member / CoU-owner add) gates on **`is_active` only**, never `revoked_at` (PR #120); a revoked-but-active teammate stays assignable as an inert billing row while `isRevoked()` + the E2 emit cascade still block live access. |
+| `revoked_at` | TIMESTAMPTZ | active-session / emit-cascade revocation anchor (mig 0006, ADR-0005 §E2) — any session issued at or before this instant is treated as cleared by the validate-session middleware; written by role-change, region-change, and explicit revoke endpoints. **Overloaded: NOT an eligibility/offboarding flag.** Because benign role/region changes bump it too, assignability (project-member / CoU-owner add) gates on **`is_active` only**, never `revoked_at` (PR #120); a revoked-but-active teammate stays assignable as an inert billing row while `isRevoked()` + the E2 emit cascade still block live access. Device emission is judged against `emit_revoked_at` instead, so a role or region change does not stop a device. |
+| `emit_revoked_at` | TIMESTAMPTZ | device-emission revocation anchor (mig 0152, #414). Device-bound emit credentials and instances enrolled before it are refused (refresh, the `/instances/{id}/*` routes, the joiner). Written only by explicit revoke-sessions and shadow-teammate retirement, never by a role or region change. |
 
 Email uniqueness is **not** a plain `UNIQUE` — two indexes enforce it together:
 a **partial** unique `UNIQUE (email) WHERE NOT provisional` (mig 0057), which
@@ -348,6 +319,11 @@ token); the read joiner gates on `attestation_state = 'attested'`.
 | `identity_state` | TEXT NOT NULL = `confirmed` | identity provenance (mig 0057): `confirmed` = the authenticated `provision_emit` flow or a later confirmed merge; `provisional` = an emit-on-install enroll where the human hasn't signed in yet. Propagated onto `attribution_record` at join time |
 | `claimed_email` | TEXT | the email a provisional enroll request *claimed* (mig 0057); NULL for the authenticated flow, where `principal_email` already carries the verified identity |
 | `deployment_env` | TEXT | cross-environment reuse guard (mig 0060): the `dev`/`sandbox`/`production`/`local` label of the deployment that minted this instance. A re-provision from a different environment is rejected (409); NULL = pre-0060 (treated as same-environment) |
+| `joiner_read_at` | TIMESTAMPTZ | read rotation (mig 0149): when a scheduled `azure-monitor-read` run last attempted this device, success or failure. Stamped once at the end of each scheduled run for every device it attempted; operator-scoped runs, forced deep reads and `telemetry-recovery` do not stamp it. The joiner's selection orders by it least recently read first (after confirmed before provisional), so its cap and deadline rotate through the fleet. NULL = never attempted by a scheduled run, and sorts first |
+| `client_plugin_version` · `client_cli_version` · `client_version_at` | TEXT · TEXT · TIMESTAMPTZ | client-asserted versions sent on each `/bearer` mint (mig 0092); `client_version_at` stamps the last claim of any `client_*` field. Diagnostic only — nothing gates on them |
+| `client_platform` | TEXT ≤ 40 | client-asserted `<os>-<arch>` in Node vocabulary (`win32-x64`, `darwin-arm64`, `linux-x64`), from `X-TokenScope-Client-Platform` on `/bearer` (mig 0150). Written only when reported, never nulled. Diagnostic only |
+| `client_surface` | TEXT ≤ 40 | client-asserted launch surface (mig 0150): Claude Code's `CLAUDE_CODE_ENTRYPOINT` (`cli`, `sdk-cli`, …) or Copilot `app`/`cli`. Same rules as `client_platform` |
+| `setup_mode` | TEXT | `full` \| `emit-only` (mig 0150), from `X-TokenScope-Setup-Mode` on `/setup/redeem`: `emit-only` = a Windows device set up through PowerShell without Node (no status line, backfill or repo pin). Overwritten by every redeem, NULL when not stated. Diagnostic only |
 | `notes` | JSONB | extension surface |
 
 **The four attestation states:**
@@ -804,7 +780,7 @@ longer collapse into (and inflate) the `claude-code` figure.
 | `cost_usd` | NUMERIC(14,6) NOT NULL | Anthropic's computed cost |
 | `source` | TEXT NOT NULL = `anthropic-analytics-api` | **per-org form** `anthropic-analytics-api:<externalOrgId>` so a teammate active in multiple reconciled orgs gets one row per org; legacy single-org fallback is the bare value |
 | `category` | TEXT | cost-category on the adapter staging row (mig 0038); NULL = legacy (treated as `model_tokens`) |
-| `chargeback_exempt` | BOOL NOT NULL = false | the **computed governance verdict** (`server/governance/verdict.ts` — the one gateway deciding chargeability from `provider_org` / `provider_enterprise` billing, or the legacy heuristic pre-activation; kept current for open periods by the `governance-recompute` worker). TRUE = excluded from the chargeback view (`v_finance_bill_chargeback`) but NOT from showback (mig 0072) |
+| `chargeback_exempt` | BOOL NOT NULL = false | the **computed governance verdict** (`server/governance/verdict.ts` — the one gateway deciding chargeability from `provider_org` / `provider_enterprise` billing, or the legacy heuristic pre-activation; recomputed for every period by the `governance-recompute` worker's wrapping sweep, newest-first by a billing edit). TRUE = excluded from the chargeback view (`v_finance_bill_chargeback`) but NOT from showback (mig 0072) |
 | `pulled_at` | TIMESTAMPTZ NOT NULL = now() | |
 | `raw_payload` | JSONB | the row as returned, for audit/reprocess (also the source the `provider-transform` worker derives `provider_usage_fact` from) |
 | `region_id` / `org_unit_id` / `cost_owning_unit_id` | UUID → region / org_unit | historical-homing dimension snapshot (mig 0101): stamped at write/replay time and never updated on a later re-poll, so a teammate reorg cannot move a historical day's homing |
@@ -1292,6 +1268,27 @@ effective window. Optionally scaled by competency tier.
 
 Constraint: `EXCLUDE USING gist (scope_type WITH =, scope_id WITH =, limit_kind WITH =, effective WITH &&)`.
 
+### client_connection_setting
+
+The admin **Client connection** policy (mig 0151, tightened by 0153): what the
+connect dialog tells developers to install for this deployment. One row
+(`key = 'policy'`, pinned by CHECK); **an absent row means the defaults** in
+`shared/connect.ts`, which reproduce the pre-policy dialog exactly.
+
+| Column | Type | Notes |
+|---|---|---|
+| `marketplace_source` | TEXT | `owner/repo` or an `https://` git URL; no whitespace, shell metacharacters or `%` (it ends up in a command the user pastes, and `cmd.exe` expands `%`) |
+| `marketplace_ref` | TEXT | optional pinned ref (Claude only; the Copilot CLI cannot pin) |
+| `marketplace_name` | TEXT | the marketplace's name in `<plugin>@<marketplace>` |
+| `claude_plugin` · `copilot_plugin` | TEXT | plugin names, `[a-z0-9-]{1,64}` |
+| `enabled_clients` | TEXT[] | non-empty subset of `claude-code`, `copilot-cli`; a disabled client's connect buttons are hidden |
+| `support_url` | TEXT | optional `https://` link shown in the dialog |
+| `updated_by` · `updated_at` | UUID → teammate · TIMESTAMPTZ | last writer; every write is also an `audit_event` |
+
+RLS: any authenticated session reads it (it is shown to every user); writes are
+`platform-admin` only. Served by `GET /api/v1/connect/config` together with the
+deployment's pinned public origin.
+
 ### tier_assignment
 
 A teammate's competency tier over time. Carries the provenance triple (mostly
@@ -1386,6 +1383,32 @@ admin (via `inbox_item`).
 | `decided_at` | TIMESTAMPTZ | |
 | `audit_event_id` | UUID | |
 | `notes` | TEXT | |
+
+### telemetry_recovery_request
+
+The queue of widened re-reads of already-ingested telemetry
+(`drizzle/schema/telemetry-recovery.ts`, migs 0093, 0148). The
+`telemetry-recovery` worker drains it one instance-day at a time: day `k` of a
+request made at `requested_at` with lookback `L` covers `TimeGenerated` in
+`[requested_at − (L−k)·24h, requested_at − (L−k−1)·24h)`. Operator requests take
+priority over the scheduled daily pass, except that a pass untouched for 30
+minutes takes the next tick; a scheduled pass still in flight after 24 h is
+closed out (`failed`, superseded) and replaced.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | |
+| `kind` | TEXT NOT NULL = `operator` | `operator` (an admin's recovery) / `scheduled` (the daily 7-day pass, queued by the worker) |
+| `instance_ids` | UUID[] NOT NULL | the scope, in order; never empty |
+| `lookback_days` | INTEGER NOT NULL | 1..90 |
+| `cursor_index` / `cursor_day` | INTEGER NOT NULL = 0 | resume point: instances finished, and days done of the next one |
+| `status` | TEXT NOT NULL = `pending` | `pending` / `running` / `succeeded` / `failed`; at most one `pending` or `running` row per `kind` |
+| `reason` | TEXT | the operator's note, or the daily pass's fixed text |
+| `requested_by` | UUID → teammate | NULL for a scheduled pass |
+| `requested_at` / `claimed_at` / `started_at` / `finished_at` | TIMESTAMPTZ | `requested_at` anchors the day windows |
+| `instances_processed` / `rows_written` / `errors` | INTEGER NOT NULL = 0 | outcome, kept separate from progress |
+| `error` | TEXT | why a request failed |
+| `run_id` | UUID | the `worker_run` that last processed it |
 
 ### report_access_grant
 

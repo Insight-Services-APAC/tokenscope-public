@@ -25,11 +25,12 @@
  *      the bearer host and is silent on a same-host re-run.
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
-import { mkdtempSync, mkdirSync, chmodSync, readFileSync, writeFileSync, rmSync, statSync, readdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, chmodSync, readFileSync, writeFileSync, rmSync, statSync, readdirSync, existsSync, realpathSync } from 'node:fs'
 import { tmpdir, platform } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
+import { writeFakeHomePreload, fakeHomeNode, realIsolatedIndex } from './helpers/fake-home'
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — mjs import resolved by Vitest
@@ -224,14 +225,17 @@ describe('assertClaudeRedeemResponse', () => {
 })
 
 describe('writeClaudeSettings', () => {
-  const HELPER = '/plugin/scripts/otel-headers-helper.sh'
+  // The helper RECORD the command is built from (buildHelperCommand), plus the
+  // install it runs from. HELPER_CMD is what lands in settings.json.
+  const HELPER = { record: { tool: 'claude-code', platform: 'linux' }, scriptsDir: '/plugin/scripts' }
+  const HELPER_CMD = '"/plugin/scripts/otel-headers-helper.sh" --tool claude-code'
 
   it('writes otelHeadersHelper + env into a fresh settings.json', () => {
     const path = join(dir, 'settings.json')
     const env = buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH)
     writeClaudeSettings(path, HELPER, env, join(dir, 'state'))
     const written = JSON.parse(readFileSync(path, 'utf8'))
-    expect(written.otelHeadersHelper).toBe(HELPER)
+    expect(written.otelHeadersHelper).toBe(HELPER_CMD)
     expect(written.env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBe('rt_super_secret')
     expect(written.env.OTEL_RESOURCE_ATTRIBUTES).toBe('tokenscope.instance_id=abc,tool=claude-code')
   })
@@ -321,8 +325,8 @@ describe('writeClaudeSettings', () => {
     const written = JSON.parse(readFileSync(path, 'utf8'))
     expect(written.permissions).toEqual({ allow: ['Bash(node:*)'] })
     expect(written.statusLine).toEqual({ type: 'command', command: 'node /some/statusline.mjs', padding: 0 })
-    // otelHeadersHelper is updated to the new helper path (a top-level key, restated).
-    expect(written.otelHeadersHelper).toBe(HELPER)
+    // otelHeadersHelper is rebuilt from the record (a top-level key, restated).
+    expect(written.otelHeadersHelper).toBe(HELPER_CMD)
   })
 
   it('detects an environment change when the bearer host changes (changed=true, with labels)', () => {
@@ -609,6 +613,73 @@ describe('writeClaudeSettings', () => {
     }
   })
 
+  /*
+   * #410. The command must carry the state dir the store was written to, or the
+   * helper mints from the DEFAULT store: another enrolment's identity, sent to
+   * this enrolment's destination. The store keeps the record, so session start
+   * and the repo pin rebuild the same command later.
+   */
+  it('a record with a state dir writes --state-dir into the command and the record into the store', () => {
+    const path = join(dir, 'settings.json')
+    const state = join(dir, 'state with space')
+    const record = { tool: 'claude-code', platform: 'linux', stateDir: state }
+    writeClaudeSettings(path, { record, scriptsDir: '/plugin/scripts' }, buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH), state)
+    expect(JSON.parse(readFileSync(path, 'utf8')).otelHeadersHelper).toBe(
+      `"/plugin/scripts/otel-headers-helper.sh" --tool claude-code --state-dir "${state}"`,
+    )
+    expect(JSON.parse(readFileSync(join(state, 'config.claude-code.json'), 'utf8')).helper).toEqual(record)
+  })
+
+  it('platform win32 writes the PowerShell command (no real Windows needed)', () => {
+    const path = join(dir, 'settings.json')
+    const record = { tool: 'claude-code', platform: 'win32', stateDir: 'C:\\Users\\Jo Do\\.tokenscope' }
+    writeClaudeSettings(
+      path,
+      { record, scriptsDir: 'C:\\Users\\Jo Do\\.claude\\plugins\\cache\\tokenscope\\tokenscope\\1.2.3\\scripts' },
+      buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH),
+      join(dir, 'state'),
+    )
+    expect(JSON.parse(readFileSync(path, 'utf8')).otelHeadersHelper).toBe(
+      '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' +
+        '"C:\\Users\\Jo Do\\.claude\\plugins\\cache\\tokenscope\\tokenscope\\1.2.3\\scripts\\otel-headers-helper.ps1" ' +
+        '--tool claude-code --state-dir "C:\\Users\\Jo Do\\.tokenscope"',
+    )
+  })
+
+  it('lists a session-scoped settings file in the state dir, once, and not the global one', () => {
+    const state = join(dir, 'state')
+    const scoped = join(dir, 'scoped', 'settings.json')
+    const env = buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH)
+    writeClaudeSettings(join(dir, 'settings.json'), HELPER, env, state)
+    expect(existsSync(join(state, 'settings-files.claude-code.json'))).toBe(false)
+    writeClaudeSettings(scoped, HELPER, env, state, { sessionScoped: true, indexDir: state })
+    writeClaudeSettings(scoped, HELPER, env, state, { sessionScoped: true, indexDir: state })
+    const list = JSON.parse(readFileSync(join(state, 'settings-files.claude-code.json'), 'utf8'))
+    expect(list.files).toEqual([scoped])
+    // Its state dir IS the index dir: the list there already covers it.
+    expect(existsSync(join(state, 'isolated-settings-files.claude-code.json'))).toBe(false)
+  })
+
+  it('indexes a session-scoped file enrolled in ANOTHER state dir in the index dir, with that state dir', () => {
+    const state = join(dir, 'iso-state')
+    const index = join(dir, 'trusted')
+    const scoped = join(dir, 'scoped', 'settings.json')
+    const env = buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH)
+    writeClaudeSettings(scoped, HELPER, env, state, { sessionScoped: true, indexDir: index })
+    writeClaudeSettings(scoped, HELPER, env, state, { sessionScoped: true, indexDir: index })
+    const doc = JSON.parse(readFileSync(join(index, 'isolated-settings-files.claude-code.json'), 'utf8'))
+    expect(doc).toEqual({ version: 1, tool: 'claude-code', entries: [{ file: scoped, stateDir: state }] })
+    // Paths only: no credential material in the index.
+    expect(readFileSync(join(index, 'isolated-settings-files.claude-code.json'), 'utf8')).not.toContain(FAKE_OAUTH.refresh_token)
+  })
+
+  it('refuses, under a test runner, to index into the REAL default store', () => {
+    const env = buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH)
+    expect(() =>
+      writeClaudeSettings(join(dir, 'guard', 'settings.json'), HELPER, env, join(dir, 'guard-state'), { sessionScoped: true }),
+    ).toThrow(/REAL settings index/)
+  })
+
   it('writeSharedCredentialStore is a no-op when there is no refresh token to store', () => {
     const stateDirPath = join(dir, 'no-token-state')
     writeSharedCredentialStore(undefined, stateDirPath)
@@ -642,6 +713,7 @@ describe('main() against a mock redeem server', () => {
   let server: ReturnType<typeof createServer>
   let baseUrl: string
   let lastBody: { handoff_code?: string; instance_id?: string } = {}
+  let lastSetupMode: string | string[] | undefined
 
   // --settings-path is confined to the account's own home (S16a: it names where a
   // durable OAuth emit credential is written, and this process's argv is composed
@@ -650,14 +722,20 @@ describe('main() against a mock redeem server', () => {
   // for the whole describe, a distinct SUBdirectory per case, because the
   // basename must stay `settings.json`.
   let homeDir: string
+  let preload: string
+  // The default store's isolated index is anchored on the passwd home, which no
+  // argv moves; the fake-home preload makes homeDir the child's account home.
+  const indexBefore = realIsolatedIndex(realHome())
   const settingsIn = (name: string) => join(homeDir, name, 'settings.json')
   beforeAll(() => {
     homeDir = mkdtempSync(join(realHome(), '.ts-claude-redeem-main-'))
+    preload = writeFakeHomePreload(homeDir)
   })
   afterAll(() => {
     if (homeDir && homeDir.startsWith(join(realHome(), '.ts-claude-redeem-main-'))) {
       rmSync(homeDir, { recursive: true, force: true })
     }
+    expect(realIsolatedIndex(realHome()), 'a spawned redeem wrote the REAL settings index').toBe(indexBefore)
   })
 
   const claudeBundle = (attrs = 'tokenscope.instance_id=f825e796,tool=claude-code') => ({
@@ -675,6 +753,7 @@ describe('main() against a mock redeem server', () => {
       req.on('data', (c) => (raw += c))
       req.on('end', () => {
         lastBody = JSON.parse(raw || '{}')
+        lastSetupMode = req.headers['x-tokenscope-setup-mode']
         const code = lastBody.handoff_code
         if (code === 'BADATTRS') {
           res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -709,6 +788,7 @@ describe('main() against a mock redeem server', () => {
   // served while spawnSync blocked the loop.
   const run = (code: string, settingsPath: string, extra: string[] = []) =>
     new Promise<{ status: number | null; stdout: string }>((resolve) => {
+      const fake = fakeHomeNode(preload, homeDir)
       const child = spawn(
         'node',
         // --state-dir keeps the spawned CLI's credential store inside this
@@ -717,8 +797,8 @@ describe('main() against a mock redeem server', () => {
         // It must be under homeDir, not a /tmp dir: the flag is confined by
         // assertConfinedPath, because unconfined it reopened the model-controlled
         // path sink argv-guard exists to close.
-        [HELPER, '--handoff-code', code, '--api-base', baseUrl, '--settings-path', settingsPath, '--state-dir', join(homeDir, 'state'), ...extra],
-        { encoding: 'utf8' } as never,
+        [...fake.args, HELPER, '--handoff-code', code, '--api-base', baseUrl, '--settings-path', settingsPath, '--state-dir', join(homeDir, 'state'), ...extra],
+        { encoding: 'utf8', env: { ...process.env, ...fake.env } } as never,
       )
       let stdout = ''
       child.stdout.on('data', (c) => (stdout += c))
@@ -734,6 +814,9 @@ describe('main() against a mock redeem server', () => {
     expect(written.env.OTEL_RESOURCE_ATTRIBUTES).toContain('tokenscope.instance_id=f825e796')
     // --instance-id was forwarded to the server for the bound-instance check.
     expect(lastBody.instance_id).toBe('f825e796-ef29-4aa0-9a35-4aa2a5b8059c')
+    // The Node redeem states it is the FULL setup (mig 0150, diagnostic only);
+    // the PowerShell redeem for Windows devices without Node says emit-only.
+    expect(lastSetupMode).toBe('full')
     // The durable secret must never appear on stdout.
     expect(r.stdout).not.toContain('rt_DURABLE_SECRET')
   })
@@ -743,6 +826,24 @@ describe('main() against a mock redeem server', () => {
     const r = await run('BADATTRS', path)
     expect(r.status).toBe(1)
     expect(existsSync(path)).toBe(false)
+  })
+
+  // #410 acceptance, end to end through main(). On 8f5d8293 the command was the
+  // bare helper path, so this session-scoped enrolment minted from the default
+  // store.
+  it('--state-dir X lands in otelHeadersHelper as --state-dir X, and the file is listed in X', async () => {
+    const path = settingsIn('state-dir-410')
+    const r = await run('GOOD', path)
+    expect(r.status).toBe(0)
+    const state = realpathSync(join(homeDir, 'state'))
+    const helper = JSON.parse(readFileSync(path, 'utf8')).otelHeadersHelper
+    expect(helper).toContain('otel-headers-helper.sh" --tool claude-code --state-dir ')
+    expect([`--state-dir ${state}`, `--state-dir "${state}"`].some((t) => helper.endsWith(t))).toBe(true)
+    const list = JSON.parse(readFileSync(join(state, 'settings-files.claude-code.json'), 'utf8'))
+    expect(list.files).toContain(realpathSync(path))
+    // X is not the default store, so the default store indexes the pairing too.
+    const index = JSON.parse(readFileSync(join(homeDir, '.tokenscope', 'isolated-settings-files.claude-code.json'), 'utf8'))
+    expect(index.entries).toContainEqual({ file: realpathSync(path), stateDir: state })
   })
 
   it('401 from server: exits 1 and writes NOTHING', async () => {

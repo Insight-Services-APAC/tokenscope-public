@@ -250,6 +250,54 @@ jobs:
         # that restores the exact illusion of coverage this job exists to end.
         run: npm run test:unit
 
+  plugin-portability:
+    # The plugins run on users' machines, not ours. Until #411 every job was
+    # ubuntu-latest, which is how a POSIX-only emission helper shipped to
+    # Windows users and sent nothing (#408). macOS runs the whole plugin unit
+    # suite; Windows runs the helper conformance suite against real Windows
+    # PowerShell 5.1 — the interpreter pilot users have — not pwsh 7.
+    name: Plugin (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Plugin unit suite (macOS)
+        if: runner.os == 'macOS'
+        run: npx vitest run tests/unit/plugin
+      - name: PowerShell helper conformance (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        env:
+          TOKENSCOPE_PWSH: powershell.exe
+          TOKENSCOPE_SKIP_SH: '1'
+        # The hook test also runs its sh/bash legs here, through Git for
+        # Windows' sh.exe/bash.exe: Git Bash and Windows PowerShell are the two
+        # shells Claude Code runs a hook through on Windows. is-main runs its
+        # scripts through a junction (a redirected-profile install path).
+        # claude-redeem-ps1 compares the two setup redeems; on Windows its
+        # fixtures live under the runner's real profile, which it allows only
+        # when CI and GITHUB_ACTIONS are both 'true' (the runner is ephemeral).
+        run: >-
+          npx vitest run
+          tests/unit/plugin/claude-redeem-ps1.test.ts
+          tests/unit/plugin/otel-helper-conformance.test.ts
+          tests/unit/plugin/otel-helper-error-body.test.ts
+          tests/unit/plugin/status-ps1.test.ts
+          tests/unit/plugin/copilot-usage-windows.test.ts
+          tests/unit/plugin/hooks-command.test.ts
+          tests/unit/plugin/is-main.test.ts
+
   integration:
     name: Integration (testcontainers Postgres)
     runs-on: ubuntu-latest

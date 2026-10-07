@@ -229,7 +229,11 @@ Preview any apply with `az deployment group what-if` and the same `--parameters`
    ```
 
    `appPublicOrigin` is what the app puts in developer enrolments; without it
-   (and without Front Door) it refuses to enrol devices.
+   (and without Front Door) it refuses to enrol devices. It is also the server
+   URL the Connect dialog shows developers: without it the dialog says the
+   deployment has no pinned public origin and shows no URL, rather than
+   guessing one. What the dialog tells developers to install is set in
+   **Admin → Policies → Client connection** (platform admins).
 
    In the app registration, add two **Web** redirect URIs:
    `https://<containerAppUrl>/auth/entra/callback` and
@@ -425,6 +429,13 @@ Before turning it on, create the `privatelink.monitor.azure.com`,
 `privatelink.oms.opinsights.azure.com`, `privatelink.ods.opinsights.azure.com`
 and `privatelink.blob.core.windows.net` zones with the AMPLS endpoint's
 records. Turning it on without them cuts the app off from its own telemetry.
+By default it also moves the platform's own logs (console, system, diagnostic
+settings) to a second workspace, `log-ops-<name>`, which stays queryable from
+the portal (`separateOpsWorkspace`). The OTel telemetry stays private.
+On an existing deployment the security audit-write alert is recreated as
+`alert-security-audit-write-ops-<name>`, because Azure cannot move a log alert
+to another workspace; delete the old `alert-security-audit-write-<name>`, which
+no longer receives logs.
 
 ### Check that telemetry arrives
 

@@ -108,6 +108,23 @@ async function versions(instanceId: string): Promise<VersionRow> {
   return row!
 }
 
+describe('/bearer — bearer expiry header (#409)', () => {
+  it('states the minted bearer’s expiry in X-TokenScope-Bearer-Expires-At so the helper can cache it', async () => {
+    // The body is printed verbatim as Claude Code's header JSON, so the expiry
+    // rides a response header. The helper stores it beside the cached bearer
+    // for diagnostics; the fallback itself never gates on it.
+    const instanceId = await enrolInstance(ownerId)
+    const access = await emitAccessTokenFor(ownerId)
+    const ev = bearerEvent(instanceId, access)
+    const before = Math.floor(Date.now() / 1000)
+    const body = (await bearerHandler(ev as never)) as { Authorization: string }
+    expect(body.Authorization).toMatch(/^Bearer /)
+    const exp = Number(ev.node.res._headers['x-tokenscope-bearer-expires-at'])
+    expect(Number.isInteger(exp)).toBe(true)
+    expect(exp).toBeGreaterThan(before) // mock OBO mints for 3600 s
+  })
+})
+
 describe('/bearer — client version capture (mig 0092)', () => {
   it('records both versions on a successful owned mint', async () => {
     const instanceId = await enrolInstance(ownerId)
@@ -243,5 +260,73 @@ describe('/bearer — client version capture (mig 0092)', () => {
     // The NULL bucket — devices that have never reported — is the population an
     // operator actually chases during a rollout, so it must be visible here.
     expect(rows.some((r) => r.v === null)).toBe(true)
+  })
+})
+
+async function platformRow(instanceId: string) {
+  const [row] = await t.client<
+    { client_platform: string | null; client_surface: string | null; client_version_at: string | null }[]
+  >`
+    SELECT client_platform, client_surface, client_version_at::text AS client_version_at
+      FROM instance_attestation WHERE instance_id = ${instanceId}::uuid`
+  return row!
+}
+
+describe('/bearer — client platform + surface capture (mig 0150, #412)', () => {
+  it('records platform and surface on a successful owned mint, and stamps client_version_at', async () => {
+    const instanceId = await enrolInstance(ownerId)
+    const access = await emitAccessTokenFor(ownerId)
+    await bearerHandler(
+      bearerEvent(instanceId, access, {
+        'x-tokenscope-client-platform': 'win32-x64',
+        'x-tokenscope-client-surface': 'sdk-cli',
+      }) as never,
+    )
+    const v = await platformRow(instanceId)
+    expect(v.client_platform).toBe('win32-x64')
+    expect(v.client_surface).toBe('sdk-cli')
+    // A device reporting a platform but no version is still a reporting device.
+    expect(v.client_version_at).not.toBeNull()
+  })
+
+  it('a later silent mint does NOT erase them; one reported field does not blank the other', async () => {
+    const instanceId = await enrolInstance(ownerId)
+    const access = await emitAccessTokenFor(ownerId)
+    await bearerHandler(
+      bearerEvent(instanceId, access, {
+        'x-tokenscope-client-platform': 'darwin-arm64',
+        'x-tokenscope-client-surface': 'cli',
+      }) as never,
+    )
+    await bearerHandler(bearerEvent(instanceId, access) as never)
+    expect(await platformRow(instanceId)).toMatchObject({ client_platform: 'darwin-arm64', client_surface: 'cli' })
+    await bearerHandler(bearerEvent(instanceId, access, { 'x-tokenscope-client-surface': 'app' }) as never)
+    expect(await platformRow(instanceId)).toMatchObject({ client_platform: 'darwin-arm64', client_surface: 'app' })
+  })
+
+  it('stores junk as NULL, independently per field', async () => {
+    const instanceId = await enrolInstance(ownerId)
+    const access = await emitAccessTokenFor(ownerId)
+    await bearerHandler(
+      bearerEvent(instanceId, access, {
+        'x-tokenscope-client-platform': '<b>win32</b>',
+        'x-tokenscope-client-surface': 'cli',
+      }) as never,
+    )
+    expect(await platformRow(instanceId)).toMatchObject({ client_platform: null, client_surface: 'cli' })
+  })
+
+  it("a NON-OWNING caller cannot write a platform claim onto someone else's instance", async () => {
+    const instanceId = await enrolInstance(ownerId)
+    const strangerAccess = await emitAccessTokenFor(strangerId)
+    await expect(
+      bearerHandler(
+        bearerEvent(instanceId, strangerAccess, {
+          'x-tokenscope-client-platform': 'linux-x64',
+          'x-tokenscope-client-surface': 'cli',
+        }) as never,
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 })
+    expect(await platformRow(instanceId)).toMatchObject({ client_platform: null, client_surface: null })
   })
 })

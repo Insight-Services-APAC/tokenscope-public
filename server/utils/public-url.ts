@@ -347,6 +347,19 @@ export function isPublicOriginTrusted(event: H3Event): boolean {
 }
 
 /**
+ * The public origin to SHOW a user as "this deployment" (the connect dialog), or
+ * null when the server cannot vouch for one. Same trust decision as
+ * `isPublicOriginTrusted`: the pinned `APP_PUBLIC_ORIGIN`, else the Front-Door
+ * or loopback origin of this request. An untrusted Host is never echoed back as
+ * the server URL a user is told to register.
+ */
+export function trustedPublicOrigin(event: H3Event): string | null {
+  const pinned = pinnedPublicOrigin()
+  if (pinned) return pinned
+  return isPublicOriginTrusted(event) ? getPublicRequestURL(event).origin : null
+}
+
+/**
  * Fail the request unless this server can vouch for its own public origin.
  *
  * Same decision as `isPublicOriginTrusted`, raised as the RFC-9457 500 the

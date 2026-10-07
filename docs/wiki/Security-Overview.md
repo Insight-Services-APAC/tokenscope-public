@@ -46,50 +46,18 @@ operator can close the pre-`frontDoorId` window explicitly by setting
 `/api/health` rather than no-op; the templates do not set it (R5). Data-plane and
 ACR access are over **private endpoints**.
 
-```mermaid
-flowchart TB
-    subgraph DevZone["Developer machine (untrusted)"]
-        BR["Browser user<br/>developer / manager / region admin / global finance / platform admin"]
-        CC["Claude Code / Copilot CLI<br/>+ TokenScope plugin"]
-    end
-    subgraph InternalZone["Internal scheduler (Azure)"]
-        CRON["Container Apps cron jobs"]
-    end
+![Every caller that reaches the app passes its own check at its own route; usage telemetry never passes the app's door, so it is defended after it lands](images/security-overview-trust-boundaries.svg)
 
-    WAF["Front Door Premium or your WAF<br/>(public entrypoint)"]
+1. Browser users sign in with Entra OIDC. Each request decrypts the cookie, enriches it from the database and passes `requireRole` and the region scope checks. Four roles are assignable.
+2. The CLI plugin uses three routes: MCP and OAuth 2.1 with PKCE for read and tag access, `/api/v1/setup/redeem` to trade a one-time handoff code for the durable emit credential, and `/api/v1/instances/{id}/bearer` to trade that credential for a short-lived Azure Monitor bearer. Each mint stamps an authenticated heartbeat on the instance.
+3. Once `frontDoorId` is set, `require-front-door` refuses any request without Front Door's `X-Azure-FDID` header, except `/api/health`. With your own WAF there is no header to check and the gate is inert.
+4. The cron jobs sign each call to the run-worker route with HMAC-SHA256. They call `workerBaseUrl`: the app's internal address, or the Front Door endpoint once `frontDoorId` is set.
+5. Usage telemetry leaves the device as OTLP with the minted bearer and lands in Azure Monitor's public ingest endpoint. It never passes the app's door, so anyone holding an emit token can write rows.
+6. The read joiner reads those rows with KQL, resolves the teammate from the attested `tokenscope.instance_id` and keeps a project tag only when the teammate is a member.
+7. `heartbeat-coverage` marks a Claude Code session as unverified spend when no bearer heartbeat covers its time span (it reads only `tool = 'claude-code'` rows and skips instances that have never minted a bearer). It informs and never revokes or deletes. Copilot usage has no early detector; reconciliation (8) is its check.
+8. `usage-reconciliation` compares OTel with the provider APIs per teammate and day, and flags OTel the provider bill does not corroborate for the developer to review.
 
-    subgraph Perimeter["Network perimeter — VNet (the edge control)"]
-    subgraph AppZone["TokenScope — Nitro app (Container App, INTERNAL ingress / private VIP)"]
-        FD["require-front-door<br/>(X-Azure-FDID gate — enforces once frontDoorId is set)"]
-        OIDC["Entra OIDC cookie<br/>+ per-request DB enrichment"]
-        RBAC["requireRole / requireRegionScope<br/>+ scope predicates"]
-        HMACI["verifyInternalRequest<br/>(internal HMAC)"]
-        OAUTH["/api/v1/mcp + /oauth/*<br/>(OAuth 2.1 read/tag)"]
-        SETUP["/setup/redeem<br/>(emit-handoff is-auth)"]
-        BEARER["/bearer<br/>(MI token mint)"]
-    end
-    PG[("PostgreSQL — private endpoint")]
-    end
-
-    AZ["Azure Monitor<br/>OTLP ingest + Log Analytics read<br/>(UNTRUSTED / public-write LAW)"]
-    HB["heartbeat-coverage worker<br/>quarantine 'unverified spend'<br/>(detect, informational)"]
-    REC["reconciliation vs Anthropic actuals<br/>(truth — wipes non-reconciling spend)"]
-
-    BR -->|HTTPS| WAF
-    CC -->|OAuth consent + emit handoff| WAF
-    CRON -->|HMAC-signed| WAF
-    WAF --> FD
-    FD --> OIDC --> RBAC --> PG
-    FD --> HMACI --> PG
-    FD --> OAUTH --> PG
-    FD --> SETUP --> PG
-    FD --> BEARER -->|monitor.azure.com/.default<br/>authenticated heartbeat per mint| AZ
-    CC -->|OTLP + MI bearer<br/>SPOOFABLE — defended downstream| AZ
-    AZ -.->|KQL, membership-gated| PG
-    PG -.->|detect: no covering heartbeat| HB
-    HB -.->|surfaces early; feeds revoke| PG
-    PG -.->|reconcile: wipe non-reconciling| REC
-```
+*Four doors each check their own credential. The fifth channel, telemetry, is checked after it lands: by membership as it is read, then against heartbeats and the provider's own figures.*
 
 | Boundary crossing | What crosses | Control |
 |---|---|---|
@@ -193,7 +161,7 @@ release; each has a documented disposition.
 | R2 | **The app layer is the only data-scope boundary** — a handler that omits its scope predicate has nothing behind it | Deliberate: the schema's RLS policies key on role, while report reach is a revocable per-teammate grant, so enabling them would contradict configured access rather than back it up. The exposure is mitigated by a CI gate (`check-handler-rls-context.mjs`), shared scope-predicate helpers rather than hand-rolled clauses, and route-level tests | Not planned — the policies would first have to express grants rather than roles |
 | R3 | **~~`/instances/attest` not yet on a real Entra bearer~~ — CLOSED by the cutover** | The standalone direct-attest route was removed; the device binding is now minted by the OAuth-authenticated `provision_emit` (a read+tag consent token, validated via `requireOAuthBearer`), and `/bearer` / `/end` gate on the OAuth `tokenscope.emit` token. The placeholder-principal-OID gap no longer exists | Closed (PR #38) |
 | R4 | **CSP `style-src 'unsafe-inline'`** | `@nuxt/ui` v4 baseline requirement for injected styles; rest of CSP is tight (`frame-ancestors 'none'`, constrained `img-src`/`font-src`) | Track upstream |
-| R5 | **`X-Azure-FDID` header gate enforces only once `frontDoorId` is set** — with your own WAF there is no Front Door to inject the header, and with Front Door the gate is a no-op until the apply that sets `frontDoorId` | The **network perimeter (VNet + the entrypoint) is the edge control**; the ACA environment is internal (private VIP), so the header check is defence in depth, not the gate. `AZURE_FRONT_DOOR_REQUIRED=true` makes the middleware **fail closed** (403 on everything but `/api/health`) even before an FDID is wired, but the templates do not set it. Coupled effect: `container-app.bicep` sets `NUXT_SECURITY_RATE_LIMITER_IP_HEADER` to `x-azure-clientip` **only** when the FDID is non-empty, so without it nuxt-security's global 150 req / 5 min limiter is keyed on a spoofable forwarded hop | Set `frontDoorId` in the Front Door shape (see the pre-pilot checklist) |
+| R5 | **`X-Azure-FDID` header gate enforces only once `frontDoorId` is set** — with your own WAF there is no Front Door to inject the header, and with Front Door the gate is a no-op until the apply that sets `frontDoorId` | The **network perimeter (VNet + the entrypoint) is the edge control**; the ACA environment is internal (private VIP), so the header check is defence in depth, not the gate. `AZURE_FRONT_DOOR_REQUIRED=true` makes the middleware **fail closed** (403 on everything but `/api/health`) even before an FDID is wired, but the templates do not set it. Coupled effect: `container-app.bicep` sets `NUXT_SECURITY_RATE_LIMITER_IP_HEADER` to `x-azure-socketip` **only** when the FDID is non-empty, so without it nuxt-security's global 150 req / 5 min limiter is keyed on a spoofable forwarded hop | Set `frontDoorId` in the Front Door shape (see the pre-pilot checklist) |
 | R6 | **~~`assertSameOrigin` must trust the WAF's forwarded `Host`~~ — RESOLVED by origin pinning** | The public hostname (at the WAF) differs from the internal ACA FQDN. The app now **pins its public origin** via `appPublicOrigin` (`APP_PUBLIC_ORIGIN`), resolved through `getPublicRequestURL`, so same-origin validation uses the user-facing origin **regardless of whether the WAF preserves or rewrites `Host`** — no dependency on WAF Host-forwarding | Closed (origin pinning) |
 | R7 | **Shared app-level emit bearer is the attribution spoof-root** | Attribution **identity is anchored to the authed device attestation** (resolved by `tokenscope.instance_id` / DEVICE_SID, bound at an authenticated enrol) — **not spoofable per-event**; the **project is a membership-gated claim**. The residual: an *enrolled insider* who extracts the shared MI bearer from the global config can emit **arbitrary** resource attrs (foreign DEVICE_SID and/or project). Bounded to **noise-class** — no quota gain (attribution never grants/blocks compute), membership-gated, and reconciliation against Anthropic Analytics nets it out. **Accepted** per ADR-0004; insider-bounded (bearer needs an authed enrol). Pre-pilot guardrail: ingestion-volume / anomaly alert (below) | Re-open per ADR-0004 triggers (e.g. enforcement coupling, per-user bearer) |
 | R8 | **Spoofed emissions over the untrusted, public-write LAW channel** — anyone holding the broadly-readable `tokenscope.emit` credential (it lives in `~/.claude/settings.json` on every host) or LAW write access can hand-write **spoofed** `attribution_record` rows claiming a victim's `instance_id` / `project.code_hash` / email | Defended by **revoke + detect + reconcile** with strict emit-credential isolation, **not** by trusting the wire or per-record signing (a signing collector was rejected as over-engineering — ADR-0008, ADR-0005). **Detect (built, PR #37):** each `/bearer` mint stamps an **authenticated heartbeat** (`last_bearer_at`); the heartbeat-coverage worker **quarantines** spend whose session window has no covering heartbeat as "unverified spend" (`/api/v1/me/quarantined-spend`), **catching the cross-instance spoof early** (before reconciliation's ~1h+ lag). **Quarantine is informational only — never auto-revokes/deletes.** **Reconcile** wipes non-reconciling spend (the truth backstop). **Isolation:** the read→emit one-way wall (an emit bearer is rejected by every read/tag/MCP/admin surface). **Residual not caught by quarantine:** full emit-credential **theft** — a thief's `/bearer` mints heartbeat **as the victim**, so theft-spend looks covered → stays on **revoke + reconcile** | Re-open per ADR-0008 triggers; admin/region quarantine view is the tracked follow-up |

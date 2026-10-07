@@ -13,11 +13,13 @@ import type { ConnectClient } from '#shared/connect'
 import UiButton from '../ui/Button.vue'
 import ConnectClientGuide from './ConnectClientGuide.vue'
 import { useModalA11y } from '../../composables/useModalA11y'
+import { useConnectConfig } from '../../composables/useConnectConfig'
 
 const props = defineProps<{ client: ConnectClient | null }>()
 const emit = defineEmits<{ close: [] }>()
 
 const dialogEl = ref<HTMLElement | null>(null)
+const { config, failed } = useConnectConfig()
 
 useModalA11y({
   isOpen: () => !!props.client,
@@ -51,7 +53,12 @@ useModalA11y({
         </UiButton>
       </div>
       <div class="px-6 pb-6 pt-1">
-        <ConnectClientGuide :client="client" :title-id="`connect-dialog-title-${client}`" />
+        <ConnectClientGuide
+          :client="client"
+          :config="config"
+          :failed="failed"
+          :title-id="`connect-dialog-title-${client}`"
+        />
       </div>
     </div>
   </div>

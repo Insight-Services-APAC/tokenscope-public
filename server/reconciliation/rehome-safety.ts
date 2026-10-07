@@ -4,8 +4,8 @@
  *
  * WHY IT IS A CONTROL, NOT A FILTER. A (re)home can change a teammate's region,
  * and region drives their RLS scope. The admin region-PATCH runs a revoke cascade
- * (revoked_at + end instances + revoke OAuth) for exactly that reason; the
- * automatic lanes do not. So the automatic lanes may only touch a teammate with
+ * (revoked_at + revoke interactive OAuth; device-bound emit credentials survive,
+ * #414) for exactly that reason; the automatic lanes do not. So the automatic lanes may only touch a teammate with
  * NO live session to re-scope: a never-adopted `bill:` placeholder with no live
  * emit instance and no live OAuth credential. Anything with a real oid or a live
  * credential is left for the admin worklist. (The #99 review contract.)

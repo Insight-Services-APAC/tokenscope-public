@@ -27,6 +27,7 @@
  * POST") are only answerable from outside the process.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { writeFakeHomePreload, fakeHomeNode, realIsolatedIndex } from './helpers/fake-home'
 import { mkdtempSync, mkdirSync, rmSync, existsSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -40,13 +41,14 @@ const { assertAllowedApiBase, acceptApiBaseArg, assertConfinedPath, flagValue, a
 // @ts-ignore — mjs import resolved by Vitest
 const { realHome } = await import('../../../plugin/scripts/real-home.mjs')
 // @ts-ignore — mjs import resolved by Vitest
-const { DEFAULT_API_BASE } = await import('../../../plugin/scripts/api-base.mjs')
-// @ts-ignore — mjs import resolved by Vitest
 const { parseArgs: parseClaudeArgs } = await import('../../../plugin/scripts/claude-redeem.mjs')
 // @ts-ignore — mjs import resolved by Vitest
 const { parseArgs: parseCopilotArgs } = await import('../../../plugin/scripts/copilot-redeem.mjs')
 /* eslint-enable @typescript-eslint/ban-ts-comment */
 
+// A packaged host as a literal, not api-base.mjs's PACKAGED: the public
+// build empties that constant (#415), and these tests are about argv shapes.
+const PACKAGED = 'https://tokenscope.example.com'
 const DISCOVERED = 'https://ts-registered.example.com'
 const EVIL = 'https://evil.example.com'
 
@@ -65,10 +67,10 @@ afterAll(() => {
 })
 
 describe('assertAllowedApiBase — argv may select a known origin, never introduce one', () => {
-  const allowed = [DEFAULT_API_BASE, DISCOVERED]
+  const allowed = [PACKAGED, DISCOVERED]
 
   it('accepts the packaged default and the discovered MCP origin', () => {
-    expect(assertAllowedApiBase(DEFAULT_API_BASE, { allowed })).toBe(DEFAULT_API_BASE)
+    expect(assertAllowedApiBase(PACKAGED, { allowed })).toBe(PACKAGED)
     expect(assertAllowedApiBase(DISCOVERED, { allowed })).toBe(DISCOVERED)
   })
 
@@ -99,8 +101,8 @@ describe('assertAllowedApiBase — argv may select a known origin, never introdu
     const rejected = [
       // userinfo: the ALLOWED host in the credentials slot, the attacker's in the
       // authority. URL#origin reads the authority, and userinfo is refused outright.
-      `${DEFAULT_API_BASE}@evil.example.com`,
-      `${DEFAULT_API_BASE}@evil.example.com/api`,
+      `${PACKAGED}@evil.example.com`,
+      `${PACKAGED}@evil.example.com/api`,
       // a homoglyph host punycodes to a different origin
       'https://tokenscope-dev.insight.cоm',
       // a different port is a different endpoint
@@ -126,17 +128,17 @@ describe('assertAllowedApiBase — argv may select a known origin, never introdu
     // normalised away — the POST target is built from the ORIGIN, so nothing a
     // caller appended to the flag survives into the URL.
     expect(assertAllowedApiBase('https://tokenscope.example.com/', { allowed })).toBe(
-      DEFAULT_API_BASE,
+      PACKAGED,
     )
-    expect(assertAllowedApiBase(`${DEFAULT_API_BASE}:443`, { allowed })).toBe(DEFAULT_API_BASE)
-    expect(assertAllowedApiBase(`${DEFAULT_API_BASE}/evil/path?q=1#f`, { allowed })).toBe(
-      DEFAULT_API_BASE,
+    expect(assertAllowedApiBase(`${PACKAGED}:443`, { allowed })).toBe(PACKAGED)
+    expect(assertAllowedApiBase(`${PACKAGED}/evil/path?q=1#f`, { allowed })).toBe(
+      PACKAGED,
     )
   })
 
   it('an EMPTY allowed list admits nothing but loopback', () => {
-    expect(() => assertAllowedApiBase(DEFAULT_API_BASE, { allowed: [] })).toThrow()
-    expect(() => assertAllowedApiBase(DEFAULT_API_BASE, { allowed: [null, undefined, ''] })).toThrow()
+    expect(() => assertAllowedApiBase(PACKAGED, { allowed: [] })).toThrow()
+    expect(() => assertAllowedApiBase(PACKAGED, { allowed: [null, undefined, ''] })).toThrow()
   })
 })
 
@@ -206,8 +208,10 @@ describe('assertConfinedPath — a path flag cannot leave the home it is anchore
     let outside: string
 
     beforeAll(() => {
-      fakeHome = mkdtempSync(join(tmpdir(), 'ts-argv-home-'))
-      outside = mkdtempSync(join(tmpdir(), 'ts-argv-outside-'))
+      // realpath: assertConfinedPath returns the RESOLVED target, and macOS's
+      // tmpdir() is itself a symlink (/var -> /private/var).
+      fakeHome = realpathSync(mkdtempSync(join(tmpdir(), 'ts-argv-home-')))
+      outside = realpathSync(mkdtempSync(join(tmpdir(), 'ts-argv-outside-')))
     })
     afterAll(() => {
       rmSync(fakeHome, { recursive: true, force: true })
@@ -399,8 +403,13 @@ describe('claude-redeem main() — no flag can redirect the handoff POST', () =>
   let hits: string[] = []
   let dir: string
 
+  // The default store's isolated index is anchored on the passwd home; the
+  // fake-home preload makes `dir` the child's account home instead.
+  const indexBefore = realIsolatedIndex(realHome())
+  let preload = ''
   beforeAll(async () => {
     dir = mkdtempSync(join(realHome(), '.ts-argv-guard-main-'))
+    preload = writeFakeHomePreload(dir)
     server = createServer((req, res) => {
       hits.push(req.url ?? '')
       let raw = ''
@@ -437,6 +446,7 @@ describe('claude-redeem main() — no flag can redirect the handoff POST', () =>
     if (dir && dir.startsWith(join(realHome(), '.ts-argv-guard-main-'))) {
       rmSync(dir, { recursive: true, force: true })
     }
+    expect(realIsolatedIndex(realHome()), 'a spawned redeem wrote the REAL settings index').toBe(indexBefore)
   })
 
   // Async spawn (NOT spawnSync): the mock server runs in this worker's event
@@ -445,9 +455,11 @@ describe('claude-redeem main() — no flag can redirect the handoff POST', () =>
     new Promise<{ status: number | null; out: string }>((resolve) => {
       // --state-dir keeps the spawned CLI's credential store in the sandbox; the
       // store now refuses to write the real ~/.tokenscope under a test runner.
-      const child = spawn('node', [HELPER, ...args, '--state-dir', join(dir, 'state')], {
+      const fake = fakeHomeNode(preload, dir)
+      const child = spawn('node', [...fake.args, HELPER, ...args, '--state-dir', join(dir, 'state')], {
         env: {
           ...process.env,
+          ...fake.env,
           // The ONLY off-argv source in play: a LOOPBACK TOKENSCOPE_API_BASE is
           // the documented dev override, and it is what the helper falls back to
           // when a hostile --api-base is dropped. That fallback landing on this

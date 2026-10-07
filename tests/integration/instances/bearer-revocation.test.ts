@@ -89,7 +89,7 @@ const adminSession = (): Session => ({ teammateId, email: 'admin@x.test', displa
 
 describe('E2 — /bearer revocation enforcement', () => {
   it('mints for an active (non-revoked) teammate', async () => {
-    await t.client.unsafe(`UPDATE teammate SET revoked_at = NULL WHERE id = '${teammateId}'`)
+    await t.client.unsafe(`UPDATE teammate SET revoked_at = NULL, emit_revoked_at = NULL WHERE id = '${teammateId}'`)
     const { instanceId } = await enrolInstance(new Date())
     const access = await emitAccessToken()
     const out = (await bearerHandler(bearerEvent(instanceId, access) as never)) as { Authorization: string }
@@ -97,7 +97,7 @@ describe('E2 — /bearer revocation enforcement', () => {
   })
 
   it('401s when the teammate is revoked AFTER enrolment', async () => {
-    await t.client.unsafe(`UPDATE teammate SET revoked_at = NULL WHERE id = '${teammateId}'`)
+    await t.client.unsafe(`UPDATE teammate SET revoked_at = NULL, emit_revoked_at = NULL WHERE id = '${teammateId}'`)
     const enrolledAt = new Date(Date.now() - 60_000)
     const { instanceId } = await enrolInstance(enrolledAt)
     // Token issued BEFORE the revoke → requireOAuthBearer's own E2 gate (teammate
@@ -105,7 +105,7 @@ describe('E2 — /bearer revocation enforcement', () => {
     // (revoked_at vs ts_start) is the same defense one layer down; either way a
     // revoked teammate cannot mint. We assert the behaviour (revoked → 401).
     const access = await emitAccessToken()
-    await t.client.unsafe(`UPDATE teammate SET revoked_at = NOW() WHERE id = '${teammateId}'`)
+    await t.client.unsafe(`UPDATE teammate SET revoked_at = NOW(), emit_revoked_at = NOW() WHERE id = '${teammateId}'`)
     await expect(bearerHandler(bearerEvent(instanceId, access) as never)).rejects.toMatchObject({ statusCode: 401 })
   })
 
@@ -124,20 +124,20 @@ describe('E2 — /bearer revocation enforcement', () => {
     // access_issued_at) does NOT fire (token issued after the revoke), so /bearer's
     // instance-level gate (revoked_at > ts_start) is the layer that 401s. Covers the
     // redundant defense directly (R2 L2 — previously only requireOAuthBearer's gate fired).
-    await t.client.unsafe(`UPDATE teammate SET revoked_at = NULL WHERE id = '${teammateId}'`)
+    await t.client.unsafe(`UPDATE teammate SET revoked_at = NULL, emit_revoked_at = NULL WHERE id = '${teammateId}'`)
     const { instanceId } = await enrolInstance(new Date(Date.now() - 60_000))
-    await t.client.unsafe(`UPDATE teammate SET revoked_at = NOW() WHERE id = '${teammateId}'`)
+    await t.client.unsafe(`UPDATE teammate SET revoked_at = NOW(), emit_revoked_at = NOW() WHERE id = '${teammateId}'`)
     const access = await emitAccessToken() // issued AFTER the revoke
     await expect(bearerHandler(bearerEvent(instanceId, access) as never)).rejects.toMatchObject({
       statusMessage: 'Session revoked',
     })
-    await t.client.unsafe(`UPDATE teammate SET revoked_at = NULL WHERE id = '${teammateId}'`)
+    await t.client.unsafe(`UPDATE teammate SET revoked_at = NULL, emit_revoked_at = NULL WHERE id = '${teammateId}'`)
   })
 })
 
 describe('E2 — revoke cascades to instances', () => {
   it('revoke-sessions sets ts_actual_end on the teammate active instances', async () => {
-    await t.client.unsafe(`UPDATE teammate SET revoked_at = NULL WHERE id = '${teammateId}'`)
+    await t.client.unsafe(`UPDATE teammate SET revoked_at = NULL, emit_revoked_at = NULL WHERE id = '${teammateId}'`)
     const { instanceId } = await enrolInstance(new Date())
     await revokeHandler(revokeEvent(teammateId, adminSession()) as never)
     const rows = await t.client<{ ended: string | null }[]>`SELECT ts_actual_end::text AS ended FROM instance_attestation WHERE instance_id = ${instanceId}`

@@ -22,6 +22,7 @@ import type { LensDisclosureData } from '../components/me/LensDisclosure.vue'
 import ActivityCard from '../components/me/ActivityCard.vue'
 import type { TagTarget as DialogTagTarget } from '../components/home/TagSessionDialog.vue'
 import { budgetPace, budgetPaceKind, budgetPaceLabel, projectedMonthEnd, type BudgetPace } from '../composables/useRagState'
+import { useConnectConfig } from '../composables/useConnectConfig'
 
 interface Bucket {
   project_code: string
@@ -370,6 +371,8 @@ const sessionDetailId = ref<string | null>(null)
 // Which client's connect pop-up is open (null = closed). Opened by the
 // "Connect Claude" / "Connect Copilot" buttons in the page head.
 const connectClient = ref<ConnectClient | null>(null)
+// Hide a client the admin has not enabled for this deployment (#415).
+const { isEnabled: isClientEnabled } = useConnectConfig()
 function openTag(t: TagTarget) {
   tagSession.value = t
 }
@@ -707,6 +710,7 @@ const softCapTickPct = computed(() =>
                /account (shared ConnectClientGuide → no drift). -->
           <div class="flex flex-wrap items-center gap-2 justify-end" data-testid="home-connect-tools">
             <button
+              v-if="isClientEnabled('claude-code')"
               type="button"
               class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#D97757]/40 bg-[#D97757]/5 hover:bg-[#D97757]/12 transition-colors text-sm font-semibold text-carbon cursor-pointer"
               data-testid="connect-claude"
@@ -716,6 +720,7 @@ const softCapTickPct = computed(() =>
               Connect Claude Code
             </button>
             <button
+              v-if="isClientEnabled('copilot-cli')"
               type="button"
               class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-carbon/15 bg-carbon/5 hover:bg-carbon/10 transition-colors text-sm font-semibold text-carbon cursor-pointer"
               data-testid="connect-copilot"
@@ -771,6 +776,7 @@ const softCapTickPct = computed(() =>
         </div>
         <div class="flex flex-wrap items-center gap-2 shrink-0">
           <button
+            v-if="isClientEnabled('claude-code')"
             type="button"
             class="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-[#D97757]/40 bg-[#D97757]/5 hover:bg-[#D97757]/12 transition-colors text-sm font-semibold text-carbon cursor-pointer"
             data-testid="onboarding-connect-claude"
@@ -780,6 +786,7 @@ const softCapTickPct = computed(() =>
             Connect Claude Code
           </button>
           <button
+            v-if="isClientEnabled('copilot-cli')"
             type="button"
             class="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-carbon/15 bg-carbon/5 hover:bg-carbon/10 transition-colors text-sm font-semibold text-carbon cursor-pointer"
             data-testid="onboarding-connect-copilot"

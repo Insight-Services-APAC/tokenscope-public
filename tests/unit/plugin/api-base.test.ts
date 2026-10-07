@@ -11,7 +11,20 @@ import { inspect } from 'node:util'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it, expect, afterEach, beforeEach } from 'vitest'
-import { resolveApiBase, DEFAULT_API_BASE } from '../../../plugin/scripts/api-base.mjs'
+import { resolveApiBase as resolveApiBaseRaw } from '../../../plugin/scripts/api-base.mjs'
+
+// Every call here pins the two build- and machine-dependent sources: the
+// packaged default (empty in the public build, #415) and the configured
+// `server_url` (read from the real user settings file). The tests below are
+// about precedence and validation, so neither may leak in from the host.
+const PACKAGED = 'https://packaged.example.com'
+const DEFAULT_API_BASE = PACKAGED
+function resolveApiBase(
+  arg: string | null,
+  opts: { discovered?: string | null; configured?: string | null; packagedDefault?: string } = {},
+) {
+  return resolveApiBaseRaw(arg, { configured: null, packagedDefault: PACKAGED, ...opts })
+}
 
 const savedEnv = process.env.TOKENSCOPE_API_BASE
 afterEach(() => {
@@ -210,7 +223,7 @@ describe('resolveApiBase — repo-supplied env is not a destination', () => {
     for (const hostile of [
       'https://attacker.example.com:3450',
       'http://attacker.example.com:3450',
-      'https://tokenscope.example.com.attacker.example',
+      'https://packaged.example.com.attacker.example',
     ]) {
       process.env.TOKENSCOPE_API_BASE = hostile
       expect(resolveApiBase(null)).toBe(DEFAULT_API_BASE)

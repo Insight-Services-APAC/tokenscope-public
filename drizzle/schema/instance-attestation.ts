@@ -78,6 +78,15 @@ export const instanceAttestation = pgTable('instance_attestation', {
   // (a downgrade) advances last_bearer_at and leaves this behind — which is how
   // a stale reading is spotted rather than trusted.
   clientVersionAt: timestamp('client_version_at', { withTimezone: true }),
+  // Same trust model and write rules as the two version columns (mig 0150): the
+  // device's `<os>-<arch>` (Node vocabulary) and launch surface, from /bearer.
+  // client_version_at stamps a claim of any of the four.
+  clientPlatform: text('client_platform'),
+  clientSurface: text('client_surface'),
+  // full | emit-only, stated by the LATEST /setup/redeem (mig 0150). Overwritten
+  // on every redeem, NULL when that redeem stated no recognised mode.
+  // Diagnostic only, like everything in this block.
+  setupMode: text('setup_mode'),
   // Cross-environment reuse guard (mig 0060). NUXT_DEPLOY_ENV-classified label
   // (dev/sandbox/production/local) of the deployment that minted/owns this
   // instance. Stamped on mint; on a re-provision that supplies this instance_id,
@@ -86,5 +95,10 @@ export const instanceAttestation = pgTable('instance_attestation', {
   // The label (not the origin host) is used because it is stable across a custom
   // -domain cutover. NULL = legacy row (pre-0060) — treated as same-environment.
   deploymentEnv: text('deployment_env'),
+  // Read rotation (mig 0149): when a SCHEDULED azure-monitor-read tick last
+  // attempted this device, success or failure. The joiner selection orders by it
+  // least-recently-read first so its cap and deadline rotate through the fleet.
+  // NULL = never attempted by a scheduled tick.
+  joinerReadAt: timestamp('joiner_read_at', { withTimezone: true }),
   notes: jsonb('notes'),
 })

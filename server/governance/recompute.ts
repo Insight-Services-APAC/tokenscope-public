@@ -1,20 +1,22 @@
 /*
- * recompute — the core governance-verdict recompute engine (design §4.1 / §8.4,
- * Required outcome 1): "Closed actual_spend verdicts freeze; open rows
- * recompute from current authoritative governance."
+ * recompute — the core governance-verdict recompute engine (design §4.1 / §8.4):
+ * every actual_spend row's verdict is recomputed from current authoritative
+ * governance. Closed months are NOT frozen (see the note on the candidate query
+ * below): closing records a reporting_snapshot, and a later verdict change shows
+ * as a delta against it.
  *
- * ONE function, THREE callers, so "open recomputes, closed freezes" can never
- * drift between them:
+ * ONE function, THREE callers, so the verdict rule can never drift between them:
  *   - server/api/v1/admin/reconciliation/{orgs,enterprises}/[id].patch.ts — scoped
- *     to the edited org/enterprise, so "editing billing changes an open month"
- *     takes effect immediately rather than waiting for the next worker tick.
+ *     to the edited org/enterprise, NEWEST FIRST within a 10 s budget
+ *     (recomputeScopeNewestFirst), so the current month reflects a billing edit
+ *     in the request; whatever the budget leaves is converged by the worker.
  *   - server/workers/governance-recompute.ts — the periodic, unscoped, bounded
  *     sweep (catches rows a scoped call never touched: new ingest before this
  *     PR's writer changes deploy, or an operator-triggered governance-key
  *     resweep that just resolved previously-unresolved rows).
  *   - server/governance/reporting-snapshot.ts — close calls it SCOPED TO THE
  *     PERIOD being closed/restated, inside the SAME advisory-locked transaction,
- *     so the freeze always captures a fully-current snapshot.
+ *     so the recorded snapshot is always fully current.
  *
  * Bounded + resumable (design §8.4): callers pass `limit`; a call that hits the
  * limit returns `hasMore: true` so a periodic caller loops (within its own
@@ -26,7 +28,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type * as schema from '../../drizzle/schema'
 import { CLAUDE_FAMILY_TOOLS } from '../../shared/usage/surface'
 import { COPILOT_CLI_TOOL } from '../../shared/usage/github-surface'
-import { advisoryXactLock } from '../db/advisory-lock'
+import { advisoryXactLock, advisoryXactTryLock } from '../db/advisory-lock'
 import { parseActualSpendSourceOrgRef } from '../reconciliation/source-org-ref'
 import {
   loadGovernanceResolutionContext,
@@ -41,6 +43,10 @@ type SqlRunner = Pick<Db, 'execute'>
 
 export const RECOMPUTE_DEFAULT_BATCH = 2000
 
+/** Wall-clock budget for the billing PATCH's in-request recompute, checked
+ *  after each batch (docs/design/scaling-to-1000-users.md 0.6). */
+export const GOVERNANCE_PATCH_BUDGET_MS = 10_000
+
 export interface RecomputeScope {
   /** Restrict to actual_spend rows carrying this provider_org_id (anthropic orgs). */
   providerOrgId?: string
@@ -51,9 +57,16 @@ export interface RecomputeScope {
   /** Batch cap. Defaults to RECOMPUTE_DEFAULT_BATCH. */
   limit?: number
   /**
-   * Composite keyset cursor for an UNSCOPED sweep. `actual_spend.id` is a
-   * random UUID, so date-first pagination uses the indexed chronological
-   * dimension instead of repeatedly walking arbitrary historical UUID order.
+   * Scan direction over `(date, id)`. `asc` (default) walks oldest first;
+   * `desc` walks newest first, so a bounded caller fixes the current month
+   * before older ones. Locks are taken in ascending period order either way.
+   */
+  order?: 'asc' | 'desc'
+  /**
+   * Composite keyset cursor: the scan resumes strictly AFTER this key in the
+   * chosen `order` (`>` for asc, `<` for desc). `actual_spend.id` is a random
+   * UUID, so date-first pagination uses the indexed chronological dimension
+   * instead of repeatedly walking arbitrary historical UUID order.
    */
   afterDate?: string
   afterId?: string
@@ -62,9 +75,10 @@ export interface RecomputeScope {
 export interface RecomputeResult {
   scanned: number
   updated: number
-  /** true when `scanned === limit` — more open, unrecomputed rows may remain. */
+  /** true when `scanned === limit` — more rows in this scope may remain. */
   hasMore: boolean
-  /** Composite cursor of the last candidate scanned this call. */
+  /** Composite cursor of the last candidate scanned this call, in scan order
+   *  (the smallest key for `desc`) — pass it back as `afterDate`/`afterId`. */
   lastDate?: string
   lastId?: string
 }
@@ -120,10 +134,18 @@ function computeRowVerdict(ctx: GovernanceResolutionContext, row: CandidateRow):
   return base
 }
 
+function scopeConds(scope: RecomputeScope): SQL[] {
+  const conds: SQL[] = []
+  if (scope.providerOrgId) conds.push(sql`a.provider_org_id = ${scope.providerOrgId}::uuid`)
+  if (scope.providerEnterpriseId) conds.push(sql`a.provider_enterprise_id = ${scope.providerEnterpriseId}::uuid`)
+  if (scope.periodMonth) conds.push(sql`date_trunc('month', a.date)::date = ${scope.periodMonth}::date`)
+  return conds
+}
+
 /**
  * Recompute `actual_spend.chargeback_exempt` / `governance_verdict_source` for
- * OPEN-period rows matching `scope`. Closed-period rows are never touched
- * (excluded by the join below) — the freeze is structural, not a convention.
+ * up to `limit` rows matching `scope`, in every period (see the note below on
+ * closed months).
  */
 export async function recomputeGovernanceVerdicts(
   db: SqlRunner,
@@ -140,12 +162,14 @@ export async function recomputeGovernanceVerdicts(
    * (reporting_snapshot) rather than freezing it, so a verdict change applies
    * and shows up as a delta against what was recorded.
    */
-  const conds: SQL[] = []
-  if (scope.providerOrgId) conds.push(sql`a.provider_org_id = ${scope.providerOrgId}::uuid`)
-  if (scope.providerEnterpriseId) conds.push(sql`a.provider_enterprise_id = ${scope.providerEnterpriseId}::uuid`)
-  if (scope.periodMonth) conds.push(sql`date_trunc('month', a.date)::date = ${scope.periodMonth}::date`)
+  const desc = scope.order === 'desc'
+  const conds = scopeConds(scope)
   if (scope.afterDate && scope.afterId) {
-    conds.push(sql`(a.date, a.id) > (${scope.afterDate}::date, ${scope.afterId}::uuid)`)
+    conds.push(
+      desc
+        ? sql`(a.date, a.id) < (${scope.afterDate}::date, ${scope.afterId}::uuid)`
+        : sql`(a.date, a.id) > (${scope.afterDate}::date, ${scope.afterId}::uuid)`,
+    )
   }
   const where = sql.join(conds, sql` AND `)
 
@@ -157,11 +181,13 @@ export async function recomputeGovernanceVerdicts(
            date_trunc('month', a.date)::date::text AS period_month
     FROM actual_spend a
     ${conds.length ? sql`WHERE ${where}` : sql``}
-    ORDER BY a.date, a.id
+    ${desc ? sql`ORDER BY a.date DESC, a.id DESC` : sql`ORDER BY a.date, a.id`}
     LIMIT ${limit}
   `)
   if (candidates.length === 0) return { scanned: 0, updated: 0, hasMore: false }
 
+  // ASCENDING period order whatever the scan order: every caller agrees on one
+  // acquisition order, so two batches can never wait on each other in a cycle.
   const periods = [...new Set(candidates.map((r) => r.period_month))].sort()
   for (const period of periods) {
     await db.execute(advisoryXactLock('reportingSnapshot', period))
@@ -209,5 +235,66 @@ export async function recomputeGovernanceVerdicts(
     hasMore: candidates.length === limit,
     lastDate: last.date,
     lastId: last.id,
+  }
+}
+
+/**
+ * The billing PATCH's in-request recompute: newest rows first, in batches,
+ * until the budget has elapsed (checked after each batch) or no rows remain.
+ * Runs on the caller's transaction, so the recompute commits with the edit.
+ * `complete: false` means rows were left for the governance-recompute worker.
+ *
+ * Every period the scope touches is locked UP FRONT, ascending. Without that,
+ * a newest-first walk acquires months in descending order across batches of
+ * one transaction, while the worker's ascending batches acquire them upward:
+ * a lock cycle. Re-acquiring a held xact lock in a batch below is a no-op.
+ *
+ * The up-front locks are TRY-locks: a month held elsewhere (the worker's batch,
+ * a snapshot being taken) must not park an admin's request behind it for as long
+ * as that holder runs. If any month is busy, the in-request recompute is skipped
+ * entirely and `complete: false` is returned; the billing edit itself still
+ * commits, and the worker converges every row. The months already taken stay
+ * held until the caller commits, which is prompt because nothing else waits.
+ * (A month that first appears in the scope after the up-front read is locked by
+ * its batch's own, blocking, lock: that window is one statement wide.)
+ */
+export async function recomputeScopeNewestFirst(
+  db: SqlRunner,
+  scope: Pick<RecomputeScope, 'providerOrgId' | 'providerEnterpriseId'>,
+  opts: { budgetMs?: number; batchSize?: number } = {},
+): Promise<{ complete: boolean }> {
+  const budgetMs = opts.budgetMs ?? GOVERNANCE_PATCH_BUDGET_MS
+  const limit = opts.batchSize ?? RECOMPUTE_DEFAULT_BATCH
+  const deadline = Date.now() + budgetMs
+
+  const conds = scopeConds(scope)
+  const periods = await db.execute<{ period_month: string }>(sql`
+    SELECT DISTINCT date_trunc('month', a.date)::date::text AS period_month
+    FROM actual_spend a
+    ${conds.length ? sql`WHERE ${sql.join(conds, sql` AND `)}` : sql``}
+    ORDER BY period_month
+  `)
+  for (const p of periods) {
+    const [got] = await db.execute<{ locked: boolean }>(advisoryXactTryLock('reportingSnapshot', p.period_month))
+    if (!got?.locked) return { complete: false }
+  }
+
+  let afterDate: string | undefined
+  let afterId: string | undefined
+  for (;;) {
+    const r = await recomputeGovernanceVerdicts(db, { ...scope, order: 'desc', limit, afterDate, afterId })
+    if (!r.hasMore) return { complete: true }
+    afterDate = r.lastDate
+    afterId = r.lastId
+    if (Date.now() >= deadline) {
+      // `hasMore` only says the batch was full; probe so a scope that ended
+      // exactly on a batch boundary is not reported as left over.
+      const left = await db.execute<{ one: number }>(sql`
+        SELECT 1 AS one FROM actual_spend a
+        WHERE ${sql.join([...conds, sql`(a.date, a.id) < (${afterDate}::date, ${afterId}::uuid)`], sql` AND `)}
+        LIMIT 1
+      `)
+      return { complete: left.length === 0 }
+    }
   }
 }

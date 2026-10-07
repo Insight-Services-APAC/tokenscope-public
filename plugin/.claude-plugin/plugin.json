@@ -1,8 +1,16 @@
 {
   "name": "tokenscope",
-  "version": "0.1.43",
+  "version": "0.1.45",
   "description": "TokenScope \u2014 attribute AI-tool token spend to projects via the Insight TokenScope platform. Trust the developer. Track every token.",
   "author": {
     "name": "Insight Services APAC"
+  },
+  "userConfig": {
+    "server_url": {
+      "type": "string",
+      "title": "TokenScope server URL",
+      "description": "Your TokenScope deployment's address, e.g. https://tokenscope.your-company.com. Copy it from TokenScope's Connect dialog (Connect, then Claude Code).",
+      "default": ""
+    }
   }
 }

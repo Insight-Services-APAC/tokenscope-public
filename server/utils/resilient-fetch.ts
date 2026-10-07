@@ -13,9 +13,17 @@
  *   - Honours a `retry-after` header (seconds or HTTP-date), capped so a
  *     hostile/buggy upstream can't park a worker for hours.
  *   - Never retries other 4xx (the request itself is wrong; retrying spams).
+ *   - Optional `deadline` (epoch ms): no attempt and no wait is started that
+ *     would end past it, and each attempt's timeout shrinks to the time left.
+ *     When the deadline stops the retries before a wait, the last response is
+ *     returned (or the last error thrown) exactly as when the retries run out;
+ *     when it passes during a wait, the drained response cannot be returned and
+ *     DeadlinePassedError is thrown instead.
  *
  * Returns the final Response (ok or not) — callers keep their own `res.ok`
- * handling. Throws only when every attempt failed at the network layer.
+ * handling. Throws only when every attempt failed at the network layer, or
+ * when the deadline stops it before any attempt produced a network error to
+ * rethrow (before the first attempt, or before a retry of a 429/5xx answer).
  */
 
 export interface ResilientFetchOptions {
@@ -25,6 +33,21 @@ export interface ResilientFetchOptions {
   retries?: number
   /** Base backoff in ms; attempt n waits base * 2^n (default 1 000). */
   backoffMs?: number
+  /**
+   * Absolute deadline (epoch ms). No attempt starts once it has passed, an
+   * attempt's timeout is min(timeoutMs, time left), and a backoff / retry-after
+   * wait that would end at or past it is not started. Absent → no deadline.
+   */
+  deadline?: number
+}
+
+/** Thrown when the deadline stops the call with no network error to rethrow:
+ *  before the first attempt, or before a retry of a 429/5xx answer. */
+export class DeadlinePassedError extends Error {
+  constructor(host: string) {
+    super(`resilientFetch: deadline passed before a request to ${host}`)
+    this.name = 'DeadlinePassedError'
+  }
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -62,12 +85,24 @@ export async function resilientFetch(
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const retries = opts.retries ?? DEFAULT_RETRIES
   const backoffMs = opts.backoffMs ?? DEFAULT_BACKOFF_MS
+  const deadline = opts.deadline
 
   let lastError: unknown = null
   for (let attempt = 0; attempt <= retries; attempt++) {
+    let attemptTimeoutMs = timeoutMs
+    if (deadline !== undefined) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        // Past the deadline before this attempt: send nothing. On a retry the
+        // previous attempt's failure (kept in lastError) is what gets thrown.
+        lastError ??= new DeadlinePassedError(new URL(url).host)
+        break
+      }
+      attemptTimeoutMs = Math.min(timeoutMs, remaining)
+    }
     let res: Response | null = null
     try {
-      res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+      res = await fetch(url, { ...init, signal: AbortSignal.timeout(attemptTimeoutMs) })
     } catch (err) {
       // Network error / timeout — retryable.
       lastError = err
@@ -79,6 +114,12 @@ export async function resilientFetch(
     }
     const retryAfterMs = res ? parseRetryAfterMs(res.headers.get('retry-after')) : null
     const waitMs = Math.min(retryAfterMs ?? backoffMs * 2 ** attempt, MAX_WAIT_MS)
+    // A wait that ends at or past the deadline leaves no time for the retry it
+    // exists for: stop here, exactly as if the retries had run out.
+    if (deadline !== undefined && Date.now() + waitMs >= deadline) {
+      if (res) return res
+      break
+    }
     // Drain the body so the retried connection can be reused (undici keep-alive).
     if (res) await res.arrayBuffer().catch(() => undefined)
     await sleep(waitMs)

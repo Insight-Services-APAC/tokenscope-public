@@ -36,8 +36,11 @@ param postgresServerId string
 @description('Resource ID of the caj-ts-ops-alert Container Apps Job — scope of the dead-man alert (ar-H4). Empty = the job is not deployed (phase-1 / workerBaseUrl unset) and the dead-man rule is elided: a metric alert cannot scope a resource that does not exist.')
 param opsAlertJobId string = ''
 
-@description('Log Analytics workspace the app logs to. Empty disables the security-audit log alert (phase-1 applies before monitoring exists).')
+@description('Workspace the app logs to (monitoring.outputs.opsLogAnalyticsId). Empty disables the security-audit log alert (phase-1 applies before monitoring exists).')
 param logAnalyticsId string = ''
+
+@description('True when logAnalyticsId is the separate ops workspace (main.bicep separateOpsWorkspace). Changes the log-alert rule names.')
+param logsOnOpsWorkspace bool = false
 
 @description('Tags applied to every resource in this module.')
 param tags object = {}
@@ -78,6 +81,46 @@ resource appReplicasAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
           operator: 'LessThan'
           threshold: 1
           timeAggregation: 'Maximum'
+          criterionType: 'StaticThresholdCriterion'
+        }
+      ]
+    }
+    actions: actionGroups
+  }
+}
+
+// 1b. App crash-looping. The Replicas rule cannot see it: a CrashLoopBackOff
+// replica still counts. RestartCount arrives as one sample per restart per
+// podName, so Total over the window counts restarts; if it were ever reported
+// cumulatively this rule would fire on every replica that restarted once.
+resource appRestartsAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: 'alert-app-restarts-${name}'
+  location: 'global'
+  tags: tags
+  properties: {
+    description: 'A Container App replica restarted more than once in 30 minutes — the app is crash-looping (OOM, failed boot). Replicas stays >= 1 while this happens, so the replicas alert does not fire.'
+    severity: 1
+    enabled: true
+    scopes: [ containerAppId ]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT30M'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [
+        {
+          name: 'AppRestarting'
+          metricName: 'RestartCount'
+          metricNamespace: 'Microsoft.App/containerapps'
+          dimensions: [
+            {
+              name: 'podName'
+              operator: 'Include'
+              values: [ '*' ]
+            }
+          ]
+          operator: 'GreaterThan'
+          threshold: 1
+          timeAggregation: 'Total'
           criterionType: 'StaticThresholdCriterion'
         }
       ]
@@ -201,7 +244,9 @@ resource opsAlertDeadmanAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = if 
 // other rules here follow that, and a rule you can see in the portal is worth
 // having even when nothing is paged.
 resource securityAuditWriteAlert 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = if (!empty(logAnalyticsId)) {
-  name: 'alert-security-audit-write-${name}'
+  // Azure refuses to change a scheduled-query rule's scope ("Scope can not be
+  // updated"), so a rule that moves workspace must take a new name.
+  name: logsOnOpsWorkspace ? 'alert-security-audit-write-ops-${name}' : 'alert-security-audit-write-${name}'
   location: resourceGroup().location
   tags: tags
   properties: {
@@ -211,7 +256,8 @@ resource securityAuditWriteAlert 'Microsoft.Insights/scheduledQueryRules@2023-03
     enabled: true
     scopes: [logAnalyticsId]
     evaluationFrequency: 'PT15M'
-    windowSize: 'PT15M'
+    // Twice the frequency, so a marker ingested late still lands in a window.
+    windowSize: 'PT30M'
     // Deploy-time KQL validation resolves table references BEFORE `isfuzzy` gets
     // runtime semantics, and a freshly created workspace has materialised
     // neither console table — so validating this rule can fail the whole infra
@@ -225,9 +271,10 @@ resource securityAuditWriteAlert 'Microsoft.Insights/scheduledQueryRules@2023-03
         {
           // NOT AppTraces. That table is populated by the Application Insights
           // Node SDK, which this app does not depend on or initialise — the
-          // Container App ships stdout/stderr straight to Log Analytics
-          // (container-app.bicep appLogsConfiguration destination: 'log-analytics'),
-          // and consola writes there. Querying AppTraces would have deployed a
+          // Container Apps environment ships stdout/stderr to the workspace this
+          // rule scopes (container-app.bicep: the direct 'log-analytics'
+          // destination, or a diagnostic setting when separateOpsWorkspace), and
+          // consola writes there. Querying AppTraces would have deployed a
           // rule that reads an empty table forever: present, green, and mute.
           //
           // `contains`, NOT `has`. KQL's `has` matches whole TERMS, and this
@@ -237,8 +284,8 @@ resource securityAuditWriteAlert 'Microsoft.Insights/scheduledQueryRules@2023-03
           //
           // union isfuzzy=true because the console table has two schemas across
           // Azure generations (ContainerAppConsoleLogs_CL with Log_s, and
-          // ContainerAppConsoleLogs with Log) and the workspace is behind AMPLS,
-          // so which one this environment uses cannot be read from here. isfuzzy
+          // ContainerAppConsoleLogs with Log), and which one an environment uses
+          // is decided by Azure, not by this template. isfuzzy
           // tolerates the absent table instead of failing the whole query — and
           // the post-deploy assertion below is what settles which one is live.
           //
@@ -252,6 +299,44 @@ resource securityAuditWriteAlert 'Microsoft.Insights/scheduledQueryRules@2023-03
           query: 'union isfuzzy=true (datatable(Msg: string)[]), (ContainerAppConsoleLogs_CL | where Log_s contains "[SECURITY-AUDIT-WRITE-FAILED]" | project Msg = Log_s), (ContainerAppConsoleLogs | where Log contains "[SECURITY-AUDIT-WRITE-FAILED]" | project Msg = Log)'
           timeAggregation: 'Count'
           operator: 'GreaterThanOrEqual'
+          threshold: 1
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: empty(actionGroupId) ? [] : [actionGroupId]
+    }
+  }
+}
+
+// 4. Platform logs silent for an hour: log delivery broke, and the audit-write
+// rule would go mute while reading green. Needs the cron jobs, which log a line
+// on every run; without them a quiet app would page.
+resource platformLogsSilentAlert 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = if (!empty(logAnalyticsId) && !empty(opsAlertJobId)) {
+  name: 'alert-platform-logs-silent-${name}'
+  location: resourceGroup().location
+  tags: tags
+  properties: {
+    displayName: 'Platform logs silent (${name})'
+    description: 'No Container Apps console log arrived in the platform-log workspace for an hour; log delivery is broken and crash logs would be unreadable.'
+    severity: 2
+    enabled: true
+    scopes: [logAnalyticsId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT1H'
+    // Neither console table exists until the first rows arrive.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'union isfuzzy=true (datatable(T: datetime)[]), (ContainerAppConsoleLogs_CL | project T = TimeGenerated), (ContainerAppConsoleLogs | project T = TimeGenerated)'
+          timeAggregation: 'Count'
+          operator: 'LessThan'
           threshold: 1
           failingPeriods: {
             numberOfEvaluationPeriods: 1

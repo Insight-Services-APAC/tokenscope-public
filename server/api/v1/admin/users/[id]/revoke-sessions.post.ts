@@ -14,16 +14,15 @@
  *        currently always allows, but the gate point exists for future).
  *      - recordAuditEvent (eventType='teammate-sessions-revoked',
  *        payload={ reason, byUser:false, ... }).
- *      - UPDATE teammate SET revoked_at = NOW().
+ *      - UPDATE teammate SET revoked_at = NOW(), emit_revoked_at = NOW().
  *
  * Self-revoke IS allowed: forcing your own sessions to sign-out is a
  * legitimate operator action (e.g. you suspect your laptop is
  * compromised — force-revoke from another device).
  *
- * The same `teammate.revoked_at` column drives the auto-revoke on
- * role change (see [id].patch.ts). Two writers, one column, one
- * reader (validate-session middleware) — the audit eventType
- * distinguishes intent.
+ * The role-change and region-move PATCHes bump `teammate.revoked_at`
+ * too, but NOT `emit_revoked_at` and they do not end devices (#414): only
+ * this endpoint and teammate retirement stop a device's emission.
  *
  * Returns { ok: true } on success. validate-session middleware on the
  * target's NEXT /api/v1/** request returns 401 + clears the cookie.
@@ -166,8 +165,11 @@ export default defineEventHandler(async (event) => {
       },
     })
 
+    // Both anchors: revoke-sessions is the explicit "end everything" action, so
+    // it reaches device emission too (emit_revoked_at, mig 0152 / #414). A role
+    // or region change bumps revoked_at alone.
     await tx.execute(sql`
-      UPDATE teammate SET revoked_at = NOW() WHERE id = ${target.id}::uuid
+      UPDATE teammate SET revoked_at = NOW(), emit_revoked_at = NOW() WHERE id = ${target.id}::uuid
     `)
 
     // E2 (ADR-0005): eager cascade — revoking the teammate also ENDS their

@@ -129,7 +129,7 @@ describe('runWentSilent — bearer-auth-failed', () => {
 
     const revTeammate = await createTeammate('revoked')
     const revInstance = await createInstance(revTeammate, { enrolDaysAgo: 5 })
-    await t.client`UPDATE teammate SET revoked_at = ${hoursAgo(72).toISOString()}::timestamptz WHERE id = ${revTeammate}::uuid`
+    await t.client`UPDATE teammate SET revoked_at = ${hoursAgo(72).toISOString()}::timestamptz, emit_revoked_at = ${hoursAgo(72).toISOString()}::timestamptz WHERE id = ${revTeammate}::uuid`
     await failBearer(revInstance, hoursAgo(2))
 
     await runWentSilent(t.db, { now: NOW })

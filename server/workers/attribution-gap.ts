@@ -142,7 +142,7 @@ export async function findAttributionGaps(
        -- report a victim that is really a policy outcome.
        AND NOT EXISTS (
          SELECT 1 FROM teammate tr
-          WHERE tr.id = sa.teammate_id AND tr.revoked_at IS NOT NULL AND tr.revoked_at > sa.ts_start
+          WHERE tr.id = sa.teammate_id AND tr.emit_revoked_at IS NOT NULL AND tr.emit_revoked_at > sa.ts_start
        )
        -- ALIVE: minting right now.
        AND sa.last_bearer_at >= NOW() - (${liveHours} * INTERVAL '1 hour')

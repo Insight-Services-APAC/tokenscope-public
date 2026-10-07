@@ -45,7 +45,7 @@ describe('interpretEmissionProbe', () => {
     })
     expect(v.emitting).toBe(false)
     expect(v.probe_status).toBe(401)
-    expect(v.message).toMatch(/DROPPED/)
+    expect(v.message).toMatch(/^NOT SENDING: .*Usage is being dropped\./)
     expect(v.message).toMatch(/tokenscope-setup/i)
     expect(v.message).toMatch(/Session expired/)
   })
@@ -70,17 +70,31 @@ describe('interpretEmissionProbe', () => {
     })
     expect(v.emitting).toBe(false)
     expect(v.probe_status).toBe(0)
-    expect(v.message).toMatch(/could not be verified|transient/i)
-    expect(v.message).not.toMatch(/re-provision/i)
+    expect(v.message).toMatch(/^UNVERIFIED: .*short network blip/)
+    expect(v.message).not.toMatch(/tokenscope-setup/)
   })
 
   it('non-zero + NO sentinel → hard failure with no detail, steers to setup (not "transient")', () => {
     const v = interpretEmissionProbe({ status: 1, stdoutHasAuth: false, sentinel: null })
     expect(v.emitting).toBe(false)
     expect(v.probe_status).toBeNull()
-    expect(v.message).toMatch(/no detail recorded/i)
+    expect(v.message).toMatch(/^NOT SENDING: the helper failed without saying why/)
     expect(v.message).toMatch(/tokenscope-setup/i)
-    expect(v.message).not.toMatch(/transient/i)
+    expect(v.message).not.toMatch(/network blip/i)
+  })
+
+  // Copilot names a plugin skill after its directory (skills/status/), and no
+  // SKILL.md sets `name:`, so "tokenscope-status" is a skill the user cannot find.
+  it.each([
+    { status: 0, stdoutHasAuth: true, sentinel: null, degraded: { reason: 'unreachable', ts: 't' } },
+    { status: 0, stdoutHasAuth: false, sentinel: null },
+    { status: 1, stdoutHasAuth: false, sentinel: { http_status: 0, message: 'net' } },
+    { status: 1, stdoutHasAuth: false, sentinel: null },
+    { status: 1, stdoutHasAuth: false, sentinel: { http_status: 500, message: 'boom' } },
+  ])('names the status skill as Copilot lists it (%o)', (input) => {
+    const v = interpretEmissionProbe(input)
+    expect(v.message).toContain('Run the TokenScope status skill')
+    expect(v.message).not.toContain('tokenscope-status')
   })
 })
 

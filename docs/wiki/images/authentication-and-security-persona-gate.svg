@@ -1,0 +1,160 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 670" width="900" height="670" role="img" aria-labelledby="t d">
+  <title id="t">Persona override is refused on every environment except local and sandbox, whatever the flags or the caller's role.</title>
+  <desc id="d">A ladder of gates for POST /api/v1/auth/dev-login. Gate 1: the deploy environment must be local or sandbox, else 404. Gate 2: dev mode skips gates 3 to 5. Gate 3: the override flag must be on, else 404. Gate 4: the caller must be signed in, else 401. Gate 5: the caller must be admin or platform-admin, else 403. Gate 6: same-origin check, else 403. Gate 7: the persona must be a demo persona, else 400. Gate 8: the audit row must be written, else 500 and no cookie. Then the HMAC-signed ts_persona_override cookie is set.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+    .fr { fill: var(--panel); stroke: var(--fg2); stroke-width: 1; stroke-dasharray: 3 3; }
+    .frl { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; letter-spacing: .06em; fill: var(--fg2); }
+    .band { stroke: var(--line); stroke-width: 1; }
+    .halo { paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="900" height="670"/>
+  <rect class="node" x="230" y="16" width="300" height="40" rx="6"/>
+  <text class="tm" x="380" y="41" text-anchor="middle">POST /api/v1/auth/dev-login</text>
+  <line class="e" x1="380" y1="56" x2="380" y2="78" marker-end="url(#ah)"/>
+
+  <!-- gate 1: the floor -->
+  <rect class="node acc" x="230" y="80" width="300" height="44" rx="6"/>
+  <text class="t" x="380" y="98" text-anchor="middle">Deploy env is local or sandbox?</text>
+  <text class="s acc" x="380" y="114" text-anchor="middle">NUXT_DEPLOY_ENV · unknown counts as no</text>
+  <line class="e bad" x1="530" y1="102" x2="598" y2="102" marker-end="url(#ah-bad)"/>
+  <rect class="node bad" x="600" y="80" width="280" height="44" rx="6"/>
+  <text class="t" x="740" y="98" text-anchor="middle">404 · env-not-demo-capable</text>
+  <text class="s" x="740" y="114" text-anchor="middle">decided first, whatever flag or role</text>
+  <line class="e" x1="380" y1="124" x2="380" y2="144" marker-end="url(#ah)"/><text class="lbl" x="388" y="139">yes</text>
+
+  <!-- gate 2 -->
+  <rect class="node" x="230" y="146" width="300" height="44" rx="6"/>
+  <text class="t" x="380" y="164" text-anchor="middle">Dev mode on?</text>
+  <text class="sm" x="380" y="180" text-anchor="middle">NUXT_OIDC_AUTH_DEV_MODE=true</text>
+  <polyline class="e" points="230,154 170,154 170,418 228,418" marker-end="url(#ah)"/>
+  <text class="lbl" x="160" y="290" text-anchor="end">yes: no Entra,</text>
+  <text class="lbl" x="160" y="304" text-anchor="end">skip 3 to 5</text>
+  <line class="e" x1="380" y1="190" x2="380" y2="210" marker-end="url(#ah)"/><text class="lbl" x="388" y="205">no</text>
+
+  <!-- gate 3 -->
+  <rect class="node" x="230" y="212" width="300" height="44" rx="6"/>
+  <text class="t" x="380" y="230" text-anchor="middle">Override flag on?</text>
+  <text class="sm" x="380" y="246" text-anchor="middle">NUXT_ALLOW_PERSONA_OVERRIDE=true</text>
+  <line class="e bad" x1="530" y1="234" x2="598" y2="234" marker-end="url(#ah-bad)"/>
+  <rect class="node bad" x="600" y="212" width="280" height="44" rx="6"/>
+  <text class="t" x="740" y="239" text-anchor="middle">404 · override-disabled</text>
+  <line class="e" x1="380" y1="256" x2="380" y2="276" marker-end="url(#ah)"/><text class="lbl" x="388" y="271">yes</text>
+
+  <!-- gate 4 -->
+  <rect class="node" x="230" y="278" width="300" height="44" rx="6"/>
+  <text class="t" x="380" y="296" text-anchor="middle">Caller signed in?</text>
+  <text class="s" x="380" y="312" text-anchor="middle">Entra session via tryAuth</text>
+  <line class="e bad" x1="530" y1="300" x2="598" y2="300" marker-end="url(#ah-bad)"/>
+  <rect class="node bad" x="600" y="278" width="280" height="44" rx="6"/>
+  <text class="t" x="740" y="305" text-anchor="middle">401</text>
+  <line class="e" x1="380" y1="322" x2="380" y2="342" marker-end="url(#ah)"/><text class="lbl" x="388" y="337">yes</text>
+
+  <!-- gate 5 -->
+  <rect class="node" x="230" y="344" width="300" height="44" rx="6"/>
+  <text class="t" x="380" y="362" text-anchor="middle">Role admin or platform-admin?</text>
+  <text class="s" x="380" y="378" text-anchor="middle">the caller's real role</text>
+  <line class="e bad" x1="530" y1="366" x2="598" y2="366" marker-end="url(#ah-bad)"/>
+  <rect class="node bad" x="600" y="344" width="280" height="44" rx="6"/>
+  <text class="t" x="740" y="371" text-anchor="middle">403</text>
+  <line class="e" x1="380" y1="388" x2="380" y2="408" marker-end="url(#ah)"/><text class="lbl" x="388" y="403">yes</text>
+
+  <!-- gate 6 -->
+  <rect class="node" x="230" y="410" width="300" height="44" rx="6"/>
+  <text class="t" x="380" y="428" text-anchor="middle">Same origin?</text>
+  <text class="s" x="380" y="444" text-anchor="middle">assertSameOrigin (CSRF)</text>
+  <line class="e bad" x1="530" y1="432" x2="598" y2="432" marker-end="url(#ah-bad)"/>
+  <rect class="node bad" x="600" y="410" width="280" height="44" rx="6"/>
+  <text class="t" x="740" y="437" text-anchor="middle">403</text>
+  <line class="e" x1="380" y1="454" x2="380" y2="474" marker-end="url(#ah)"/><text class="lbl" x="388" y="469">yes</text>
+
+  <!-- gate 7 -->
+  <rect class="node" x="230" y="476" width="300" height="44" rx="6"/>
+  <text class="t" x="380" y="494" text-anchor="middle">Persona is a demo persona?</text>
+  <text class="s" x="380" y="510" text-anchor="middle">request body, fixed list of keys</text>
+  <line class="e bad" x1="530" y1="498" x2="598" y2="498" marker-end="url(#ah-bad)"/>
+  <rect class="node bad" x="600" y="476" width="280" height="44" rx="6"/>
+  <text class="t" x="740" y="503" text-anchor="middle">400</text>
+  <line class="e" x1="380" y1="520" x2="380" y2="540" marker-end="url(#ah)"/><text class="lbl" x="388" y="535">yes</text>
+
+  <!-- gate 8 -->
+  <rect class="node" x="230" y="542" width="300" height="44" rx="6"/>
+  <text class="t" x="380" y="560" text-anchor="middle">Audit row written</text>
+  <text class="s" x="380" y="576" text-anchor="middle">persona-impersonation, or dev-login</text>
+  <line class="e bad" x1="530" y1="564" x2="598" y2="564" marker-end="url(#ah-bad)"/>
+  <rect class="node bad" x="600" y="542" width="280" height="44" rx="6"/>
+  <text class="t" x="740" y="560" text-anchor="middle">insert fails: 500</text>
+  <text class="s" x="740" y="576" text-anchor="middle">no cookie is set</text>
+  <line class="e ok" x1="380" y1="586" x2="380" y2="606" marker-end="url(#ah-ok)"/>
+
+  <!-- 9 mint -->
+  <rect class="node good" x="230" y="608" width="300" height="44" rx="6"/>
+  <text class="tm" x="380" y="626" text-anchor="middle">ts_persona_override</text>
+  <text class="s ok" x="380" y="642" text-anchor="middle">HMAC-signed · httpOnly · sameSite=lax</text>
+
+  <!-- callouts -->
+  <circle class="cn accent" cx="230" cy="102" r="10"/><text class="cnt accent" x="230" y="106" text-anchor="middle">1</text>
+  <circle class="cn" cx="230" cy="168" r="10"/><text class="cnt" x="230" y="172" text-anchor="middle">2</text>
+  <circle class="cn" cx="230" cy="234" r="10"/><text class="cnt" x="230" y="238" text-anchor="middle">3</text>
+  <circle class="cn" cx="230" cy="300" r="10"/><text class="cnt" x="230" y="304" text-anchor="middle">4</text>
+  <circle class="cn" cx="230" cy="366" r="10"/><text class="cnt" x="230" y="370" text-anchor="middle">5</text>
+  <circle class="cn" cx="230" cy="432" r="10"/><text class="cnt" x="230" y="436" text-anchor="middle">6</text>
+  <circle class="cn" cx="230" cy="498" r="10"/><text class="cnt" x="230" y="502" text-anchor="middle">7</text>
+  <circle class="cn" cx="230" cy="564" r="10"/><text class="cnt" x="230" y="568" text-anchor="middle">8</text>
+  <circle class="cn" cx="230" cy="630" r="10"/><text class="cnt" x="230" y="634" text-anchor="middle">9</text>
+</svg>

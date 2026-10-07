@@ -87,6 +87,9 @@ interface Resp {
     clientPluginVersion: string | null
     clientCliVersion: string | null
     clientVersionAt: string | null
+    clientPlatform: string | null
+    clientSurface: string | null
+    setupMode: string | null
     lastBearerAt: string | null
     endedAt: string | null
   } | null
@@ -341,6 +344,19 @@ describe('instance-telemetry — the client version claims', () => {
     const res = (await handler(ev({ session: admin(), query: { instanceId: id } }))) as Resp
     expect(res.instance?.clientPluginVersion).toBeNull()
     expect(res.instance?.clientCliVersion).toBeNull()
+    expect(res.instance?.clientPlatform).toBeNull()
+    expect(res.instance?.clientSurface).toBeNull()
+    expect(res.instance?.setupMode).toBeNull()
+  })
+
+  it('surfaces the platform, surface and setup mode claims (mig 0150, #412)', async () => {
+    const id = await enrol()
+    await t.client.unsafe(`
+      UPDATE instance_attestation
+         SET client_platform = 'win32-x64', client_surface = 'cli', setup_mode = 'emit-only'
+       WHERE instance_id = '${id}'`)
+    const res = (await handler(ev({ session: admin(), query: { instanceId: id } }))) as Resp
+    expect(res.instance).toMatchObject({ clientPlatform: 'win32-x64', clientSurface: 'cli', setupMode: 'emit-only' })
   })
 
   it('an unknown instance id reports known=false rather than pretending', async () => {

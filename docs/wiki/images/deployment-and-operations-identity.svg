@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 460" width="1000" height="460" role="img" aria-labelledby="t d">
+  <title id="t">One user-assigned identity carries every grant the app and its jobs need; PostgreSQL is the exception, reached with a password kept in Key Vault.</title>
+  <desc id="d">The Container App and the 32 cron jobs run as id-&lt;name&gt;. That identity holds AcrPull on the registry, Key Vault Secrets User on the vault, Monitoring Metrics Publisher and Monitoring Reader on the OTLP data collection rule, and Log Analytics Reader on the telemetry workspace. PostgreSQL and Redis get no role: PostgreSQL uses a password login whose URL is stored in Key Vault, and Redis is provisioned but unused.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="460"/>
+  <rect class="zone" x="16" y="16" width="300" height="428" rx="10"/>
+  <text class="zlabel" x="30" y="38">CAE-&lt;NAME&gt; · CONTAINER APPS</text>
+  <rect class="zone" x="336" y="16" width="220" height="428" rx="10"/>
+  <text class="zlabel" x="350" y="38">IDENTITY</text>
+  <rect class="zone" x="600" y="16" width="384" height="428" rx="10"/>
+  <text class="zlabel" x="614" y="38">RESOURCES · ROLE ON EACH</text>
+  <rect class="node" x="36" y="110" width="260" height="90" rx="6"/>
+  <text class="tm" x="50" y="132">ca-&lt;name&gt;</text>
+  <text class="s" x="50" y="150">resolves Key Vault references</text>
+  <text class="s" x="50" y="166">pulls its image · runs KQL</text>
+  <text class="s" x="50" y="182">mints device ingest bearers</text>
+  <rect class="node" x="36" y="248" width="260" height="68" rx="6"/>
+  <text class="tm" x="50" y="270">caj-ts-* · 32 jobs</text>
+  <text class="s" x="50" y="288">pull the image · read the HMAC</text>
+  <text class="s" x="50" y="304">key by Key Vault reference</text>
+  <rect class="node acc" x="356" y="180" width="180" height="70" rx="6"/>
+  <text class="tm" x="370" y="202">id-&lt;name&gt;</text>
+  <text class="s" x="370" y="220">user-assigned identity</text>
+  <text class="s acc" x="370" y="238">every grant lives here</text>
+  <polyline class="e" points="296,155 322,155 322,205 350,205" marker-end="url(#ah)"/>
+  <polyline class="e" points="296,281 322,281 322,225 350,225" marker-end="url(#ah)"/>
+  <circle class="cn" cx="322" cy="180" r="10"/><text class="cnt" x="322" y="184" text-anchor="middle">1</text>
+  <rect class="node" x="620" y="60" width="344" height="54" rx="6"/>
+  <text class="tm" x="634" y="78">cr&lt;name&gt;</text>
+  <text class="s acc" x="634" y="94">AcrPull</text>
+  <text class="s" x="634" y="109">image pull for the app and every job</text>
+  <rect class="node" x="620" y="122" width="344" height="54" rx="6"/>
+  <text class="tm" x="634" y="140">kv-&lt;name&gt;</text>
+  <text class="s acc" x="634" y="156">Key Vault Secrets User</text>
+  <text class="s" x="634" y="171">secrets arrive as Key Vault references</text>
+  <rect class="node" x="620" y="184" width="344" height="54" rx="6"/>
+  <text class="tm" x="634" y="202">dcr-&lt;name&gt;-otlp</text>
+  <text class="s acc" x="634" y="218">Monitoring Metrics Publisher · Monitoring Reader</text>
+  <text class="s" x="634" y="233">device OTLP bearer · ingest-coverage metrics</text>
+  <rect class="node" x="620" y="246" width="344" height="54" rx="6"/>
+  <text class="tm" x="634" y="264">log-&lt;name&gt;</text>
+  <text class="s acc" x="634" y="280">Log Analytics Reader</text>
+  <text class="s" x="634" y="295">the read joiner&#x27;s KQL on OTelLogs</text>
+  <rect class="node ghost" x="620" y="308" width="344" height="54" rx="6"/>
+  <text class="tm" x="634" y="326">pg-&lt;name&gt;</text>
+  <text class="s ghost" x="634" y="342">no role</text>
+  <text class="s" x="634" y="357">password login; the URL comes from Key Vault</text>
+  <rect class="node ghost" x="620" y="370" width="344" height="54" rx="6"/>
+  <text class="tm" x="634" y="388">redis-&lt;name&gt;</text>
+  <text class="s ghost" x="634" y="404">no role</text>
+  <text class="s" x="634" y="419">provisioned, not used by the app</text>
+  <line class="e accent" x1="536" y1="215" x2="576" y2="215"/>
+  <line class="e accent" x1="576" y1="87" x2="576" y2="273"/>
+  <line class="e accent" x1="576" y1="87" x2="614" y2="87" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="595" cy="87" r="10"/><text class="cnt accent" x="595" y="91" text-anchor="middle">2</text>
+  <line class="e accent" x1="576" y1="149" x2="614" y2="149" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="595" cy="149" r="10"/><text class="cnt accent" x="595" y="153" text-anchor="middle">3</text>
+  <line class="e accent" x1="576" y1="211" x2="614" y2="211" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="595" cy="211" r="10"/><text class="cnt accent" x="595" y="215" text-anchor="middle">4</text>
+  <line class="e accent" x1="576" y1="273" x2="614" y2="273" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="595" cy="273" r="10"/><text class="cnt accent" x="595" y="277" text-anchor="middle">5</text>
+  <text class="s" x="36" y="370">Grants are created only when</text>
+  <text class="s" x="36" y="386">deployRbac is true. The deploying</text>
+  <text class="s" x="36" y="402">identity needs Owner on the</text>
+  <text class="s" x="36" y="418">resource group to create them.</text>
+</svg>

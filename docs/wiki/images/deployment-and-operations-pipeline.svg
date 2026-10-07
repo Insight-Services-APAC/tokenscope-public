@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 440" width="1060" height="440" role="img" aria-labelledby="t d">
+  <title id="t">latest moves only after Azure confirms the new revision serves this commit; a failed roll or verification restores the image that was running before.</title>
+  <desc id="d">The deploy workflow signs in with OIDC, records the running image as the rollback target, builds through one of four inputs, rolls the Container App to the commit tag, verifies the revision through Azure and, when an address is known, over HTTP, and only then copies the commit tag to latest. A failure in the roll or the verification rolls the app back to the recorded image and leaves latest alone.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1060" height="440"/>
+  <rect class="zone" x="16" y="16" width="1028" height="280" rx="10"/>
+  <text class="zlabel" x="30" y="38">TOKENSCOPE-DEPLOY.YML · ONE JOB, ONE CONCURRENCY GROUP PER ENVIRONMENT</text>
+  <rect class="zone" x="16" y="312" width="1028" height="112" rx="10"/>
+  <text class="zlabel" x="30" y="334">ON FAILURE</text>
+  <rect class="node" x="28" y="110" width="110" height="60" rx="6"/>
+  <text class="t" x="83" y="132" text-anchor="middle">Sign in</text>
+  <text class="s" x="83" y="149" text-anchor="middle">Azure OIDC</text>
+  <text class="s" x="83" y="163" text-anchor="middle">no stored secret</text>
+  <rect class="node" x="152" y="100" width="178" height="80" rx="6"/>
+  <text class="t" x="241" y="121" text-anchor="middle">Resolve</text>
+  <text class="s" x="241" y="138" text-anchor="middle">registry and app</text>
+  <text class="s" x="241" y="154" text-anchor="middle">record the running image</text>
+  <text class="s" x="241" y="170" text-anchor="middle">by digest if readable</text>
+  <text class="t" x="434" y="62" text-anchor="middle">Build (input)</text>
+  <rect class="node" x="344" y="72" width="180" height="40" rx="6"/>
+  <text class="tm" x="358" y="89">acr-task</text>
+  <text class="s" x="358" y="104">ACR Tasks · public registry</text>
+  <polyline class="e" points="524,92 536,92 536,140"/>
+  <rect class="node" x="344" y="120" width="180" height="40" rx="6"/>
+  <text class="tm" x="358" y="137">docker</text>
+  <text class="s" x="358" y="152">runner inside the network</text>
+  <polyline class="e" points="524,140 536,140 536,140"/>
+  <rect class="node" x="344" y="168" width="180" height="40" rx="6"/>
+  <text class="tm" x="358" y="185">acr-agent-pool</text>
+  <text class="s" x="358" y="200">agent pool in snet-build</text>
+  <polyline class="e" points="524,188 536,188 536,140"/>
+  <rect class="node" x="344" y="216" width="180" height="40" rx="6"/>
+  <text class="tm" x="358" y="233">prebuilt</text>
+  <text class="s" x="358" y="248">your pipeline pushed it</text>
+  <polyline class="e" points="524,236 536,236 536,140"/>
+  <rect class="node" x="550" y="110" width="156" height="60" rx="6"/>
+  <text class="t" x="628" y="131" text-anchor="middle">Roll</text>
+  <text class="s" x="628" y="148" text-anchor="middle">containerapp update</text>
+  <text class="s" x="628" y="163" text-anchor="middle">image :&lt;12-char sha&gt;</text>
+  <rect class="node" x="720" y="52" width="200" height="176" rx="6"/>
+  <text class="t" x="734" y="72">Verify</text>
+  <text class="s" x="734" y="92">Azure: the newest revision</text>
+  <text class="s" x="734" y="108">runs this image, is Healthy</text>
+  <text class="s" x="734" y="124">and is the ready revision</text>
+  <text class="s" x="734" y="156">HTTP, when an address is</text>
+  <text class="s" x="734" y="172">known: /api/v1/meta/build</text>
+  <text class="s" x="734" y="188">reports this commit and</text>
+  <text class="s" x="734" y="204">/api/health returns 200</text>
+  <rect class="node acc" x="934" y="110" width="110" height="60" rx="6"/>
+  <text class="t" x="989" y="131" text-anchor="middle">Promote</text>
+  <text class="s" x="989" y="148" text-anchor="middle">:sha to :latest</text>
+  <text class="s" x="989" y="163" text-anchor="middle">acr import</text>
+  <rect class="node bad" x="550" y="342" width="370" height="64" rx="6"/>
+  <text class="t" x="735" y="366" text-anchor="middle">Roll back to the recorded image</text>
+  <text class="s" x="735" y="384" text-anchor="middle">latest is not moved and the job fails</text>
+  <line class="e" x1="138" y1="140" x2="146" y2="140" marker-end="url(#ah)"/>
+  <line class="e" x1="330" y1="140" x2="338" y2="140" marker-end="url(#ah)"/>
+  <line class="e" x1="536" y1="140" x2="544" y2="140" marker-end="url(#ah)"/>
+  <line class="e" x1="706" y1="140" x2="714" y2="140" marker-end="url(#ah)"/>
+  <line class="e ok" x1="920" y1="140" x2="928" y2="140" marker-end="url(#ah-ok)"/>
+  <line class="e bad" x1="628" y1="170" x2="628" y2="336" marker-end="url(#ah-bad)"/>
+  <line class="e bad" x1="820" y1="228" x2="820" y2="336" marker-end="url(#ah-bad)"/>
+  <text class="lbl" x="636" y="266">fails</text>
+  <text class="lbl" x="828" y="266">fails</text>
+  <circle class="cn" cx="241" cy="196" r="10"/><text class="cnt" x="241" y="200" text-anchor="middle">1</text>
+  <circle class="cn" cx="434" cy="272" r="10"/><text class="cnt" x="434" y="276" text-anchor="middle">2</text>
+  <circle class="cn" cx="628" cy="196" r="10"/><text class="cnt" x="628" y="200" text-anchor="middle">3</text>
+  <circle class="cn" cx="820" cy="246" r="10"/><text class="cnt" x="820" y="250" text-anchor="middle">4</text>
+  <circle class="cn accent" cx="989" cy="196" r="10"/><text class="cnt accent" x="989" y="200" text-anchor="middle">5</text>
+  <circle class="cn bad" cx="628" cy="300" r="10"/><text class="cnt bad" x="628" y="304" text-anchor="middle">6</text>
+</svg>

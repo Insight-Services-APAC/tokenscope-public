@@ -173,9 +173,65 @@ export function accumulate(facts: Map<string, FactRow>, f: FactRow, merge: (into
  * Re-implementing this statement per arm — or in a test — would duplicate the
  * very SQL whose behaviour is under test, so the seam is here. A second arm with
  * its own INSERT could keep passing while it re-homed every row.
+ *
+ * SET-BASED: up to PROVIDER_FACT_UPSERT_BATCH facts per statement, unpacked
+ * from ONE jsonb parameter by `jsonb_to_recordset` (docs/design/
+ * scaling-to-1000-users.md Phase 1 item 1). It replaced one statement per fact,
+ * ~30k of them per hourly run, which held provider-transform near its 200 s
+ * dispatch budget. `upsertProviderUsageFact` is the same statement over a
+ * one-row set, so there is still one definition of it.
+ *
+ * A multi-row `ON CONFLICT DO UPDATE` errors when two rows of one statement
+ * share a key ("cannot affect row a second time"). Callers pass facts already
+ * deduplicated by {@link grainKey} — what {@link accumulate} produces — which
+ * is one more reason grainKey must match the index expression below exactly.
+ *
+ * Each chunk is its own statement and this function opens no transaction:
+ * atomic publication is the caller's (provider-transform holds one per source).
  */
+export const PROVIDER_FACT_UPSERT_BATCH = 1000
+
+export async function upsertProviderUsageFacts(db: Db, facts: readonly FactRow[]): Promise<void> {
+  for (let i = 0; i < facts.length; i += PROVIDER_FACT_UPSERT_BATCH) {
+    await upsertChunk(db, facts.slice(i, i + PROVIDER_FACT_UPSERT_BATCH))
+  }
+}
+
 export async function upsertProviderUsageFact(db: Db, f: FactRow): Promise<void> {
-  const teammateIdSql = sql`${f.teammateId}::uuid`
+  await upsertProviderUsageFacts(db, [f])
+}
+
+/*
+ * Measures travel as the TEXT the single-row statement bound and are cast in
+ * SQL, so stored values are identical to it: cost is `toFixed(6)` (never a JSON
+ * float), and a bigint is the number's own string.
+ */
+const bigintText = (n: number | null): string | null => (n === null ? null : String(n))
+
+async function upsertChunk(db: Db, chunk: readonly FactRow[]): Promise<void> {
+  const records = JSON.stringify(
+    chunk.map((f) => ({
+      source: f.source,
+      provider: f.provider,
+      provider_org_id: f.providerOrgId,
+      provider_enterprise_id: f.providerEnterpriseId,
+      teammate_id: f.teammateId,
+      actor_ref: f.actorRef,
+      date: f.date,
+      tool: f.tool,
+      model: f.model,
+      cost_type: f.costType,
+      context_window: f.contextWindow,
+      cost_usd: f.costUsd === null ? null : f.costUsd.toFixed(6),
+      currency: f.currency,
+      input_tokens: bigintText(f.inputTokens),
+      output_tokens: bigintText(f.outputTokens),
+      cache_read_tokens: bigintText(f.cacheReadTokens),
+      cache_creation_tokens: bigintText(f.cacheCreationTokens),
+      requests: bigintText(f.requests),
+      web_search_requests: bigintText(f.webSearchRequests),
+    })),
+  )
   /*
    * The homing subqueries resolve the teammate's CURRENT placement. With a NULL
    * teammate they yield NULL naturally (`WHERE t.id = NULL` matches nothing), so
@@ -183,7 +239,7 @@ export async function upsertProviderUsageFact(db: Db, f: FactRow): Promise<void>
    * accident of SQL. Never guess a placement for an identity we have not
    * resolved.
    */
-  const dims = teammateDimensionSnapshotSql(teammateIdSql)
+  const dims = teammateDimensionSnapshotSql(sql`v.teammate_id`)
   await db.execute(
     sql`
       INSERT INTO provider_usage_fact
@@ -192,15 +248,20 @@ export async function upsertProviderUsageFact(db: Db, f: FactRow): Promise<void>
          region_id, org_unit_id, cost_owning_unit_id, dimension_source,
          cost_usd, currency, input_tokens, output_tokens,
          cache_read_tokens, cache_creation_tokens, requests, web_search_requests)
-      VALUES
-        (${f.source}, ${f.provider}, ${f.providerOrgId}::uuid, ${f.providerEnterpriseId}::uuid,
-         ${f.teammateId}::uuid, ${f.actorRef}, ${f.date}::date, ${f.tool}, ${f.model}, ${f.costType},
-         ${f.contextWindow},
+      SELECT
+         v.source, v.provider, v.provider_org_id, v.provider_enterprise_id,
+         v.teammate_id, v.actor_ref, v.date, v.tool, v.model, v.cost_type, v.context_window,
          ${dims.regionId}, ${dims.orgUnitId}, ${dims.costOwningUnitId}, ${DIMENSION_SOURCE_INGEST_SNAPSHOT},
-         ${f.costUsd === null ? null : f.costUsd.toFixed(6)}::numeric, ${f.currency},
-         ${f.inputTokens}::bigint, ${f.outputTokens}::bigint,
-         ${f.cacheReadTokens}::bigint, ${f.cacheCreationTokens}::bigint, ${f.requests}::bigint,
-         ${f.webSearchRequests}::bigint)
+         v.cost_usd::numeric, v.currency,
+         v.input_tokens::bigint, v.output_tokens::bigint,
+         v.cache_read_tokens::bigint, v.cache_creation_tokens::bigint, v.requests::bigint,
+         v.web_search_requests::bigint
+      FROM jsonb_to_recordset(${records}::jsonb) AS v(
+         source text, provider text, provider_org_id uuid, provider_enterprise_id uuid,
+         teammate_id uuid, actor_ref text, date date, tool text, model text, cost_type text,
+         context_window text, cost_usd text, currency text,
+         input_tokens text, output_tokens text, cache_read_tokens text,
+         cache_creation_tokens text, requests text, web_search_requests text)
       ON CONFLICT (source, COALESCE(teammate_id::text, 'actor:' || lower(actor_ref)),
                    date, tool, COALESCE(model, ''), COALESCE(cost_type, ''), COALESCE(context_window, ''))
       DO UPDATE SET

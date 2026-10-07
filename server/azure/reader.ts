@@ -256,6 +256,36 @@ export interface ReaderHealth {
   correlationId?: string
 }
 
+/*
+ * Billable ingestion into the telemetry workspace over the TRAILING 24 HOURS, in
+ * MB (the Usage table's Quantity unit; Azure's own queries divide by 1000 for
+ * GB). Fixed text, no interpolation.
+ *
+ * Trailing 24 h, not "since the cap last reset": the daily cap resets at a
+ * workspace-specific hour (09:00 UTC on Dev, per `quotaNextResetTime`; not
+ * configurable), not at UTC midnight. The usage since the last reset is always
+ * inside the trailing 24 h, so this number is always at least that usage: it can
+ * warn early (yesterday's volume before the reset still counts) but never late.
+ */
+export const BILLABLE_INGESTION_LAST_24H_KQL =
+  'Usage | where TimeGenerated > ago(24h) | where IsBillable == true | summarize sum(Quantity)'
+
+/**
+ * One reading of the trailing 24 h's billable ingestion. `megabytes` is null whenever the
+ * read could not answer: a reader without a Usage table (`error: 'unsupported'`),
+ * a failed or partial query, or a result with no number in it. Null is not zero,
+ * and a caller must not treat it as one.
+ */
+export interface IngestionLast24h {
+  megabytes: number | null
+  kind: 'log-analytics' | 'local'
+  latencyMs: number
+  /** short reason when megabytes is null — never a secret. */
+  error?: string
+  /** As on ReaderHealth: present only when `error` came from a caught exception. */
+  correlationId?: string
+}
+
 /**
  * What INGEST saw for one instance over a window — the client-vs-server
  * discriminator.
@@ -278,6 +308,80 @@ export interface InstancePresence {
   lastSeen: string | null
 }
 
+/**
+ * An event-time slice of a read, `[from, to)`. Bounds a deep read to one
+ * instance-day (docs/design/bounded-daily-deep-read.md). Both ends are resolved
+ * by the caller, never sampled here.
+ */
+export interface EventWindow {
+  from: Date
+  to: Date
+}
+
+/** KQL for an EventWindow; empty without one. The instants are ours, not input. */
+export function eventWindowClause(window?: EventWindow): string {
+  if (!window) return ''
+  return `| where TimeGenerated >= datetime(${window.from.toISOString()}) and TimeGenerated < datetime(${window.to.toISOString()})`
+}
+
+/**
+ * The query's outer timespan: the window itself when there is one, so a window
+ * fixed earlier (a resumed recovery request) is never clipped by a lookback
+ * measured from now; otherwise the reader's lookback.
+ */
+function queryTimespan(
+  lookbackDays: number,
+  durations: typeof import('@azure/monitor-query').Durations,
+  window?: EventWindow,
+): { duration: string } | { startTime: Date; endTime: Date } {
+  if (window) return { startTime: window.from, endTime: window.to }
+  return { duration: isoDuration(lookbackDays, durations) }
+}
+
+/**
+ * A windowed read runs inside a recovery tick whose dispatch budget is 200 s. An
+ * instance-day issues up to three queries (Claude, native GenAI, signals), so at
+ * 30 s each it takes at most ~90 s; started just inside the worker's 90 s budget
+ * it still ends inside the dispatch.
+ */
+export const WINDOWED_QUERY_TIMEOUT_S = 30
+
+/*
+ * An unwindowed read is a joiner run's watermark read (scheduled or operator). The run
+ * starts no device later than 80 s after its tick started (JOINER_DEADLINE_MS,
+ * measured from the registry's tick start, before the coverage probe and the
+ * selection), and a device issues two queries (usage, signal), so a device
+ * started just inside it has both answered or aborted by 80 + 2 x 45 = 170 s.
+ * The device's writes and the end-of-tick housekeeping come after that and are
+ * not bounded by it. The native-GenAI lane would add a third query; enabling it
+ * must revisit these numbers (docs/design/scaling-to-1000-users.md, Phase 1 item 2).
+ */
+export const JOINER_QUERY_TIMEOUT_S = 40
+/**
+ * Client-side abort for every joiner query, windowed or not. Set past the server
+ * timeout so the service normally answers first with its own error; the abort is
+ * the bound when it does not answer at all.
+ */
+export const JOINER_QUERY_ABORT_MS = 45_000
+
+/*
+ * Built per query: AbortSignal.timeout starts counting when it is created, so a
+ * signal shared across a device's queries would expire on the second one.
+ */
+function queryOptions(window?: EventWindow): { serverTimeoutInSeconds: number; abortSignal: AbortSignal } {
+  return {
+    serverTimeoutInSeconds: window ? WINDOWED_QUERY_TIMEOUT_S : JOINER_QUERY_TIMEOUT_S,
+    abortSignal: AbortSignal.timeout(JOINER_QUERY_ABORT_MS),
+  }
+}
+
+/** The same bound, applied to an already-fetched record's tsEvent. */
+export function inEventWindow(tsEvent: string, window?: EventWindow): boolean {
+  if (!window) return true
+  const t = new Date(tsEvent).getTime()
+  return t >= window.from.getTime() && t < window.to.getTime()
+}
+
 export interface TelemetryReader {
   /**
    * Token usage for a session, keyed on the tokenscope.instance_id we minted at
@@ -293,8 +397,15 @@ export interface TelemetryReader {
    * queries (LogAnalyticsReader's Claude + native-GenAI lanes both fold into
    * it). A reader that does no ingest-boundary parsing (LocalCollectorReader)
    * simply never touches it — never zeroed, never overwritten.
+   *
+   * `window`, when supplied, further bounds the read to that event-time slice.
    */
-  getSessionUsage(sessionId: string, sinceTsEvent?: Date, counters?: ParseCounters): Promise<UsageRecord[]>
+  getSessionUsage(
+    sessionId: string,
+    sinceTsEvent?: Date,
+    counters?: ParseCounters,
+    window?: EventWindow,
+  ): Promise<UsageRecord[]>
   /**
    * Behavioural usage signals for a session (the NON-billing lane — Copilot
    * tool/MCP/context/turn telemetry). Same high-water-mark semantics as
@@ -303,7 +414,12 @@ export interface TelemetryReader {
    * `typeof reader.getSignalUsage === 'function'`), so the runtime guard is honest
    * rather than laundering a missing required member.
    */
-  getSignalUsage?(sessionId: string, sinceTsEvent?: Date, counters?: ParseCounters): Promise<SignalRecord[]>
+  getSignalUsage?(
+    sessionId: string,
+    sinceTsEvent?: Date,
+    counters?: ParseCounters,
+    window?: EventWindow,
+  ): Promise<SignalRecord[]>
   /** Recent sessions emitted by any of `emails` (the user's Claude identities). */
   listSessions(emails: string[], opts?: { lookbackDays?: number; limit?: number }): Promise<SessionSummary[]>
   /**
@@ -329,6 +445,13 @@ export interface TelemetryReader {
    * bounds the request (ops-alerting ar-H6 probe budget).
    */
   healthCheck(opts?: { timeoutMs?: number }): Promise<ReaderHealth>
+  /**
+   * The trailing 24 h's billable ingestion into the telemetry workspace
+   * (BILLABLE_INGESTION_LAST_24H_KQL), for the ops-alert telemetry-cap condition. Resolves
+   * (never throws); `timeoutMs` bounds the request on both ends, as healthCheck
+   * does. A reader that cannot answer returns `megabytes: null`, never 0.
+   */
+  billableIngestionLast24h(opts?: { timeoutMs?: number }): Promise<IngestionLast24h>
   /**
    * The OUTER scan bound this reader actually applies, in days, or undefined when
    * the concept does not apply to it (the local collector fetches the full set
@@ -369,7 +492,18 @@ export class LocalCollectorReader implements TelemetryReader {
     }
   }
 
-  async getSessionUsage(sessionId: string, sinceTsEvent?: Date): Promise<UsageRecord[]> {
+  async billableIngestionLast24h(): Promise<IngestionLast24h> {
+    // The local collector has no Usage table and no daily cap: unsupported,
+    // which the caller reads as "unknown", not as zero ingestion.
+    return { megabytes: null, kind: 'local', latencyMs: 0, error: 'unsupported' }
+  }
+
+  async getSessionUsage(
+    sessionId: string,
+    sinceTsEvent?: Date,
+    _counters?: ParseCounters,
+    window?: EventWindow,
+  ): Promise<UsageRecord[]> {
     assertSafeSessionId(sessionId)
     const res = await resilientFetch(
       `${this.endpoint}/v1/sessions/${encodeURIComponent(sessionId)}/usage`,
@@ -377,7 +511,7 @@ export class LocalCollectorReader implements TelemetryReader {
     if (!res.ok) {
       throw new Error(`telemetry store GET usage HTTP ${res.status}`)
     }
-    const usage = SessionUsage.parse(await res.json()).usage
+    const usage = SessionUsage.parse(await res.json()).usage.filter((u) => inEventWindow(u.tsEvent, window))
     // High-water-mark incremental read: the local store returns the full usage
     // set, so filter client-side to events strictly newer than the watermark
     // minus the lookback. Without a watermark this is the full set (unchanged).
@@ -493,7 +627,7 @@ function kqlFinalProjectClause(): string {
 // so the two can still drift; a dropped alias is a query-time failure that no
 // stubbed-reader test can reach. tests/unit/server/log-analytics-parser.test.ts
 // pins the two against each other.
-export function buildSessionUsageKql(sessionId: string, sinceTsEvent?: Date): string {
+export function buildSessionUsageKql(sessionId: string, sinceTsEvent?: Date, window?: EventWindow): string {
   // VERIFIED landing shape (live sandbox, OTelLogs table):
   //   - our resource attrs (tokenscope.instance_id, project.code_hash, tool)
   //     → ResourceAttributes dynamic column
@@ -518,6 +652,7 @@ export function buildSessionUsageKql(sessionId: string, sinceTsEvent?: Date): st
     | where tostring(Attributes['event.name']) == 'api_request' or Body == 'api_request'
     | where tostring(ResourceAttributes['tokenscope.instance_id']) == '${sessionId}'
     ${sinceClause}
+    ${eventWindowClause(window)}
     | extend _model = tostring(Attributes['model']),
              _req = tostring(Attributes['request_id']),
              _org = tostring(Attributes['organization.id']),
@@ -606,7 +741,7 @@ export function copilotNativeOtelEnabled(): boolean {
  * GenAI-absent fields (org id, nano_aiu, cost, backfill, query_source) project
  * empty. sessionId is our minted join key; same charset guard + watermark.
  */
-export function buildSessionUsageKqlGenAI(sessionId: string, sinceTsEvent?: Date): string {
+export function buildSessionUsageKqlGenAI(sessionId: string, sinceTsEvent?: Date, window?: EventWindow): string {
   // Defense-in-depth (ING-10): self-guard the interpolated id even though the
   // sole caller pre-validates — this builder is exported, so a future direct
   // caller must not be able to reopen the KQL-injection hole.
@@ -626,6 +761,7 @@ export function buildSessionUsageKqlGenAI(sessionId: string, sinceTsEvent?: Date
     | where tostring(Attributes['gen_ai.operation.name']) == '${GENAI_OPERATION}'
     | where tostring(ResourceAttributes['tokenscope.instance_id']) == '${sessionId}'
     ${sinceClause}
+    ${eventWindowClause(window)}
     | extend _model = coalesce(tostring(Attributes['gen_ai.response.model']), tostring(Attributes['gen_ai.request.model'])),
              _req = tostring(Attributes['gen_ai.response.id']),
              _org = '',
@@ -954,7 +1090,7 @@ export function parseLogAnalyticsRows(
  * to one SignalRecord per present signal. sessionId == tokenscope.instance_id;
  * same charset guard + watermark-lookback as buildSessionUsageKql.
  */
-function buildSignalUsageKql(sessionId: string, sinceTsEvent?: Date): string {
+export function buildSignalUsageKql(sessionId: string, sinceTsEvent?: Date, window?: EventWindow): string {
   const sinceClause = sinceTsEvent
     ? `| where TimeGenerated > datetime(${new Date(
         sinceTsEvent.getTime() - WATERMARK_LOOKBACK_MS,
@@ -968,6 +1104,7 @@ function buildSignalUsageKql(sessionId: string, sinceTsEvent?: Date): string {
     | where tostring(Attributes['event.name']) == 'usage_signal' or Body == 'usage_signal'
     | where tostring(ResourceAttributes['tokenscope.instance_id']) == '${sessionId}'
     ${sinceClause}
+    ${eventWindowClause(window)}
     | project _ts = TimeGenerated,
              _req = tostring(Attributes['request_id']),
              ${sigProject}
@@ -1259,11 +1396,16 @@ export class LogAnalyticsReader implements TelemetryReader {
     return this.resolveLookbackDays()
   }
 
-  async getSessionUsage(sessionId: string, sinceTsEvent?: Date, callerCounters?: ParseCounters): Promise<UsageRecord[]> {
+  async getSessionUsage(
+    sessionId: string,
+    sinceTsEvent?: Date,
+    callerCounters?: ParseCounters,
+    window?: EventWindow,
+  ): Promise<UsageRecord[]> {
     assertSafeSessionId(sessionId)
     const { client, LogsQueryResultStatus, Durations } = await this.getClient()
     const lookbackDays = this.resolveLookbackDays()
-    if (!sinceTsEvent) {
+    if (!sinceTsEvent && !window) {
       // ING-12: a first-ever scan (no watermark) is silently capped by the outer
       // query duration — events older than the cap are never read. Surface it.
       console.warn(
@@ -1272,12 +1414,11 @@ export class LogAnalyticsReader implements TelemetryReader {
     }
     const result = await client.queryWorkspace(
       this.workspaceId,
-      buildSessionUsageKql(sessionId, sinceTsEvent),
-      {
-        // The query-level duration is the OUTER bound (caps the scan range).
-        // The KQL TimeGenerated filter (from the watermark) narrows WITHIN it.
-        duration: isoDuration(lookbackDays, Durations),
-      },
+      buildSessionUsageKql(sessionId, sinceTsEvent, window),
+      // The query timespan is the OUTER bound (caps the scan range); the KQL
+      // TimeGenerated filter (from the watermark) narrows WITHIN it.
+      queryTimespan(lookbackDays, Durations, window),
+      queryOptions(window),
     )
     if (result.status !== LogsQueryResultStatus.Success) {
       throw new Error(`Log Analytics query did not succeed (status=${result.status})`)
@@ -1313,9 +1454,10 @@ export class LogAnalyticsReader implements TelemetryReader {
     // proven Claude read.
     if (copilotNativeOtelEnabled()) {
       try {
-        const genai = await client.queryWorkspace(this.workspaceId, buildSessionUsageKqlGenAI(sessionId, sinceTsEvent), {
-          duration: isoDuration(lookbackDays, Durations),
-        })
+        const genai = await client.queryWorkspace(this.workspaceId, buildSessionUsageKqlGenAI(sessionId, sinceTsEvent, window),
+          queryTimespan(lookbackDays, Durations, window),
+          queryOptions(window),
+        )
         if (genai.status !== LogsQueryResultStatus.Success) {
           // Fail-open (isolation) but NOT silent — a partial/failed GenAI query
           // must surface, or a persistent native-side outage looks like "no
@@ -1355,14 +1497,20 @@ export class LogAnalyticsReader implements TelemetryReader {
     return records
   }
 
-  async getSignalUsage(sessionId: string, sinceTsEvent?: Date, callerCounters?: ParseCounters): Promise<SignalRecord[]> {
+  async getSignalUsage(
+    sessionId: string,
+    sinceTsEvent?: Date,
+    callerCounters?: ParseCounters,
+    window?: EventWindow,
+  ): Promise<SignalRecord[]> {
     assertSafeSessionId(sessionId)
     const { client, LogsQueryResultStatus, Durations } = await this.getClient()
     const lookbackDays = this.resolveLookbackDays()
     const result = await client.queryWorkspace(
       this.workspaceId,
-      buildSignalUsageKql(sessionId, sinceTsEvent),
-      { duration: isoDuration(lookbackDays, Durations) },
+      buildSignalUsageKql(sessionId, sinceTsEvent, window),
+      queryTimespan(lookbackDays, Durations, window),
+      queryOptions(window),
     )
     if (result.status !== LogsQueryResultStatus.Success) {
       throw new Error(`Log Analytics signal query did not succeed (status=${result.status})`)
@@ -1498,6 +1646,34 @@ export class LogAnalyticsReader implements TelemetryReader {
         error: reason,
         correlationId,
       }
+    }
+  }
+
+  async billableIngestionLast24h(opts: { timeoutMs?: number } = {}): Promise<IngestionLast24h> {
+    const start = Date.now()
+    const timeoutMs = opts.timeoutMs ?? HEALTHCHECK_TIMEOUT_MS
+    try {
+      const { client, LogsQueryResultStatus } = await this.getClient()
+      // P1D is the same trailing 24 h the KQL predicate states.
+      const result = await client.queryWorkspace(this.workspaceId, BILLABLE_INGESTION_LAST_24H_KQL, { duration: 'P1D' }, {
+        // Bounded on both ends, exactly as healthCheck is (ar-H6).
+        abortSignal: AbortSignal.timeout(timeoutMs),
+        serverTimeoutInSeconds: Math.max(1, Math.ceil(timeoutMs / 1000)),
+      })
+      if (result.status !== LogsQueryResultStatus.Success) {
+        // A partial result is not a total: report no number at all.
+        return { megabytes: null, kind: 'log-analytics', latencyMs: Date.now() - start, error: `query status=${result.status}` }
+      }
+      const raw = result.tables[0]?.rows[0]?.[0]
+      const megabytes = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : Number.NaN
+      if (!Number.isFinite(megabytes) || megabytes < 0) {
+        return { megabytes: null, kind: 'log-analytics', latencyMs: Date.now() - start, error: 'no-value' }
+      }
+      return { megabytes, kind: 'log-analytics', latencyMs: Date.now() - start }
+    } catch (err) {
+      // Resolved, not thrown, so the redaction happens here (see healthCheck).
+      const { reason, correlationId } = classifyProbeError(err, 'telemetry-reader:billable-ingestion')
+      return { megabytes: null, kind: 'log-analytics', latencyMs: Date.now() - start, error: reason, correlationId }
     }
   }
 

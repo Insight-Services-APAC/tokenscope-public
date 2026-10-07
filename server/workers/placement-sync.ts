@@ -7,6 +7,18 @@
  * identity and provisions+places the teammate (Entra-enriched) + replays its owed
  * bills into actual_spend — so a user who never logs in / emits still lands in their
  * cost-centre report. Graph faults are isolated here, never touching the poll.
+ *
+ * GRAPH FAILURE IS NOT ABSENCE. The directory lookups are the STRICT variants: a
+ * throttle, 5xx or timeout throws before anything is written, so the identity is
+ * skipped this run (counted in `errors`, its bills stay queued) — never provisioned
+ * onto the global bucket as a "directory miss".
+ *
+ * DEADLINE. No new identity is started after PLACEMENT_SYNC_BUDGET_MS, and every
+ * directory lookup carries the same deadline (the shared token mint has its own
+ * fixed bound, ~21 s), so a throttle burst cannot hold the run
+ * (and its single-flight lock) for hours. An identity not reached keeps its bills
+ * unplaced, which is exactly what the selection below reads: the next run picks it
+ * up, oldest-first, behind nothing newer.
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
@@ -14,9 +26,19 @@ import type * as schema from '../../drizzle/schema'
 import { makePlacementStore } from '../reconciliation/placement-store'
 import { provisionAndPlace, type PlacementDerivation } from '../reconciliation/placement-service'
 import { derivePlacement, makeChainCaches, type GetManager } from '../reconciliation/region-derivation'
-import { getUserManager, type DirectoryUser } from '../azure/directory'
+import {
+  getUserManager,
+  getDirectoryUserByMailOrUpnStrict,
+  WORKER_GRAPH_RETRIES,
+  type DirectoryUser,
+  type GraphCallOptions,
+} from '../azure/directory'
 
 type Db = PostgresJsDatabase<typeof schema>
+
+/** No new identity is started after this much of the run (the dispatch budget is
+ *  200 s; Graph calls in flight are bounded by the same deadline). */
+export const PLACEMENT_SYNC_BUDGET_MS = 150_000
 
 export interface PlacementSyncResult {
   emailsConsidered: number
@@ -44,6 +66,9 @@ export interface PlacementSyncResult {
   viaBillingRegion: number
   fellToGlobal: number
   conflicts: number
+  /** The run stopped starting new identities at PLACEMENT_SYNC_BUDGET_MS; the
+   *  rest stay queued for the next run. */
+  deadlineHit: boolean
 }
 
 /** Provision+place every distinct identity with un-replayed owed bills. Idempotent:
@@ -55,9 +80,14 @@ export async function runPlacementSync(
     /** Injected in tests; defaults to the real Graph manager hop. */
     getManager?: GetManager
     limit?: number
+    /** Test seams for the deadline. */
+    budgetMs?: number
+    now?: () => number
   },
 ): Promise<PlacementSyncResult> {
   const limit = opts?.limit ?? 500
+  const now = opts?.now ?? Date.now
+  const deadline = now() + (opts?.budgetMs ?? PLACEMENT_SYNC_BUDGET_MS)
   // Drain OLDEST-FIRST (by each identity's earliest un-replayed bill), matching the
   // pending_placement_unplaced index on first_seen_at and the migration's stated
   // "oldest-first" intent. Ordering alphabetically by email under a sustained backlog
@@ -79,7 +109,11 @@ export async function runPlacementSync(
   const leaderMap = await store.loadActiveRegionLeaders()
   const unitOwnerMap = await store.loadActiveUnitOwners()
   const caches = makeChainCaches()
-  const getManager = opts?.getManager ?? getUserManager
+  // Worker transport: retries on throttle / 5xx / network, never past the run deadline.
+  const graph: GraphCallOptions = { retries: WORKER_GRAPH_RETRIES, deadline }
+  const getManager: GetManager = opts?.getManager ?? ((oid) => getUserManager(oid, graph))
+  const lookupDirectory =
+    opts?.lookupDirectory ?? ((email: string) => getDirectoryUserByMailOrUpnStrict(email, graph))
   const derivePlacementForRun = (dir: DirectoryUser): Promise<PlacementDerivation> =>
     derivePlacement(dir, { rules, unitOwnerMap, leaderMap, getManager, caches })
 
@@ -97,12 +131,17 @@ export async function runPlacementSync(
     viaBillingRegion: 0,
     fellToGlobal: 0,
     conflicts: 0,
+    deadlineHit: false,
   }
   for (const { email } of rows) {
+    if (now() >= deadline) {
+      result.deadlineHit = true
+      break
+    }
     try {
       const r = await provisionAndPlace(email, {
         store,
-        lookupDirectory: opts?.lookupDirectory,
+        lookupDirectory,
         derivePlacement: derivePlacementForRun,
       })
       if (r.created) result.provisioned += 1
@@ -133,7 +172,8 @@ export async function runPlacementSync(
         else result.fellToGlobal += 1
       }
     } catch (err) {
-      // Isolate a single bad identity (bad Graph hit, transient) — retried next tick.
+      // Isolate a single bad identity — retried next tick. A Graph throttle / outage
+      // throws from the lookup or the chain walk, before provisionAndPlace writes.
       result.errors += 1
       console.warn(`[placement-sync] ${email}: ${err instanceof Error ? err.message : String(err)}`)
     }

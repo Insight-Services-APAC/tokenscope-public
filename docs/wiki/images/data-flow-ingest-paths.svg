@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 470" width="1000" height="470" role="img" aria-labelledby="t d">
+  <title id="t">Three provider-API paths cover every teammate in an onboarded scope; the OTel path covers enrolled devices only.</title>
+  <desc id="d">Sources on the left, the scheduled worker that reads each one in the middle, the Postgres table it writes on the right. Enrolled devices send api_request log events to OTelLogs, which azure-monitor-read joins into attribution_record every 5 minutes. analytics-poll writes Anthropic usage and cost into actual_spend every 15 minutes. reconciliation-sync writes GitHub per-user ai_credit usage into reconciliation_record hourly, and also writes Copilot seat rows into actual_spend for showback only. copilot-pool-bill reads the enterprise billing usage report daily into copilot_pool_bill. v_teammate_usage_daily combines actual_spend (minus Copilot rows) with GitHub reconciliation_record rows as the per teammate, day and tool usage truth. provider-transform derives provider_usage_fact hourly from the raw payloads of actual_spend and reconciliation_record.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="470"/>
+  <rect class="zone" x="16" y="16" width="210" height="438" rx="10"/>
+  <text class="zlabel" x="30" y="38">SOURCES</text>
+  <rect class="zone" x="246" y="16" width="190" height="438" rx="10"/>
+  <text class="zlabel" x="260" y="38">WORKERS · SCHEDULE</text>
+  <rect class="zone" x="456" y="16" width="528" height="438" rx="10"/>
+  <text class="zlabel" x="470" y="38">POSTGRES</text>
+  <text class="zlabel" x="720" y="38">READ BY REPORTING</text>
+
+  <!-- sources -->
+  <rect class="node" x="30" y="52" width="182" height="48" rx="6"/>
+  <text class="t" x="121" y="72" text-anchor="middle">Enrolled devices</text>
+  <text class="s" x="121" y="89" text-anchor="middle">Claude Code · Copilot CLI</text>
+  <rect class="node" x="30" y="122" width="182" height="48" rx="6"/>
+  <text class="tm" x="121" y="142" text-anchor="middle">OTelLogs</text>
+  <text class="s" x="121" y="159" text-anchor="middle">Log Analytics · api_request</text>
+  <rect class="node" x="30" y="202" width="182" height="48" rx="6"/>
+  <text class="t" x="121" y="222" text-anchor="middle">Anthropic</text>
+  <text class="s" x="121" y="239" text-anchor="middle">usage + cost reports · 1 day</text>
+  <rect class="node" x="30" y="292" width="182" height="48" rx="6"/>
+  <text class="t" x="121" y="312" text-anchor="middle">GitHub</text>
+  <text class="s" x="121" y="329" text-anchor="middle">per-user ai_credit/usage</text>
+  <rect class="node" x="30" y="382" width="182" height="48" rx="6"/>
+  <text class="t" x="121" y="402" text-anchor="middle">GitHub</text>
+  <text class="s" x="121" y="419" text-anchor="middle">enterprise billing usage</text>
+
+  <!-- workers -->
+  <rect class="node" x="260" y="122" width="162" height="48" rx="6"/>
+  <text class="tm" x="341" y="142" text-anchor="middle">azure-monitor-read</text>
+  <text class="s" x="341" y="159" text-anchor="middle">every 5 min · KQL</text>
+  <rect class="node" x="260" y="202" width="162" height="48" rx="6"/>
+  <text class="tm" x="341" y="222" text-anchor="middle">analytics-poll</text>
+  <text class="s" x="341" y="239" text-anchor="middle">every 15 min · 30 days</text>
+  <rect class="node" x="260" y="292" width="162" height="48" rx="6"/>
+  <text class="tm" x="341" y="312" text-anchor="middle">reconciliation-sync</text>
+  <text class="s" x="341" y="329" text-anchor="middle">hourly</text>
+  <rect class="node" x="260" y="382" width="162" height="48" rx="6"/>
+  <text class="tm" x="341" y="402" text-anchor="middle">copilot-pool-bill</text>
+  <text class="s" x="341" y="419" text-anchor="middle">daily 05:00 UTC</text>
+
+  <!-- tables -->
+  <rect class="node" x="470" y="122" width="200" height="48" rx="6"/>
+  <text class="tm" x="570" y="142" text-anchor="middle">attribution_record</text>
+  <text class="s" x="570" y="159" text-anchor="middle">per event · token type · model</text>
+  <rect class="node" x="470" y="202" width="200" height="48" rx="6"/>
+  <text class="tm" x="570" y="222" text-anchor="middle">actual_spend</text>
+  <text class="s" x="570" y="239" text-anchor="middle">per teammate · day · tool</text>
+  <rect class="node" x="470" y="292" width="200" height="48" rx="6"/>
+  <text class="tm" x="570" y="312" text-anchor="middle">reconciliation_record</text>
+  <text class="s" x="570" y="329" text-anchor="middle">per teammate · day · category</text>
+  <rect class="node" x="470" y="382" width="200" height="48" rx="6"/>
+  <text class="tm" x="570" y="402" text-anchor="middle">copilot_pool_bill</text>
+  <text class="s" x="570" y="419" text-anchor="middle">per org · month · + allocation</text>
+
+  <!-- read surfaces -->
+  <rect class="node acc" x="720" y="214" width="250" height="64" rx="6"/>
+  <text class="tm" x="734" y="236">v_teammate_usage_daily</text>
+  <text class="s" x="734" y="253">§A usage truth · teammate · day · tool</text>
+  <text class="s acc" x="734" y="269">Copilot seat rows excluded</text>
+  <rect class="node" x="720" y="374" width="250" height="64" rx="6"/>
+  <text class="tm" x="734" y="396">provider_usage_fact</text>
+  <text class="s" x="734" y="413">API lane · model · cost_type</text>
+  <text class="s" x="734" y="429">derived by provider-transform</text>
+  <text class="s" x="734" y="148">OTel detail is read from</text>
+  <text class="s" x="734" y="164">attribution_record directly</text>
+
+  <!-- 1 OTel path -->
+  <line class="e" x1="121" y1="100" x2="121" y2="116" marker-end="url(#ah)"/>
+  <line class="e" x1="212" y1="146" x2="254" y2="146" marker-end="url(#ah)"/>
+  <line class="e" x1="422" y1="146" x2="464" y2="146" marker-end="url(#ah)"/>
+  <circle class="cn" cx="236" cy="146" r="10"/><text class="cnt" x="236" y="150" text-anchor="middle">1</text>
+  <!-- 2 Anthropic -->
+  <line class="e" x1="212" y1="226" x2="254" y2="226" marker-end="url(#ah)"/>
+  <line class="e" x1="422" y1="226" x2="464" y2="226" marker-end="url(#ah)"/>
+  <circle class="cn" cx="236" cy="226" r="10"/><text class="cnt" x="236" y="230" text-anchor="middle">2</text>
+  <!-- 3 GitHub usage -->
+  <line class="e" x1="212" y1="316" x2="254" y2="316" marker-end="url(#ah)"/>
+  <line class="e" x1="422" y1="316" x2="464" y2="316" marker-end="url(#ah)"/>
+  <circle class="cn" cx="236" cy="316" r="10"/><text class="cnt" x="236" y="320" text-anchor="middle">3</text>
+  <!-- 4 seat showback rows -->
+  <polyline class="e dashed" points="422,300 446,300 446,242 464,242" marker-end="url(#ah)"/>
+  <circle class="cn" cx="446" cy="271" r="10"/><text class="cnt" x="446" y="275" text-anchor="middle">4</text>
+  <!-- 5 pool bill -->
+  <line class="e" x1="212" y1="406" x2="254" y2="406" marker-end="url(#ah)"/>
+  <line class="e" x1="422" y1="406" x2="464" y2="406" marker-end="url(#ah)"/>
+  <circle class="cn" cx="236" cy="406" r="10"/><text class="cnt" x="236" y="410" text-anchor="middle">5</text>
+  <!-- 6 usage truth -->
+  <polyline class="e accent" points="670,220 692,220 692,236 714,236" marker-end="url(#ah-acc)"/>
+  <polyline class="e accent" points="670,316 704,316 704,262 714,262" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="704" cy="290" r="10"/><text class="cnt accent" x="704" y="294" text-anchor="middle">6</text>
+  <!-- 7 provider-transform -->
+  <polyline class="e dashed" points="670,244 682,244 682,394 714,394" marker-end="url(#ah)"/>
+  <polyline class="e dashed" points="670,332 694,332 694,418 714,418" marker-end="url(#ah)"/>
+  <circle class="cn" cx="688" cy="360" r="10"/><text class="cnt" x="688" y="364" text-anchor="middle">7</text>
+</svg>

@@ -20,6 +20,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { hashSessionToken, constantTimeEqualHex } from './hmac'
 import { oauthClient, oauthAuthCode, oauthToken } from '../../drizzle/schema'
 import { clientNameSchema, MAX_REDIRECT_URIS, REDIRECT_URI_MAX_LEN } from '../../shared/schemas/oauth'
+import { deviceBoundEmitSql } from './emit-revocation'
 
 // ── Scopes ────────────────────────────────────────────────────────────────
 //
@@ -650,6 +651,9 @@ export async function issueTokens(
  *     — a revoked teammate can no longer mint fresh access tokens via refresh.
  *     refresh_issued_at (not the per-refresh-bumped access_issued_at) is the
  *     stable anchor. The join is in the UPDATE so the race is closed in-statement.
+ *     A DEVICE-BOUND emit credential is judged against `tm.emit_revoked_at`
+ *     instead (#414, server/auth/emit-revocation.ts): a role or region change
+ *     bumps revoked_at alone and must not stop a device emitting.
  *   - DEACTIVATION: `tm.is_active IS TRUE`. A separate, durable axis from E2 —
  *     no timestamp comparison, because a retired account has no "after" to be on
  *     the right side of. The privileged-identity-cleanup worker only ever sets
@@ -700,7 +704,12 @@ export async function refreshAccessToken(
        AND t.revoked_at IS NULL
        AND t.refresh_expires_at > now()
        AND t.client_id = ${clientId}::uuid
-       AND NOT (tm.revoked_at IS NOT NULL AND tm.revoked_at > t.refresh_issued_at)
+       AND NOT (
+         CASE WHEN ${deviceBoundEmitSql(sql`t`)}
+              THEN tm.emit_revoked_at IS NOT NULL AND tm.emit_revoked_at > t.refresh_issued_at
+              ELSE tm.revoked_at IS NOT NULL AND tm.revoked_at > t.refresh_issued_at
+         END
+       )
        AND tm.is_active IS TRUE
        AND (
          t.instance_id IS NULL

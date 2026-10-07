@@ -2,8 +2,8 @@
 /*
  * Read-joiner robustness regressions (robustness review 2026-06-09):
  *   - ING-1: a late-arriving event (event-time older than watermark − 5 min)
- *     is dropped by a normal tick but recovered by the deep-rescan tick;
- *     shouldDeepRescan decides from worker_run.result.
+ *     is dropped by a normal tick but recovered by a deep read, including one
+ *     bounded to an instance-day window (telemetry-recovery's daily pass).
  *   - ING-6: one throwing session does not abort the tick — the remaining
  *     sessions still attribute, and JoinResult.errors counts the bad one.
  *   - ING-8: the unauthorized-spill counter/audit fires only for NEWLY-written
@@ -13,22 +13,25 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
+import { runReadJoiner } from '../../../server/workers/azure-monitor-reader'
 import {
-  runReadJoiner,
-  shouldDeepRescan,
-} from '../../../server/workers/azure-monitor-reader'
-import { WATERMARK_LOOKBACK_MS, type TelemetryReader, type UsageRecord } from '../../../server/azure/reader'
+  WATERMARK_LOOKBACK_MS,
+  inEventWindow,
+  type EventWindow,
+  type TelemetryReader,
+  type UsageRecord,
+} from '../../../server/azure/reader'
 
 let t: TestDb
 
 const TEAM = '33333333-3333-3333-3333-333333333333'
 
 class StubReader {
-  public readonly calls: Array<{ sessionId: string; sinceTsEvent?: Date }> = []
+  public readonly calls: Array<{ sessionId: string; sinceTsEvent?: Date; window?: EventWindow }> = []
   constructor(public readonly map: Map<string, UsageRecord[]>) {}
-  async getSessionUsage(sessionId: string, sinceTsEvent?: Date): Promise<UsageRecord[]> {
-    this.calls.push({ sessionId, sinceTsEvent })
-    const all = this.map.get(sessionId) ?? []
+  async getSessionUsage(sessionId: string, sinceTsEvent?: Date, _c?: unknown, window?: EventWindow): Promise<UsageRecord[]> {
+    this.calls.push({ sessionId, sinceTsEvent, window })
+    const all = (this.map.get(sessionId) ?? []).filter((u) => inEventWindow(u.tsEvent, window))
     if (!sinceTsEvent) return all
     const cutoff = sinceTsEvent.getTime() - WATERMARK_LOOKBACK_MS
     return all.filter((u) => new Date(u.tsEvent).getTime() > cutoff)
@@ -145,65 +148,29 @@ describe('ING-1 — deep rescan recovers late-arriving telemetry', () => {
   })
 })
 
-describe('ING-1 — shouldDeepRescan (worker_run-backed daily cadence)', () => {
-  it('true with no prior deep pass; false within the interval; true again after it', async () => {
-    await t.client`DELETE FROM worker_run WHERE worker_name = 'azure-monitor-read'`
-    expect(await shouldDeepRescan(t.db)).toBe(true)
+describe('ING-1 — a deep read bounded to a day window', () => {
+  const INST = 'a1a1a1a1-0000-0000-0000-000000000002'
 
-    // A recent successful deep pass → no deep rescan needed.
-    await t.client`
-      INSERT INTO worker_run (worker_name, status, started_at, finished_at, result)
-      VALUES ('azure-monitor-read', 'success', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour',
-              '{"deepRescan": true}'::jsonb)`
-    expect(await shouldDeepRescan(t.db)).toBe(false)
+  it('passes the window to the reader and recovers only the late event inside it', async () => {
+    await insertInstance(INST)
+    const tick = new StubReader(new Map([[INST, [rec({ tokens: 200, tsEvent: '2026-05-25T09:10:00Z' })]]]))
+    expect((await runReadJoiner(t.db, asReader(tick), { sessionIds: [INST] })).attributionRowsWritten).toBe(1)
 
-    // Normal (non-deep) successes don't count.
-    await t.client`UPDATE worker_run SET result = '{"deepRescan": false}'::jsonb WHERE worker_name = 'azure-monitor-read'`
-    expect(await shouldDeepRescan(t.db)).toBe(true)
+    const all = [
+      rec({ tokens: 200, tsEvent: '2026-05-25T09:10:00Z' }),
+      rec({ tokens: 777, tsEvent: '2026-05-24T08:00:00Z', tokenType: 'cache-read' }), // late, the day before
+    ]
+    const sameDay: EventWindow = { from: new Date('2026-05-25T00:00:00Z'), to: new Date('2026-05-26T00:00:00Z') }
+    const r1 = new StubReader(new Map([[INST, all]]))
+    const a = await runReadJoiner(t.db, asReader(r1), { sessionIds: [INST], deepRescan: true, window: sameDay })
+    expect(r1.calls[0]!.window).toEqual(sameDay)
+    expect(r1.calls[0]!.sinceTsEvent).toBeUndefined()
+    expect(a.attributionRowsWritten).toBe(0) // the late event is outside this day
 
-    // A deep pass older than the interval has aged out.
-    await t.client`
-      UPDATE worker_run SET result = '{"deepRescan": true}'::jsonb, started_at = NOW() - INTERVAL '25 hours'
-      WHERE worker_name = 'azure-monitor-read'`
-    expect(await shouldDeepRescan(t.db)).toBe(true)
-
-    // A FAILED deep pass must be retried.
-    await t.client`
-      UPDATE worker_run SET status = 'failure', started_at = NOW() - INTERVAL '1 hour'
-      WHERE worker_name = 'azure-monitor-read'`
-    expect(await shouldDeepRescan(t.db)).toBe(true)
-  })
-
-  it('a SCOPED recovery batch does NOT satisfy the fleet-wide cadence', async () => {
-    // A scoped run deep-rescans only its own instances. Letting it count would
-    // suppress the real fleet-wide deep pass for 24h — and a recovery campaign
-    // runs many such batches back to back, silently disarming the mechanism that
-    // recovers late-arriving telemetry for everyone else.
-    await t.client`DELETE FROM worker_run WHERE worker_name = 'azure-monitor-read'`
-    await t.client`
-      INSERT INTO worker_run (worker_name, status, started_at, finished_at, result)
-      VALUES ('azure-monitor-read', 'success', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour',
-              '{"deepRescan": true, "scoped": true}'::jsonb)`
-    expect(await shouldDeepRescan(t.db)).toBe(true) // still owed a fleet-wide pass
-
-    // The same row unscoped DOES satisfy it — proving the scoped flag is what
-    // makes the difference, not some other property of the row.
-    await t.client`
-      UPDATE worker_run SET result = '{"deepRescan": true, "scoped": false}'::jsonb
-      WHERE worker_name = 'azure-monitor-read'`
-    expect(await shouldDeepRescan(t.db)).toBe(false)
-  })
-
-  it('a PRE-CHANGE row with no "scoped" key still counts (no deep-rescan storm on deploy)', async () => {
-    // Rows written before the scoped flag existed have no key at all; SQL NULL
-    // IS DISTINCT FROM 'true' is TRUE, so they keep counting. If they stopped,
-    // every environment would fire a fleet-wide deep pass the moment this deploys.
-    await t.client`DELETE FROM worker_run WHERE worker_name = 'azure-monitor-read'`
-    await t.client`
-      INSERT INTO worker_run (worker_name, status, started_at, finished_at, result)
-      VALUES ('azure-monitor-read', 'success', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour',
-              '{"deepRescan": true}'::jsonb)`
-    expect(await shouldDeepRescan(t.db)).toBe(false)
+    const dayBefore: EventWindow = { from: new Date('2026-05-24T00:00:00Z'), to: new Date('2026-05-25T00:00:00Z') }
+    const r2 = new StubReader(new Map([[INST, all]]))
+    const b = await runReadJoiner(t.db, asReader(r2), { sessionIds: [INST], deepRescan: true, window: dayBefore })
+    expect(b.attributionRowsWritten).toBe(1)
   })
 })
 

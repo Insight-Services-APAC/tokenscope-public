@@ -30,6 +30,10 @@
  *            server/auth/org-subtree-scope.ts      (the S3 security clamp)
  *            server/reporting/regional.ts          (region picker)
  *            server/workers/region-reenrichment.ts (re-enrichment candidates)
+ *            server/reconciliation/placement-provenance.ts
+ *                                                  (the candidate predicate the
+ *                                                   worker and its compare-and-set
+ *                                                   share)
  *            server/reconciliation/region-reresolve.ts
  *                                                  (the region-scoped re-resolve's
  *                                                   candidate set)

@@ -114,13 +114,13 @@ export default defineEventHandler(async (event) => {
       )
     }
 
-    // One in-flight recovery GLOBALLY — a widened read is the most expensive
-    // request we make of Log Analytics, and two concurrent campaigns would contend
-    // for the same budget while both reporting progress. The partial unique index
-    // (mig 0093) is the TOCTOU backstop for this pre-check.
+    // One in-flight OPERATOR recovery — a widened read is the most expensive
+    // request we make of Log Analytics. The scheduled daily pass has its own slot
+    // and yields to an operator request at claim time. The partial unique index
+    // (mig 0148, per kind) is the TOCTOU backstop for this pre-check.
     const inflight = await tx.execute<{ id: string; status: string }>(sql`
       SELECT id::text AS id, status FROM telemetry_recovery_request
-       WHERE status IN ('pending', 'running') LIMIT 1
+       WHERE kind = 'operator' AND status IN ('pending', 'running') LIMIT 1
     `)
     const busy = [...inflight][0]
     if (busy) {

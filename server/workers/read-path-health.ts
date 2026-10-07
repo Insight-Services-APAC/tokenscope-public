@@ -18,7 +18,8 @@
  * also maps attributionRowsWritten -> worker_run.rows_affected (extractRowsAffected
  * in run-worker/[name].post.ts). We read rows_affected + the ingest-coverage
  * verdict (result->'sourceCoverage'->>'status') for the STALL streak and
- * result->>'errors' / result->>'sessionsProcessed' for the ALL-FAULT case.
+ * result->>'errors' against result->>'devicesAttempted' (falling back to
+ * result->>'sessionsProcessed' on older runs) for the ALL-FAULT case.
  *
  * Fires (see decideReadPathAlert for the exact truth table + thresholds) when
  * ANY of these hold for worker_name = 'azure-monitor-read':
@@ -103,6 +104,15 @@ export interface ReaderRun {
   // it includes every open instance with a fresh bearer, so an idle laptop is 1,
   // not 0. It feeds ALL-FAULT (errors vs sessions) and is NOT work evidence.
   sessionsProcessed: number | null
+  /*
+   * result->>'devicesAttempted' — how many of the selected devices the run
+   * actually started before its deadline (JOINER_DEADLINE_MS). ALL-FAULT
+   * compares errors against THIS when present: a run whose every started device
+   * failed (a wedged workspace, each read timing out) starts few devices, so its
+   * errors never reach the selection size. null on a run recorded before the
+   * field shipped, which falls back to sessionsProcessed (then equal to it).
+   */
+  devicesAttempted?: number | null
   errors: number | null
   /*
    * result->'sourceCoverage'->>'status' — the INGEST-SIDE coverage verdict for
@@ -248,13 +258,16 @@ export function decideReadPathAlert(input: DecideInput): ReadPathDecision {
   // isolation caught them, so the run "succeeded" while writing nothing useful).
   // The floor excludes a clean 0-session tick AND a single transient flaky
   // session (sessionsProcessed 1, errors 1) — that's noise, not a storm.
+  // "Processed" is the devices the run STARTED (devicesAttempted) when the run
+  // recorded it: since the joiner's deadline, a selected device may never start.
   const latest = runs[0]
+  const started = latest ? (latest.devicesAttempted ?? latest.sessionsProcessed) : null
   if (
     latest &&
-    latest.sessionsProcessed !== null &&
+    started !== null &&
     latest.errors !== null &&
-    latest.sessionsProcessed >= ALL_FAULT_MIN_SESSIONS &&
-    latest.errors >= latest.sessionsProcessed
+    started >= ALL_FAULT_MIN_SESSIONS &&
+    latest.errors >= started
   ) {
     return { fire: true, reason: 'all-fault' }
   }
@@ -341,7 +354,7 @@ const RUN_LOAD_LIMIT = 20
  * runReadPathHealth; the query semantics (scoped-run and running-row exclusion)
  * are part of this worker's contract and must not fork per consumer.
  *
- * Model on shouldDeepRescan's worker_run query + the diagnostics workers-RAG
+ * Model on the diagnostics workers-RAG
  * SQL: read rows_affected and the result jsonb's errors/sessionsProcessed/
  * sourceCoverage/newEventsSeen. All are cast from the jsonb text — NULL-safe (a
  * missing key yields NULL, not 0). For sourceCoverage that NULL is load-bearing:
@@ -357,6 +370,7 @@ export async function loadReaderRuns(
     started_at_ms: string
     rows_affected: number | null
     sessions_processed: string | null
+    devices_attempted: string | null
     errors: string | null
     source_coverage: string | null
     new_events_seen: string | null
@@ -365,6 +379,7 @@ export async function loadReaderRuns(
            (EXTRACT(EPOCH FROM started_at) * 1000)::bigint::text AS started_at_ms,
            rows_affected,
            (result->>'sessionsProcessed') AS sessions_processed,
+           (result->>'devicesAttempted') AS devices_attempted,
            (result->>'errors') AS errors,
            -- The ingest-coverage verdict (JoinResult.sourceCoverage.status).
            -- NULL when absent (pre-probe / scoped / thrown run) is load-bearing:
@@ -399,6 +414,7 @@ export async function loadReaderRuns(
     startedAtMs: Number(r.started_at_ms),
     rowsAffected: r.rows_affected === null ? null : Number(r.rows_affected),
     sessionsProcessed: r.sessions_processed === null ? null : Number(r.sessions_processed),
+    devicesAttempted: r.devices_attempted === null ? null : Number(r.devices_attempted),
     errors: r.errors === null ? null : Number(r.errors),
     sourceCoverage: normaliseCoverageStatus(r.source_coverage),
     newEventsSeen: r.new_events_seen === null ? null : Number(r.new_events_seen),

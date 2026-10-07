@@ -12,10 +12,18 @@
  * SAFETY (the #99-review revoke contract): we ONLY move a teammate that is a never-adopted
  * `bill:` placeholder with NO live emit instance — i.e. nobody whose live session/RLS scope
  * would be silently re-scoped. A teammate that has ever authenticated (real oid) or is
- * emitting is LEFT for the admin region-PATCH (which runs the revoke cascade). So this
+ * emitting is LEFT for the admin region-PATCH (which runs the revoke cascade). The
+ * selection is re-checked at WRITE time (placeTeammateIfStillSelected): someone who
+ * signed in, was placed by an admin, or whose target was retired while this pass was
+ * awaiting Graph is skipped, never moved. So this
  * worker is safe to run on a cron; the operator should still watch the placement-sync
  * coverage ratio (viaAttribute/viaManager : fellToGlobal) on connector-health before
  * treating its output as authoritative.
+ *
+ * GRAPH FAILURE IS NOT ABSENCE. The lookups are the STRICT variants: a throttle, 5xx
+ * or timeout throws, and a throw skips the person for this run — not placed (never
+ * the global bucket), counted in `errors`. A TRANSIENT failure leaves them unstamped,
+ * retried at the head next run; any other failure stamps them (see the loop).
  */
 import { consola } from 'consola'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
@@ -24,17 +32,29 @@ import type * as schema from '../../drizzle/schema'
 import { makePlacementStore } from '../reconciliation/placement-store'
 import { HOLDING_UNIT_TYPE } from '../../shared/placement/holding-nodes'
 import { derivePlacement, makeChainCaches, type GetManager } from '../reconciliation/region-derivation'
-import type { PlacementDerivation } from '../reconciliation/placement-service'
-import { rehomeSafePredicate } from '../reconciliation/rehome-safety'
+import type { CasPlacementTarget, PlacementDerivation } from '../reconciliation/placement-service'
 import {
-  DERIVED_PLACEMENT_VIAS,
   PLACED_VIA_ATTRIBUTE_RULE,
   PLACED_VIA_MANAGER_CHAIN,
+  reenrichmentCandidatePredicate,
   type PlacementProvenance,
 } from '../reconciliation/placement-provenance'
-import { getUserManager, getDirectoryUserByMailOrUpn, type DirectoryUser } from '../azure/directory'
+import {
+  getUserManager,
+  getDirectoryUserByMailOrUpnStrict,
+  isTransientGraphFailure,
+  WORKER_GRAPH_RETRIES,
+  type DirectoryUser,
+  type GraphCallOptions,
+} from '../azure/directory'
 
 type Db = PostgresJsDatabase<typeof schema>
+
+/** No new person is started after this much of the run (the dispatch budget is
+ *  200 s; Graph calls in flight are bounded by the same deadline). */
+export const REENRICH_BUDGET_MS = 150_000
+
+const ACTOR_SYSTEM = 'region-reenrichment-worker'
 
 export interface RegionReenrichmentResult {
   considered: number
@@ -43,7 +63,15 @@ export interface RegionReenrichmentResult {
   alreadyCorrect: number
   /** No directory match / no signal resolved → left on the holding node. */
   unresolved: number
+  /** Per-person failures, Graph errors included (a throttled or failed lookup
+   *  is NOT "no match"). Skipped; a transient one is not stamped (retried at the
+   *  head next run), any other one is stamped (retried when the queue comes round). */
   errors: number
+  /** The write-time re-check refused the move: the person signed in, was moved by
+   *  hand, or the target stopped being valid since selection. Skipped, not stamped. */
+  casRefused: number
+  /** The run stopped starting new people at REENRICH_BUDGET_MS. */
+  deadlineHit: boolean
   /** Directory-snapshot writes that failed. DISPLAY data only — a non-zero here
    *  means the worklist's Department/Company columns are stale for that many
    *  people; it never means a placement was missed (the write is fenced). */
@@ -56,23 +84,31 @@ export async function runRegionReenrichment(
     lookupDirectory?: (email: string) => Promise<DirectoryUser | null>
     getManager?: GetManager
     limit?: number
+    /** Test seams for the deadline. */
+    budgetMs?: number
+    now?: () => number
   },
 ): Promise<RegionReenrichmentResult> {
   const limit = opts?.limit ?? 500
+  const now = opts?.now ?? Date.now
+  const deadline = now() + (opts?.budgetMs ?? REENRICH_BUDGET_MS)
+  const graph: GraphCallOptions = { retries: WORKER_GRAPH_RETRIES, deadline }
   const store = makePlacementStore(db)
   const rules = await store.loadDirectoryRegionRules()
   const leaderMap = await store.loadActiveRegionLeaders()
   const unitOwnerMap = await store.loadActiveUnitOwners()
   const caches = makeChainCaches()
-  const getManager = opts?.getManager ?? getUserManager
-  const lookup = opts?.lookupDirectory ?? getDirectoryUserByMailOrUpn
+  const getManager: GetManager = opts?.getManager ?? ((oid) => getUserManager(oid, graph))
+  const lookup = opts?.lookupDirectory ?? ((email: string) => getDirectoryUserByMailOrUpnStrict(email, graph))
 
-  // Candidates: bill placeholders that are EITHER on a holding node OR were DERIVED
-  // into a unit (metadata.placedVia — a manager-chain walk or a curated attribute
-  // rule) — re-deriving the latter is how a person who changes teams in Entra moves
-  // to their new practice (and how a stale unit placement gets de-placed). Restricted
-  // by rehomeSafePredicate to rows with NO live emit instance/oauth — the only ones we
-  // may move without the admin revoke cascade. Oldest-touched first.
+  // Candidates (reenrichmentCandidatePredicate — the ONE definition, re-applied by
+  // the compare-and-set write): bill placeholders that are EITHER on a holding node
+  // OR were DERIVED into a unit (metadata.placedVia — a manager-chain walk or a
+  // curated attribute rule) — re-deriving the latter is how a person who changes
+  // teams in Entra moves to their new practice (and how a stale unit placement gets
+  // de-placed). Restricted by rehomeSafePredicate to rows with NO live emit
+  // instance/oauth — the only ones we may move without the admin revoke cascade.
+  // Oldest-touched first.
   //
   // ON unit_type, NOT on the holding-node CODE. This is the same definition the
   // worklist, the region's unplaced count and the RLS clamp use
@@ -84,8 +120,7 @@ export async function runRegionReenrichment(
     SELECT t.id::text AS id, t.email, t.org_unit_id::text AS org_unit_id, (ou.unit_type = ${HOLDING_UNIT_TYPE}) AS on_holding
     FROM teammate t
     JOIN org_unit ou ON ou.id = t.org_unit_id
-    WHERE (ou.unit_type = ${HOLDING_UNIT_TYPE} OR t.metadata->>'placedVia' IN ${[...DERIVED_PLACEMENT_VIAS]})
-      AND ${rehomeSafePredicate(sql`t`)}
+    WHERE ${reenrichmentCandidatePredicate(sql`t`, sql`ou`)}
     ORDER BY t.last_sync_at NULLS FIRST
     LIMIT ${limit}`)
 
@@ -95,14 +130,49 @@ export async function runRegionReenrichment(
     alreadyCorrect: 0,
     unresolved: 0,
     errors: 0,
+    casRefused: 0,
+    deadlineHit: false,
     snapshotErrors: 0,
   }
 
+  /*
+   * THE CONTINUATION CURSOR — the same stamp region-reresolve.ts makes for the
+   * same reason, and the jam stampPlacementAttempt's own comment describes.
+   *
+   * A row left with its timestamp untouched stays at the head of
+   * `ORDER BY t.last_sync_at NULLS FIRST` for ever; past `limit` such rows the
+   * window is re-read every tick and no other candidate is ever reached. So every
+   * row this pass FINISHED is stamped — moved, already correct, or legitimately
+   * unresolved — and stamped as it finishes, so a run cut short by its deadline
+   * (or killed) keeps the progress it made. A move or a provenance re-stamp is
+   * stamped inside its own compare-and-set transaction; an unresolved row here.
+   *
+   * A person whose write the re-check REFUSED is stamped too: the refusal means
+   * the state changed since selection, and a refusal that repeats (a unit rule
+   * whose region differs from its unit's, say) must not pin the head of the
+   * queue. The next pass re-selects them from fresh state.
+   *
+   * A person whose lookup, derivation or write THREW is stamped unless the
+   * failure was TRANSIENT (isTransientGraphFailure: a 429 or 5xx, a network
+   * error, a timeout or abort, the deadline). A throttle or outage is not an
+   * answer, and says nothing about this person: they stay at the head and are
+   * retried next run, which costs nothing because the next run would fail on
+   * everyone alike. Any other failure — a 4xx, a holding-node lookup or a write
+   * that threw — would throw again on every run, so leaving it unstamped would
+   * pin the head of the window exactly as an unstamped refusal would. Stamped,
+   * it moves to the back and is retried when the queue comes round. A stamp that
+   * itself fails is logged and left; the person stays where they were.
+   */
   for (const row of rows) {
+    if (now() >= deadline) {
+      result.deadlineHit = true
+      break
+    }
     try {
       const dir = await lookup(row.email)
       if (!dir) {
         result.unresolved += 1
+        await store.stampPlacementAttempt([row.id])
         continue
       }
       /*
@@ -157,64 +227,69 @@ export async function runRegionReenrichment(
       const derived = der!
 
       // Resolve the TARGET org_unit + provenance for the derived placement.
-      let targetOrgUnit: string
+      let target: CasPlacementTarget
       let provenance: PlacementProvenance | null
       if (derived.via === 'unit') {
-        targetOrgUnit = derived.orgUnitId!
+        target = { kind: 'unit', orgUnitId: derived.orgUnitId!, regionId: derived.regionId! }
         provenance = derived.ownerOid ? { via: PLACED_VIA_MANAGER_CHAIN, ownerOid: derived.ownerOid } : null
       } else if (derived.via === 'unit-rule') {
-        targetOrgUnit = derived.orgUnitId!
+        target = { kind: 'unit', orgUnitId: derived.orgUnitId!, regionId: derived.regionId! }
         provenance = derived.attribute ? { via: PLACED_VIA_ATTRIBUTE_RULE, attribute: derived.attribute } : null
       } else if (derived.regionId) {
-        targetOrgUnit = await store.unplacedOrgUnitIdForRegion(derived.regionId)
+        target = {
+          kind: 'holding-node',
+          orgUnitId: await store.unplacedOrgUnitIdForRegion(derived.regionId),
+          regionId: derived.regionId,
+        }
         provenance = null
       } else if (!row.on_holding) {
         // No signal now, but the row WAS chain-placed into a unit → that placement is stale
         // (owner revoked / chain changed). De-place it to the global holding bucket so it
         // stops charging the old practice; an admin / a later resolve re-places it.
-        targetOrgUnit = await store.unplacedOrgUnitId()
+        target = { kind: 'holding-node', orgUnitId: await store.unplacedOrgUnitId(), regionId: null }
         provenance = null
       } else {
         result.unresolved += 1 // already on a holding node, still unresolved → leave
+        await store.stampPlacementAttempt([row.id])
         continue
       }
 
-      if (targetOrgUnit === row.org_unit_id) {
-        // Still the right home, but provenance may need (un)setting after a re-derive.
-        await store.setPlacementProvenance(row.id, provenance)
-        result.alreadyCorrect += 1
-        continue
-      }
-      await store.homeTeammate(row.id, targetOrgUnit)
-      await store.setPlacementProvenance(row.id, provenance)
-      result.rehomed += 1
+      // One compare-and-set for both the move and the provenance-only re-stamp
+      // (target = the unit it is already on): same locks, same re-checks.
+      const outcome = await store.placeTeammateIfStillSelected({
+        teammateId: row.id,
+        selectedOrgUnitId: row.org_unit_id,
+        target,
+        provenance,
+        actorSystem: ACTOR_SYSTEM,
+      })
+      if (outcome === 'refused') {
+        result.casRefused += 1
+        await store.stampPlacementAttempt([row.id])
+      } else if (outcome === 'moved') result.rehomed += 1
+      else result.alreadyCorrect += 1
     } catch (err) {
-      // Isolate a single bad identity (transient Graph hit) — retried next tick.
+      // Isolate a single bad identity. Transient → unstamped; otherwise stamped
+      // so a failure that repeats cannot hold the head of the queue.
       result.errors += 1
+      const transient = isTransientGraphFailure(err)
       consola.warn('[region-reenrichment] identity failed', {
         email: row.email,
+        transient,
         error: err instanceof Error ? err.message : String(err),
       })
+      if (!transient) {
+        try {
+          await store.stampPlacementAttempt([row.id])
+        } catch (stampErr) {
+          consola.warn('[region-reenrichment] stamp after failure failed', {
+            email: row.email,
+            error: stampErr instanceof Error ? stampErr.message : String(stampErr),
+          })
+        }
+      }
     }
   }
-
-  /*
-   * THE CONTINUATION CURSOR — the same stamp region-reresolve.ts makes for the
-   * same reason, and the jam stampPlacementAttempt's own comment describes.
-   *
-   * Only the MOVE branch wrote last_sync_at (inside store.homeTeammate). Every
-   * other exit — unresolved (no directory match, or on a holding node with no
-   * signal), already-correct, and the per-row catch — left the row's timestamp
-   * untouched, so it stayed at the head of `ORDER BY t.last_sync_at NULLS FIRST`
-   * for ever. Past `limit` such rows the window is entirely re-read every tick
-   * and no other candidate is ever reached: the unmovable starve the movable.
-   *
-   * So every row this pass LOOKED AT is stamped, moved or not — which is what a
-   * sync timestamp means (the directory was read for this row). This worker has
-   * no dry-run mode (unlike region-reresolve, whose stamp is gated on one): every
-   * pass here is a real pass, so there is no preview to keep off the cursor.
-   */
-  await store.stampPlacementAttempt(rows.map((r) => r.id))
 
   return result
 }

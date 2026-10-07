@@ -41,6 +41,14 @@ const ANSWERING_SURFACE: Record<string, { route: string; shows: string }> = {
     route: 'server/api/v1/admin/diagnostics/index.get.ts',
     shows: 'per-worker last run, RAG and consecutive-failure streak',
   },
+  'worker-duration': {
+    route: 'server/api/v1/admin/diagnostics/index.get.ts',
+    shows: "per-worker latest run duration and its dispatchBudget state (ok / near / over) with the plain-language reason",
+  },
+  'telemetry-cap': {
+    route: 'server/api/v1/admin/worker-runs/[id].get.ts',
+    shows: "the ops-alert run's result: telemetryIngestion (today's billable MB and the cap in GB it was compared with) and the condition's count, the percent of the cap used",
+  },
   'channel-test': {
     route: 'server/api/v1/admin/diagnostics/probes.get.ts',
     shows: 'the probe results a channel validation ping is asserting against',

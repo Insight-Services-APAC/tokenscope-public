@@ -29,7 +29,6 @@ import { runPendingPlacementGc } from './pending-placement-gc'
 import {
   runReadJoiner,
   selectJoinableInstances,
-  shouldDeepRescan,
   recordJoinerSelectionCap,
   type JoinResult,
 } from './azure-monitor-reader'
@@ -74,8 +73,7 @@ export interface WorkerRunContext {
    * and optional so workers that ignore it are unaffected. Today only
    * azure-monitor-read reads `opts.deepRescan` — it lets an operator FORCE a
    * full-window re-read (a one-off Container Apps job execution with
-   * DEEP_RESCAN=true) to recover a read-path backlog, overriding the auto-decided
-   * daily cadence (shouldDeepRescan). The body is inside the signed HMAC payload
+   * DEEP_RESCAN=true) to recover a read-path backlog. The body is inside the signed HMAC payload
    * (server/auth/internal-request.ts), so this is tamper-proof.
    */
   opts?: {
@@ -213,6 +211,9 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
   {
     name: 'azure-monitor-read',
     run: async (db, ctx) => {
+      // The tick's start: JOINER_DEADLINE_MS is measured from here, so the
+      // coverage probe and the selection below count against it.
+      const tickStartedAtMs = Date.now()
       /*
        * Scheduler entrypoint: scan the last 24h of instance_attestation rows
        * still needing a (re)join — active sessions (re-scanned each tick for
@@ -261,14 +262,11 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
           consola.error('[azure-monitor-read] selection-cap signal failed; attribution is unaffected', e)
         }
       }
-      // ING-1: once per ~24h, ignore the per-instance watermark and re-read the
-      // full reader window — recovers telemetry that arrived later than the
-      // 5-minute lookback (OTLP batching, laptop suspends, ingestion latency).
-      // Auto-decided from worker_run.result (so a crashed deep pass retries next
-      // tick) UNLESS an operator FORCES it via the signed run-worker body
-      // (ctx.opts.deepRescan) — the recovery lever for a read-path backlog after
-      // a silent outage. The forced flag wins over the cadence.
-      const deepRescan = ctx?.opts?.deepRescan ?? (await shouldDeepRescan(db))
+      // Scheduled ticks never deep-read: the daily re-read of late telemetry is
+      // telemetry-recovery's scheduled request, drained one instance-day at a
+      // time under its own lock (docs/design/bounded-daily-deep-read.md). Only an
+      // operator's signed body (ctx.opts.deepRescan) forces a full-window read here.
+      const deepRescan = ctx?.opts?.deepRescan ?? false
       if (sessionIds.length === 0) {
         // `satisfies JoinResult` is the enforcement of the "never omit the
         // object" convention below: this literal drifted from JoinResult twice
@@ -302,7 +300,7 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
           spansSpilledUnauthorized: 0,
           spansSpilledEnded: 0,
           errors: 0,
-          // A zero-session tick must NOT claim the daily deep pass happened.
+          // Nothing was read, so nothing was deep-read.
           deepRescan: false,
           signalRowsWritten: 0,
           // An empty selection cannot have hit the cap.
@@ -311,6 +309,15 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
           lookbackDaysApplied: null,
           scoped: false,
           signalErrors: 0,
+          devicesSelected: 0,
+          devicesAttempted: 0,
+          deadlineHit: false,
+          // No device was selected, so there is no read age to report.
+          oldestReadAgeMinutes: null,
+          devicesNeverRead: 0,
+          // No device was attempted, so no stamp was tried.
+          rotationStampFailed: false,
+          heapUsedPeakMb: null,
         } satisfies JoinResult
       }
       // lookbackDays widens the reader's OUTER scan bound (default 7d). Without
@@ -328,6 +335,13 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
         // recomputing it here would let the reported and applied windows diverge.
         // Same `scoped` the cap-signal gate above reads, for the same reason.
         scoped,
+        // Only the scheduled read moves a device to the back of the rotation
+        // (mig 0149). An operator's scoped run did not come from the selection,
+        // and a forced deep read is an operator's out-of-band pass; neither
+        // touches joiner_read_at. telemetry-recovery calls runReadJoiner
+        // directly and never sets it.
+        stampReadAt: !scoped && !deepRescan,
+        startedAtMs: tickStartedAtMs,
       })
     },
     recommendedCron: '*/5 * * * *',
@@ -383,12 +397,11 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
   {
     name: 'telemetry-recovery',
     run: (db, ctx) => runTelemetryRecovery(db, { runId: ctx?.runId ?? null }),
-    // Every 5 minutes, matching azure-monitor-read: a recovery campaign is drained
-    // one budgeted slice per tick, so the cadence IS the drain rate. At rest the
-    // tick is a single indexed SELECT that claims nothing.
+    // Every 5 minutes: a request drains one budget of instance-days per tick, so
+    // the cadence IS the drain rate. At rest the tick is two indexed queries.
     recommendedCron: '*/5 * * * *',
     description:
-      'Drain the admin widened-read queue (mig 0093): re-read scoped instances at a wider reader lookback + deepRescan, in resumable slices, to recover a backlog older than the 7-day default',
+      'Drain widened re-reads one instance-day at a time: operator recoveries and the scheduled daily 7-day pass that recovers late telemetry (mig 0093, 0148)',
   },
   {
     name: 'copilot-pool-bill',
@@ -526,11 +539,11 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
   {
     name: 'governance-recompute',
     run: (db) => runGovernanceRecompute(db),
-    // Periodic catch-up for the open-period chargeback verdict (design §4.1).
-    // Money-adjacent bulk UPDATE — cron/HMAC-only.
+    // Periodic catch-up for the chargeback verdict (design §4.1), resuming from
+    // a persisted cursor. Money-adjacent bulk UPDATE — cron/HMAC-only.
     recommendedCron: '*/15 * * * *',
     description:
-      'Recompute actual_spend.chargeback_exempt for OPEN-period rows from authoritative provider_org/provider_enterprise.billing; personal declarations never participate and closed periods are structurally untouched (docs/design/usage-completeness-and-provider-governance.md §4.1/§8.4)',
+      'Recompute actual_spend.chargeback_exempt in every period from authoritative provider_org/provider_enterprise.billing, resuming from a persisted (date, id) cursor and wrapping to the oldest row at the end; personal declarations never participate (docs/design/usage-completeness-and-provider-governance.md §4.1/§8.4)',
   },
   {
     name: 'github-coverage-sweep',

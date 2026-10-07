@@ -40,7 +40,7 @@ import { evaluateRoleChange, canAssignRole, canModifyHolderOf } from '../../../.
 import { recordAuditEvent } from '../../../../db/audit'
 import { requireUuidParam } from '../../../../utils/require-uuid-param'
 import { ROLES, isRole, type Role } from '../../../../../shared/auth/roles'
-import { endLiveDevicesOf } from '../../../../utils/device-lifecycle'
+import { revokeInteractiveCredentialsOf } from '../../../../auth/emit-revocation'
 
 const Body = z.object({
   role: z.enum(ROLES),
@@ -207,16 +207,13 @@ export default defineEventHandler(async (event) => {
       SET role = ${newRole}, revoked_at = NOW()
       WHERE id = ${target.id}::uuid
     `)
-    // E2 (ADR-0005): role change bumps revoked_at, so eager-cascade-end the
-    // teammate's emit instances too (scope changed → old credential must die).
-    await endLiveDevicesOf(tx as never, target.id)
-    // E2 (ADR-0005): role change ⇒ scope changed ⇒ the old OAuth emit credential
-    // must die too. Eager-revoke the teammate's live oauth_token rows (access +
-    // durable refresh) so they can no longer mint or present emit tokens.
-    await tx.execute(sql`
-      UPDATE oauth_token SET revoked_at = NOW()
-      WHERE teammate_id = ${target.id}::uuid AND revoked_at IS NULL
-    `)
+    // E2 (ADR-0005) as amended by #414: re-validate everything interactive —
+    // read/tag and unbound emit credentials die with the cookie sessions. The
+    // device stays: a device-bound emit credential carries no read scope and
+    // its RLS context is read from this row on every request, so the new role
+    // reaches it live. Ending it here silently stopped the device's telemetry
+    // until a full re-enrolment. revoke-sessions is the path that ends devices.
+    await revokeInteractiveCredentialsOf(tx as never, target.id)
 
     return { previousRole: target.role, newRole }
   })

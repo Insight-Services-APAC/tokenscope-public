@@ -1,7 +1,40 @@
 # TokenScope Claude Code plugin
 
-Attribute Claude Code session tokens to TokenScope projects. The model is
-**connect once (OAuth), then tag each repo**:
+Tracks your Claude Code token usage in TokenScope, so it is billed to the right
+project.
+
+## Quick start
+
+About 5 minutes, once per computer. Do every step in Claude Code.
+Windows: nothing else to install. macOS / Linux: needs Node.js.
+
+1. **Install the plugin.** Run these one at a time:
+
+   ```
+   /plugin marketplace add <owner>/<repo>
+   /plugin install tokenscope@tokenscope
+   ```
+
+   When asked, choose **Install for you**.
+2. **Point the plugin at your server.** Skip this unless your TokenScope Connect
+   dialog shows it. Run `/plugin`, open **tokenscope** → **Configure options**,
+   and paste the server URL.
+3. **Sign in.** Run `/mcp`, choose **tokenscope**, and approve in your browser.
+4. **Turn on tracking.** Run `/tokenscope:setup`.
+5. **Restart Claude Code.**
+6. **Check it works.** Run `/tokenscope:status`. Green means you're done.
+
+Then, in each repo you bill to a project, run the `project` prompt once and
+commit the `.tokenscope` file it writes.
+
+Use the marketplace your TokenScope Connect dialog names for `<owner>/<repo>`.
+Stuck? See [Troubleshooting](#troubleshooting). How each step works:
+[Install](#install), [Point the plugins at your deployment](#point-the-plugins-at-your-deployment)
+and [How setup works](#how-setup-works).
+
+## What the plugin gives you
+
+The model is **connect once, then tag each repo**:
 
 - **`tokenscope-setup`** (MCP prompt) — **run once per device.** Authenticates you
   (one browser OAuth consent) AND provisions emitting: it writes the OTel plumbing
@@ -37,9 +70,8 @@ committed `.tokenscope` and the device is connected (see *Zero-touch tagging*).
 ## Install
 
 The marketplace manifest lives at the **repo root** (`.claude-plugin/marketplace.json`),
-so the GitHub shorthand resolves it. The plugin talks to the deployment whose host
-is baked into it, so add the marketplace of the repository that carries **your**
-deployment's host (normally your fork; see
+so the GitHub shorthand resolves it. Add the marketplace your TokenScope Connect
+dialog names, then set your deployment's URL in the plugin (see
 [Point the plugins at your deployment](#point-the-plugins-at-your-deployment)).
 
 The simplest path — **works inside any Claude Code session, no `claude` CLI on
@@ -48,7 +80,7 @@ one, run it, then the next — Claude Code treats a multi-line paste as a single
 command):
 
 ```
-/plugin marketplace add <your-org>/<your-fork>
+/plugin marketplace add <owner>/<repo>
 /plugin install tokenscope@tokenscope
 ```
 
@@ -63,7 +95,7 @@ form supports `--sparse`, a git sparse-checkout of just `.claude-plugin` + `plug
 so the whole repository isn't checked out:
 
 ```
-claude plugin marketplace add <your-org>/<your-fork> --sparse .claude-plugin plugin
+claude plugin marketplace add <owner>/<repo> --sparse .claude-plugin plugin
 claude plugin install tokenscope@tokenscope
 ```
 
@@ -71,55 +103,70 @@ From a local checkout you can instead `claude plugin marketplace add .`.
 
 ## Point the plugins at your deployment
 
-The API base is **part of the plugin**, not a user setting: it is baked into the
-plugin source, and the server it names returns the OTLP ingestion endpoint and the
-emit credential at provision time. `TOKENSCOPE_API_BASE` is honoured **only** when
-it names loopback (`http://localhost:3450`, for local development). Any other value
-is ignored, because a cloned repository can set that variable and the plugin cannot
-tell a repo-supplied value from one you exported.
+**Claude Code: set the plugin's server URL.** No fork is needed. The plugin
+declares one option, `server_url`. Copy the server URL from your TokenScope
+deployment's Connect dialog, then in Claude Code run `/plugin`, choose
+**tokenscope**, then **Configure**, and paste it (just the address, such as
+`https://tokenscope.your-company.example`, with no path). Restart Claude Code.
 
-To run the plugins against your own TokenScope deployment:
+Claude Code stores the value in your user settings (`~/.claude/settings.json`,
+under `pluginConfigs["tokenscope@<marketplace>"].options.server_url`) and puts it
+into the plugin's MCP server URL (`${user_config.server_url}/api/v1/mcp`). The
+plugin's scripts (setup redeem, enrolment) read the same value from the same
+file, so both halves talk to one server. An organisation can set it for every
+device in managed settings instead (`pluginConfigs` is read from managed and user
+settings).
 
-1. **Fork this repository.**
-2. **Set your host** (for example `https://tokenscope.your-company.example`) in all
-   four places it is baked:
-   - `plugin/scripts/api-base.mjs` — `DEFAULT_API_BASE`
-   - `plugin/.mcp.json` — the literal `url`
-   - `copilot-plugin/.mcp.json` — the literal `url` (Copilot CLI does not expand
-     variables there)
-   - `copilot-plugin/scripts/enroll.mjs` — its own `DEFAULT_API_BASE`
-3. **Check they agree:** `npm run check:copilot-plugin-sync` fails when the four
-   hosts differ, or when the copies in `copilot-plugin/scripts/` drift from
-   `plugin/scripts/`.
-4. **Bump both plugin versions** (`plugin/.claude-plugin/plugin.json`,
-   `copilot-plugin/plugin.json` and the matching entries in
-   `.claude-plugin/marketplace.json`). An installed plugin is replaced only when
-   its version increases, and CI (`scripts/check-plugin-version-bump.mjs`) fails a
-   plugin-code change without a bump.
-5. **Have developers add your fork as the marketplace** (see [Install](#install)).
+A repository cannot set it. From Claude Code 2.1.207, `pluginConfigs` in a
+project's `.claude/settings.json` or `settings.local.json` is ignored, and the
+scripts never read the `CLAUDE_PLUGIN_OPTION_SERVER_URL` variable Claude Code
+exports to hooks, because a repository's `env` can set that too. Older Claude
+Code versions read `pluginConfigs` from project settings, so a cloned repository
+could move their MCP server; the scripts still ignore it there.
 
-**Alternative without a fork (Claude Code):** register your deployment's MCP
-server yourself at user scope. The plugin's scripts discover that registration and
-use its host:
+What the default is depends on the build:
+
+- **This repository's build** defaults `server_url` to the maintainers' Dev
+  deployment, so an install that never configures it keeps working.
+- **The public build** has no default. Until you set it, `claude mcp list` shows
+  *"URL is unset or invalid — open /plugin manage and configure"* and the setup
+  helpers stop with *"No TokenScope server is configured"*.
+
+If you run Claude Code with a custom `CLAUDE_CONFIG_DIR`, the scripts do not see
+the value (they read the account's own `~/.claude/settings.json`, because that
+variable can be set by a repository). Register the server instead:
+`claude mcp add --transport http --scope user tokenscope https://<your-host>/api/v1/mcp`.
+
+**Copilot CLI: register the server.** Copilot has no plugin options. Run the
+`copilot mcp add` command your Connect dialog shows:
 
 ```
-claude mcp add --transport http --scope user tokenscope https://<your-host>/api/v1/mcp
+copilot mcp add --transport http tokenscope https://<your-host>/api/v1/mcp
 ```
 
-Run setup through that server's `tokenscope-setup` prompt. The plugin's own
-bundled MCP server still points at the baked host (and will fail to connect), so
-the fork is the cleaner path for a team.
+The Copilot plugin's scripts discover that registration and use its host.
+
+**Changing the packaged default (maintainers).** The packaged host lives in
+`plugin/.claude-plugin/plugin.json` (`userConfig.server_url.default`),
+`plugin/scripts/api-base.mjs` (`DEFAULT_API_BASE`), `copilot-plugin/.mcp.json`,
+`copilot-plugin/scripts/enroll.mjs` (`DEFAULT_API_BASE`) and `shared/connect.ts`
+(`CLAUDE_PLUGIN_DEFAULT_ORIGIN`, `COPILOT_PLUGIN_BUNDLED_ORIGIN`).
+`npm run check:copilot-plugin-sync` fails when they disagree (the three Claude
+defaults may all be empty, which is the public build),
+or when `plugin/.mcp.json` is anything but the `server_url` template. Bump both
+plugin versions with the change: an installed plugin is replaced only when its
+version increases.
 
 ## Configure
 
 | Var | Default | Purpose |
 |---|---|---|
-| `TOKENSCOPE_API_BASE` | the host baked into `scripts/api-base.mjs` | **Local development only.** Honoured only for a loopback value (`http://localhost:3450`); any other value is ignored. To target another deployment, see [Point the plugins at your deployment](#point-the-plugins-at-your-deployment). It does not move the MCP server: `plugin/.mcp.json` carries a literal URL, because a repository can set this variable. For a local server, register it at user scope with `claude mcp add --transport http --scope user tokenscope http://localhost:3450/api/v1/mcp`; the plugin's scripts discover that registration. |
+| `TOKENSCOPE_API_BASE` | unset | **Local development only.** Honoured only for a loopback value (`http://localhost:3450`); any other value is ignored, because a repository can set this variable. It does not move the MCP server. For a local server, set the plugin's `server_url` to `http://localhost:3450` instead (see [Point the plugins at your deployment](#point-the-plugins-at-your-deployment)); that moves both the MCP server and the scripts. |
 
 Tagging makes **no server call** at write time and needs no env var — the
 `project` prompt resolves the code from your memberships and hashes it locally.
 
-## 1. Connect + provision emitting (once)
+## How setup works
 
 After install, the plugin registers the TokenScope **MCP server**. Authenticate it,
 then run the setup prompt:
@@ -132,8 +179,11 @@ then run the setup prompt:
    the bundled **`claude-redeem.mjs`** helper (Copilot's analogue is `copilot-redeem.mjs`).
    The agent runs that command, which redeems the handoff **locally** (process→server,
    never through the chat) for the durable emit credential and writes it into the
-   **global** `~/.claude/settings.json` (mode 0600, atomic temp+rename), merging in:
-   - `otelHeadersHelper` — absolute path to `scripts/otel-headers-helper.sh`. The
+   **global** `~/.claude/settings.json` (atomic temp+rename; mode 0600 on POSIX,
+   the profile's own ACL on Windows), merging in:
+   - `otelHeadersHelper` — the command that runs the headers helper for the OS:
+     `scripts/otel-headers-helper.sh` on POSIX, `scripts/otel-headers-helper.ps1`
+     under an absolute `powershell.exe` on Windows (ADR-0015). The
      Azure Monitor Bearer can ONLY be configured as a helper via this settings key.
      Claude runs the helper at startup and every ~29 min; it mints a short-lived
      OAuth `tokenscope.emit` access token (refresh-token grant) and presents THAT to
@@ -143,8 +193,12 @@ then run the setup prompt:
      That same request also states what the device is running:
      `X-TokenScope-Plugin-Version` (read from the `plugin.json` beside the helper,
      so it is the version that actually ran) and `X-TokenScope-Client-Version`
-     (the CLI version, from `CLAUDE_CODE_EXECPATH` / `AI_AGENT`). The server
-     records both on `instance_attestation` as **client-asserted diagnostic
+     (the CLI version, from `CLAUDE_CODE_EXECPATH` / `AI_AGENT`), plus
+     `X-TokenScope-Client-Platform` (`<os>-<arch>` from `uname`, in Node's
+     vocabulary: `darwin-arm64`, `linux-x64`, `win32-x64`) and
+     `X-TokenScope-Client-Surface` (`CLAUDE_CODE_ENTRYPOINT`, or `app`/`cli` from
+     Copilot's `AI_AGENT`). The server records them on `instance_attestation` as
+     **client-asserted diagnostic
      hints** — never an authorisation or costing input — so an operator can answer
      "does this device need to update?" from data instead of asking the human. A
      value that cannot be determined is **omitted**, not guessed: the resulting
@@ -162,14 +216,14 @@ then run the setup prompt:
 Restart `claude` to begin emitting. Until a repo is tagged, its sessions emit
 **untagged** and surface in the untagged-spend worklist.
 
-## 2. Tag a repo (per repo)
+## Tag a repo (per repo)
 
 Run the **`project`** MCP prompt in the repo. It lists the projects you can bill,
 you pick one, and it:
 
 - writes a committable `./.tokenscope` (`project.code: <code>`, preserving any
   existing fields) so the tag travels with the repo, then
-- writes the **repo-local** `./.claude/settings.local.json` (mode 0600) with the
+- writes the **repo-local** `./.claude/settings.local.json` (mode 0600 on POSIX) with the
   `otelHeadersHelper` path and ONE env key, `OTEL_RESOURCE_ATTRIBUTES`:
   `tokenscope.instance_id=<DEVICE_SID>,project.code_hash=<sha256(code)>,tool=claude-code`.
   Claude Code merges the `env` blocks **per key**, so every other key (exporter,
@@ -244,9 +298,9 @@ the same verdict in detail; for your spend breakdown use the `usage` prompt /
 The plugin registers a **remote MCP server** (`plugin/.mcp.json`) — a
 streamable-HTTP server at the deployed base + `/api/v1/mcp`, authenticated by
 OAuth 2.1 (no token to paste; the browser consent runs on first connect). It
-points at the same deployment as the rest of the plugin (`scripts/api-base.mjs`).
-Its URL is a literal; for local development, register a local server at user
-scope (see [Configure](#configure)).
+points at the same deployment as the rest of the plugin: its URL is
+`${user_config.server_url}/api/v1/mcp`, the `server_url` option you configure
+(see [Point the plugins at your deployment](#point-the-plugins-at-your-deployment)).
 
 Over MCP the server exposes read tools (`list_my_projects`, `list_activity_types`,
 `my_usage`, `resolve_repo_project`) + a tag tool (`tag_session`), and **prompts**
@@ -266,3 +320,14 @@ Claude-specific surface.
   short-lived access tokens — there is no legacy session token. It is never
   written to a per-repo `settings.local.json` (see "Tag a repo" above): a tagged
   repo's session mints its bearer from the device's own state-dir credential store.
+
+## Troubleshooting
+
+| Problem | What to do |
+| --- | --- |
+| Windows without Node.js | Tracking works. The status line, `/tokenscope:backfill` and tagging sessions from a `.tokenscope` file need Node.js. Without it, a plugin update doesn't update your tracking settings, so run `/tokenscope:setup` again after each update. To get everything, run `winget install OpenJS.NodeJS.LTS`, then `/tokenscope:setup` again. |
+| macOS / Linux: setup says `node: command not found` | Install Node.js (`sudo apt-get install -y nodejs`, `brew install node`, or add it to your container image), then run `/tokenscope:setup` again. |
+| The browser sign-in can't get back to Claude Code | Copy the link the sign-in page shows into Claude Code. |
+| `/mcp` says "URL is unset or invalid" | Set the plugin's server URL ([Point the plugins at your deployment](#point-the-plugins-at-your-deployment)), then restart Claude Code. |
+| `/tokenscope:status` isn't green | Check you restarted Claude Code. In a repo with a `.tokenscope` file, restart once more if you see a "superseded device enrolment" warning. Still not green? Run `/tokenscope:setup` again. |
+| Green, but no usage in TokenScope yet | Usage shows about 5 minutes after you use Claude Code. Status checks the credential, not delivery. |

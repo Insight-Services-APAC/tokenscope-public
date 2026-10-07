@@ -51,6 +51,7 @@ import { homedir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { isMainModule } from './is-main.mjs'
 import https from 'node:https'
 import http from 'node:http'
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
@@ -259,6 +260,8 @@ function httpsPost(urlStr, body) {
           'Content-Type': 'application/json',
           'Content-Length': bodyBuf.length,
           Accept: 'application/json',
+          // Diagnostic only (mig 0150): the Node redeem is the FULL setup.
+          'X-TokenScope-Setup-Mode': 'full',
         },
       },
       (res) => {
@@ -851,9 +854,7 @@ async function main() {
   if (envChange?.changed) {
     const from = envChange.oldLabel ?? 'previous'
     const to = envChange.newLabel ?? 'new'
-    console.log(
-      `[tokenscope] Environment changed: ${from} → ${to} — wrote a fresh config for the new environment (old credentials and endpoints dropped).`,
-    )
+    console.log(`[tokenscope] Environment changed: ${from} → ${to}. Old credentials and endpoints removed.`)
   }
   console.log(`[tokenscope] Wrote credentials to ${TOKENSCOPE_DIR}`)
 
@@ -867,17 +868,16 @@ async function main() {
   //    competing wiring with inconsistent casing/args — B3 fix.)
 
   console.log('')
-  console.log('[tokenscope] ✓ Copilot enrolled successfully.')
-  console.log(`[tokenscope]   Instance ID: ${bundle.instance_id}`)
+  console.log('[tokenscope] ✓ Setup finished for Copilot on this computer.')
   if (armed.extensions === 'manual') {
-    console.log('[tokenscope]   Usage capture needs Copilot extensions enabled (see the message above). Until then only a')
-    console.log('[tokenscope]   terminal that still exports the old variable is captured. Re-run setup once they are enabled.')
+    console.log('[tokenscope]   Copilot extensions are off, so the usage extension cannot track your sessions yet. Turn them on (see above), then run setup again.')
   }
-  console.log('[tokenscope]   Restart copilot: usage is captured by the TokenScope usage extension from the next session.')
+  console.log('[tokenscope]   Next: restart copilot. Tracking starts in the new session.')
+  console.log(`[tokenscope]   Device ${bundle.instance_id}.`)
 }
 
 // Only run main() when executed directly (not when imported as a module for testing).
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isMainModule(import.meta.url)) {
   main().catch((err) => {
     console.error('[tokenscope] Fatal:', err.message)
     process.exit(1)

@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" width="1000" height="560" role="img" aria-labelledby="t d">
+  <title id="t">One consent connects the device, a local helper redeems the emit credential outside the chat, and a committed .tokenscope file tags the repo on a later launch.</title>
+  <desc id="d">Developer device, TokenScope app and Azure Monitor zones. Claude Code opens a browser consent at /api/v1/oauth and gets a read and tag token. The setup prompt calls provision_emit, which returns a single-use handoff code. The local claude-redeem.mjs script posts it to /api/v1/setup/redeem and writes the durable emit credential and OTel settings to ~/.claude/settings.json and the device store. A committed .tokenscope file is hashed by the SessionStart hook into the repo's gitignored .claude/settings.local.json. On the next launch Claude Code emits OTLP log events with a bearer that otel-headers-helper.sh mints through /api/v1/instances/{id}/bearer. The joiner reads OTelLogs and resolves the teammate from the instance id.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="560"/>
+  <rect class="zone" x="16" y="16" width="504" height="528" rx="10"/>
+  <text class="zlabel" x="30" y="38">DEVELOPER DEVICE</text>
+  <rect class="zone" x="546" y="16" width="244" height="528" rx="10"/>
+  <text class="zlabel" x="560" y="38">TOKENSCOPE APP</text>
+  <rect class="zone" x="816" y="16" width="168" height="528" rx="10"/>
+  <text class="zlabel" x="830" y="38">AZURE MONITOR</text>
+
+  <!-- device -->
+  <rect class="node" x="36" y="56" width="200" height="160" rx="6"/>
+  <text class="t" x="136" y="80" text-anchor="middle">Claude Code</text>
+  <text class="s" x="136" y="98" text-anchor="middle">tokenscope plugin</text>
+  <text class="s" x="136" y="128" text-anchor="middle">MCP prompts:</text>
+  <text class="sm" x="136" y="146" text-anchor="middle">tokenscope-setup</text>
+  <text class="sm" x="136" y="162" text-anchor="middle">project</text>
+  <text class="s" x="136" y="190" text-anchor="middle">SessionStart hook</text>
+
+  <rect class="node" x="276" y="56" width="224" height="40" rx="6"/>
+  <text class="t" x="388" y="74" text-anchor="middle">Browser</text>
+  <text class="s" x="388" y="89" text-anchor="middle">Entra session · consent page</text>
+
+  <rect class="node acc" x="276" y="176" width="224" height="40" rx="6"/>
+  <text class="tm" x="388" y="193" text-anchor="middle">claude-redeem.mjs</text>
+  <text class="s acc" x="388" y="208" text-anchor="middle">local process, outside the chat</text>
+
+  <rect class="node" x="36" y="250" width="200" height="66" rx="6"/>
+  <text class="tm" x="136" y="270" text-anchor="middle">~/.claude/settings.json</text>
+  <text class="s" x="136" y="288" text-anchor="middle">OTEL_* · otelHeadersHelper</text>
+  <text class="s" x="136" y="305" text-anchor="middle">instance_id · emit credential</text>
+
+  <rect class="node" x="276" y="250" width="224" height="66" rx="6"/>
+  <text class="tm" x="388" y="270" text-anchor="middle">~/.tokenscope/</text>
+  <text class="tm" x="388" y="286" text-anchor="middle">config.claude-code.json</text>
+  <text class="s" x="388" y="305" text-anchor="middle">device store · emit credential · 0600</text>
+
+  <rect class="node" x="36" y="350" width="200" height="50" rx="6"/>
+  <text class="tm" x="136" y="371" text-anchor="middle">.tokenscope</text>
+  <text class="s" x="136" y="389" text-anchor="middle">committed · project code</text>
+
+  <rect class="node" x="276" y="350" width="224" height="50" rx="6"/>
+  <text class="tm" x="388" y="371" text-anchor="middle">.claude/settings.local.json</text>
+  <text class="s" x="388" y="389" text-anchor="middle">gitignored · project.code_hash</text>
+
+  <rect class="node" x="36" y="440" width="200" height="50" rx="6"/>
+  <text class="t" x="136" y="461" text-anchor="middle">claude, next launch</text>
+  <text class="s" x="136" y="479" text-anchor="middle">OTLP api_request log events</text>
+
+  <rect class="node" x="276" y="440" width="224" height="50" rx="6"/>
+  <text class="tm" x="388" y="461" text-anchor="middle">otel-headers-helper.sh</text>
+  <text class="s" x="388" y="479" text-anchor="middle">refresh → emit token → bearer</text>
+
+  <!-- app -->
+  <rect class="node" x="566" y="56" width="204" height="40" rx="6"/>
+  <text class="tm" x="668" y="74" text-anchor="middle">/api/v1/oauth/*</text>
+  <text class="s" x="668" y="89" text-anchor="middle">PKCE · read + tag scopes</text>
+
+  <rect class="node" x="566" y="116" width="204" height="40" rx="6"/>
+  <text class="tm" x="668" y="134" text-anchor="middle">provision_emit</text>
+  <text class="s" x="668" y="149" text-anchor="middle">MCP tool · handoff code, ~5 min</text>
+
+  <rect class="node" x="566" y="176" width="204" height="40" rx="6"/>
+  <text class="tm" x="668" y="194" text-anchor="middle">/api/v1/setup/redeem</text>
+  <text class="s" x="668" y="209" text-anchor="middle">single-use claim</text>
+
+  <rect class="node" x="566" y="350" width="204" height="50" rx="6"/>
+  <text class="t" x="668" y="371" text-anchor="middle">Read joiner</text>
+  <text class="s" x="668" y="389" text-anchor="middle">teammate ← instance_id</text>
+
+  <rect class="node" x="566" y="440" width="204" height="50" rx="6"/>
+  <text class="tm" x="668" y="461" text-anchor="middle">/instances/{id}/bearer</text>
+  <text class="s" x="668" y="479" text-anchor="middle">emit scope → MI token</text>
+
+  <!-- azure -->
+  <rect class="node" x="832" y="350" width="136" height="50" rx="6"/>
+  <text class="tm" x="900" y="371" text-anchor="middle">log-&lt;name&gt;</text>
+  <text class="s" x="900" y="389" text-anchor="middle">OTelLogs</text>
+  <rect class="node" x="832" y="440" width="136" height="50" rx="6"/>
+  <text class="t" x="900" y="461" text-anchor="middle">DCE + DCR</text>
+  <text class="s" x="900" y="479" text-anchor="middle">logs ingestion</text>
+
+  <!-- 1 consent -->
+  <line class="e" x1="236" y1="76" x2="270" y2="76" marker-end="url(#ah)"/>
+  <line class="e" x1="500" y1="76" x2="560" y2="76" marker-end="url(#ah)"/>
+  <circle class="cn" cx="530" cy="76" r="10"/><text class="cnt" x="530" y="80" text-anchor="middle">1</text>
+  <!-- 2 provision -->
+  <line class="e" x1="236" y1="136" x2="560" y2="136" marker-end="url(#ah)"/>
+  <circle class="cn" cx="388" cy="136" r="10"/><text class="cnt" x="388" y="140" text-anchor="middle">2</text>
+  <text class="lbl" x="440" y="130">handoff code</text>
+  <!-- 3 redeem -->
+  <line class="e" x1="236" y1="196" x2="270" y2="196" marker-end="url(#ah)"/>
+  <line class="e accent" x1="500" y1="196" x2="560" y2="196" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="530" cy="196" r="10"/><text class="cnt accent" x="530" y="200" text-anchor="middle">3</text>
+  <line class="e accent" x1="388" y1="216" x2="388" y2="244" marker-end="url(#ah-acc)"/>
+  <polyline class="e accent" points="310,216 310,233 136,233 136,244" marker-end="url(#ah-acc)"/>
+  <!-- 4 tag -->
+  <line class="e" x1="236" y1="375" x2="270" y2="375" marker-end="url(#ah)"/>
+  <circle class="cn" cx="256" cy="352" r="10"/><text class="cnt" x="256" y="356" text-anchor="middle">4</text>
+  <line class="e dashed" x1="236" y1="300" x2="300" y2="344" marker-end="url(#ah)"/>
+  <text class="lbl" x="232" y="334" text-anchor="end">instance_id</text>
+  <!-- 5 startup -->
+  <polyline class="e" points="388,400 388,420 136,420 136,434" marker-end="url(#ah)"/>
+  <circle class="cn" cx="260" cy="420" r="10"/><text class="cnt" x="260" y="424" text-anchor="middle">5</text>
+  <text class="lbl" x="280" y="433">read at startup</text>
+  <!-- 6 bearer -->
+  <line class="e" x1="236" y1="465" x2="270" y2="465" marker-end="url(#ah)"/>
+  <line class="e" x1="500" y1="465" x2="560" y2="465" marker-end="url(#ah)"/>
+  <circle class="cn" cx="530" cy="465" r="10"/><text class="cnt" x="530" y="469" text-anchor="middle">6</text>
+  <!-- 7 emit -->
+  <polyline class="e" points="136,490 136,520 900,520 900,496" marker-end="url(#ah)"/>
+  <circle class="cn" cx="530" cy="520" r="10"/><text class="cnt" x="530" y="524" text-anchor="middle">7</text>
+  <text class="lbl" x="560" y="512">OTLP + bearer · instance_id, code_hash</text>
+  <line class="e" x1="900" y1="440" x2="900" y2="406" marker-end="url(#ah)"/>
+  <!-- 8 join -->
+  <line class="e" x1="832" y1="375" x2="776" y2="375" marker-end="url(#ah)"/>
+  <circle class="cn" cx="804" cy="375" r="10"/><text class="cnt" x="804" y="379" text-anchor="middle">8</text>
+</svg>

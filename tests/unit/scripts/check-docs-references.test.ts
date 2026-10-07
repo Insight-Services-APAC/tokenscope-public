@@ -101,6 +101,67 @@ describe('check-docs-references', () => {
     expect(messages()).toEqual([])
   })
 
+  describe('wiki diagrams', () => {
+    const svg = (body = '') =>
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="10" height="10" role="img"><title>t</title><desc>d</desc>` +
+      `<style>@media (prefers-color-scheme: dark) { svg { --bg: #000; } }</style>` +
+      `<line marker-end="url(#ah)"/>${body}</svg>`
+
+    it('passes a page whose image exists and is a self-contained SVG', () => {
+      write('docs/wiki/images/flow.svg', svg())
+      write('docs/wiki/Page.md', '![the claim](images/flow.svg)\n')
+      expect(messages()).toEqual([])
+    })
+
+    it('reports a mermaid block unless it is marked as kept', () => {
+      write('docs/wiki/Page.md', '```mermaid\nflowchart LR\n```\n')
+      expect(messages().join('\n')).toContain('docs/wiki/Page.md: mermaid block in the wiki')
+      write('docs/wiki/Page.md', '<!-- docs-check: keep-mermaid (an ER diagram) -->\n```mermaid\nerDiagram\n```\n')
+      expect(messages()).toEqual([])
+    })
+
+    it('reports a missing image, an unreferenced one and a name the wiki workflow would not copy', () => {
+      write('docs/wiki/Page.md', '![gone](images/gone.svg)\n')
+      write('docs/wiki/images/orphan.svg', svg())
+      write('docs/wiki/images/has space.svg', svg())
+      const m = messages().join('\n')
+      expect(m).toContain('image "images/gone.svg" does not exist')
+      expect(m).toContain('docs/wiki/images/orphan.svg: no wiki page references this image')
+      expect(m).toContain('docs/wiki/images/has space.svg: only files named')
+    })
+
+    it('reports an image outside docs/wiki/images, which the workflow never publishes', () => {
+      write('infra/diagram.png', 'x')
+      write('docs/wiki/Page.md', '![a](../../infra/diagram.png)\n')
+      expect(messages().join('\n')).toContain('image "../../infra/diagram.png" is outside docs/wiki/images/')
+    })
+
+    it('reports a single-quoted external href', () => {
+      write('docs/wiki/images/q.svg', svg("<image href='https://x.test/a.png'/>"))
+      write('docs/wiki/Page.md', '![q](images/q.svg)\n')
+      expect(messages().join('\n')).toContain('docs/wiki/images/q.svg: SVG contains an external href')
+    })
+
+    it('reports an SVG that would not render standalone through <img>', () => {
+      write('docs/wiki/images/bad.svg', '<svg viewBox="0 0 1 1"><script>x()</script><image href="https://x.test/a.png"/><rect style="fill:url(https://x.test/p)"/></svg>')
+      write('docs/wiki/Page.md', '![bad](images/bad.svg)\n')
+      const m = messages().join('\n')
+      for (const what of ['a width', 'role="img"', 'a <title>', 'a <desc>', 'prefers-color-scheme', '<script>', 'an external href', 'an external url()']) {
+        expect(m).toContain(what)
+      }
+    })
+
+    it('reports a deployed resource name in a public diagram but not in one the publish drops', () => {
+      write('docs/wiki/images/pub.svg', svg('<text>ca-tokenscope-example</text>'))
+      write('docs/wiki/images/internal.svg', svg('<text>log-ops-tokenscope-dev-wus3</text>'))
+      write('docs/wiki/Page.md', '![a](images/pub.svg) ![b](images/internal.svg) and ca-&lt;name&gt; is fine\n')
+      write('tools/publish/internal-only-paths.txt', 'docs/wiki/images/internal.svg\n')
+      const m = messages()
+      expect(m).toHaveLength(1)
+      expect(m[0]).toContain('docs/wiki/images/pub.svg: public diagram names a deployed resource ("ca-tokenscope-example")')
+    })
+  })
+
   it('exits 1 with findings and 0 when clean', () => {
     const clean = spawnSync(process.execPath, [SCRIPT, '--root', root], { encoding: 'utf8' })
     expect(clean.status).toBe(0)

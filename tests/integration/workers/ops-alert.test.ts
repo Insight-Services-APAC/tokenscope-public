@@ -29,7 +29,7 @@ import {
   isOpsAlertReason,
   type OpsAlertPayload,
 } from '../../../shared/ops-alert/conditions'
-import type { ReaderHealth } from '../../../server/azure/reader'
+import type { IngestionLast24h, ReaderHealth } from '../../../server/azure/reader'
 import type { NetCheckReport, NetCheckRecord } from '../../../server/azure/network-check'
 import * as schema from '../../../drizzle/schema'
 
@@ -160,13 +160,27 @@ function netReport(records: NetCheckRecord[]): NetCheckReport {
 
 const okNetwork = async () => netReport([])
 
+// The cap lane's defaults: a 2 GB cap and a quiet day, so it raises nothing and
+// is never indeterminate unless a test says otherwise.
+const ingestionMb = (megabytes: number | null) => async (): Promise<IngestionLast24h> => ({
+  megabytes,
+  kind: 'log-analytics',
+  latencyMs: 1,
+  ...(megabytes === null ? { error: 'query status=PartialFailure' } : {}),
+})
+const quietIngestion = ingestionMb(10)
+const CAP_GB = 2
+
 interface RunOver {
   at?: Date
   telemetry?: () => Promise<ReaderHealth>
   network?: () => Promise<NetCheckReport>
+  ingestion?: () => Promise<IngestionLast24h>
+  capGb?: number | null
   workers?: OpsAlertOpts['workers']
   thresholds?: OpsAlertOpts['thresholds']
   stallLoaders?: OpsAlertOpts['stallLoaders']
+  durationEvaluator?: OpsAlertOpts['durationEvaluator']
   probeTimeoutMs?: number
   telemetryProbeTimeoutMs?: number
   totalDeadlineMs?: number
@@ -182,10 +196,13 @@ async function run(over: RunOver) {
     probes: {
       telemetryRead: over.telemetry ?? okReader,
       network: over.network ?? okNetwork,
+      telemetryIngestion: over.ingestion ?? quietIngestion,
     },
+    telemetryDailyCapGb: over.capGb !== undefined ? over.capGb : CAP_GB,
     workers: over.workers ?? [],
     thresholds: over.thresholds,
     ...(over.stallLoaders !== undefined ? { stallLoaders: over.stallLoaders } : {}),
+    ...(over.durationEvaluator !== undefined ? { durationEvaluator: over.durationEvaluator } : {}),
     ...(over.probeTimeoutMs !== undefined ? { probeTimeoutMs: over.probeTimeoutMs } : {}),
     ...(over.telemetryProbeTimeoutMs !== undefined
       ? { telemetryProbeTimeoutMs: over.telemetryProbeTimeoutMs }
@@ -217,6 +234,15 @@ async function insertRun(worker: string, status: string, startedAtMs: number, ro
     INSERT INTO worker_run (worker_name, status, started_at, finished_at, rows_affected, result)
     VALUES (${worker}, ${status}, ${started}::timestamptz, ${finished}::timestamptz, ${rowsAffected},
             ${status === 'running' ? null : '{"sessionsProcessed":5,"errors":0}'}::jsonb)
+  `
+}
+
+async function insertTimedRun(worker: string, status: string, startedAtMs: number, durationMs: number | null): Promise<void> {
+  const started = new Date(startedAtMs).toISOString()
+  await t.client`
+    INSERT INTO worker_run (worker_name, status, started_at, finished_at, duration_ms)
+    VALUES (${worker}, ${status}, ${started}::timestamptz,
+            ${status === 'running' ? null : started}::timestamptz, ${durationMs})
   `
 }
 
@@ -420,6 +446,70 @@ describe('recovery is DELIVERED-only (ar-M15)', () => {
     const retried = await run({ notify: notify.fn, at: new Date(NOW.getTime() + 60 * MIN) })
     expect(retried.recoveries).toBe(1)
     expect(await kvState('telemetry-read')).toBeNull()
+  })
+})
+
+/*
+ * A warning is announced to the inbox, never pushed — so its recovery must not
+ * push either: a phone that never buzzed for the raise must not buzz for the
+ * all-clear. Only an episode that reached the channel recovers on the channel.
+ */
+describe('recovery is pushed only when the raise was (warnings recover in the inbox)', () => {
+  const rec = { name: 'ft-rec', recommendedCron: '*/15 * * * *' }
+  const at = (min: number) => new Date(NOW.getTime() + min * MIN)
+
+  it('a per-worker WARNING recovers with no push: inbox resolved, key dropped, audited as suppressed', async () => {
+    const notify = mkNotify()
+    await insertRun('ft-rec', 'failure', NOW.getTime() - 10 * MIN)
+    await insertRun('ft-rec', 'failure', NOW.getTime() - 25 * MIN)
+    await armAndPage({ notify: notify.fn, workers: [rec] }) // announced at NOW+15, inbox only
+    expect(await kvState('worker:ft-rec')).toMatchObject({ delivered: true, channelDelivered: false })
+    expect((await openOpsItems('worker:ft-rec')).length).toBe(1)
+
+    await t.client`DELETE FROM worker_run WHERE worker_name = 'ft-rec'`
+    await run({ notify: notify.fn, workers: [rec], at: at(30) }) // clear run 1
+    const recovered = await run({ notify: notify.fn, workers: [rec], at: at(45) })
+    expect(notify.calls.length, 'neither the raise nor the recovery reached the phone').toBe(0)
+    expect(recovered.recoveries).toBe(0)
+    expect(recovered.suppressed).toBe(1)
+    expect(await kvState('worker:ft-rec')).toBeNull()
+    expect((await openOpsItems('worker:ft-rec')).length).toBe(0)
+    expect(await auditCount('ops-alert-recovered', 'worker:ft-rec')).toBe(0)
+  })
+
+  it('state persisted before the field existed: a warning is read as never pushed, a critical as pushed', async () => {
+    const notify = mkNotify()
+    const legacy = (severity: 'warning' | 'critical') =>
+      JSON.stringify({ severity, activeRuns: 2, delivered: true, lastSentAtMs: NOW.getTime(), clearRuns: 1 })
+    await t.client`INSERT INTO kv_store (mount, key, value) VALUES
+      ('ops-alert', 'worker:ft-rec', ${legacy('warning')}),
+      ('ops-alert', 'telemetry-read', ${legacy('critical')})`
+
+    const res = await run({ notify: notify.fn, workers: [rec], at: at(15) })
+    expect(notify.calls.map((c) => c.payload.condition)).toEqual(['telemetry-read'])
+    expect(res.recoveries).toBe(1)
+    expect(res.suppressed).toBe(1)
+    expect(await kvCount()).toBe(0)
+  })
+
+  it('one systemic failure: the pushed CRITICAL recovers on the phone, its per-worker warnings in the inbox only', async () => {
+    const notify = mkNotify()
+    const fleet = ['ft-a', 'ft-b', 'ft-c', 'ft-d'].map((name) => ({ name, recommendedCron: '*/15 * * * *' }))
+    for (const w of fleet) {
+      await insertRun(w.name, 'failure', NOW.getTime() - 10 * MIN)
+      await insertRun(w.name, 'failure', NOW.getTime() - 25 * MIN)
+    }
+    // The critical worker-fleet page goes out on the second tick.
+    await armAndPage({ notify: notify.fn, workers: fleet, thresholds: { fleetThreshold: 4 } })
+    expect(notify.calls.length).toBe(1)
+    await t.client`DELETE FROM worker_run`
+    await run({ notify: notify.fn, workers: fleet, at: at(30) })
+    const res = await run({ notify: notify.fn, workers: fleet, at: at(45) })
+    expect(res.recoveries).toBe(1)
+    expect(notify.calls.map((c) => [c.kind, c.payload.condition])).toEqual([
+      ['alert', 'worker-fleet'],
+      ['recovered', 'worker-fleet'],
+    ])
   })
 })
 
@@ -900,7 +990,7 @@ describe('persisted kv rows are validated before entering the state machine (ar-
 describe('every raised severity carries a reason (D1)', () => {
   it('EVERY condition the evaluator can raise, in one run, names why — none is bare', async () => {
     const notify = mkNotify()
-    // Arm all four raisable lanes at once (channel-test is the A7 deploy-time
+    // Arm every raisable lane at once (channel-test is the A7 deploy-time
     // ping and is never raised by this worker — asserted below; inbox-aging was
     // retired with this change).
     const fleet = ['d1-a', 'd1-b', 'd1-c', 'd1-d'].map((name) => ({ name, recommendedCron: '*/15 * * * *' }))
@@ -918,11 +1008,15 @@ describe('every raised severity carries a reason (D1)', () => {
                 0, '{"sessionsProcessed":5,"attributionRowsWritten":0,"errors":0,"newEventsSeen":5,"sourceCoverage":{"status":"rows-arrived","rowsReceived":42}}'::jsonb)
       `
     }
+    // A slow-but-succeeding worker for worker-duration.
+    await insertTimedRun('d1-slow', 'success', NOW.getTime() - 5 * MIN, 190_000)
+    await insertTimedRun('d1-slow', 'success', NOW.getTime() - 65 * MIN, 185_000)
     const res = await run({
       notify: notify.fn,
       telemetry: classifiedFailReader,
       network: async () => netReport([mkNetRecord({ verdict: 'unreachable' })]),
-      workers: fleet,
+      ingestion: ingestionMb(1_900),
+      workers: [...fleet, { name: 'd1-slow', recommendedCron: '0 * * * *' }],
       thresholds: { fleetThreshold: 4 },
     })
 
@@ -931,7 +1025,9 @@ describe('every raised severity carries a reason (D1)', () => {
       [
         'attribution-stall',
         'probe-network',
+        'telemetry-cap',
         'telemetry-read',
+        'worker-duration',
         'worker-fleet',
         ...fleet.map((w) => `worker:${w.name}`),
       ].sort(),
@@ -952,6 +1048,8 @@ describe('every raised severity carries a reason (D1)', () => {
     expect(res.conditions['attribution-stall']!.reason).toBe('source-backlog')
     expect(res.conditions['worker-fleet']!.reason).toBe('workers-failing')
     expect(res.conditions['worker:d1-a']!.reason).toBe('worker-failing')
+    expect(res.conditions['worker-duration']!.reason).toBe('near-dispatch-budget')
+    expect(res.conditions['telemetry-cap']!.reason).toBe('ingestion-near-cap')
     // channel-test is the deploy-time ping, not an evaluator verdict — but its
     // reason is still in the vocabulary, so the A7 sender can name itself.
     expect(res.conditions['channel-test']).toBeUndefined()
@@ -1044,5 +1142,169 @@ describe('an indeterminate lane freezes its keys (A3)', () => {
     expect(res2.statesDeleted).toBe(0)
     expect(notify.calls.length).toBe(1)
     expect(await kvState('attribution-stall')).toEqual(stateAfterDelivery)
+  })
+})
+
+/*
+ * worker-duration is a warning; worker-fleet is the critical page. They read the
+ * same table, but a slow or failing duration read must never cost the fleet its
+ * verdict: each is its own lane with its own bound.
+ */
+describe('the duration lane cannot blind the fleet lane', () => {
+  const fleet = ['ft-a', 'ft-b', 'ft-c', 'ft-d'].map((name) => ({ name, recommendedCron: '*/15 * * * *' }))
+  const throwing = async (): Promise<string[]> => {
+    throw new Error('injected duration-lane failure')
+  }
+  const at = (min: number) => new Date(NOW.getTime() + min * MIN)
+
+  it('a THROWING duration read: worker-fleet still raises, pages, and recovers', async () => {
+    const notify = mkNotify()
+    for (const w of fleet) {
+      await insertRun(w.name, 'failure', NOW.getTime() - 10 * MIN)
+      await insertRun(w.name, 'failure', NOW.getTime() - 25 * MIN)
+    }
+    const over = { notify: notify.fn, workers: fleet, thresholds: { fleetThreshold: 4 }, durationEvaluator: throwing }
+    const res1 = await run(over)
+    expect(res1.indeterminate).toEqual(['duration'])
+    expect(res1.conditions['worker-fleet']).toMatchObject({ severity: 'critical', count: 4 })
+    const res2 = await run({ ...over, at: pagedAt(over) })
+    expect(res2.sent).toBe(1)
+
+    await t.client`DELETE FROM worker_run`
+    await run({ ...over, at: at(30) })
+    const res4 = await run({ ...over, at: at(45) })
+    expect(res4.recoveries).toBe(1)
+    expect(notify.calls.map((c) => c.kind)).toEqual(['alert', 'recovered'])
+  })
+
+  it('a HUNG duration read times out alone: the fleet verdict is reached on the same tick', async () => {
+    const notify = mkNotify()
+    for (const w of fleet) {
+      await insertRun(w.name, 'failure', NOW.getTime() - 10 * MIN)
+      await insertRun(w.name, 'failure', NOW.getTime() - 25 * MIN)
+    }
+    const res = await run({
+      notify: notify.fn,
+      workers: fleet,
+      thresholds: { fleetThreshold: 4 },
+      probeTimeoutMs: 2_000,
+      durationEvaluator: () => new Promise<string[]>(() => {}),
+    })
+    expect(res.indeterminate).toEqual(['duration'])
+    expect(res.conditions['worker-fleet']).toMatchObject({ severity: 'critical', count: 4 })
+  })
+})
+
+describe('worker-duration: two consecutive runs near or over the dispatch budget (scaling plan 0.3)', () => {
+  const hourly = [{ name: 'slow-w', recommendedCron: '0 * * * *' }]
+  // DISPATCH_TIMEOUT_MS is 200 s and DISPATCH_NEAR_FRACTION 0.8: 160 s is near, 200 s is over.
+  const NEAR = 165_000
+  const OVER = 205_000
+  const OK = 30_000
+
+  it('holds when the two latest measured runs are near and over, as a warning: inbox, never the phone', async () => {
+    const notify = mkNotify()
+    await insertTimedRun('slow-w', 'success', NOW.getTime() - 10 * MIN, NEAR)
+    await insertTimedRun('slow-w', 'failure', NOW.getTime() - 70 * MIN, OVER)
+
+    const res1 = await run({ notify: notify.fn, workers: hourly })
+    expect(res1.conditions['worker-duration']).toEqual({ severity: 'warning', reason: 'near-dispatch-budget', count: 1 })
+
+    const res2 = await run({ notify: notify.fn, workers: hourly, at: pagedAt({ notify: notify.fn }) })
+    expect(res2.suppressed).toBe(1)
+    expect(notify.calls.length, 'a warning never pushes').toBe(0)
+    expect(await kvState('worker-duration')).toMatchObject({ severity: 'warning', delivered: true })
+    const items = await openOpsItems('worker-duration')
+    expect(items).toHaveLength(1)
+    expect(items[0]!.severity).toBe('attention')
+    expect(items[0]!.body).toMatchObject({ reason: 'near-dispatch-budget', count: 1 })
+  })
+
+  it('does not hold on ONE near run', async () => {
+    const notify = mkNotify()
+    await insertTimedRun('slow-w', 'success', NOW.getTime() - 10 * MIN, NEAR)
+    const res = await run({ notify: notify.fn, workers: hourly })
+    expect(res.conditions['worker-duration']).toBeUndefined()
+  })
+
+  it('does not hold when the LATEST run is ok, however slow the ones before it', async () => {
+    const notify = mkNotify()
+    await insertTimedRun('slow-w', 'success', NOW.getTime() - 10 * MIN, OK)
+    await insertTimedRun('slow-w', 'success', NOW.getTime() - 70 * MIN, OVER)
+    await insertTimedRun('slow-w', 'success', NOW.getTime() - 130 * MIN, OVER)
+    const res = await run({ notify: notify.fn, workers: hourly })
+    expect(res.conditions['worker-duration']).toBeUndefined()
+  })
+
+  it('skips runs with no recorded duration and running rows, and pairs the two measured ones', async () => {
+    const notify = mkNotify()
+    await insertTimedRun('slow-w', 'running', NOW.getTime() - 2 * MIN, null)
+    await insertTimedRun('slow-w', 'failure', NOW.getTime() - 10 * MIN, null) // reaped: no duration
+    await insertTimedRun('slow-w', 'success', NOW.getTime() - 70 * MIN, NEAR)
+    await insertTimedRun('slow-w', 'success', NOW.getTime() - 130 * MIN, NEAR)
+    const res = await run({ notify: notify.fn, workers: hourly })
+    expect(res.conditions['worker-duration']).toMatchObject({ count: 1 })
+  })
+
+  it('counts each holding worker once, and ignores a worker outside the evaluated fleet', async () => {
+    const notify = mkNotify()
+    for (const w of ['slow-a', 'slow-b', 'not-in-fleet']) {
+      await insertTimedRun(w, 'success', NOW.getTime() - 10 * MIN, OVER)
+      await insertTimedRun(w, 'success', NOW.getTime() - 70 * MIN, NEAR)
+    }
+    const res = await run({
+      notify: notify.fn,
+      workers: [
+        { name: 'slow-a', recommendedCron: '0 * * * *' },
+        { name: 'slow-b', recommendedCron: '0 * * * *' },
+      ],
+    })
+    expect(res.conditions['worker-duration']).toMatchObject({ count: 2 })
+  })
+})
+
+describe('telemetry-cap: billable ingestion against the workspace daily cap (scaling plan 0.5)', () => {
+  // 2 GB cap = 2000 MB (Usage.Quantity is MB, 1000 MB to the GB); 80% = 1600 MB.
+  it('holds at 80% of the cap as a CRITICAL that pages, with the percent as its count', async () => {
+    const notify = mkNotify()
+    const over = { notify: notify.fn, ingestion: ingestionMb(1_600) }
+    const res1 = await run(over)
+    expect(res1.conditions['telemetry-cap']).toEqual({ severity: 'critical', reason: 'ingestion-near-cap', count: 80 })
+    expect(res1.telemetryIngestion).toEqual({ megabytesLast24h: 1_600, capGb: CAP_GB })
+    const res2 = await run({ ...over, at: pagedAt(over) })
+    expect(res2.sent).toBe(1)
+    expect(notify.calls[0]!.payload).toMatchObject({ severity: 'critical', condition: 'telemetry-cap', count: 80 })
+  })
+
+  it('does not hold just under 80%', async () => {
+    const notify = mkNotify()
+    const res = await run({ notify: notify.fn, ingestion: ingestionMb(1_599.9) })
+    expect(res.conditions['telemetry-cap']).toBeUndefined()
+    expect(res.indeterminate).not.toContain('telemetry-cap')
+  })
+
+  it.each([
+    ['a read with no number', { ingestion: ingestionMb(null) }],
+    ['a read that throws', { ingestion: async (): Promise<IngestionLast24h> => { throw new Error('injected') } }],
+    ['an unsupported reader', { ingestion: async (): Promise<IngestionLast24h> => ({ megabytes: null, kind: 'local', latencyMs: 0, error: 'unsupported' }) }],
+    ['no cap configured', { capGb: null }],
+  ])('%s is indeterminate: never zero, never a cleared condition', async (_label, lane) => {
+    const notify = mkNotify()
+    // Ticks 1-2: a real near-cap reading, delivered.
+    const held = { notify: notify.fn, ingestion: ingestionMb(1_900) }
+    await armAndPage(held)
+    const delivered = await kvState('telemetry-cap')
+    expect(delivered).toMatchObject({ delivered: true, severity: 'critical' })
+
+    // Two later ticks that cannot read the volume: recovery needs one full clear
+    // run and then a send, so two indeterminate ticks would have recovered it.
+    for (const later of [45, 60]) {
+      const res = await run({ notify: notify.fn, at: new Date(NOW.getTime() + later * MIN), ...lane })
+      expect(res.indeterminate).toContain('telemetry-cap')
+      expect(res.conditions['telemetry-cap']).toBeUndefined()
+      expect(res.recoveries).toBe(0)
+    }
+    expect(await kvState('telemetry-cap')).toEqual(delivered)
+    expect(notify.calls.map((c) => c.kind)).toEqual(['alert'])
   })
 })

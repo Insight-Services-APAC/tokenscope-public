@@ -92,7 +92,15 @@ describe('buildNtfyPayload — the ar-H9 allowlist', () => {
 describe('condition constants (design A1/A2)', () => {
   it('pins the fixed condition keys', () => {
     expect(Object.values(OPS_ALERT_CONDITION).sort()).toEqual(
-      ['attribution-stall', 'channel-test', 'probe-network', 'telemetry-read', 'worker-fleet'].sort(),
+      [
+        'attribution-stall',
+        'channel-test',
+        'probe-network',
+        'telemetry-cap',
+        'telemetry-read',
+        'worker-duration',
+        'worker-fleet',
+      ].sort(),
     )
     expect(workerConditionKey('azure-monitor-read')).toBe('worker:azure-monitor-read')
   })
@@ -116,6 +124,8 @@ describe('OpsAlertReason — the CLOSED reason vocabulary (D1)', () => {
         'coverage-unknown-bearer-fresh',
         'workers-failing',
         'worker-failing',
+        'near-dispatch-budget',
+        'ingestion-near-cap',
         'items-aged',
         'manual-test',
         // Unioned in from redact-probe-error's classifier, never restated.

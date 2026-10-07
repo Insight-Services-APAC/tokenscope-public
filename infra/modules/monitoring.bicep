@@ -27,7 +27,7 @@ param location string
 @allowed(['sandbox', 'dev', 'staging', 'production'])
 param environment string
 
-@description('Daily ingestion cap in GB for Log Analytics (cost guard).')
+@description('Daily ingestion cap in GB, applied to EACH Log Analytics workspace (cost guard). Per workspace on purpose: a platform-log flood cannot use up the cap that OTel ingestion depends on.')
 @minValue(1)
 param dailyIngestionCapGb int = 2
 
@@ -58,6 +58,9 @@ param useCentralAmpls bool = false
 @description('Resource ID of the central AMPLS to point OUR private endpoint at, for when the central PE is not reachable from our VNet. Read only when useCentralAmpls. Empty (default) = create no PE either and reach the central scope over the scope owner\'s own PE. Two prerequisites: privateEndpointSubnetId must be set (no subnet, no PE — the id is otherwise ignored in silence), and no PE of the same name may already point at a different scope, because privateLinkServiceId is IMMUTABLE — Azure rejects the retarget, so delete that PE first. Cross-subscription: the connection lands Pending until the scope owner approves it.')
 param centralAmplsResourceId string = ''
 
+@description('Send the platform\'s OWN logs (Container Apps console/system logs, resource diagnostic settings, log alert rules) to a second workspace, log-ops-<name>, whose query path is public and governed by Entra RBAC. The telemetry workspace keeps the OTel streams the DCR ingests and the Application Insights component that DCR enriches with. Wanted wherever enableQueryPrivateLink is on: query privacy is workspace-wide, so without this the crash logs of the app are readable only by the app.')
+param separateOpsWorkspace bool = false
+
 // ── Log Analytics Workspace ─────────────────────────────────────────
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
@@ -81,6 +84,28 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
     publicNetworkAccessForQuery: enableQueryPrivateLink ? 'Disabled' : 'Enabled'
   }
 }
+
+// ── Ops Log Analytics Workspace (platform logs, human-queryable) ────
+// Never joined to an AMPLS: operators query it from the portal under Entra RBAC.
+
+resource opsLogAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = if (separateOpsWorkspace) {
+  name: 'log-ops-${name}'
+  location: location
+  tags: tags
+  properties: {
+    sku: {
+      name: 'PerGB2018'
+    }
+    retentionInDays: environment == 'production' ? 90 : 30
+    workspaceCapping: {
+      dailyQuotaGb: dailyIngestionCapGb
+    }
+    publicNetworkAccessForIngestion: 'Enabled'
+    publicNetworkAccessForQuery: 'Enabled'
+  }
+}
+
+var opsWorkspaceId = separateOpsWorkspace ? opsLogAnalytics!.id : logAnalytics.id
 
 // ── Azure Monitor Private Link Scope (private QUERY, public INGEST) ──
 // ingestionAccessMode=Open keeps the DCE/ingest path public; queryAccessMode=
@@ -145,6 +170,8 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   kind: 'web'
   properties: {
     Application_Type: 'web'
+    // Telemetry workspace even when split: the OTLP DCR enriches its streams
+    // with this component.
     WorkspaceResourceId: logAnalytics.id
     SamplingPercentage: 100
   }
@@ -500,14 +527,26 @@ resource dependencyFailureAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
 
 // ── Outputs ──────────────────────────────────────────────────────────
 
-@description('Log Analytics workspace resource ID.')
+@description('TELEMETRY workspace resource ID (the OTel streams the DCR ingests). Platform logs go to opsLogAnalyticsId.')
 output logAnalyticsId string = logAnalytics.id
 
-@description('Log Analytics workspace customer ID (workspace GUID).')
+@description('TELEMETRY workspace customer ID (workspace GUID) — what the app\'s reader queries.')
 output logAnalyticsCustomerId string = logAnalytics.properties.customerId
+
+@description('The daily cap in GB set on the TELEMETRY workspace (its workspaceCapping.dailyQuotaGb). The app compares the trailing 24 hours\' billable ingestion against it (TELEMETRY_DAILY_CAP_GB), so it comes from here rather than from a second copy of the number.')
+output telemetryDailyCapGb int = dailyIngestionCapGb
 
 @description('Log Analytics workspace name. Consumers needing the shared key reference the workspace as `existing` + call `listKeys()` themselves — the key never crosses a module-output boundary, which keeps it out of the ARM deployment template entirely.')
 output logAnalyticsName string = logAnalytics.name
+
+@description('Workspace for the platform\'s own logs: diagnostic settings, the Container Apps environment, log alert rules. The telemetry workspace when separateOpsWorkspace is off.')
+output opsLogAnalyticsId string = opsWorkspaceId
+
+@description('Ops workspace customer ID, for the Container Apps environment log destination.')
+output opsLogAnalyticsCustomerId string = separateOpsWorkspace ? opsLogAnalytics!.properties.customerId : logAnalytics.properties.customerId
+
+@description('Ops workspace name. The shared key stays behind listKeys() in the consumer, as for logAnalyticsName.')
+output opsLogAnalyticsName string = separateOpsWorkspace ? opsLogAnalytics!.name : logAnalytics.name
 
 @description('Application Insights connection string — wire into container app env as APPLICATIONINSIGHTS_CONNECTION_STRING.')
 output appInsightsConnectionString string = appInsights.properties.ConnectionString

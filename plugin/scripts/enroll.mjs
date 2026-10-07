@@ -43,9 +43,9 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { trustedGitPath } from './trusted-git.mjs'
-import { resolveApiBase } from './api-base.mjs'
+import { configuredServerUrl, resolveApiBase } from './api-base.mjs'
 import { discoverMcpOrigin } from './mcp-origin.mjs'
-import { httpsPostJson, resolveHelperPath } from './plugin-runtime.mjs'
+import { httpsPostJson, resolveScriptsDir } from './plugin-runtime.mjs'
 // Reuse the redeem flow's validation + env-builder + atomic 0600 writer VERBATIM
 // (the enroll response shape mirrors /setup/redeem), so the OTel/emit env +
 // otelHeadersHelper land exactly like a redeem — one writer, one contract.
@@ -167,8 +167,10 @@ export function computeDeviceBinding({ home = homedir() } = {}) {
  *   timeoutMs?: number,
  *   post?: typeof httpsPostJson,
  *   writeSettings?: typeof writeClaudeSettings,
- *   helperPath?: string,
+ *   scriptsDir?: string,
+ *   platform?: string,
  *   discoverOrigin?: () => string|null,
+ *   configuredOrigin?: () => string|null,
  * }} [opts]
  */
 export async function enrollIfNeeded({
@@ -181,12 +183,16 @@ export async function enrollIfNeeded({
   timeoutMs = ENROLL_TIMEOUT_MS,
   post = httpsPostJson,
   writeSettings = writeClaudeSettings,
-  helperPath = undefined,
+  scriptsDir = undefined,
+  platform = process.platform,
   // Injectable for the same reason `post` and `writeSettings` are: the real
   // implementation reads the account's passwd home, so leaving it un-seamed
   // would make a unit test's resolved destination depend on whether the machine
   // running it happens to have an MCP registration.
   discoverOrigin = defaultDiscoverOrigin,
+  // The plugin's `server_url` option from the user's settings file (#415);
+  // seamed for the same reason as discoverOrigin.
+  configuredOrigin = configuredServerUrl,
 } = {}) {
   // 1. Already enrolled — never re-enrol / never clobber an existing credential.
   if (isEnrolled(env)) return { enrolled: false, reason: 'already-enrolled' }
@@ -218,15 +224,14 @@ export async function enrollIfNeeded({
   //    whose handoff code is single-use and bound to one device.
   //
   //    This was first patched by passing `trustEnv: false` here; the flag is gone
-  //    now, so a future caller cannot forget it. Discovery still sits below the
-  //    argument, so an operator who ran `claude mcp add` against their own server
-  //    enrols against their own server — but note that a STOCK install has no
-  //    discoverable registration at all (mcp-origin.mjs explains why the Claude
-  //    bundle tier is invisible), so for most people this resolves to the baked
-  //    default, and for a local developer to the loopback override.
+  //    now, so a future caller cannot forget it. The user's configured
+  //    `server_url` and then discovery sit below the argument, so a user who set
+  //    their server in /plugin, or ran `claude mcp add`, enrols against it. With
+  //    neither, this is the packaged default (none in the public build: no-base),
+  //    and for a local developer the loopback override.
   let base
   try {
-    base = resolveApiBase(apiBase, { discovered: discoverOrigin() })
+    base = resolveApiBase(apiBase, { discovered: discoverOrigin(), configured: configuredOrigin() })
   } catch {
     return { enrolled: false, reason: 'no-base' }
   }
@@ -251,7 +256,10 @@ export async function enrollIfNeeded({
   try {
     const { claude, oauth } = assertClaudeRedeemResponse(resp)
     const envBlock = buildClaudeDeviceEnv(claude, oauth)
-    writeSettings(settingsPath, helperPath ?? resolveHelperPath(), envBlock)
+    // Default state dir, so no --state-dir in the record: the same command a
+    // redeem without one writes (buildHelperCommand).
+    const helper = { record: { tool: 'claude-code', platform }, scriptsDir: scriptsDir ?? resolveScriptsDir() }
+    writeSettings(settingsPath, helper, envBlock)
   } catch {
     return { enrolled: false, reason: 'write-failed' }
   }

@@ -1,7 +1,8 @@
 // @vitest-environment node
 /*
- * The widened-read recovery lever (mig 0093): admin enqueues → the
- * telemetry-recovery worker drains it in resumable slices.
+ * The widened-read recovery lever (mig 0093, 0148): admin enqueues, or the worker
+ * queues the daily pass → the telemetry-recovery worker drains it one
+ * instance-day at a time.
  *
  * WHAT MUST NOT REGRESS, in order of consequence:
  *   1. the widened window actually REACHES the reader. A recovery that silently
@@ -11,8 +12,8 @@
  *      bounds the widened read to almost nothing while every progress field reads
  *      green.
  *   3. the drain RESUMES rather than restarting or stalling — a 90-day read
- *      cannot be served inside the ~120s worker gateway, so resumability is the
- *      whole reason this is a queue.
+ *      cannot be served inside one dispatch, so resumability is the whole reason
+ *      this is a queue.
  *   4. RBAC + same-origin + audit on the enqueue.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
@@ -21,8 +22,8 @@ import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
 import * as schema from '../../../drizzle/schema'
 import { injectTestSession } from '../../helpers/auth'
 import type { Session } from '../../../server/utils/auth'
-import type { TelemetryReader, UsageRecord } from '../../../server/azure/reader'
-import { runTelemetryRecovery, RECOVERY_CHUNK_INSTANCES } from '../../../server/workers/telemetry-recovery'
+import type { EventWindow, TelemetryReader, UsageRecord } from '../../../server/azure/reader'
+import { runTelemetryRecovery, dayWindow, SCHEDULED_LOOKBACK_DAYS } from '../../../server/workers/telemetry-recovery'
 import recoveryPost from '../../../server/api/v1/admin/diagnostics/telemetry-recovery.post'
 import recoveryGet from '../../../server/api/v1/admin/diagnostics/telemetry-recovery.get'
 
@@ -80,10 +81,10 @@ const dev = (): Session => ({ teammateId: devId, email: 'tr-dev@x.test', display
  * narrowing destroys.
  */
 class SpyReader implements TelemetryReader {
-  calls: Array<{ instanceId: string; since: Date | undefined }> = []
+  calls: Array<{ instanceId: string; since: Date | undefined; window: EventWindow | undefined }> = []
   constructor(readonly appliedLookbackDays: number) {}
-  async getSessionUsage(instanceId: string, since?: Date): Promise<UsageRecord[]> {
-    this.calls.push({ instanceId, since })
+  async getSessionUsage(instanceId: string, since?: Date, _c?: unknown, window?: EventWindow): Promise<UsageRecord[]> {
+    this.calls.push({ instanceId, since, window })
     return []
   }
   async listSessions() { return [] }
@@ -291,14 +292,18 @@ describe('the drain worker', () => {
     // worker_run.result and a consumer reading rowsWritten must get 0, not
     // undefined. It runs every 5 minutes with an empty queue, so it is by far the
     // most common result this worker produces.
-    const res = await runTelemetryRecovery(t.db, { readerFor: spyFactory() })
+    const res = await runTelemetryRecovery(t.db, { readerFor: spyFactory(), scheduled: false })
     expect(res).toEqual({
       claimed: 0,
       requestId: null,
+      kind: null,
       status: null,
       instancesProcessed: 0,
+      daysProcessed: 0,
       rowsWritten: 0,
       errors: 0,
+      scheduledQueued: null,
+      heapUsedPeakMb: null,
       lookbackDaysApplied: null,
     })
     expect(readers, 'an empty queue must not build a reader or query Azure').toHaveLength(0)
@@ -310,7 +315,7 @@ describe('the drain worker', () => {
     // look identical in every count.
     const id = await enrol()
     await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 60 } }))
-    const res = await runTelemetryRecovery(t.db, { readerFor: spyFactory() })
+    const res = await runTelemetryRecovery(t.db, { readerFor: spyFactory(), scheduled: false })
     expect(res.status).toBe('succeeded')
     expect(readers.every((r) => r.appliedLookbackDays === 60)).toBe(true)
     // Reported from the reader, so a future drift between asked and applied
@@ -339,36 +344,91 @@ describe('the drain worker', () => {
       tsEvent: new Date(), // a FRESH watermark — the trap
     })
     await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 90 } }))
-    await runTelemetryRecovery(t.db, { readerFor: spyFactory() })
+    await runTelemetryRecovery(t.db, { readerFor: spyFactory(), scheduled: false })
     const call = readers.flatMap((r) => r.calls).find((c) => c.instanceId === id)
     expect(call, 'the instance should have been read').toBeTruthy()
     expect(call!.since, 'a watermark here would silently bound the widened read').toBeUndefined()
   })
 
-  it('RESUMES from the cursor when the budget runs out mid-campaign', async () => {
-    // The reason this is a queue at all: a 90-day read across a set of instances
-    // cannot be served inside the ~120s worker gateway.
-    const ids: string[] = []
-    for (let i = 0; i < RECOVERY_CHUNK_INSTANCES * 2 + 1; i++) ids.push(await enrol())
-    await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: ids, lookbackDays: 30 } }))
+  it('RESUMES from (instance, day) when the budget runs out, reading each instance-day once', async () => {
+    // The reason this is a queue at all: a widened read across a set of instances
+    // cannot be served inside one dispatch.
+    const ids = [await enrol(), await enrol()]
+    await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: ids, lookbackDays: 2 } }))
 
-    // budgetMs 0 → the post-slice check trips immediately, so exactly ONE slice
-    // runs per invocation. (The check is AFTER a slice by design: a claim must
-    // always make progress, or a slow claim livelocks.)
-    const first = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
-    expect(first.status).toBe('running')
-    expect(first.instancesProcessed).toBe(RECOVERY_CHUNK_INSTANCES)
+    // budgetMs 0 → the check after each instance-day trips immediately, so exactly
+    // ONE instance-day runs per invocation. (The check is AFTER the work by design:
+    // a claim must always make progress, or a slow claim livelocks.)
+    const statuses: string[] = []
+    let requestId: string | null = null
+    for (let i = 0; i < 4; i++) {
+      const r = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory(), scheduled: false })
+      statuses.push(r.status ?? 'none')
+      expect(r.daysProcessed).toBe(1)
+      requestId ??= r.requestId
+      expect(r.requestId).toBe(requestId) // continued, not a new claim
+    }
+    expect(statuses).toEqual(['running', 'running', 'running', 'succeeded'])
 
-    const second = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
-    expect(second.status).toBe('running')
-    expect(second.requestId).toBe(first.requestId) // continued, not a new claim
+    // Every instance-day read exactly once, in order: no restart, no skip.
+    const calls = readers.flatMap((r) => r.calls)
+    expect(calls.map((c) => c.instanceId)).toEqual([ids[0], ids[0], ids[1], ids[1]])
+    expect(calls[0]!.window).toEqual(calls[2]!.window)
+    expect(calls[1]!.window).toEqual(calls[3]!.window)
+    expect(calls[0]!.window).not.toEqual(calls[1]!.window)
+  })
 
-    const third = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
-    expect(third.status).toBe('succeeded')
+  it('reads day windows that tile the lookback without a gap, anchored at the request', async () => {
+    // Anchored at requested_at, not at the tick's clock: a request resumed hours
+    // later must not leave its first day's early hours unread.
+    const id = await enrol()
+    await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 3 } }))
+    const [{ requested_at_ms }] = await t.client<{ requested_at_ms: string }[]>`
+      SELECT floor(EXTRACT(EPOCH FROM requested_at) * 1000)::bigint::text AS requested_at_ms FROM telemetry_recovery_request`
+    const R = new Date(Number(requested_at_ms))
+    await runTelemetryRecovery(t.db, { readerFor: spyFactory(), scheduled: false })
+    const windows = readers.flatMap((r) => r.calls).map((c) => c.window!)
+    expect(windows).toEqual([dayWindow(R, 3, 0), dayWindow(R, 3, 1), dayWindow(R, 3, 2)])
+    expect(windows[0]!.from.getTime()).toBe(R.getTime() - 3 * 24 * 3600_000)
+    expect(windows[0]!.to).toEqual(windows[1]!.from)
+    expect(windows[1]!.to).toEqual(windows[2]!.from)
+    expect(windows[2]!.to, 'every window is closed: the last day ends at the request').toEqual(R)
+  })
 
-    // Every instance read exactly once across the campaign: no restart, no skip.
-    const readIds = readers.flatMap((r) => r.calls).map((c) => c.instanceId)
-    expect(readIds.sort()).toEqual([...ids].sort())
+  it('counts a failed instance-day and still reads the rest of the window', async () => {
+    // The joiner isolates a failed read into `errors`; the pass moves on and the
+    // next daily pass re-reads those days. What must not happen is a silent zero.
+    const id = await enrol()
+    await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 3 } }))
+    class FlakyReader extends SpyReader {
+      override async getSessionUsage(instanceId: string, since?: Date, c?: unknown, window?: EventWindow) {
+        await super.getSessionUsage(instanceId, since, c, window)
+        if (this.calls.length === 1) throw new Error('LA 503 for day 0')
+        return []
+      }
+    }
+    const res = await runTelemetryRecovery(t.db, { readerFor: (d) => new FlakyReader(d), scheduled: false })
+    expect(res.status).toBe('succeeded')
+    expect(res.daysProcessed).toBe(3)
+    expect(res.errors).toBe(1)
+    const [row] = await t.client<{ errors: number }[]>`SELECT errors FROM telemetry_recovery_request`
+    expect(row!.errors).toBe(1)
+  })
+
+  it('counts a failed signal read as an error for the instance-day', async () => {
+    // The joiner keeps signal failures out of `errors` so they cannot disturb
+    // billing; the recovery outcome must still show the day was not recovered.
+    const id = await enrol()
+    await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 1 } }))
+    class SignalFailReader extends SpyReader {
+      async getSignalUsage(): Promise<never> {
+        throw new Error('signal query failed')
+      }
+    }
+    const res = await runTelemetryRecovery(t.db, { readerFor: (d) => new SignalFailReader(d), scheduled: false })
+    expect(res.errors).toBe(1)
+    const [row] = await t.client<{ errors: number }[]>`SELECT errors FROM telemetry_recovery_request`
+    expect(row!.errors).toBe(1)
   })
 
   it('advances the cursor past an instance the joiner SKIPS, so a campaign always terminates', async () => {
@@ -378,7 +438,7 @@ describe('the drain worker', () => {
     const skipped = await enrol()
     await t.client.unsafe(`UPDATE instance_attestation SET ts_actual_end = NOW(), ts_purged = NOW() WHERE instance_id = '${skipped}'`)
     await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [skipped], lookbackDays: 30 } }))
-    const res = await runTelemetryRecovery(t.db, { readerFor: spyFactory() })
+    const res = await runTelemetryRecovery(t.db, { readerFor: spyFactory(), scheduled: false })
     expect(res.status).toBe('succeeded')
     expect(res.instancesProcessed).toBe(1)
   })
@@ -387,6 +447,7 @@ describe('the drain worker', () => {
     const id = await enrol()
     await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 30 } }))
     const res = await runTelemetryRecovery(t.db, {
+      scheduled: false,
       readerFor: () => {
         throw new Error('reader exploded')
       },
@@ -406,12 +467,109 @@ describe('the drain worker', () => {
   it('a crashed "running" claim is re-claimed and continued on the next tick', async () => {
     const ids = [await enrol(), await enrol()]
     await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: ids, lookbackDays: 30 } }))
-    // Simulate a hard crash mid-campaign: status left 'running', cursor at 1.
-    await t.client`UPDATE telemetry_recovery_request SET status = 'running', cursor_index = 1`
-    const res = await runTelemetryRecovery(t.db, { readerFor: spyFactory() })
+    // Simulate a hard crash mid-campaign: status left 'running', cursor at
+    // instance 1, day 28 of 30.
+    await t.client`UPDATE telemetry_recovery_request SET status = 'running', cursor_index = 1, cursor_day = 28`
+    const res = await runTelemetryRecovery(t.db, { readerFor: spyFactory(), scheduled: false })
     expect(res.status).toBe('succeeded')
-    // Only the REMAINING instance was re-read — the cursor was honoured.
-    expect(readers.flatMap((r) => r.calls).map((c) => c.instanceId)).toEqual([ids[1]])
+    // Only the REMAINING instance-days were re-read — both cursors were honoured.
+    expect(readers.flatMap((r) => r.calls).map((c) => c.instanceId)).toEqual([ids[1], ids[1]])
+  })
+})
+
+describe('the scheduled daily pass', () => {
+  it('is queued once per 24 h, over the joiner\'s selection, for the last 7 days', async () => {
+    const id = await enrol()
+    const first = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
+    expect(first.scheduledQueued).toBeTruthy()
+    const [row] = await t.client<{ kind: string; lookback_days: number; instance_ids: string[]; requested_by: string | null }[]>`
+      SELECT kind, lookback_days, instance_ids::text[] AS instance_ids, requested_by::text AS requested_by
+        FROM telemetry_recovery_request WHERE id = ${first.scheduledQueued!}::uuid`
+    expect(row!.kind).toBe('scheduled')
+    expect(row!.lookback_days).toBe(SCHEDULED_LOOKBACK_DAYS)
+    expect(row!.instance_ids).toContain(id)
+    expect(row!.requested_by).toBeNull()
+
+    // In flight → not queued again; finished within 24 h → still not queued again.
+    const second = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
+    expect(second.scheduledQueued).toBeNull()
+    await t.client`UPDATE telemetry_recovery_request SET status = 'succeeded', finished_at = now()`
+    const third = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
+    expect(third.scheduledQueued).toBeNull()
+
+    // A day later it is due again.
+    await t.client`UPDATE telemetry_recovery_request SET requested_at = now() - INTERVAL '25 hours'`
+    const fourth = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
+    expect(fourth.scheduledQueued).toBeTruthy()
+  })
+
+  it('does not block an operator recovery, and yields to it at claim time', async () => {
+    const id = await enrol()
+    const tick = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
+    expect(tick.kind).toBe('scheduled') // claimed and left running
+    const status = (await recoveryGet(ev({ method: 'GET', session: finops() }))) as { inFlight: boolean }
+    expect(status.inFlight, 'the daily pass must not grey out the operator button').toBe(false)
+
+    const op = (await recoveryPost(
+      ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 30, reason: 'backlog' } }),
+    )) as { id: string }
+    readers = []
+    const next = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
+    expect(next.requestId).toBe(op.id)
+    expect(next.kind).toBe('operator')
+  })
+
+  it('supersedes a pass still in flight a day later, so the daily pass keeps running', async () => {
+    await enrol()
+    const first = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
+    await t.client`UPDATE telemetry_recovery_request SET requested_at = now() - INTERVAL '25 hours' WHERE id = ${first.scheduledQueued!}::uuid`
+    const next = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
+    expect(next.scheduledQueued).toBeTruthy()
+    expect(next.scheduledQueued).not.toBe(first.scheduledQueued)
+    const [old] = await t.client<{ status: string; error: string }[]>`
+      SELECT status, error FROM telemetry_recovery_request WHERE id = ${first.scheduledQueued!}::uuid`
+    expect(old!.status).toBe('failed')
+    expect(old!.error).toContain('superseded')
+  })
+
+  it('gives a starved scheduled pass the tick ahead of a waiting operator request', async () => {
+    const id = await enrol()
+    const tick = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
+    await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 30 } }))
+    // Operator first while the scheduled pass was touched recently …
+    expect((await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory(), scheduled: false })).kind).toBe('operator')
+    // … but once it has waited past STARVE_MINUTES it gets the tick.
+    await t.client`UPDATE telemetry_recovery_request SET claimed_at = now() - INTERVAL '40 minutes' WHERE id = ${tick.requestId!}::uuid`
+    const starved = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory(), scheduled: false })
+    expect(starved.requestId).toBe(tick.requestId)
+  })
+
+  it('keeps a scheduled pass running through a transient error and resumes it', async () => {
+    await enrol()
+    const failing = await runTelemetryRecovery(t.db, {
+      budgetMs: 0,
+      readerFor: () => {
+        throw new Error('LA throttled')
+      },
+    })
+    expect(failing.kind).toBe('scheduled')
+    expect(failing.status).toBe('running')
+    const [row] = await t.client<{ status: string; error: string }[]>`
+      SELECT status, error FROM telemetry_recovery_request WHERE id = ${failing.requestId!}::uuid`
+    expect(row!.status).toBe('running')
+    expect(row!.error).toContain('LA throttled')
+    const resumed = await runTelemetryRecovery(t.db, { budgetMs: 0, readerFor: spyFactory() })
+    expect(resumed.requestId).toBe(failing.requestId)
+    expect(resumed.daysProcessed).toBe(1)
+  })
+
+  it('allows one in-flight request per kind at the DB, not one overall', async () => {
+    const id = await enrol()
+    await t.client`INSERT INTO telemetry_recovery_request (kind, instance_ids, lookback_days) VALUES ('scheduled', ARRAY[${id}::uuid], 7)`
+    await t.client`INSERT INTO telemetry_recovery_request (kind, instance_ids, lookback_days) VALUES ('operator', ARRAY[${id}::uuid], 30)`
+    await expect(
+      t.client`INSERT INTO telemetry_recovery_request (kind, instance_ids, lookback_days) VALUES ('scheduled', ARRAY[${id}::uuid], 7)`,
+    ).rejects.toMatchObject({ code: '23505' })
   })
 })
 
@@ -419,7 +577,7 @@ describe('status endpoint', () => {
   it('reports progress and outcome SEPARATELY (100% processed with 0 rows is a real result)', async () => {
     const id = await enrol()
     await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 30 } }))
-    await runTelemetryRecovery(t.db, { readerFor: spyFactory() })
+    await runTelemetryRecovery(t.db, { readerFor: spyFactory(), scheduled: false })
     const res = (await recoveryGet(ev({ method: 'GET', session: admin() }))) as {
       requests: Array<{ status: string; percentComplete: number; rowsWritten: number; instanceCount: number }>
       inFlight: boolean
@@ -434,6 +592,22 @@ describe('status endpoint', () => {
     const id = await enrol()
     await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 30 } }))
     const res = (await recoveryGet(ev({ method: 'GET', session: admin() }))) as { inFlight: boolean }
+    expect(res.inFlight).toBe(true)
+  })
+
+  it('reports an operator recovery in flight even when newer rows push it off the history page', async () => {
+    const id = await enrol()
+    await recoveryPost(ev({ method: 'POST', session: finops(), body: { instanceIds: [id], lookbackDays: 30 } }))
+    await t.client`UPDATE telemetry_recovery_request SET status = 'running', requested_at = now() - INTERVAL '20 days'`
+    for (let i = 0; i < 12; i++) {
+      await t.client`INSERT INTO telemetry_recovery_request (kind, instance_ids, lookback_days, status, requested_at)
+                     VALUES ('scheduled', ARRAY[${id}::uuid], 7, 'succeeded', now() - (${i} * INTERVAL '1 day'))`
+    }
+    const res = (await recoveryGet(ev({ method: 'GET', session: finops() }))) as {
+      requests: Array<{ kind: string }>
+      inFlight: boolean
+    }
+    expect(res.requests.every((r) => r.kind === 'scheduled'), 'the operator row is off the page').toBe(true)
     expect(res.inFlight).toBe(true)
   })
 

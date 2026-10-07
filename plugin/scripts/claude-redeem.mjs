@@ -14,14 +14,16 @@
  *
  * Writes (merging, never clobbering):
  *   ~/.claude/settings.json (mode 0600, atomic temp+rename) —
- *     - otelHeadersHelper: absolute path to scripts/otel-headers-helper.sh (the
- *       only way to configure the Azure Monitor Bearer as a refreshing helper).
+ *     - otelHeadersHelper: the helper COMMAND for this platform, built from a
+ *       record by env-builder's buildHelperCommand (the only way to configure
+ *       the Azure Monitor Bearer as a refreshing helper). It carries
+ *       `--state-dir` when this redeem was given one (#410).
  *     - env: CLAUDE_CODE_ENABLE_TELEMETRY + logs-only OTLP plumbing +
  *       TOKENSCOPE_BEARER_ENDPOINT + the durable OAuth emit credential
  *       (TOKENSCOPE_OAUTH_REFRESH_TOKEN/_TOKEN_ENDPOINT/_CLIENT_ID) +
  *       OTEL_RESOURCE_ATTRIBUTES (tokenscope.instance_id=<sid>,tool=claude-code).
- *   Pre-existing top-level keys (e.g. permissions, statusLine, otelHeadersHelper)
- *   are always preserved. Same-environment re-runs rotate the credential in place.
+ *   Pre-existing top-level keys other than otelHeadersHelper (e.g. permissions,
+ *   statusLine) are always preserved. Same-environment re-runs rotate the credential in place.
  *   When the redeem points at a DIFFERENT deployment than the one currently
  *   configured (the bearer-endpoint host changed — Sandbox→Dev, Dev→Prod), the
  *   env block is REPLACED wholesale instead of additively merged, so stale
@@ -40,14 +42,16 @@
  * process is composed by a model under a prefix `allowed-tools` grant, so an
  * unknown flag is refused outright, --settings-path is confined to the account's
  * own home, and --api-base may only SELECT among the origins this device already
- * knows (loopback, the packaged default, the discovered MCP registration).
+ * knows (loopback, the packaged default, the configured `server_url`, the
+ * discovered MCP registration).
  * `--redeem-url` was deleted rather than validated: it named the POST target
  * outright, bypassing api-base.mjs entirely, and nothing in the product ever
  * passed it — the `redeem_command` the server builds (server/utils/mcp.ts) sends
  * only --handoff-code and, when it can vouch for its own origin, --api-base.
  *
- * The API base defaults to the plugin's baked deployment (api-base.mjs); a
- * loopback TOKENSCOPE_API_BASE overrides it for local dev.
+ * The API base is resolved by api-base.mjs: the configured `server_url`, else a
+ * discovered registration, else the packaged default; a loopback
+ * TOKENSCOPE_API_BASE overrides them for local dev.
  *
  * Restart `claude` after running — Claude reads its OTel config once at startup.
  */
@@ -55,7 +59,8 @@ import { existsSync, mkdirSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { resolveApiBase, DEFAULT_API_BASE } from './api-base.mjs'
+import { isMainModule } from './is-main.mjs'
+import { resolveApiBase, configuredServerUrl, knownApiOrigins } from './api-base.mjs'
 import { discoverMcpOrigin } from './mcp-origin.mjs'
 import {
   acceptApiBaseArg,
@@ -64,7 +69,7 @@ import {
   flagValue,
 } from './argv-guard.mjs'
 import {
-  resolveHelperPath,
+  resolveScriptsDir,
   httpsPostJson,
   realHome,
   trustedStateDir,
@@ -74,6 +79,8 @@ import {
   deviceStorePath,
   legacyStorePath,
   casWriteFile,
+  recordSettingsFile,
+  recordIsolatedSettingsFile,
 } from './plugin-runtime.mjs'
 import { mergeClaudeSettings } from './env-builder.mjs'
 import { emitEnvLabel } from './statusline.mjs'
@@ -374,11 +381,16 @@ function claudeStoreFields(oauthRefreshToken, endpoints = {}) {
  * disk (it would shadow this enrolment) and best-effort otherwise; the catch
  * distinguishes the two. docs/design/device-store-per-tool-sections.md
  */
-function writeSharedCredentialStore(oauthRefreshToken, dir, endpoints = {}) {
+function writeSharedCredentialStore(oauthRefreshToken, dir, endpoints = {}, helperRecord = undefined) {
   if (!oauthRefreshToken) return
   // OUTSIDE the best-effort try below: a store that would be refused is a bad
-  // bundle, never an I/O failure to shrug off.
-  const fields = assertStoreConsistent('claude-code', claudeStoreFields(oauthRefreshToken, endpoints))
+  // bundle, never an I/O failure to shrug off. `helper` is the record the
+  // settings command was built from, so session start and the repo pin rebuild
+  // the same string (S1, #408).
+  const fields = assertStoreConsistent('claude-code', {
+    ...claudeStoreFields(oauthRefreshToken, endpoints),
+    ...(helperRecord ? { helper: helperRecord } : {}),
+  })
   /*
    * A TEST MUST NEVER WRITE THE REAL CREDENTIAL STORE.
    *
@@ -473,7 +485,7 @@ function writeSharedCredentialStore(oauthRefreshToken, dir, endpoints = {}) {
 
 // ── ~/.claude/settings.json writer ─────────────────────────────────────────────
 // Read-merge-write so a developer's pre-existing top-level settings (permissions,
-// statusLine, otelHeadersHelper) survive. Never logs the env block (it carries the
+// statusLine) survive; otelHeadersHelper is ours and is rewritten. Never logs the env block (it carries the
 // refresh token). Refuses to proceed if an existing settings.json is present but
 // unparseable, rather than clobbering it. Writes atomically (temp + rename, 0600)
 // so a concurrent `claude` / SessionStart hook never reads a half-written file.
@@ -493,7 +505,21 @@ function writeSharedCredentialStore(oauthRefreshToken, dir, endpoints = {}) {
  * pass the directory rather than steer it. Default keeps production on the
  * passwd home. See epic-mdash-remediation.md (Wave 1, credential-store guard).
  */
-function writeClaudeSettings(settingsPath, helperPath, envBlock, credentialStoreDir = trustedStateDir()) {
+/*
+ * `helper` is `{ record, scriptsDir }`: mergeClaudeSettings builds the command
+ * from it and the store keeps the record. `sessionScoped` (a --settings-path
+ * target) lists the file in the state dir so session start can migrate it.
+ * When that state dir is not `indexDir` (the trusted default store, the only
+ * one session start is sure to read), the file is ALSO indexed there with the
+ * state dir it belongs to; otherwise nothing would ever find it again.
+ */
+function writeClaudeSettings(
+  settingsPath,
+  helper,
+  envBlock,
+  credentialStoreDir = trustedStateDir(),
+  { sessionScoped = false, indexDir = trustedStateDir() } = {},
+) {
   // BEFORE the first persist. settings.json is the helper's source on a device
   // with no store, so it must never receive a tuple the store write would then
   // refuse; main() has already checked the response, this makes the function
@@ -524,7 +550,7 @@ function writeClaudeSettings(settingsPath, helperPath, envBlock, credentialStore
     // Replace the env block ONLY on a detected environment change; an additive merge
     // would leave the old deployment's credentials/endpoints at rest. mergeClaudeSettings
     // preserves top-level non-env keys (permissions, statusLine) in both modes.
-    const merged = mergeClaudeSettings(existing, helperPath, envBlock, {
+    const merged = mergeClaudeSettings(existing, helper, envBlock, {
       replaceEnv: envChange.changed,
     })
     // Strip retired credentials from the MERGED result, not just the new block: on a
@@ -554,8 +580,48 @@ function writeClaudeSettings(settingsPath, helperPath, envBlock, credentialStore
     clientId: envBlock.TOKENSCOPE_OAUTH_CLIENT_ID,
     logsEndpoint: envBlock.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
     resourceAttributes: envBlock.OTEL_RESOURCE_ATTRIBUTES,
-  })
+  }, helper?.record)
+  if (sessionScoped) {
+    // Best-effort: the enrolment itself is complete. Missing from the list only
+    // means a later plugin update will not rebuild this file's helper command.
+    try {
+      recordSettingsFile('claude-code', credentialStoreDir, settingsPath)
+    } catch {
+      console.error(
+        `[tokenscope] WARN: could not list ${settingsPath} in ${credentialStoreDir}; a plugin update will not migrate its helper command. Re-run setup after updating.`,
+      )
+    }
+    if (canonDir(indexDir) !== canonDir(credentialStoreDir)) {
+      // OUTSIDE the best-effort catch: a test that forgets to pass indexDir
+      // must fail, not quietly add its fixture paths to the developer's index.
+      if (underVitestWorker() && canonDir(indexDir) === canonDir(join(realHome(), '.tokenscope'))) {
+        throw new Error('refusing to write the REAL settings index from a test — pass an explicit indexDir')
+      }
+      try {
+        mkdirSync(indexDir, { recursive: true, mode: 0o700 })
+        recordIsolatedSettingsFile('claude-code', indexDir, settingsPath, credentialStoreDir)
+      } catch {
+        console.error(
+          `[tokenscope] WARN: could not index ${settingsPath} in ${indexDir}; a plugin update will not migrate its helper command. Re-run setup after updating.`,
+        )
+      }
+    }
+  }
   return envChange
+}
+
+/** realpath, or the lexical path when it does not exist yet. */
+function canonDir(d) {
+  try {
+    return realpathSync(d)
+  } catch {
+    return resolve(d)
+  }
+}
+
+/** Inside a vitest worker (a global no settings file can set; see writeSharedCredentialStore). */
+function underVitestWorker() {
+  return typeof globalThis.__vitest_worker__ === 'object' && globalThis.__vitest_worker__ !== null
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -580,8 +646,9 @@ async function main() {
   // allowed-tools grant it appeals to ends in `:*` — a PREFIX grant under which
   // every argv tail is pre-approved with no prompt. So a prompt-injected model
   // CAN append flags here, and the control is that --api-base is checked
-  // against the origins this device already knows (the packaged default and the
-  // discovered registration, plus loopback) before it is used: it can select
+  // against the origins this device already knows (the packaged default, the
+  // configured `server_url`, the discovered registration, plus loopback) before
+  // it is used: it can select
   // one of them, never introduce one. A value outside that set is warned about
   // and dropped, and resolution continues from local configuration — see
   // argv-guard.mjs for why dropping beats exiting.
@@ -595,12 +662,13 @@ async function main() {
   const discovered = discoverMcpOrigin(fileURLToPath(new URL('.', import.meta.url)), {
     client: 'claude',
   })
+  const configured = configuredServerUrl()
   const apiBase = resolveApiBase(
     acceptApiBaseArg(args.apiBase, {
-      allowed: [DEFAULT_API_BASE, discovered],
+      allowed: knownApiOrigins({ configured, discovered }),
       warn: (m) => console.error(m),
     }),
-    { discovered },
+    { discovered, configured },
   )
   // The path is FIXED. It used to come from `--redeem-url`, which bypassed all
   // of the above — an absolute value became the POST target verbatim — and which
@@ -628,7 +696,9 @@ async function main() {
 
   let resp
   try {
-    resp = await httpsPostJson(redeemUrl, reqBody)
+    // Diagnostic only (mig 0150): this is the FULL setup. The PowerShell redeem
+    // for Windows devices without Node sends `emit-only`.
+    resp = await httpsPostJson(redeemUrl, reqBody, { headers: { 'X-TokenScope-Setup-Mode': 'full' } })
   } catch (err) {
     console.error(`[tokenscope] Redeem failed: ${err.message}`)
     process.exit(1)
@@ -645,7 +715,13 @@ async function main() {
   }
 
   const envBlock = buildClaudeDeviceEnv(claude, oauth)
-  const helperPath = resolveHelperPath()
+  // The record the helper command is built from. --state-dir rides along so
+  // the command mints from the store this redeem wrote, not the default one
+  // (#410: without it a session-scoped enrolment minted another identity).
+  const helper = {
+    record: { tool: 'claude-code', platform: process.platform, ...(args.stateDir ? { stateDir: args.stateDir } : {}) },
+    scriptsDir: resolveScriptsDir(),
+  }
   // The durable emit credential lands in this file, which makes the path a
   // trust sink and not merely a location. os.homedir() trusts $HOME, so a
   // leaked or planted HOME writes a live refresh token into a directory
@@ -673,7 +749,9 @@ async function main() {
   const settingsPath = args.settingsPath ?? join(trustedHome, '.claude', 'settings.json')
   let envChange
   try {
-    envChange = writeClaudeSettings(settingsPath, helperPath, envBlock, args.stateDir || trustedStateDir())
+    envChange = writeClaudeSettings(settingsPath, helper, envBlock, args.stateDir || trustedStateDir(), {
+      sessionScoped: Boolean(args.settingsPath),
+    })
   } catch (err) {
     console.error(`[tokenscope] ${err.message}`)
     process.exit(1)
@@ -686,21 +764,17 @@ async function main() {
   if (envChange?.changed) {
     const from = envChange.oldLabel ?? 'previous'
     const to = envChange.newLabel ?? 'new'
-    console.log(
-      `[tokenscope] Environment changed: ${from} → ${to} — minting/writing fresh config for the new environment (old credentials and endpoints dropped).`,
-    )
+    console.log(`[tokenscope] Environment changed: ${from} → ${to}. Old credentials and endpoints removed.`)
   }
-  console.log('[tokenscope] ✓ Claude Code device enrolled — emitting provisioned.')
-  console.log(`[tokenscope]   Instance ID: ${resp.instance_id}`)
-  console.log(`[tokenscope]   Wrote OTel plumbing to ${settingsPath} (mode 0600).`)
-  console.log('[tokenscope]   Restart `claude` — the OTel config is read once at startup.')
-  console.log(
-    '[tokenscope]   Then tag this repo with the `project` prompt so its sessions attribute to a budget.',
-  )
+  console.log('[tokenscope] ✓ Tracking is on for Claude Code on this computer.')
+  console.log('[tokenscope]   Next: restart Claude Code. Tracking starts in the new session.')
+  console.log('[tokenscope]   In a repo with a .tokenscope file, restart once more if you see a "superseded device enrolment" warning.')
+  console.log('[tokenscope]   Then, to bill a repo to a project, run the `project` prompt in that repo.')
+  console.log(`[tokenscope]   Saved to ${settingsPath} (device ${resp.instance_id}).`)
 }
 
 // Only run main() when executed directly (not when imported as a module for testing).
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isMainModule(import.meta.url)) {
   main().catch((err) => {
     console.error('[tokenscope] Fatal:', err.message)
     process.exit(1)

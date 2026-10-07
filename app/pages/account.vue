@@ -10,6 +10,7 @@
 // registered before the bounds fix shipped may still carry control/bidi
 // characters, so this strips them defensively wherever the name is displayed.
 import { sanitizeClientNameForDisplay } from '#shared/schemas/oauth'
+import { useConnectConfig } from '../composables/useConnectConfig'
 
 interface Identity {
   id: string
@@ -77,7 +78,13 @@ const { data: projData } = await useFetch<{ projects: { id: string; code: string
 )
 
 // Install commands now live in the shared ConnectClientGuide component (the
-// single source for both this page and the homepage connect dialog).
+// single source for both this page and the homepage connect dialog), built from
+// this deployment's connect config (#415).
+const {
+  config: connectConfig,
+  failed: connectConfigFailed,
+  isEnabled: isClientEnabled,
+} = useConnectConfig()
 
 // Tagging is now the `project` MCP prompt: it lists the projects you can bill,
 // you pick one, and it writes the committable `.tokenscope` + tags the repo
@@ -573,13 +580,13 @@ async function revokePersonalSubscription(tool: string) {
 
     <!-- Card 1 — connect Claude Code (install the plugin once). The instructions
          live in ConnectClientGuide so they can't drift from the homepage dialog. -->
-    <UiCard class="mt-5">
-      <ConnectClientGuide client="claude-code" />
+    <UiCard v-if="isClientEnabled('claude-code')" class="mt-5">
+      <ConnectClientGuide client="claude-code" :config="connectConfig" :failed="connectConfigFailed" />
     </UiCard>
 
     <!-- Card 1b — connect Copilot CLI (same shared guide component). -->
-    <UiCard id="connect-copilot-cli" class="mt-5">
-      <ConnectClientGuide client="copilot-cli" />
+    <UiCard v-if="isClientEnabled('copilot-cli')" id="connect-copilot-cli" class="mt-5">
+      <ConnectClientGuide client="copilot-cli" :config="connectConfig" :failed="connectConfigFailed" />
     </UiCard>
 
     <!-- Card 2 — tag a repo's project (one step: writes .tokenscope + tags) -->

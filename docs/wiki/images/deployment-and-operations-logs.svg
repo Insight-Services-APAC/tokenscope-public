@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 540" width="1000" height="540" role="img" aria-labelledby="t d">
+  <title id="t">With private telemetry query, platform logs go to an operator-readable ops workspace; usage telemetry stays in its own workspace</title>
+  <desc id="d">Developer devices send OTLP logs to the public DCE and DCR, which write OTelLogs and OTel traces to log-&lt;name&gt;, enriched with the App Insights component. The app reads OTelLogs from log-&lt;name&gt;, over a private link scope when the query path is private. The Container Apps environment cae-&lt;name&gt;, holding the app ca-&lt;name&gt; and its cron jobs, ships console and system logs through a diagnostic setting to log-ops-&lt;name&gt;. Key Vault, Postgres, ACR and, when enabled, Front Door send all logs and metrics to log-ops-&lt;name&gt;. Operators query log-ops-&lt;name&gt; from the portal under Entra RBAC.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --panel: #ffffff; --fg: #1b2230; --fg2: #4d586b; --line: #c9d0db; --zone: #f3f5f8;
+      --accent: #2554c7; --accent-soft: #e4ebfb; --blocked: #c0392b; --ok: #1e7f4f; --private: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --panel: #161b22; --fg: #e3e8f0; --fg2: #a3aec0; --line: #3a4453; --zone: #11161d;
+        --accent: #7aa2ff; --accent-soft: #1d2a47; --blocked: #ff7a6b; --ok: #4fd18f; --private: #e2b04a;
+      }
+    }
+    text { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+    .bg { fill: var(--bg); }
+    .zone { fill: var(--zone); stroke: var(--line); }
+    .zlabel { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: .08em; fill: var(--fg2); }
+    .node { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .node.inner { stroke: var(--line); }
+    .node.env { fill: none; stroke: var(--fg2); stroke-dasharray: 4 3; }
+    .node.private { stroke: var(--private); stroke-width: 1.6; }
+    .node.acc { stroke: var(--accent); stroke-width: 2; fill: var(--accent-soft); }
+    .node.ghost { fill: none; stroke: var(--line); stroke-dasharray: 5 4; }
+    .node.bad { stroke: var(--blocked); stroke-width: 1.6; }
+    .node.good { stroke: var(--ok); stroke-width: 1.6; }
+    .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+    .tm { fill: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; }
+    .s { fill: var(--fg2); font-size: 11.5px; }
+    .sm { fill: var(--fg2); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+    .s.bad, .sm.bad { fill: var(--blocked); }
+    .s.ok, .sm.ok { fill: var(--ok); }
+    .s.acc, .sm.acc { fill: var(--accent); }
+    .s.priv, .sm.priv { fill: var(--private); }
+    .s.ghost { font-style: italic; }
+    .lbl { fill: var(--fg2); font-size: 11px; }
+    .e { fill: none; stroke: var(--fg2); stroke-width: 1.6; }
+    .e.dashed { stroke-dasharray: 5 4; }
+    .e.accent { stroke: var(--accent); stroke-width: 2.6; }
+    .e.bad { stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 6 4; }
+    .e.ok { stroke: var(--ok); stroke-width: 2.4; }
+    .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .act { fill: var(--zone); stroke: var(--fg2); stroke-width: 1; }
+    .ah { fill: var(--fg2); }
+    .ah.accent { fill: var(--accent); }
+    .ah.bad { fill: var(--blocked); }
+    .ah.ok { fill: var(--ok); }
+    .cn { fill: var(--panel); stroke: var(--fg2); stroke-width: 1.2; }
+    .cn.accent { fill: var(--accent); stroke: var(--accent); }
+    .cn.bad { stroke: var(--blocked); }
+    .cnt { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: var(--fg); }
+    .cnt.accent { fill: var(--panel); }
+    .cnt.bad { fill: var(--blocked); }
+    .x { stroke: var(--blocked); stroke-width: 3; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah accent" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah bad" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="540"/>
+  <rect class="zone" x="16" y="20" width="200" height="500" rx="10"/>
+  <text class="zlabel" x="30" y="42">INTERNET · CORP NETWORK</text>
+  <rect class="zone" x="246" y="20" width="340" height="500" rx="10"/>
+  <text class="zlabel" x="260" y="42">RESOURCE GROUP</text>
+  <rect class="zone" x="626" y="20" width="358" height="500" rx="10"/>
+  <text class="zlabel" x="640" y="42">AZURE MONITOR</text>
+
+  <rect class="node" x="36" y="60" width="160" height="50" rx="6"/>
+  <text class="t" x="116" y="81" text-anchor="middle">Developer devices</text>
+  <text class="s" x="116" y="98" text-anchor="middle">Claude Code · Copilot CLI</text>
+
+  <rect class="node" x="36" y="445" width="160" height="50" rx="6"/>
+  <text class="t" x="116" y="466" text-anchor="middle">Operator</text>
+  <text class="s" x="116" y="483" text-anchor="middle">Azure portal · CLI</text>
+
+  <rect class="node env" x="266" y="130" width="300" height="170" rx="8"/>
+  <text class="tm" x="280" y="150">cae-&lt;name&gt;</text>
+  <rect class="node inner" x="284" y="162" width="262" height="52" rx="6"/>
+  <text class="tm" x="415" y="183" text-anchor="middle">ca-&lt;name&gt;</text>
+  <text class="s" x="415" y="201" text-anchor="middle">app · read joiner · ops-alert worker</text>
+  <rect class="node inner" x="284" y="224" width="262" height="34" rx="6"/>
+  <text class="s" x="415" y="246" text-anchor="middle">32 cron jobs · caj-ts-*</text>
+  <text class="s" x="556" y="286" text-anchor="end">console + system logs</text>
+
+  <rect class="node" x="266" y="390" width="300" height="70" rx="6"/>
+  <text class="t" x="416" y="412" text-anchor="middle">Key Vault · Postgres · ACR</text>
+  <text class="s" x="416" y="430" text-anchor="middle">+ Front Door, when enabled</text>
+  <text class="sm" x="416" y="448" text-anchor="middle">allLogs + AllMetrics</text>
+
+  <rect class="node" x="646" y="60" width="150" height="50" rx="6"/>
+  <text class="t" x="721" y="81" text-anchor="middle">DCE + DCR</text>
+  <text class="s" x="721" y="98" text-anchor="middle">public ingest</text>
+  <rect class="node" x="816" y="60" width="150" height="50" rx="6"/>
+  <text class="t" x="891" y="81" text-anchor="middle">App Insights</text>
+  <text class="s" x="891" y="98" text-anchor="middle">enriches ingest</text>
+
+  <rect class="node private" x="646" y="160" width="320" height="110" rx="6"/>
+  <text class="tm" x="662" y="183">log-&lt;name&gt;</text>
+  <text class="s" x="662" y="203">OTelLogs · OTel traces</text>
+  <text class="s" x="662" y="221">usage telemetry, read by the app</text>
+  <text class="s priv" x="662" y="259">query: private (monitorQueryPrivateOnly)</text>
+
+  <rect class="node acc" x="646" y="380" width="320" height="130" rx="6"/>
+  <text class="tm" x="662" y="403">log-ops-&lt;name&gt;</text>
+  <text class="s" x="662" y="423">ContainerAppConsoleLogs · SystemLogs</text>
+  <text class="s" x="662" y="441">resource diagnostics</text>
+  <text class="s" x="662" y="459">audit-write log alert reads here</text>
+  <text class="s acc" x="662" y="495">query: public, Entra RBAC</text>
+
+  <!-- 1 ingest -->
+  <line class="e" x1="196" y1="85" x2="640" y2="85" marker-end="url(#ah)"/>
+  <line class="e" x1="721" y1="110" x2="721" y2="154" marker-end="url(#ah)"/>
+  <line class="e dashed" x1="891" y1="110" x2="891" y2="154" marker-end="url(#ah)"/>
+  <circle class="cn" cx="420" cy="85" r="10"/><text class="cnt" x="420" y="89" text-anchor="middle">1</text>
+  <!-- 2 read -->
+  <line class="e" x1="546" y1="188" x2="640" y2="188" marker-end="url(#ah)"/>
+  <circle class="cn" cx="596" cy="188" r="10"/><text class="cnt" x="596" y="192" text-anchor="middle">2</text>
+  <!-- 3 env logs by diagnostic setting -->
+  <polyline class="e accent" points="566,282 612,282 612,400 640,400" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="612" cy="340" r="10"/><text class="cnt accent" x="612" y="344" text-anchor="middle">3</text>
+  <!-- 4 diagnostics -->
+  <line class="e accent" x1="566" y1="430" x2="640" y2="430" marker-end="url(#ah-acc)"/>
+  <circle class="cn accent" cx="588" cy="430" r="10"/><text class="cnt accent" x="588" y="434" text-anchor="middle">4</text>
+  <!-- 5 operator reads ops -->
+  <line class="e ok" x1="196" y1="482" x2="640" y2="482" marker-end="url(#ah-ok)"/>
+  <circle class="cn accent" cx="420" cy="482" r="10"/><text class="cnt accent" x="420" y="486" text-anchor="middle">5</text>
+</svg>

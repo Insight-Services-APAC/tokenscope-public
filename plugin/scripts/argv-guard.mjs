@@ -23,14 +23,24 @@
  * already knows the handoff is posted to, and which of the files under the
  * account's own home is written — it may never INTRODUCE either. The hosts a
  * device knows come from configuration a human wrote outside the conversation
- * (the MCP registration the two redeem helpers discover — see mcp-origin.mjs),
- * from the packaged default, or from loopback. A model relaying a value through
+ * (the MCP registration the two redeem helpers discover — see mcp-origin.mjs —
+ * and, for Claude Code, the plugin's `server_url` option in the user's own
+ * settings file — see api-base.mjs), from the packaged default, or from
+ * loopback. A model relaying a value through
  * the conversation cannot add to that set.
  */
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { assertSafeEndpoint, isLoopbackHostname, unsafeEndpointError } from './endpoint-guard.mjs'
 import { realHome } from './real-home.mjs'
+
+// Windows: realpathSync.native expands 8.3 short names (C:\\Users\\RUNNER~1) and
+// returns the on-disk case, and paths compare case-insensitively. Without both, a
+// path inside the profile written in short form was refused while the PowerShell
+// redeem (which normalises) accepted it.
+const IS_WIN = process.platform === 'win32'
+const realpathFs = IS_WIN ? realpathSync.native : realpathSync
+const foldPath = (p) => (IS_WIN ? p.toLowerCase() : p)
 
 /**
  * A rejection carrying a stable, value-free `reason` — the same
@@ -134,7 +144,7 @@ function realpathForWrite(p) {
   let dir = p
   for (let i = 0; i <= MAX_PATH_DEPTH; i++) {
     try {
-      const real = realpathSync(dir)
+      const real = realpathFs(dir)
       return tail.length ? join(real, ...tail) : real
     } catch (err) {
       if (!err || err.code !== 'ENOENT') throw err
@@ -250,12 +260,12 @@ export function assertConfinedPath(
       // IS fully resolved, so a stale root can only fail to match (safe), never
       // widen what is accepted.
       try {
-        return realpathSync(resolve(r))
+        return realpathFs(resolve(r))
       } catch {
         return resolve(r)
       }
     })
-    .some((root) => real === root || real.startsWith(root + sep))
+    .some((root) => foldPath(real) === foldPath(root) || foldPath(real).startsWith(foldPath(root + sep)))
   if (!inside) {
     throw argvError(
       `${safeToken(flag)} must name a path inside your home directory (${roots[0]}), and must not be a symlink out of it`,
@@ -302,10 +312,11 @@ function originOf(value) {
  *   - any loopback host, on any port — the documented local-dev target. To be
  *     served by 127.0.0.1 an attacker must already be running a process on the
  *     machine, which is a shorter path to the credential than this flag.
- *   - any origin in `allowed` — supplied by the caller as (a) the packaged
- *     default and (b) the MCP registration discovered in the human's own
- *     client configuration. Both are origins by construction, so comparing on
- *     origin loses nothing.
+ *   - any origin in `allowed` — supplied by the caller from configuration the
+ *     human wrote: the packaged default, the MCP registration discovered in
+ *     their own client configuration, and (Claude Code) the `server_url` they
+ *     configured for the plugin. Compared on origin, so a configured value with
+ *     a trailing slash still matches.
  *
  * Comparison is on `URL#origin`, which is why the usual near-miss shapes do not
  * pass: `https://good.example@evil.example` has origin `https://evil.example`
@@ -354,7 +365,8 @@ export function assertAllowedApiBase(value, { allowed = [], flag = '--api-base' 
  * a rejected `--api-base` is WARNED ABOUT and IGNORED, not fatal.
  *
  * Why ignore rather than exit. Every remaining source — a loopback
- * TOKENSCOPE_API_BASE, the discovered MCP registration, the packaged default —
+ * TOKENSCOPE_API_BASE, the configured `server_url`, the discovered MCP
+ * registration, the packaged default —
  * is a value the conversation cannot choose, so continuing without the flag is
  * safe by construction. When the two disagree it is also the better guess:
  * discovery reads the registration the human made with THIS CLI, while the flag
@@ -378,9 +390,10 @@ export function acceptApiBaseArg(
   } catch (err) {
     warn(
       `[tokenscope] WARN: ignoring ${safeToken(flag)} (${err.reason ?? 'invalid'}) — it does not name ` +
-        'loopback, the packaged deployment, or the TokenScope MCP server registered in your own client ' +
-        'config. Resolving the redeem host from local configuration instead. If this deployment really ' +
-        'is yours, register it with your CLI (e.g. `claude mcp add`) so the helper can discover it.',
+        'loopback, the packaged deployment, your configured TokenScope server URL, or the TokenScope MCP ' +
+        'server registered in your own client config. Resolving the redeem host from local configuration ' +
+        'instead. If this deployment really is yours, set it as the plugin\'s server URL (Claude Code: ' +
+        '/plugin, tokenscope, Configure) or register it with your CLI (e.g. `copilot mcp add`).',
     )
     return null
   }

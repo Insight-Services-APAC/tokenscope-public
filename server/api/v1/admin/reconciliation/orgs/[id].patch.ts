@@ -31,7 +31,7 @@ import { readSecret } from '../../../../../reconciliation/credentials'
 import { validateKeyFormat } from '../../../../../anthropic/health'
 import { assertOrgUnitInRegion } from '../../../../../db/org-units'
 import { lockGovernanceCutoverForBillingEdit } from '../../../../../governance/cutover'
-import { recomputeGovernanceVerdicts } from '../../../../../governance/recompute'
+import { recomputeScopeNewestFirst } from '../../../../../governance/recompute'
 import { resweepProviderOrgReferences } from '../../../../../workers/governance-key-backfill'
 import {
   reconciliationModeSchema,
@@ -384,14 +384,21 @@ export default defineEventHandler(async (event) => {
       userAgent: ua,
     })
 
-    // Immediate effect for open-period rows (design §4.1) — a no-op
-    // pre-activation (see the identical note in enterprises/[id].patch.ts).
+    // A billing edit recomputes this org's rows NEWEST FIRST in the request, for
+    // up to GOVERNANCE_PATCH_BUDGET_MS, so the current month reflects it on
+    // commit — unless a month it touches is locked elsewhere, in which case the
+    // in-request recompute is skipped rather than waited for. Either way, rows
+    // this request does not reach (`complete: false`) are converged by the
+    // governance-recompute worker's ascending sweep, which revisits every row
+    // within (ceil(N / R) + 1) × 15 min (the bound its header derives). The
+    // billing edit commits regardless. A no-op pre-activation (see the identical
+    // note in enterprises/[id].patch.ts).
     // Reachable only for anthropic here: a github billing edit was already
     // rejected above once activated, and pre-activation the legacy heuristic
     // ignores `billing` entirely for both providers.
-    if (has('billing')) {
-      await recomputeGovernanceVerdicts(tx, { providerOrgId: id })
-    }
+    const governanceRecompute = has('billing')
+      ? await recomputeScopeNewestFirst(tx, { providerOrgId: id })
+      : { complete: true }
 
     // Targeted governance-key resweep (design §8.4) — linking this org to an
     // enterprise may resolve previously-unresolved rows keyed by it.
@@ -400,7 +407,7 @@ export default defineEventHandler(async (event) => {
     // six handlers"): its scope is an explicit parameter (org id + provider +
     // external id), not the caller's region; its tables carry no RLS; and it
     // must observe the UPDATE above, which no other connection can see until
-    // this transaction commits. Same for recomputeGovernanceVerdicts, scoped by
+    // this transaction commits. Same for recomputeScopeNewestFirst, scoped by
     // { providerOrgId }.
     if (has('providerEnterpriseId')) {
       await resweepProviderOrgReferences(tx, {
@@ -411,6 +418,8 @@ export default defineEventHandler(async (event) => {
       })
     }
 
-    return { id, updated: true }
+    // `governanceRecompute` is always present (additive): `complete: true` when
+    // billing was not edited, since no recompute is owed by this request.
+    return { id, updated: true, governanceRecompute }
   })
 })

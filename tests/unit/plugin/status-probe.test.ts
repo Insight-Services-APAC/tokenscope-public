@@ -34,8 +34,8 @@ describe('interpretEmissionProbe', () => {
     })
     expect(v.emitting).toBe(false)
     expect(v.probe_status).toBe(401)
-    expect(v.message).toMatch(/DROPPED/)
-    expect(v.message).toMatch(/re-provision/i)
+    expect(v.message).toMatch(/^NOT SENDING: .*Usage is being dropped\./)
+    expect(v.message).toMatch(/run \/tokenscope:setup/i)
     expect(v.message).toMatch(/Session expired/)
   })
 
@@ -43,14 +43,14 @@ describe('interpretEmissionProbe', () => {
     const v = interpretEmissionProbe({ status: 1, stdoutHasAuth: false, sentinel: { http_status: 403, message: 'revoked' } })
     expect(v.emitting).toBe(false)
     expect(v.probe_status).toBe(403)
-    expect(v.message).toMatch(/re-provision/i)
+    expect(v.message).toMatch(/run \/tokenscope:setup/i)
   })
 
   it('non-zero exit + 404 sentinel (instance unknown) → re-provision', () => {
     const v = interpretEmissionProbe({ status: 1, stdoutHasAuth: false, sentinel: { http_status: 404, message: 'instance not found' } })
     expect(v.emitting).toBe(false)
     expect(v.probe_status).toBe(404)
-    expect(v.message).toMatch(/re-provision/i)
+    expect(v.message).toMatch(/run \/tokenscope:setup/i)
   })
 
   it('non-zero exit + network sentinel (http 0) → UNVERIFIABLE, not a hard "dropped"', () => {
@@ -61,17 +61,17 @@ describe('interpretEmissionProbe', () => {
     })
     expect(v.emitting).toBe(false)
     expect(v.probe_status).toBe(0)
-    expect(v.message).toMatch(/could not be verified|transient/i)
-    expect(v.message).not.toMatch(/re-provision/i)
+    expect(v.message).toMatch(/^UNVERIFIED: .*short network blip/)
+    expect(v.message).not.toMatch(/tokenscope:setup/)
   })
 
   it('non-zero exit + NO sentinel → hard failure with no detail, steers to re-provision (not "transient")', () => {
     const v = interpretEmissionProbe({ status: 1, stdoutHasAuth: false, sentinel: null })
     expect(v.emitting).toBe(false)
     expect(v.probe_status).toBeNull()
-    expect(v.message).toMatch(/no detail recorded/i)
-    expect(v.message).toMatch(/re-provision/i)
-    expect(v.message).not.toMatch(/transient/i)
+    expect(v.message).toMatch(/^NOT SENDING: the helper failed without saying why/)
+    expect(v.message).toMatch(/run \/tokenscope:setup/i)
+    expect(v.message).not.toMatch(/network blip/i)
   })
 })
 

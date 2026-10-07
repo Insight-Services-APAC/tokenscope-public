@@ -185,6 +185,11 @@ param hasAnthropicKey bool = false
 @description('log_min_duration_statement (ms) forwarded to the PG module — the per-environment slow-statement threshold.')
 param slowStatementLogMs string = '1000'
 
+@description('Postgres max_connections, forwarded to the PG module. 0 (default) = unmanaged: an unmeasured environment keeps the server\'s own value. STATIC — a change takes effect only after a Postgres restart. Size it against maxReplicas × (request pool + worker pool + dispatch-lock pool) + 15 reserved (tests/unit/infra/postgres-connection-budget.test.ts checks every parameter file that sets it).')
+@minValue(0)
+@maxValue(5000)
+param postgresMaxConnections int = 0
+
 // ── GitHub Copilot reconciliation PATs (F2 — GATED OFF; TEMPLATE) ──
 // Empty (the default) = NO-OP: no KV secret written, no container-app KV ref/env
 // var emitted, F2 stays gated off (no reconciled provider_enterprise → no lookup).
@@ -261,6 +266,15 @@ param monitorQueryPrivateOnly bool = false
 
 @description('Consume a central Azure Monitor Private Link Scope (owned by whoever owns the central private DNS zones) instead of deploying our own. DEFAULTS from centralDnsZonesSubscriptionId, because the two are the same constraint: one shared privatelink zone holds ONE set of Monitor A records, so a scope of our own overwrites the central one and blackholes whoever it displaced. An env on central zones therefore consumes the central scope unless someone opts out ON PURPOSE. The scope owner joins our workspace to their scope as a scoped resource.')
 param useCentralAmpls bool = !empty(centralDnsZonesSubscriptionId)
+
+@description('Send the platform\'s own logs (Container Apps console/system logs, diagnostic settings, log alert rules) to a separate ops workspace whose query path is public and governed by Entra RBAC. DEFAULTS on exactly when query is private (enablePrivateNetworking && monitorQueryPrivateOnly, the same predicate monitoring.bicep applies): query privacy is workspace-wide, so a private-query env without it leaves its crash logs readable only by the app.')
+param separateOpsWorkspace bool = enablePrivateNetworking && monitorQueryPrivateOnly
+
+@description('App container vCPU, e.g. \'1.0\'. Unset = 1.0 in production, 0.5 otherwise. Pair with appMemory per the Consumption ratio (0.5 → 1Gi, 1.0 → 2Gi).')
+param appCpu string?
+
+@description('App container memory, e.g. 2Gi. Unset = 2Gi in production, 1Gi otherwise. Node\'s default heap limit is about half of it. Set appCpu with it.')
+param appMemory string?
 
 @description('Resource ID of the central AMPLS to point our own private endpoint at. Read only when useCentralAmpls, and needed only if the central PE is unreachable from our VNet. Empty (default) = we deploy no AMPLS PE at all. Requires amplsSubnetPrefix, and no same-named PE already pointing at another scope (privateLinkServiceId is immutable).')
 param centralAmplsResourceId string = ''
@@ -354,10 +368,10 @@ param frontDoorRateLimitPerIpPer5Min int = 100
 @description('ISO-3166 alpha-2 country codes allowed through the AFD WAF. Empty array = no geo restriction (global access). Forwarded directly to `front-door.bicep`.')
 param wafGeoAllowedCountries array = []
 
-@description('AFD origin response timeout (seconds). TokenScope long-running endpoints (CSV exports, region admin queries) should stay under 60s; tune up only if a long-poll endpoint is added.')
+@description('AFD origin response timeout (seconds). Defaults to 240, the maximum Azure allows. With Front Door enforced (frontDoorId set) the scheduled worker jobs call through it, so it must stay at or above the 200 s worker dispatch budget (DISPATCH_TIMEOUT_MS in shared/workers/dispatch-budget.ts): below it, a worker that finishes and records success is still reported as a failed job execution, and its retry 409s. It is not a control on user endpoints, which stay bounded by the replica and their own timeouts.')
 @minValue(16)
 @maxValue(240)
-param afdOriginResponseTimeoutSeconds int = 60
+param afdOriginResponseTimeoutSeconds int = 240
 
 @description('Azure Front Door instance ID. Default empty = not enforced. Set it to the `frontDoorInstanceId` output of an apply with Front Door on; the container-app revision then rejects requests without the matching X-Azure-FDID header.')
 param frontDoorId string = ''
@@ -432,6 +446,7 @@ module monitoring 'modules/monitoring.bicep' = {
     // so it uses amplsSubnetId, not the shared PE subnet. On useCentralAmpls we
     // deploy no scope, and no PE either unless centralAmplsResourceId is set.
     enableQueryPrivateLink: enablePrivateNetworking && monitorQueryPrivateOnly
+    separateOpsWorkspace: separateOpsWorkspace
     privateEndpointSubnetId: enablePrivateNetworking ? networking!.outputs.amplsSubnetId : ''
     useCentralAmpls: useCentralAmpls
     centralAmplsResourceId: centralAmplsResourceId
@@ -489,7 +504,7 @@ module keyVault 'modules/key-vault.bicep' = {
     // the private-endpoint resources.
     privateEndpointSubnetId: enablePrivateNetworking ? networking!.outputs.privateEndpointSubnetId : ''
     privateDnsZoneId: (enablePrivateNetworking && registerDnsZoneGroups) ? networking!.outputs.dnsZoneKeyVaultId : ''
-    logAnalyticsId: monitoring.outputs.logAnalyticsId
+    logAnalyticsId: monitoring.outputs.opsLogAnalyticsId
     tags: tags
   }
 }
@@ -502,7 +517,7 @@ module containerRegistry 'modules/container-registry.bicep' = {
     name: nameSuffix
     location: location
     environment: env
-    logAnalyticsId: monitoring.outputs.logAnalyticsId
+    logAnalyticsId: monitoring.outputs.opsLogAnalyticsId
     // ACR goes private alongside the rest of the data plane. When
     // enablePrivateNetworking=false there's no networking module, so both
     // IDs are '' and the module's if-guard skips the PE (public + RBAC).
@@ -526,8 +541,9 @@ module postgresql 'modules/postgresql.bicep' = {
     enablePrivateEndpoint: enablePrivateNetworking
     privateEndpointSubnetId: enablePrivateNetworking ? networking!.outputs.privateEndpointSubnetId : ''
     privateDnsZoneId: (enablePrivateNetworking && registerDnsZoneGroups) ? networking!.outputs.dnsZonePostgresqlId : ''
-    logAnalyticsId: monitoring.outputs.logAnalyticsId
+    logAnalyticsId: monitoring.outputs.opsLogAnalyticsId
     slowStatementLogMs: slowStatementLogMs
+    maxConnections: postgresMaxConnections
     tags: tags
   }
 }
@@ -649,10 +665,17 @@ module containerApp 'modules/container-app.bicep' = {
     containerAppsSubnetId: enablePrivateNetworking ? networking!.outputs.containerAppsSubnetId : ''
     // Private networking → internal ACA env (private VIP; Front Door Premium or your own WAF fronts it).
     internalIngress: enablePrivateNetworking
+    // Reader: telemetry workspace. Environment logs: ops workspace.
     logAnalyticsCustomerId: monitoring.outputs.logAnalyticsCustomerId
-    // logAnalyticsName lets container-app call listKeys() itself —
-    // shared key never crosses a module-output boundary.
-    logAnalyticsName: monitoring.outputs.logAnalyticsName
+    appLogsWorkspaceCustomerId: monitoring.outputs.opsLogAnalyticsCustomerId
+    // The name lets container-app call listKeys() itself — the shared key
+    // never crosses a module-output boundary.
+    appLogsWorkspaceName: monitoring.outputs.opsLogAnalyticsName
+    // The ops workspace is outside the private link scope the VNet resolves through.
+    appLogsViaDiagnosticSettings: separateOpsWorkspace
+    appLogsWorkspaceId: monitoring.outputs.opsLogAnalyticsId
+    appCpu: appCpu
+    appMemory: appMemory
     // Full OTLP logs ingest URL (VERIFIED form, sandbox-realclaude-journey.md):
     // <dce-logs-endpoint>/dataCollectionRules/<dcrImmutableId>/streams/
     // Microsoft-OTLP-Logs/otlp/v1/logs. Drives the app's LogAnalyticsReader +
@@ -662,6 +685,8 @@ module containerApp 'modules/container-app.bicep' = {
     // read-path ingest-coverage probe (NUXT_AZURE_DCR_RESOURCE_ID). Needs
     // Monitoring Reader on the DCR (granted in monitoring.bicep).
     dcrResourceId: monitoring.outputs.dcrResourceId
+    // The telemetry workspace's daily cap, for the telemetry-cap ops alert.
+    telemetryDailyCapGb: monitoring.outputs.telemetryDailyCapGb
     hasAnthropicKey: hasAnthropicKey || !empty(anthropicApiKey)
     // F2 GitHub Copilot reconciliation PATs (GATED OFF; flags false until provided).
     hasGithubPatPartnerDemo: !empty(githubPatPartnerDemo)
@@ -748,7 +773,7 @@ module frontDoor 'modules/front-door.bicep' = if (enableFrontDoor) {
     privateLinkResourceId: enablePrivateNetworking ? containerApp.outputs.environmentId : ''
     privateLinkLocation: enablePrivateNetworking ? location : ''
     managedRuleAction: frontDoorWafManagedRuleAction
-    logAnalyticsId: monitoring.outputs.logAnalyticsId
+    logAnalyticsId: monitoring.outputs.opsLogAnalyticsId
     rateLimitPerIpPer5Min: frontDoorRateLimitPerIpPer5Min
     tags: tags
   }
@@ -797,7 +822,8 @@ module opsAlerts 'modules/ops-alerts.bicep' = {
     // resourceId() is a pure string build — NO implicit dependency — hence the
     // explicit dependsOn below.
     opsAlertJobId: !empty(workerBaseUrl) ? resourceId('Microsoft.App/jobs', '${workerJobPrefix}-ops-alert') : ''
-    logAnalyticsId: monitoring.outputs.logAnalyticsId
+    logAnalyticsId: monitoring.outputs.opsLogAnalyticsId
+    logsOnOpsWorkspace: separateOpsWorkspace
     tags: tags
   }
   dependsOn: [

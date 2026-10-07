@@ -11,6 +11,12 @@
  * read by an example parameter file. Drift between these and the code is what broke the
  * public docs (docs/DEPLOY-AZURE.md §Troubleshooting has the history).
  *
+ * The wiki's diagrams are SVG files under docs/wiki/images. Every image a wiki page
+ * references must exist, every file there must be referenced, each SVG must render
+ * standalone through <img> on GitHub in both themes, and a public one must not name
+ * a real deployment's resources. A mermaid block left in the wiki must be marked
+ * `<!-- docs-check: keep-mermaid -->` on the line above it.
+ *
  *   node scripts/check-docs-references.mjs [--root <dir>]
  */
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
@@ -54,12 +60,17 @@ export function docFiles(root) {
   ].map((p) => relative(root, p).split(sep).join('/'))
   const extra = ['plugin/README.md', 'tests/deploy/README.md'].filter((f) => existsSync(join(root, f)))
   // Files the publish drops are not user-facing; skip them in the source tree.
+  const isInternal = internalOnly(root)
+  return [...new Set([...top, ...docs, ...nested, ...extra])].filter((f) => !isInternal(f)).sort()
+}
+
+/** A predicate for the paths publish.sh drops (tools/publish/internal-only-paths.txt). */
+function internalOnly(root) {
   const listFile = join(root, 'tools/publish/internal-only-paths.txt')
   const internal = existsSync(listFile)
     ? readFileSync(listFile, 'utf8').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))
     : []
-  const isInternal = (f) => internal.some((pre) => f === pre || f.startsWith(pre.endsWith('/') ? pre : `${pre}/`))
-  return [...new Set([...top, ...docs, ...nested, ...extra])].filter((f) => !isInternal(f)).sort()
+  return (f) => internal.some((pre) => f === pre || f.startsWith(pre.endsWith('/') ? pre : `${pre}/`))
 }
 
 /** What the tree offers: npm scripts, Bicep params/outputs, code text, secret reads, wired credentials. */
@@ -170,9 +181,82 @@ export function checkWorkflows(root, ctx) {
   })
 }
 
+const WIKI = 'docs/wiki'
+const IMAGES = `${WIKI}/images`
+// The wiki publish workflow copies only these names; keep the two in step.
+const IMAGE_NAME = /^[A-Za-z0-9_-]+\.(svg|png)$/
+const KEEP_MERMAID = '<!-- docs-check: keep-mermaid'
+// A concrete deployment's resource name, <prefix>-<env>-<region>, such as ca-tokenscope-example.
+const DEPLOYED_NAME = /\b[a-z0-9][a-z0-9-]*-(?:dev|test|staging|prod|production|sandbox)-[a-z]{2,}[0-9]*\b/i
+const SVG_REQUIRED = [
+  { re: /<svg\b[^>]*\bviewBox="/, what: 'a viewBox on <svg>' },
+  { re: /<svg\b[^>]*\bwidth="/, what: 'a width on <svg>' },
+  { re: /<svg\b[^>]*\bheight="/, what: 'a height on <svg>' },
+  { re: /<svg\b[^>]*\brole="img"/, what: 'role="img" on <svg>' },
+  { re: /<title\b/, what: 'a <title>' },
+  { re: /<desc\b/, what: 'a <desc>' },
+  { re: /prefers-color-scheme:\s*dark/, what: 'a prefers-color-scheme: dark block' },
+]
+// GitHub shows these through <img>, which loads no scripts, foreign HTML or external resources.
+const SVG_FORBIDDEN = [
+  { re: /<script\b/i, what: '<script>' },
+  { re: /<foreignObject\b/i, what: '<foreignObject>' },
+  { re: /@import\b/i, what: '@import' },
+  { re: /\b(?:xlink:)?href\s*=\s*["'](?!#)/i, what: 'an external href' },
+  { re: /url\(\s*(?!['"]?#)/i, what: 'an external url()' },
+]
+
+const lineOf = (text, index) => text.slice(0, index).split('\n').length
+
+/** Wiki diagrams: references resolve, files are referenced, SVGs are self-contained, no stray mermaid. */
+export function checkWikiDiagrams(root) {
+  const problems = []
+  const isInternal = internalOnly(root)
+  const pages = walk(join(root, WIKI), (p) => p.endsWith('.md')).map((p) => relative(root, p).split(sep).join('/'))
+  const referenced = new Set()
+  for (const file of pages) {
+    const lines = readFileSync(join(root, file), 'utf8').split('\n')
+    lines.forEach((line, i) => {
+      if (/^\s*```+\s*mermaid\b/.test(line) && !(i > 0 && lines[i - 1].includes(KEEP_MERMAID))) {
+        problems.push({ file, line: i + 1, message: `mermaid block in the wiki: draw it as an SVG under ${IMAGES}/ or mark it ${KEEP_MERMAID} -->` })
+      }
+      for (const m of line.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)) {
+        if (/^https?:/.test(m[1])) continue
+        const target = relative(root, resolve(join(root, dirname(file)), m[1])).split(sep).join('/')
+        if (!target.startsWith(`${IMAGES}/`)) problems.push({ file, line: i + 1, message: `image "${m[1]}" is outside ${IMAGES}/, which is all the wiki workflow publishes` })
+        else if (!existsSync(join(root, target))) problems.push({ file, line: i + 1, message: `image "${m[1]}" does not exist` })
+        else referenced.add(target)
+      }
+    })
+  }
+  const images = existsSync(join(root, IMAGES)) ? readdirSync(join(root, IMAGES)) : []
+  for (const name of images) {
+    const file = `${IMAGES}/${name}`
+    if (!IMAGE_NAME.test(name) || !statSync(join(root, file)).isFile()) {
+      problems.push({ file, line: 0, message: `only files named ${IMAGE_NAME} belong in ${IMAGES}; the wiki workflow copies nothing else` })
+      continue
+    }
+    if (!referenced.has(file)) problems.push({ file, line: 0, message: 'no wiki page references this image' })
+    if (!name.endsWith('.svg')) continue
+    const svg = readFileSync(join(root, file), 'utf8')
+    for (const { re, what } of SVG_REQUIRED) if (!re.test(svg)) problems.push({ file, line: 0, message: `SVG lacks ${what}` })
+    for (const { re, what } of SVG_FORBIDDEN) {
+      const m = svg.match(re)
+      if (m) problems.push({ file, line: lineOf(svg, m.index), message: `SVG contains ${what}, which GitHub does not load through <img>` })
+    }
+    const named = isInternal(file) ? null : svg.match(DEPLOYED_NAME)
+    if (named) problems.push({ file, line: lineOf(svg, named.index), message: `public diagram names a deployed resource ("${named[0]}"); use a template name such as ca-<name>` })
+  }
+  return problems
+}
+
 export function checkTree(root) {
   const ctx = buildContext(root)
-  return [...docFiles(root).flatMap((f) => checkDoc(root, f, ctx).map((p) => ({ file: f, ...p }))), ...checkWorkflows(root, ctx)]
+  return [
+    ...docFiles(root).flatMap((f) => checkDoc(root, f, ctx).map((p) => ({ file: f, ...p }))),
+    ...checkWorkflows(root, ctx),
+    ...checkWikiDiagrams(root),
+  ]
 }
 
 function main() {
@@ -185,10 +269,10 @@ function main() {
   const problems = checkTree(root)
   for (const p of problems) console.error(`✗ ${p.file}:${p.line}: ${p.message}`)
   if (problems.length) {
-    console.error(`\n${problems.length} doc reference(s) do not resolve in ${root}`)
+    console.error(`\n${problems.length} doc problem(s) in ${root}`)
     process.exit(1)
   }
-  console.log(`✓ doc references resolve (${docFiles(root).length} docs, ${root})`)
+  console.log(`✓ doc references and wiki diagrams check out (${docFiles(root).length} docs, ${root})`)
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) main()

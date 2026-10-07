@@ -61,38 +61,15 @@ What TokenScope holds, ranked by sensitivity.
 
 ## Data flow — PII vs non-PII at each hop
 
-```mermaid
-flowchart LR
-    Dev["Developer + Claude Code CLI"]
-    AZ["Azure Monitor / Log Analytics<br/>(OTelLogs)"]
-    Joiner["Read joiner<br/>(Container Apps worker)"]
-    PG[("Postgres<br/>Flexible Server")]
-    Dash["Dashboard<br/>(browser, Entra OIDC)"]
+![With TokenScope's client settings no prompt or response text leaves the device, but Claude Code attaches the signed-in email to its events, and that email reaches Log Analytics and a column on attribution_record](images/data-protection-pii-hops.svg)
 
-    Dev -- "OTLP: token COUNTS + model + session_id<br/>(no bodies). Claude attaches user.email / org.id" --> AZ
-    AZ -- "KQL read: counts joined on tokenscope.instance_id" --> Joiner
-    Joiner -- "counts/cost/model → attribution_record" --> PG
-    PG -- "RLS-scoped reads (region + org)" --> Dash
+1. **Device → Azure Monitor.** Each `api_request` log event carries token counts, `cost_usd`, `model`, Claude's `session.id` and TokenScope's resource attributes (`tokenscope.instance_id`, `project.code_hash`, `tool`). Claude Code also attaches `user.email` and `organization.id`. TokenScope does not strip them. **[Current]**, strip/keep policy **[VERIFY / Planned]**.
+2. **Azure Monitor → joiner.** `OTelLogs` keeps every attribute as emitted. The joiner's KQL reads `api_request` rows for one `tokenscope.instance_id` (`server/azure/reader.ts`) and takes the teammate from `instance_attestation`, never from the email.
+3. **Joiner → Postgres.** It writes the ledger row to `attribution_record`, with the email canonicalised into `emitting_email` and the org id into `emitting_org_id` (migration 0119) as evidence for the billing lane. Entra identity (OID, email) lives in `teammate`, `instance_attestation.principal_email` and `teammate_identity_map`.
+4. **Postgres → dashboard.** Reads go through Entra OIDC and the application's role and scope checks (`requireRole`, the region and unit clamps). Row-level security policies exist but bind only after the RLS cutover provisions the non-owner app role; until then the app connects as the table owner, which RLS does not restrict. This is where names and emails are shown back.
+5. **Not emitted by default.** TokenScope's client settings never set `OTEL_LOG_USER_PROMPTS` or `OTEL_LOG_TOOL_DETAILS`, so Claude Code sends no prompt text or tool parameters. This is a client default, not an enforced boundary: a user who sets either variable would send that content, and the data collection rule stores every log event it receives. The joiner reads only `api_request` events.
 
-    classDef pii fill:#fde,stroke:#c39;
-    classDef nonpii fill:#dfe,stroke:#3a6;
-    class Dev,Dash pii;
-    class AZ,Joiner,PG nonpii;
-
-    note1["PII (email, OID) lives in<br/>Postgres identity tables +<br/>browser session — NOT in the<br/>telemetry counts"]
-```
-
-- **Dev → Azure:** OTLP carries **counts only**. Claude Code does attach
-  `user.email` / `organization.id` / hashed `user.id` to each point by default;
-  TokenScope joins on its own `tokenscope.instance_id` (the device/enrolment
-  INSTANCE id), not Claude's identity attributes (the per-SESSION
-  `session.id` is captured per-record as `claude_session_id`). **[Current]** — strip/keep policy for Claude's identity attrs is a
-  decision point **[VERIFY / Planned]**.
-- **Azure → Joiner:** KQL pulls counts; identity is resolved *in TokenScope* via
-  the attestation row, not carried in the telemetry payload.
-- **Joiner → Postgres:** writes the non-content ledger row.
-- **Postgres → Dashboard:** the only hop where PII is read back, gated by Entra
-  OIDC + region/org scope.
+*With the default client settings content stays on the device; identity does not, as `user.email` when Claude Code supplies it, and it is stored twice before anyone signs in to read it.*
 
 ---
 

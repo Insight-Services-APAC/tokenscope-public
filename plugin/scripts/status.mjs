@@ -36,8 +36,8 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { readEmitSentinel, runEmitHelper, safeProcessEnv } from './plugin-runtime.mjs'
+import { isMainModule } from './is-main.mjs'
+import { degradedExpiryNote, readEmitDegraded, readEmitSentinel, runEmitHelper, safeProcessEnv, trustedStateDir } from './plugin-runtime.mjs'
 import { checkRepoProjectBillable } from './project-check.mjs'
 
 /**
@@ -46,13 +46,25 @@ import { checkRepoProjectBillable } from './project-check.mjs'
  * `stdoutHasAuth` whether a bearer was minted, `sentinel` the parsed
  * emit-failure.json (or null).
  */
-export function interpretEmissionProbe({ status, stdoutHasAuth, sentinel }) {
+export function interpretEmissionProbe({ status, stdoutHasAuth, sentinel, degraded = null }) {
+  if (status === 0 && stdoutHasAuth && degraded) {
+    // Exit 0 on the CACHED bearer (#409): TokenScope was unreachable, so nothing
+    // verified the credential this run. Emitting, but not "OK".
+    const reason = degraded.reason || 'TokenScope unreachable'
+    const since = degraded.ts || 'unknown time'
+    return {
+      emitting: true,
+      degraded: true,
+      probe_status: 0,
+      message: `DEGRADED: TokenScope is unreachable (${reason}; since ${since}). Still sending on the cached credential (${degradedExpiryNote(degraded)}), but it was NOT verified. Run /tokenscope:status again once TokenScope is reachable.`,
+    }
+  }
   if (status === 0 && stdoutHasAuth) {
     return {
       emitting: true,
       probe_status: 200,
       message:
-        'Emission auth OK — the real emit path (headers helper → /bearer) minted an Azure Monitor bearer. This proves the credential is VALID; it does NOT confirm telemetry actually landed in Azure Monitor (the DCR/ingest/read path is downstream and not observable from here).',
+        'OK: this computer can send usage to TokenScope. This checks the credential only; it cannot see whether your usage has arrived.',
     }
   }
   if (status === 0 && !stdoutHasAuth) {
@@ -60,27 +72,27 @@ export function interpretEmissionProbe({ status, stdoutHasAuth, sentinel }) {
       emitting: false,
       probe_status: null,
       message:
-        'Headers helper exited 0 but returned no Authorization header — unexpected. Re-run /tokenscope:status; if it persists, re-provision emit via the tokenscope-setup MCP prompt.',
+        'ERROR: the helper finished but returned no credential. Run /tokenscope:status again; if it keeps happening, run /tokenscope:setup.',
     }
   }
   // Non-zero exit: the helper printed a loud, sanitised reason to stderr and
   // wrote a sentinel with the precise HTTP status + reason. Surface that.
   const http = sentinel && Number.isFinite(sentinel.http_status) ? sentinel.http_status : null
-  const reason = (sentinel && sentinel.message) || 'emission auth failed'
+  const reason = (sentinel && sentinel.message) || 'credential check failed'
   let message
   if (http === 401 || http === 403 || http === 404) {
-    message = `Emission auth FAILED — ${reason} (HTTP ${http}). Telemetry is being DROPPED. The durable credential may have lapsed or the instance was revoked/unknown — re-provision emit via the tokenscope-setup MCP prompt.`
+    message = `NOT SENDING: ${reason} (HTTP ${http}). Usage is being dropped. Run /tokenscope:setup to reconnect this computer.`
   } else if (http === 0) {
     // The helper recorded a NETWORK error — likely transient (the exporter keeps
     // its last bearer). Do NOT cry "dropped" or steer to re-provision.
-    message = `Emission auth could not be verified — ${reason}. Often a transient network blip; re-run /tokenscope:status. If it persists, telemetry may be DROPPED.`
+    message = `UNVERIFIED: ${reason}. Usually a short network blip. Run /tokenscope:status again; if it keeps failing, usage may be dropped.`
   } else if (http == null) {
     // Helper exited non-zero but recorded NO sentinel (e.g. the sentinel write
     // itself failed) — a real failure with no detail. Steer to re-provision rather
     // than mislabel it transient (under-warning is as bad as crying wolf).
-    message = `Emission auth FAILED (no detail recorded — the headers helper exited non-zero). Telemetry may be DROPPED. Re-run /tokenscope:status; if it persists, re-provision emit via the tokenscope-setup MCP prompt.`
+    message = `NOT SENDING: the helper failed without saying why. Usage may be dropped. Run /tokenscope:status again; if it keeps failing, run /tokenscope:setup.`
   } else {
-    message = `Emission auth FAILED — ${reason} (HTTP ${http}). Telemetry may be DROPPED. Re-run /tokenscope:status or re-provision emit.`
+    message = `NOT SENDING: ${reason} (HTTP ${http}). Usage may be dropped. Run /tokenscope:status again, or run /tokenscope:setup.`
   }
   return { emitting: false, probe_status: http, message }
 }
@@ -105,7 +117,7 @@ export function interpretEmissionProbe({ status, stdoutHasAuth, sentinel }) {
  * TOKENSCOPE_BEARER_ENDPOINT, say — and leave every other value looking
  * untouched.
  */
-function probeEmissionAuth(env) {
+export function probeEmissionAuth(env) {
   const endpoint = (env.TOKENSCOPE_BEARER_ENDPOINT ?? '').trim()
   const hasOAuth = Boolean(
     (env.TOKENSCOPE_OAUTH_REFRESH_TOKEN ?? '').trim() &&
@@ -117,7 +129,7 @@ function probeEmissionAuth(env) {
       emitting: false,
       probe_status: null,
       message:
-        "Not configured — no bearer endpoint / OAuth emit credential in this session's env. Run the tokenscope-setup MCP prompt (provision_emit), then restart `claude` (OTel env is read at startup).",
+        "Not configured: this session has no TokenScope credential. Run /tokenscope:setup, then restart Claude Code.",
     }
   }
   const { ran, status, hasAuth } = runEmitHelper({ env })
@@ -128,7 +140,16 @@ function probeEmissionAuth(env) {
       message: 'Headers helper not found — is the plugin installed / CLAUDE_PLUGIN_ROOT set?',
     }
   }
-  return interpretEmissionProbe({ status, stdoutHasAuth: hasAuth, sentinel: readEmitSentinel(env) })
+  return interpretEmissionProbe({
+    status,
+    stdoutHasAuth: hasAuth,
+    // The helper writes where runEmitHelper pinned it — trustedStateDir() — so
+    // read back from there. stateDir() honours a live TOKENSCOPE_STATE_DIR (which
+    // safeProcessEnv only strips from its copy), and reading through it missed
+    // the marker and reported "Emission auth OK" during an outage.
+    sentinel: readEmitSentinel(env, trustedStateDir()),
+    degraded: readEmitDegraded(env, trustedStateDir()),
+  })
 }
 
 /** Abs path to Claude Code's own credential store. */
@@ -220,8 +241,8 @@ async function main() {
   // second, forgotten call site still reading raw process.env.
   const env = safeProcessEnv()
   const probe = probeEmissionAuth(env)
-  const sentinel = readEmitSentinel(env)
-  const otherLaneFailure = readEmitSentinel(env, undefined, 'copilot-cli')
+  const sentinel = readEmitSentinel(env, trustedStateDir())
+  const otherLaneFailure = readEmitSentinel(env, trustedStateDir(), 'copilot-cli')
   const mcpAuthed = probeMcpAuth()
   const project = await projectBlock(env)
 
@@ -250,7 +271,7 @@ async function main() {
 
 // CLI entry guard so tests can import the pure helpers without running the probe
 // (mirrors backfill.mjs).
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
+const isMain = isMainModule(import.meta.url)
 if (isMain) {
   main().catch((err) => {
     console.error(

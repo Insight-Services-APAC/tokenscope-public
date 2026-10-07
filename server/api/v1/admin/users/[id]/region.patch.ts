@@ -28,7 +28,8 @@ import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
 import { unplacedOrgUnitIdForRegion } from '../../../../../auth/placement-home'
-import { endLiveDevicesOf } from '../../../../../utils/device-lifecycle'
+import { revokeInteractiveCredentialsOf } from '../../../../../auth/emit-revocation'
+import { rehomeLiveDevicesOf } from '../../../../../utils/device-lifecycle'
 
 const Body = z.object({
   region_id: z.string().uuid(),
@@ -70,6 +71,30 @@ export default defineEventHandler(async (event) => {
       orgUnitId = await unplacedOrgUnitIdForRegion(tx, body.region_id)
     }
 
+    await tx.execute(sql`
+      UPDATE teammate
+      SET region_id = ${body.region_id}::uuid, org_unit_id = ${orgUnitId}::uuid, revoked_at = NOW(),
+          -- An admin move is a competing authority over the manager-chain derivation: clear
+          -- the placement provenance so region-reenrichment treats this as a deliberate
+          -- placement and does NOT re-derive it back to the chain's unit next tick.
+          metadata = (coalesce(metadata, '{}'::jsonb) - 'placedVia' - 'placedOwnerOid' - 'placedAt')
+      WHERE id = ${target.id}::uuid
+    `)
+    // The teammate's devices survive the move (#414), so they must MOVE with it:
+    // the joiner stamps new records' region/BU from the device row, and the new
+    // region's admin finds devices by it. Ended devices and attributed history
+    // keep the placement they were emitted under. Lock order: teammate, then
+    // devices (as revoke-sessions), then oauth_token (device-lifecycle.ts).
+    const rehomedInstanceIds = await rehomeLiveDevicesOf(tx as never, target.id, {
+      regionId: body.region_id,
+      orgUnitId,
+    })
+
+    // E2 (ADR-0005) as amended by #414: same split as the role-change PATCH.
+    // Interactive credentials die; the teammate's devices keep emitting, and
+    // the RLS lane each emit request runs in reads the NEW region from this row.
+    await revokeInteractiveCredentialsOf(tx as never, target.id)
+
     await recordAuditEvent(tx, {
       eventType: 'teammate-region-reassigned',
       actorTeammateId: caller.teammateId,
@@ -82,28 +107,9 @@ export default defineEventHandler(async (event) => {
         newOrgUnitId: orgUnitId,
         targetEmail: target.email,
         sessionsRevoked: true,
+        rehomedInstanceIds,
       },
     })
-    await tx.execute(sql`
-      UPDATE teammate
-      SET region_id = ${body.region_id}::uuid, org_unit_id = ${orgUnitId}::uuid, revoked_at = NOW(),
-          -- An admin move is a competing authority over the manager-chain derivation: clear
-          -- the placement provenance so region-reenrichment treats this as a deliberate
-          -- placement and does NOT re-derive it back to the chain's unit next tick.
-          metadata = (coalesce(metadata, '{}'::jsonb) - 'placedVia' - 'placedOwnerOid' - 'placedAt')
-      WHERE id = ${target.id}::uuid
-    `)
-    // E2 (ADR-0005): region re-scope bumps revoked_at → eager-cascade-end the
-    // teammate's emit instances (their region/scope changed; old instances must
-    // stop emitting under the prior scope).
-    await endLiveDevicesOf(tx as never, target.id)
-    // E2 (ADR-0005): region re-scope ⇒ the old OAuth emit credential must die
-    // too. Eager-revoke the teammate's live oauth_token rows so the old refresh
-    // token can no longer mint access tokens under the prior scope.
-    await tx.execute(sql`
-      UPDATE oauth_token SET revoked_at = NOW()
-      WHERE teammate_id = ${target.id}::uuid AND revoked_at IS NULL
-    `)
     return { previousRegionId: target.region_id, newRegionId: body.region_id, orgUnitId }
   })
 

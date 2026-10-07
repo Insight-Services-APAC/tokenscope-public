@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /*
- * tokenscope-status (Copilot CLI) — "is my Copilot CLI emitting to TokenScope, and
+ * The `status` skill (Copilot CLI) — "is my Copilot CLI emitting to TokenScope, and
  * did a record actually LAND?" The Copilot analogue of the Claude /tokenscope:status
  * probe (plugin/scripts/status.mjs). Copilot can't render a Claude-style statusline,
  * but it CAN run this probe from a skill and surface a clear health verdict.
@@ -63,7 +63,9 @@
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { resolveStorePath } from './device-store.mjs'
+import { emitHelperSpawn, helperScriptName } from './emit-helper-spawn.mjs'
 import { fileURLToPath } from 'node:url'
+import { isMainModule } from './is-main.mjs'
 import { spawnSync } from 'node:child_process'
 // landed-check.mjs already owns the state-dir resolver this probe needs, and this
 // module already imports from it — so import it rather than keep a second copy that
@@ -93,6 +95,27 @@ function readEmitSentinel(stateD, tool = 'copilot-cli') {
 }
 
 /**
+ * The helper's "emitting on the cached Azure bearer" marker (#409): TokenScope
+ * was unreachable on its last run, so the credential was NOT verified. Written
+ * on every such run and cleared by the next clean mint, so it is never stale
+ * right after an exit-0 run. Copy of plugin-runtime's reader, kept local like
+ * readEmitSentinel so this surface has no dependency on plugin/scripts/.
+ */
+function readEmitDegraded(stateD, tool = 'copilot-cli') {
+  return readJson(join(stateD, `emit-degraded.${tool}.json`))
+}
+
+/** One phrase for the marker's expiry (mirrors plugin-runtime.degradedExpiryNote). */
+export function degradedExpiryNote(degraded, nowSec = Math.floor(Date.now() / 1000)) {
+  const exp = Number(degraded && degraded.expires_at)
+  if (!Number.isFinite(exp) || exp <= 0) return 'cached bearer expiry unknown'
+  const iso = new Date(exp * 1000).toISOString()
+  return exp <= nowSec
+    ? `cached bearer EXPIRED at ${iso} — exports are probably being refused`
+    : `cached bearer valid until ${iso}`
+}
+
+/**
  * Decide the emission verdict from the helper's exit result + any sentinel it wrote.
  * Pure + exported for tests. `status` is the helper's exit code, `stdoutHasAuth`
  * whether a bearer was minted, `sentinel` the parsed emit-failure.json (or null).
@@ -102,13 +125,25 @@ function readEmitSentinel(stateD, tool = 'copilot-cli') {
  * Wording is Copilot-flavoured (skill name, not slash command), but the verdict
  * tree (200 / unexpected-0 / 401-403-404 / network / no-detail / other) is identical.
  */
-export function interpretEmissionProbe({ status, stdoutHasAuth, sentinel }) {
+export function interpretEmissionProbe({ status, stdoutHasAuth, sentinel, degraded = null }) {
+  if (status === 0 && stdoutHasAuth && degraded) {
+    // Exit 0 on the CACHED bearer (#409): TokenScope was unreachable, so nothing
+    // verified the credential this run. Emitting, but not "OK".
+    const reason = degraded.reason || 'TokenScope unreachable'
+    const since = degraded.ts || 'unknown time'
+    return {
+      emitting: true,
+      degraded: true,
+      probe_status: 0,
+      message: `DEGRADED: TokenScope is unreachable (${reason}; since ${since}). Still sending on the cached credential (${degradedExpiryNote(degraded)}), but it was NOT verified. Run the TokenScope status skill again once TokenScope is reachable.`,
+    }
+  }
   if (status === 0 && stdoutHasAuth) {
     return {
       emitting: true,
       probe_status: 200,
       message:
-        'Emission auth OK — the real emit path (headers helper → /bearer) minted an Azure Monitor bearer. This proves the credential is VALID; it does NOT by itself confirm a record landed (see the landed check below).',
+        'OK: this computer can send usage to TokenScope. This checks the credential only; the landed check below says whether usage arrived.',
     }
   }
   if (status === 0 && !stdoutHasAuth) {
@@ -116,21 +151,21 @@ export function interpretEmissionProbe({ status, stdoutHasAuth, sentinel }) {
       emitting: false,
       probe_status: null,
       message:
-        'Headers helper exited 0 but returned no Authorization header — unexpected. Re-run the tokenscope-status skill; if it persists, re-provision emit via the tokenscope-setup skill.',
+        'ERROR: the helper finished but returned no credential. Run the TokenScope status skill again; if it keeps happening, run the tokenscope-setup skill.',
     }
   }
   // Non-zero exit: the helper wrote a sentinel with the precise HTTP status + reason.
   const http = sentinel && Number.isFinite(sentinel.http_status) ? sentinel.http_status : null
-  const reason = (sentinel && sentinel.message) || 'emission auth failed'
+  const reason = (sentinel && sentinel.message) || 'credential check failed'
   let message
   if (http === 401 || http === 403 || http === 404) {
-    message = `Emission auth FAILED — ${reason} (HTTP ${http}). Telemetry is being DROPPED. The durable credential may have lapsed or the instance was revoked/unknown — re-provision emit via the tokenscope-setup skill.`
+    message = `NOT SENDING: ${reason} (HTTP ${http}). Usage is being dropped. Run the tokenscope-setup skill to reconnect this computer.`
   } else if (http === 0) {
-    message = `Emission auth could not be verified — ${reason}. Often a transient network blip; re-run the tokenscope-status skill. If it persists, telemetry may be DROPPED.`
+    message = `UNVERIFIED: ${reason}. Usually a short network blip. Run the TokenScope status skill again; if it keeps failing, usage may be dropped.`
   } else if (http == null) {
-    message = `Emission auth FAILED (no detail recorded — the headers helper exited non-zero). Telemetry may be DROPPED. Re-run the tokenscope-status skill; if it persists, re-provision emit via the tokenscope-setup skill.`
+    message = `NOT SENDING: the helper failed without saying why. Usage may be dropped. Run the TokenScope status skill again; if it keeps failing, run the tokenscope-setup skill.`
   } else {
-    message = `Emission auth FAILED — ${reason} (HTTP ${http}). Telemetry may be DROPPED. Re-run the tokenscope-status skill or re-provision emit.`
+    message = `NOT SENDING: ${reason} (HTTP ${http}). Usage may be dropped. Run the TokenScope status skill again, or run the tokenscope-setup skill.`
   }
   return { emitting: false, probe_status: http, message }
 }
@@ -292,10 +327,10 @@ export function interpretManagedTelemetry(managed) {
 /**
  * Active emission-auth probe for Copilot. Builds the TOKENSCOPE_* env from
  * config.copilot-cli.json (Copilot does NOT export these to the shell — same approach as
- * copilot-forwarder.mjs's mintBearer), runs otel-headers-helper.sh, and interprets
+ * copilot-forwarder.mjs's mintBearer), runs the headers helper (.sh, or .ps1 on Windows), and interprets
  * the result. NEVER surfaces the bearer.
  */
-function probeEmissionAuth(stateD) {
+export function probeEmissionAuth(stateD, spawnOpts = {}) {
   const cfg = readJson(resolveStorePath('copilot-cli', stateD))
   if (!cfg) {
     return {
@@ -320,7 +355,8 @@ function probeEmissionAuth(stateD) {
     }
   }
 
-  const helperPath = join(__dirname, 'otel-headers-helper.sh')
+  const platform = spawnOpts.platform ?? process.platform
+  const helperPath = join(__dirname, helperScriptName(platform))
   if (!existsSync(helperPath)) {
     return {
       emitting: false,
@@ -337,14 +373,30 @@ function probeEmissionAuth(stateD) {
     TOKENSCOPE_OAUTH_CLIENT_ID: cfg.oauth_client_id,
     TOKENSCOPE_OAUTH_REFRESH_TOKEN: cfg.oauth_refresh_token,
   }
-  // State dir as an ARGUMENT, `/bin/sh` absolute: the helper no longer reads
-  // TOKENSCOPE_STATE_DIR (Claude Code invokes it directly with a repo-merged
-  // environment — see otel-headers-helper.sh's header), and a bare `sh` resolves
-  // through a PATH that same merge can set.
-  const res = spawnSync('/bin/sh', [helperPath, '--state-dir', stateD, '--tool', 'copilot-cli'], {
+  // State dir as an ARGUMENT, interpreter absolute (`/bin/sh`, or Windows
+  // PowerShell on win32 — emit-helper-spawn.mjs): the helper no longer reads
+  // TOKENSCOPE_STATE_DIR, and a bare name resolves through a PATH the
+  // environment can set. `spawnOpts` ({ platform, powershell }) is for tests.
+  const spawn = emitHelperSpawn({
+    helper: helperPath,
+    stateDir: stateD,
+    tool: 'copilot-cli',
+    platform,
+    env,
+    powershell: spawnOpts.powershell,
+  })
+  if (!spawn) {
+    return {
+      emitting: false,
+      probe_status: null,
+      message: 'Windows PowerShell (powershell.exe) not found — the headers helper cannot run on this device.',
+    }
+  }
+  const res = spawnSync(spawn.file, spawn.args, {
     encoding: 'utf8',
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
   })
   let hasAuth = false
   try {
@@ -356,6 +408,7 @@ function probeEmissionAuth(stateD) {
     status: res.status,
     stdoutHasAuth: hasAuth,
     sentinel: readEmitSentinel(stateD),
+    degraded: readEmitDegraded(stateD),
   })
 }
 
@@ -558,7 +611,7 @@ async function main() {
 }
 
 // CLI entry guard so tests can import the pure helpers without running the probe.
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
+const isMain = isMainModule(import.meta.url)
 if (isMain) {
   main().catch((err) => {
     console.error(

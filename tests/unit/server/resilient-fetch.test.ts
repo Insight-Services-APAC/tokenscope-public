@@ -87,6 +87,63 @@ describe('resilientFetch', () => {
   }, 15_000)
 })
 
+describe('resilientFetch deadline', () => {
+  it('sends nothing when the deadline has already passed', async () => {
+    let hits = 0
+    const url = await serve((_req, res) => {
+      hits += 1
+      res.writeHead(200)
+      res.end()
+    })
+    await expect(resilientFetch(url, {}, { deadline: Date.now() - 1 })).rejects.toThrow(/deadline/)
+    expect(hits).toBe(0)
+  })
+
+  it('does not start a retry-after wait that would end past the deadline: returns the 429 at once', async () => {
+    let hits = 0
+    const url = await serve((_req, res) => {
+      hits += 1
+      res.writeHead(429, { 'retry-after': '5' })
+      res.end()
+    })
+    const started = Date.now()
+    const res = await resilientFetch(url, {}, { retries: 2, deadline: Date.now() + 1_000 })
+    expect(res.status).toBe(429)
+    expect(hits).toBe(1)
+    expect(Date.now() - started).toBeLessThan(1_000)
+  })
+
+  it('still retries when the wait and the next attempt fit before the deadline', async () => {
+    let hits = 0
+    const url = await serve((_req, res) => {
+      hits += 1
+      if (hits === 1) {
+        res.writeHead(503, { 'retry-after': '0' })
+        res.end()
+        return
+      }
+      res.writeHead(200)
+      res.end('ok')
+    })
+    const res = await resilientFetch(url, {}, { retries: 2, deadline: Date.now() + 5_000 })
+    expect(res.status).toBe(200)
+    expect(hits).toBe(2)
+  })
+
+  it('clips the per-attempt timeout to the time left, and starts no retry after it', async () => {
+    let hits = 0
+    const url = await serve((_req, _res) => {
+      hits += 1 // never respond
+    })
+    const started = Date.now()
+    await expect(
+      resilientFetch(url, {}, { timeoutMs: 10_000, retries: 2, backoffMs: 1, deadline: Date.now() + 300 }),
+    ).rejects.toThrow()
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(hits).toBe(1)
+  }, 15_000)
+})
+
 describe('parseRetryAfterMs', () => {
   it('parses delta-seconds', () => {
     expect(parseRetryAfterMs('2')).toBe(2000)

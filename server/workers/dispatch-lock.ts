@@ -26,9 +26,10 @@ type Db = PostgresJsDatabase<typeof schema> & { $client: Sql }
  * cron coincidence (`:00`) dispatches 19, so 24 covers a full batch with room;
  * a 25th dispatch queues on the lock pool (and never deadlocks: a holder needs
  * nothing further from this pool). Short idle_timeout so the connections are
- * gone between batches — they count against Dev PG's max_connections 50
+ * gone between batches — they count against the server's max_connections
  * alongside the request (10) and worker (10) lanes per replica
- * (server/db/index.ts).
+ * (server/db/index.ts; tests/unit/infra/postgres-connection-budget.test.ts
+ * checks the sum for every environment that sets postgresMaxConnections).
  */
 export const DISPATCH_LOCK_POOL_MAX = 24
 

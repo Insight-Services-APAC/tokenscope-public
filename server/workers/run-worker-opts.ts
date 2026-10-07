@@ -51,13 +51,13 @@ import type { WorkerRunContext } from './registry'
  * Max instances per WIDENED (lookbackDays) recovery run.
  *
  * The bound is DATA VOLUME, not round-trip count — those are the same for a
- * 500-id run whatever the window, and the unwidened path (and the daily deep
- * tick) already do 500 serially. What a widened run multiplies is how much each
- * of those reads scans: 50 instances x 90 days = 4,500 instance-days, roughly
- * 1.3x the unattended daily deep pass (500 x 7d = 3,500). So a widened batch is
- * sized to cost about what the fleet already absorbs once a day, which the ~120s
- * worker gateway ceiling demonstrably tolerates. Unwidened scoped runs keep the
- * larger cap because they scan no more than a normal tick.
+ * 500-id run whatever the window. What a widened run multiplies is how much each
+ * read scans and holds: this path reads each instance's whole window in one query
+ * inside one dispatch, with no slicing, so 50 x 90 days is already far past what
+ * one dispatch can serve. Prefer an operator request on the telemetry-recovery
+ * queue, which reads one instance-day at a time; this lever is for a handful of
+ * instances. Unwidened scoped runs keep the larger cap because they scan no more
+ * than a normal tick.
  */
 const MAX_WIDENED_BATCH = 50
 

@@ -256,6 +256,22 @@ SENTINEL="${STATE_DIR}/emit-failure.${TOOL}.json"
 STORE="${STATE_DIR}/config.${TOOL}.json"
 LEGACY_STORE="${STATE_DIR}/config.json"
 ACCESS_CACHE="${STATE_DIR}/oauth-access.${TOOL}.json"
+# The Azure bearer /bearer last handed back (#409). When TokenScope is
+# UNREACHABLE (network, timeout, 5xx, 429) the helper hands this back instead of
+# failing, and Azure decides whether it is still good. An expired one fails each
+# export exactly as a failing helper would; backfill recovers the gap once
+# TokenScope is reachable again. It is never handed back once an auth VERDICT
+# has been seen this run, and a verdict deletes it — so while TokenScope is
+# reachable a revoked device stops within one cycle. While TokenScope is NOT
+# reachable a revoked device can keep sending for the token's remaining life;
+# the server's heartbeat-coverage check (ADR-0008) quarantines spend with no
+# covering /bearer heartbeat, and reconciliation wipes what never happened. The
+# expiry stored beside it is diagnostics only, never a gate on the fallback.
+AZURE_CACHE="${STATE_DIR}/azure-bearer.${TOOL}.json"
+# "Emitting on the cached bearer" marker. Deliberately NOT the failure sentinel:
+# the status line reads "sentinel present" as "not emitting", and on this path
+# emission continues. Cleared by the next clean mint.
+DEGRADED="${STATE_DIR}/emit-degraded.${TOOL}.json"
 # Re-mint the access token if it expires within this many seconds.
 EXPIRY_SKEW=120
 
@@ -269,7 +285,11 @@ clear_sentinel() {
 # JSON is hand-built (no jq dependency); the message is sanitised of quotes
 # and backslashes so it can't break the JSON. Token material is never included.
 write_sentinel() {
-  _status="$1"
+  # A bare JSON number: curl's "no response" status is the string `000`, and
+  # `"http_status":000` is not valid JSON. Every reader parses the sentinel
+  # with JSON.parse, gets null, and reads "no sentinel" — i.e. healthy, while
+  # emission is failing. Normalise to decimal digits without leading zeros.
+  case "$1" in '' | *[!0-9]*) _status=0 ;; *) _status="$(printf '%s' "$1" | sed 's/^0*//')"; [ -n "$_status" ] || _status=0 ;; esac
   _msg="$2"
   _ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
   # Strip characters that would break a bare JSON string literal.
@@ -293,6 +313,94 @@ json_num() {
   printf '%s' "$1" | tr -d '\n\r' \
     | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" \
     | head -n1
+}
+
+clear_degraded() {
+  [ -f "$DEGRADED" ] && rm -f "$DEGRADED" 2>/dev/null
+  return 0
+}
+drop_azure_cache() {
+  rm -f "$AZURE_CACHE" 2>/dev/null
+  return 0
+}
+
+# Atomically write a small private JSON file (0600 via umask, mktemp + mv — the
+# same discipline as the access cache). Args: $1 = path, $2 = content. Best
+# effort: a failure here must never fail the mint that produced the content.
+write_private_json() {
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  _wpj_umask="$(umask)"
+  umask 077
+  _wpj_tmp="$(mktemp "$1.tmp.XXXXXX" 2>/dev/null)" || _wpj_tmp=""
+  if [ -n "$_wpj_tmp" ]; then
+    if printf '%s\n' "$2" >"$_wpj_tmp" 2>/dev/null; then
+      mv -f "$_wpj_tmp" "$1" 2>/dev/null || rm -f "$_wpj_tmp" 2>/dev/null
+    else
+      rm -f "$_wpj_tmp" 2>/dev/null
+    fi
+  fi
+  umask "$_wpj_umask"
+  return 0
+}
+
+# Remember the bearer /bearer just returned, bound to this endpoint like the
+# access cache. Args: $1 = /bearer body, $2 = expiry epoch from the response
+# header (empty = unknown, stored as 0).
+write_azure_cache() {
+  _az_auth="$(json_str "$1" Authorization | tr -d '\000-\037"\\')"
+  [ -n "$_az_auth" ] || return 0
+  _az_exp="$2"
+  case "$_az_exp" in '' | *[!0-9]*) _az_exp=0 ;; esac
+  _az_bear="$(printf '%s' "$TOKENSCOPE_BEARER_ENDPOINT" | tr -d '\000-\037"\\')"
+  [ "$_az_bear" = "$TOKENSCOPE_BEARER_ENDPOINT" ] || return 0
+  write_private_json "$AZURE_CACHE" \
+    "{\"authorization\":\"${_az_auth}\",\"expires_at\":${_az_exp},\"bearer_endpoint\":\"${_az_bear}\"}"
+}
+
+# TokenScope could not be reached. Hand back the cached Azure bearer bound to
+# THIS endpoint, if any, so emission rides out the outage; Azure refuses it
+# itself once it has really expired. Writes the degraded marker and clears a
+# stale failure sentinel (emission IS continuing). Args: $1 = reason. Returns 1
+# when nothing usable is cached, and the caller falls through to failing.
+try_cached_bearer() {
+  # An auth verdict earlier in THIS run (a 401/403 on the first /bearer call)
+  # outranks any transient that follows it: a revoked device must not ride a
+  # deploy out on its cache.
+  if [ "${VERDICT_SEEN:-0}" = 1 ]; then return 1; fi
+  [ -f "$AZURE_CACHE" ] || return 1
+  _tc="$(cat "$AZURE_CACHE" 2>/dev/null || echo '')"
+  _tc_bear_now="$(printf '%s' "$TOKENSCOPE_BEARER_ENDPOINT" | tr -d '\000-\037"\\')"
+  [ -n "$_tc_bear_now" ] && [ "$_tc_bear_now" = "$TOKENSCOPE_BEARER_ENDPOINT" ] || return 1
+  [ "$(json_str "$_tc" bearer_endpoint)" = "$_tc_bear_now" ] || return 1
+  _tc_auth="$(json_str "$_tc" authorization)"
+  [ -n "$_tc_auth" ] || return 1
+  _tc_exp="$(json_num "$_tc" expires_at)"
+  [ -z "$_tc_exp" ] && _tc_exp=0
+  _tc_now="$(now_epoch)"
+  _tc_expired=0
+  if [ "$_tc_exp" -gt 0 ] 2>/dev/null && [ "$_tc_exp" -le "$_tc_now" ] 2>/dev/null; then
+    _tc_expired=1
+    _tc_note="cached bearer EXPIRED at ${_tc_exp}; Azure will refuse it until TokenScope is reachable again"
+  elif [ "$_tc_exp" -gt 0 ] 2>/dev/null; then
+    _tc_note="cached bearer valid until ${_tc_exp}"
+  else
+    _tc_note="cached bearer expiry unknown"
+  fi
+  echo "TokenScope: emission auth DEGRADED (${1}) — emitting on the cached Azure bearer (${_tc_note}). Run /tokenscope:status if this persists." >&2
+  _tc_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+  _tc_reason="$(printf '%s' "$1" | tr -d '"\\\n\r' | cut -c1-200)"
+  write_private_json "$DEGRADED" "{\"ts\":\"${_tc_ts}\",\"reason\":\"${_tc_reason}\",\"expires_at\":${_tc_exp}}"
+  # The bearer is still handed back either way (Azure is the judge), but the
+  # health signal must tell the truth: a known-expired cache means exports are
+  # probably being refused, so the failure sentinel stays/gets written and the
+  # status line goes red. A still-valid cache is degraded, not failed.
+  if [ "$_tc_expired" = 1 ]; then
+    write_sentinel 0 "TokenScope unreachable (${_tc_reason}); cached Azure bearer expired at ${_tc_exp} — exports are probably being refused"
+  else
+    clear_sentinel
+  fi
+  printf '{"Authorization":"%s"}\n' "$_tc_auth"
+  exit 0
 }
 
 # ── Trusted device store ───────────────────────────────────────────────────────
@@ -357,6 +465,7 @@ adopt_source() { # $1=token $2=bearer $3=token_ep $4=client_id
 # A source that is PRESENT but cannot be used in full. Never fall through.
 refuse_source() { # $1=sentinel message $2=operator explanation
   echo "TokenScope: emission auth REFUSED — $2 Telemetry will not emit." >&2
+  clear_degraded # nothing is being emitted on a cache from here
   write_sentinel 0 "$1"
   exit 1
 }
@@ -596,6 +705,19 @@ oauth_refresh() {
   if [ "$TOK_STATUS" != "200" ]; then
     _err="$(json_str "$_tok_body" error)"
     [ -z "$_err" ] && _err="token refresh failed"
+    case "$TOK_STATUS" in
+      000 | 408 | 429 | 5*)
+        # TokenScope unreachable or failing — not a verdict on the credential.
+        # Emission may continue on the cached Azure bearer (#409); exits 0 if so.
+        try_cached_bearer "OAuth token endpoint HTTP ${TOK_STATUS}" || true
+        ;;
+      *)
+        # A verdict (invalid_grant, 401…): the credential is dead, so a cached
+        # bearer must not keep sending for a device TokenScope no longer vouches for.
+        drop_azure_cache
+        clear_degraded
+        ;;
+    esac
     echo "TokenScope: emission auth FAILED (OAuth refresh HTTP ${TOK_STATUS} ${_err}) — telemetry is being DROPPED. The durable credential may have lapsed; re-provision emit via the tokenscope-setup MCP prompt or run /tokenscope:status." >&2
     write_sentinel "$TOK_STATUS" "oauth refresh failed: ${_err}"
     exit 1
@@ -728,18 +850,65 @@ safe_version() {
   printf '%s' "$1" | tr -d '\000-\037' | sed -n 's|^\([A-Za-z0-9][A-Za-z0-9._+-]\{0,39\}\)$|\1|p'
 }
 
+# Platform as `<os>-<arch>` in Node's process.platform / process.arch vocabulary
+# (darwin|linux|win32 × x64|arm64), so this helper and the PowerShell twin report
+# the same strings for the same machine. Anything unrecognised reports NOTHING
+# rather than a guess: the server's NULL is "not reported", and a made-up value
+# would hide the device from the "which machines are we blind on?" question.
+# win32 covers this script run under Git Bash / MSYS / Cygwin on Windows.
+detect_client_platform() {
+  CLIENT_PLATFORM=""
+  case "$(uname -s 2>/dev/null)" in
+    Darwin) _cp_os=darwin ;;
+    Linux) _cp_os=linux ;;
+    MINGW*|MSYS*|CYGWIN*) _cp_os=win32 ;;
+    *) return 0 ;;
+  esac
+  case "$(uname -m 2>/dev/null)" in
+    x86_64|amd64) _cp_arch=x64 ;;
+    aarch64|arm64) _cp_arch=arm64 ;;
+    *) return 0 ;;
+  esac
+  CLIENT_PLATFORM="${_cp_os}-${_cp_arch}"
+}
+
+# Which launcher this CLI runs under. Same caveat as detect_cli_version: these
+# variables are seen in hook environments; whether they reach the ~29-minute
+# helper subprocess is unverified (#408 V3), and an absent one omits the header.
+#   claude-code: CLAUDE_CODE_ENTRYPOINT verbatim (observed: cli, sdk-cli).
+#   copilot-cli: AI_AGENT, mapped like copilot-usage.mjs's surfaceOf (`app` for
+#     the App agent, `cli` otherwise) — EXCEPT that an absent or foreign
+#     AI_AGENT sends nothing instead of defaulting to `cli`. The forwarder mints
+#     without that variable even on an App device, and a default would flip the
+#     stored reading on every such mint.
+detect_client_surface() {
+  CLIENT_SURFACE=""
+  if [ "$TOOL" = "copilot-cli" ]; then
+    case "${AI_AGENT:-}" in
+      github_copilot_app_agent) CLIENT_SURFACE=app ;;
+      github_copilot*) CLIENT_SURFACE=cli ;;
+    esac
+  else
+    CLIENT_SURFACE="${CLAUDE_CODE_ENTRYPOINT:-}"
+  fi
+}
+
 PLUGIN_VERSION=""
 CLI_VERSION=""
 detect_plugin_version
 detect_cli_version
+detect_client_platform
+detect_client_surface
 PLUGIN_VERSION="$(safe_version "$PLUGIN_VERSION")"
 CLI_VERSION="$(safe_version "$CLI_VERSION")"
+CLIENT_PLATFORM="$(safe_version "$CLIENT_PLATFORM")"
+CLIENT_SURFACE="$(safe_version "$CLIENT_SURFACE")"
 
 # Build the curl header arguments once (present_bearer runs twice on the self-heal
 # path). Uses curl's `-H Name:value` form, which word-splits into exactly TWO
 # tokens per header (`-H` and `Name:value`) — that split is the intent, and the
 # colon form keeps the value welded to its name. safe_version has already
-# constrained both values to [A-Za-z0-9._+-], so neither token can carry further
+# constrained every value to [A-Za-z0-9._+-], so no token can carry further
 # whitespace or a glob character, and the deliberate UNQUOTED expansion of
 # $VERSION_HEADER_ARGS below therefore cannot split or glob into anything
 # unintended. An undetermined value contributes no argument at all — the server
@@ -751,6 +920,12 @@ fi
 if [ -n "$CLI_VERSION" ]; then
   VERSION_HEADER_ARGS="${VERSION_HEADER_ARGS} -H X-TokenScope-Client-Version:${CLI_VERSION}"
 fi
+if [ -n "$CLIENT_PLATFORM" ]; then
+  VERSION_HEADER_ARGS="${VERSION_HEADER_ARGS} -H X-TokenScope-Client-Platform:${CLIENT_PLATFORM}"
+fi
+if [ -n "$CLIENT_SURFACE" ]; then
+  VERSION_HEADER_ARGS="${VERSION_HEADER_ARGS} -H X-TokenScope-Client-Surface:${CLIENT_SURFACE}"
+fi
 
 # ── Present the chosen credential to /bearer ──────────────────────────────────
 # GET /bearer with AUTH_TOKEN; set HTTP_STATUS + BODY (no exit). We do NOT use
@@ -761,6 +936,12 @@ fi
 present_bearer() {
   HTTP_STATUS=000
   BODY=""
+  BEARER_EXPIRES_AT=""
+  # Response headers go to a temp file (-D): the server states the bearer's
+  # expiry in X-TokenScope-Bearer-Expires-At (#409). Best effort — no temp file,
+  # no expiry; the mint itself never depends on it.
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  _hdr="$(mktemp "${STATE_DIR}/.bearer-hdr.XXXXXX" 2>/dev/null)" || _hdr=""
   _resp="$(
     # shellcheck disable=SC2086 -- word-splitting $VERSION_HEADER_ARGS is intended;
     # its tokens are charset-constrained by safe_version above.
@@ -768,16 +949,24 @@ present_bearer() {
       --proto "$(proto_for "$TOKENSCOPE_BEARER_ENDPOINT")" \
       -H @- \
       $VERSION_HEADER_ARGS \
+      ${_hdr:+-D "$_hdr"} \
       --url "${TOKENSCOPE_BEARER_ENDPOINT}" 2>/dev/null
   )" || _resp=""
   if [ -n "$_resp" ]; then
     HTTP_STATUS="$(printf '%s' "$_resp" | tail -n1)"
     BODY="$(printf '%s' "$_resp" | sed '$d')"
   fi
+  if [ -n "$_hdr" ]; then
+    # Header names are case-insensitive (HTTP/2 lower-cases them); digits only.
+    BEARER_EXPIRES_AT="$(tr -d '\r' <"$_hdr" 2>/dev/null | tr 'A-Z' 'a-z' \
+      | sed -n 's/^x-tokenscope-bearer-expires-at:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | tail -n1)"
+    rm -f "$_hdr" 2>/dev/null
+  fi
 }
 
 if [ -z "${TOKENSCOPE_BEARER_ENDPOINT:-}" ]; then
   echo "TokenScope: emission auth NOT CONFIGURED — TOKENSCOPE_BEARER_ENDPOINT not set (connect + provision emit via the tokenscope-setup MCP prompt first). Telemetry will not emit." >&2
+  clear_degraded
   write_sentinel 0 "TOKENSCOPE_BEARER_ENDPOINT not set"
   exit 1
 fi
@@ -799,6 +988,7 @@ if [ -z "${TOKENSCOPE_OAUTH_REFRESH_TOKEN:-}" ] \
   || [ -z "${TOKENSCOPE_OAUTH_TOKEN_ENDPOINT:-}" ] \
   || [ -z "${TOKENSCOPE_OAUTH_CLIENT_ID:-}" ]; then
   echo "TokenScope: emission auth NOT CONFIGURED — no OAuth credential (TOKENSCOPE_OAUTH_REFRESH_TOKEN/_TOKEN_ENDPOINT/_CLIENT_ID, and none found in ${STORE}); run the tokenscope-setup MCP prompt. Telemetry will not emit." >&2
+  clear_degraded
   write_sentinel 0 "no OAuth credential configured"
   exit 1
 fi
@@ -809,6 +999,10 @@ assert_safe_endpoint "$TOKENSCOPE_OAUTH_TOKEN_ENDPOINT" "TOKENSCOPE_OAUTH_TOKEN_
 # token's 401 is worth a refresh-and-retry; a fresh token's 401 is genuine.
 AUTH_TOKEN=""
 USED_CACHE=0
+# Set once /bearer has refused a credential THIS run. try_cached_bearer refuses
+# to fall back after that, so a verdict followed by a transient (a 401, then the
+# refresh or the retry hits a deploy) cannot end on the cache.
+VERDICT_SEEN=0
 
 # ── Use a valid cached access token, else refresh ───────────────────────────────
 CACHED_TOKEN=""
@@ -843,12 +1037,19 @@ present_bearer
 # (concurrent refresh / out-of-band / deploy). Force ONE fresh refresh + retry.
 if [ "$USED_CACHE" = 1 ] && { [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "403" ]; }; then
   rm -f "$ACCESS_CACHE" 2>/dev/null
+  # A refusal is a verdict until the retry proves otherwise: no cache fallback
+  # from here on, and the cached Azure bearer goes now rather than after a retry
+  # that may never complete. A successful retry rewrites it.
+  VERDICT_SEEN=1
+  drop_azure_cache
   oauth_refresh # forces a fresh token (or exits 1 if the credential is truly dead)
   present_bearer
 fi
 
 case "$HTTP_STATUS" in
   200)
+    write_azure_cache "$BODY" "$BEARER_EXPIRES_AT"
+    clear_degraded
     clear_sentinel
     printf '%s\n' "$BODY"
     exit 0
@@ -857,7 +1058,10 @@ case "$HTTP_STATUS" in
     # Reached here means a FRESH token (just refreshed, or the retry above) was
     # still rejected — the credential is revoked or the instance ended. Drop the
     # cache so the next run forces a full refresh; surface the server's message.
+    # The cached Azure bearer goes too: a refused device must stop sending.
     rm -f "$ACCESS_CACHE" 2>/dev/null
+    drop_azure_cache
+    clear_degraded
     SERVER_MSG="$(json_str "$BODY" statusMessage)"
     [ -z "$SERVER_MSG" ] && SERVER_MSG="$(json_str "$BODY" detail)"
     [ -z "$SERVER_MSG" ] && SERVER_MSG="Session expired or revoked"
@@ -866,11 +1070,24 @@ case "$HTTP_STATUS" in
     exit 1
     ;;
   000)
+    # Unreachable: ride it out on the cached bearer if there is one (exits 0).
+    try_cached_bearer "could not reach ${TOKENSCOPE_BEARER_ENDPOINT}" || true
     echo "TokenScope: emission auth FAILED (could not reach ${TOKENSCOPE_BEARER_ENDPOINT}) — telemetry may be DROPPED. Check connectivity; run /tokenscope:status." >&2
     write_sentinel 0 "network error reaching bearer endpoint"
     exit 1
     ;;
+  408 | 429 | 5*)
+    # Transient on the server side — same treatment as unreachable.
+    try_cached_bearer "bearer endpoint HTTP ${HTTP_STATUS}" || true
+    echo "TokenScope: emission auth FAILED (HTTP ${HTTP_STATUS}) — telemetry may be DROPPED. Run /tokenscope:status." >&2
+    write_sentinel "$HTTP_STATUS" "bearer endpoint returned HTTP ${HTTP_STATUS}"
+    exit 1
+    ;;
   *)
+    # Any other 4xx (404/410: the instance is gone; 400: misconfigured) is a
+    # verdict, not weather — the cached bearer must not outlive it.
+    drop_azure_cache
+    clear_degraded
     echo "TokenScope: emission auth FAILED (HTTP ${HTTP_STATUS}) — telemetry may be DROPPED. Run /tokenscope:status or re-provision emit via the tokenscope-setup MCP prompt." >&2
     write_sentinel "$HTTP_STATUS" "bearer endpoint returned HTTP ${HTTP_STATUS}"
     exit 1

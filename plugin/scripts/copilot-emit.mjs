@@ -17,6 +17,7 @@ import { resolveRepoProjectCode, computeCodeHash } from './tokenscope-project.mj
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 import { realHome } from './real-home.mjs'
 import { deviceStorePath, resolveStorePath } from './device-store.mjs'
+import { emitHelperSpawn, helperScriptName } from './emit-helper-spawn.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -152,14 +153,17 @@ let cachedBearer = null
  * The refresh token reaches the helper through ITS env only (a child process, never
  * this process's own env or argv). The state dir travels as an argument because the
  * helper deliberately ignores TOKENSCOPE_STATE_DIR (otel-headers-helper.sh header).
- * `/bin/sh` absolute because PATH is untrusted. POSIX-only by construction.
+ * The interpreter is absolute because PATH is untrusted: `/bin/sh` on POSIX, Windows
+ * PowerShell on win32 (emit-helper-spawn.mjs). `spawnOpts` ({ platform, powershell })
+ * exists for tests only; production callers pass nothing.
  */
-export function mintBearer(force = false) {
+export function mintBearer(force = false, spawnOpts = {}) {
   const cfg = loadConfig()
   if (cachedBearer && !force && cachedBearer.bearerEndpoint === cfg.bearer_endpoint) {
     return cachedBearer.token
   }
-  const helperPath = join(__dirname, 'otel-headers-helper.sh')
+  const platform = spawnOpts.platform ?? process.platform
+  const helperPath = join(__dirname, helperScriptName(platform))
   const env = {
     ...process.env,
     TOKENSCOPE_BEARER_ENDPOINT: cfg.bearer_endpoint,
@@ -167,11 +171,21 @@ export function mintBearer(force = false) {
     TOKENSCOPE_OAUTH_CLIENT_ID: cfg.oauth_client_id,
     TOKENSCOPE_OAUTH_REFRESH_TOKEN: cfg.oauth_refresh_token,
   }
-  const out = execFileSync(
-    '/bin/sh',
-    [helperPath, '--state-dir', TOKENSCOPE_DIR, '--tool', 'copilot-cli'],
-    { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'inherit'] },
-  )
+  const spawn = emitHelperSpawn({
+    helper: helperPath,
+    stateDir: TOKENSCOPE_DIR,
+    tool: 'copilot-cli',
+    platform,
+    env,
+    powershell: spawnOpts.powershell,
+  })
+  if (!spawn) throw new Error('Windows PowerShell (powershell.exe) not found — cannot mint the TokenScope bearer')
+  const out = execFileSync(spawn.file, spawn.args, {
+    encoding: 'utf8',
+    env,
+    stdio: ['ignore', 'pipe', 'inherit'],
+    windowsHide: true,
+  })
   cachedBearer = { token: JSON.parse(out).Authorization, bearerEndpoint: cfg.bearer_endpoint }
   return cachedBearer.token
 }
@@ -219,7 +233,14 @@ export function httpsPost(urlStr, headers, body) {
   })
 }
 
-/** POST, re-minting the bearer ONCE on 401/403 (it can expire mid-session). */
+/**
+ * POST, re-minting the bearer ONCE on 401/403 (it can expire mid-session).
+ *
+ * While the helper is on its CACHED bearer (#409, TokenScope unreachable) the
+ * re-mint hands back the same bearer and this retry is a no-op by design — the
+ * next helper cycle after TokenScope returns is what picks up a fresh one. Do
+ * not "fix" this by retrying harder; the mint cannot produce anything new.
+ */
 export async function postWithRetry(url, proto, mint, post) {
   let result = await post(url, { authorization: mint(false) }, proto)
   if (result.status === 401 || result.status === 403) {

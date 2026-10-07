@@ -62,19 +62,37 @@ param containerAppsSubnetId string = ''
 @description('Make the Container Apps environment INTERNAL — a private VIP on the VNet, no public endpoint. Whatever fronts it (Front Door Premium over Private Link, or your own WAF / application gateway) is then the only public entrypoint, reaching the internal VIP over the VNet. Wired from main.bicep `enablePrivateNetworking`. Requires containerAppsSubnetId.')
 param internalIngress bool = false
 
-// ── Log Analytics (for Container App Environment app-logs) ──────────
+// ── Log Analytics ────────────────────────────────────────────────────
 
-@description('Log Analytics workspace customer ID (workspace GUID).')
+@description('TELEMETRY workspace customer ID (workspace GUID): what the app\'s reader queries for OTelLogs (NUXT_LOG_ANALYTICS_WORKSPACE_ID). Not where the environment\'s own logs go — that is appLogsWorkspaceCustomerId.')
 param logAnalyticsCustomerId string = ''
 
-@description('Log Analytics workspace name. Container app references it as `existing` and calls `listKeys()` to read the shared key inline, so the secret never appears as a cross-module output.')
-param logAnalyticsName string = ''
+@description('Workspace customer ID the Container Apps environment sends console/system logs to (monitoring.outputs.opsLogAnalyticsCustomerId). Empty = no app-logs destination.')
+param appLogsWorkspaceCustomerId string = ''
+
+@description('Name of the appLogsWorkspaceCustomerId workspace. Container app references it as `existing` and calls `listKeys()` to read the shared key inline, so the secret never appears as a cross-module output.')
+param appLogsWorkspaceName string = ''
+
+@description('Ship the environment\'s logs through a diagnostic setting (destination azure-monitor) into appLogsWorkspaceId. Required when that workspace is outside an Azure Monitor Private Link Scope the VNet resolves through. Tables become ContainerAppConsoleLogs / ContainerAppSystemLogs (no _CL).')
+param appLogsViaDiagnosticSettings bool = false
+
+@description('Resource ID of the workspace the diagnostic setting writes to. Read only when appLogsViaDiagnosticSettings.')
+param appLogsWorkspaceId string = ''
+
+@description('vCPU for the app container. Null = 1.0 in production, 0.5 otherwise. Must pair with appMemory per the Consumption profile ratio (0.5 → 1Gi, 1.0 → 2Gi, …).')
+param appCpu string?
+
+@description('Memory for the app container. Null = 2Gi in production, 1Gi otherwise. Node\'s default heap limit is about half of it.')
+param appMemory string?
 
 @description('Full Azure Monitor OTLP logs ingest URL (DCE logs endpoint + DCR immutable id + Microsoft-OTLP-Logs stream), composed in main.bicep. Empty = phase-1 bring-up before the DCE/DCR exist → the telemetry reader env is omitted and the read joiner stays off.')
 param azureMonitorLogsEndpoint string = ''
 
 @description('DCR ARM resource id for the read-path ingest-coverage metrics probe (NUXT_AZURE_DCR_RESOURCE_ID). Empty = the probe reads unknown and the stall alerts fall back to the bearer gate.')
 param dcrResourceId string = ''
+
+@description('Daily ingestion cap of the TELEMETRY workspace in GB (monitoring.outputs.telemetryDailyCapGb), set as TELEMETRY_DAILY_CAP_GB for the ops-alert telemetry-cap condition. 0 = unknown: the condition is indeterminate.')
+param telemetryDailyCapGb int = 0
 
 // ── Optional secret-presence flags ──────────────────────────────────
 // These flags mirror the if-guards in keyvault-secrets.bicep. The
@@ -199,16 +217,28 @@ param tags object = {}
 // The managed env lives inside this module so it's
 // always co-versioned with the app revision.
 
+resource containerAppEnvDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (appLogsViaDiagnosticSettings && !empty(appLogsWorkspaceId)) {
+  name: 'diag-${name}'
+  scope: containerAppEnv
+  properties: {
+    workspaceId: appLogsWorkspaceId
+    logs: [
+      { category: 'ContainerAppConsoleLogs', enabled: true }
+      { category: 'ContainerAppSystemLogs', enabled: true }
+    ]
+  }
+}
+
 // Reference the LAW as `existing` so the shared key resolves inline
 // via listKeys() — keeps the key out of every cross-module boundary.
 // The lookup is unconditional (Bicep's `existing` is a symbolic compile
 // -time reference; ARM only resolves it when listKeys() is invoked,
-// which the appLogsConfiguration ternary below guards on the same
-// `!empty(logAnalyticsName)` predicate). When logAnalyticsName is
-// empty, the deploy is a config-only test and the LAW isn't
+// which the appLogsConfiguration ternary below reaches only when
+// appLogsViaDiagnosticSettings is off and appLogsWorkspaceName is set). When
+// the name is empty, the deploy is a config-only test and the LAW isn't
 // expected to exist — listKeys() is never called.
-resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
-  name: empty(logAnalyticsName) ? 'placeholder-never-used' : logAnalyticsName
+resource appLogsWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
+  name: empty(appLogsWorkspaceName) ? 'placeholder-never-used' : appLogsWorkspaceName
 }
 
 resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
@@ -223,11 +253,13 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
       // (Private Link) or your own WAF fronts it. External otherwise (standalone public ingress).
       internal: internalIngress
     } : null
-    appLogsConfiguration: !empty(logAnalyticsCustomerId) && !empty(logAnalyticsName) ? {
+    appLogsConfiguration: appLogsViaDiagnosticSettings ? {
+      destination: 'azure-monitor'
+    } : !empty(appLogsWorkspaceCustomerId) && !empty(appLogsWorkspaceName) ? {
       destination: 'log-analytics'
       logAnalyticsConfiguration: {
-        customerId: logAnalyticsCustomerId
-        sharedKey: logAnalytics.listKeys().primarySharedKey
+        customerId: appLogsWorkspaceCustomerId
+        sharedKey: appLogsWorkspace.listKeys().primarySharedKey
       }
     } : null
     workloadProfiles: [
@@ -467,11 +499,15 @@ var baseEnvVars = [
   // ── Rate-limiter trustworthy IP source (CORE-4) ──
   // nuxt-security's limiter defaults to the first X-Forwarded-For hop, which
   // AFD only APPENDS to (so it is client-controlled → spoofable). When AFD
-  // fronts the app, key the limiter on AFD's authoritative X-Azure-ClientIP
-  // instead; with AFD off, the empty value keeps the single-origin default.
+  // fronts the app, key the limiter on X-Azure-SocketIP, the TCP peer Front
+  // Door saw. Not X-Azure-ClientIP: that follows a caller's X-Forwarded-For
+  // (server/api/v1/oauth/register.post.ts keys on the socket IP for the same
+  // reason). With AFD off, the empty value keeps the single-origin default.
   // Set in lockstep with AZURE_FRONT_DOOR_ID above — the nuxt.config
-  // `ipHeader: ''` slot only becomes trustworthy once this overlay binds it.
-  { name: 'NUXT_SECURITY_RATE_LIMITER_IP_HEADER', value: empty(azureFrontDoorId) ? '' : 'x-azure-clientip' }
+  // `ipHeader: ''` slot only takes effect once this overlay binds it. On a
+  // publicly reachable origin a direct caller that presents the FDID can still
+  // set this header itself; the FDID is not a secret.
+  { name: 'NUXT_SECURITY_RATE_LIMITER_IP_HEADER', value: empty(azureFrontDoorId) ? '' : 'x-azure-socketip' }
 ]
 
 // ── Wave-VII build provenance (R1 F2) ──
@@ -597,6 +633,9 @@ var telemetryReaderEnvVars = !empty(azureMonitorLogsEndpoint) ? [
   // The ingest-coverage metrics probe (PR #319). Empty until the DCR id is
   // threaded through → probe reads unknown → stall alerts on the bearer gate.
   { name: 'NUXT_AZURE_DCR_RESOURCE_ID', value: dcrResourceId }
+  // The workspace's daily cap, from the value that sets it (monitoring.bicep),
+  // for the telemetry-cap ops alert. '0' reads as no cap known (indeterminate).
+  { name: 'TELEMETRY_DAILY_CAP_GB', value: string(telemetryDailyCapGb) }
 ] : []
 
 // ── Container App ──────────────────────────────────────────────────
@@ -635,8 +674,8 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'tokenscope'
           image: '${acrLoginServer}/tokenscope:${imageTag}'
           resources: {
-            cpu: json(environment == 'production' ? '1.0' : '0.5')
-            memory: environment == 'production' ? '2Gi' : '1Gi'
+            cpu: json(appCpu ?? (environment == 'production' ? '1.0' : '0.5'))
+            memory: appMemory ?? (environment == 'production' ? '2Gi' : '1Gi')
           }
           env: concat(baseEnvVars, anthropicEnvVars, githubPatEnvVars, githubAppKeyEnvVars, appRoleEnvVars, opsAlertEnvVars, entraEnvVars, oidcModuleEnvVars, aiFoundryEnvVars, gitCommitShaEnvVars, telemetryReaderEnvVars)
           probes: [
@@ -681,10 +720,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             }
             // Liveness probe: process-only check; MUST NOT touch deps.
             // A transient PG/Redis blip into liveness would loop-restart.
+            // `?probe=live` answers without the DB (server/api/health.get.ts);
+            // Startup and Readiness keep the DB check on the bare path.
             {
               type: 'Liveness'
               httpGet: {
-                path: '/api/health'
+                path: '/api/health?probe=live'
                 port: 3000
               }
               periodSeconds: 30

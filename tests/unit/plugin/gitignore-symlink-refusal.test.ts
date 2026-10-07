@@ -85,7 +85,7 @@ describe('writeRepoTag refuses a symlinked .claude (MDASH r3)', () => {
       cwd: repo,
       enrolment: {
         instanceId: 'inst-A',
-        helperPath: join(sandbox, 'helper.sh'),
+        helperCommand: join(sandbox, 'helper.sh'),
         env: { TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'rt_DURABLE' },
       },
       codeHash: 'abc123',
@@ -110,7 +110,7 @@ describe('writeRepoTag refuses a symlinked settings.local.json', () => {
 
     const r = writeRepoTag({
       cwd: repo,
-      enrolment: { instanceId: 'inst-A', helperPath: join(sandbox, 'h.sh'), env: {} },
+      enrolment: { instanceId: 'inst-A', helperCommand: join(sandbox, 'h.sh'), env: {} },
       codeHash: 'abc123',
     })
 

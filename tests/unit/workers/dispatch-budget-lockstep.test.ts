@@ -11,7 +11,7 @@
  *
  * These assertions are that comparison.
  */
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
@@ -77,6 +77,34 @@ describe('dispatch budget lockstep', () => {
     // trigger's log line naming the worker, which is the only legible artefact
     // when a run overruns.
     expect(DISPATCH_TIMEOUT_MS).toBeLessThan(REPLICA_TIMEOUT_SECONDS * 1000)
+  })
+})
+
+describe('Front Door origin timeout fits the dispatch budget', () => {
+  // With Front Door enforced the cron jobs call through it, so its origin timeout
+  // is a second ceiling on every worker. Below the budget, a worker that finishes
+  // and records success is reported as a FAILED execution and its retry 409s.
+  const budgetSeconds = DISPATCH_TIMEOUT_MS / 1000
+
+  it.each([
+    ['infra/main.bicep', 'afdOriginResponseTimeoutSeconds'],
+    ['infra/modules/front-door.bicep', 'originResponseTimeoutSeconds'],
+  ])('%s default for %s is at or above the budget', (file, param) => {
+    const m = read(file).match(new RegExp(`param\\s+${param}\\s+int\\s*=\\s*(\\d+)`))
+    expect(m, `${file} must declare ${param} with a numeric default`).not.toBeNull()
+    expect(Number(m![1])).toBeGreaterThanOrEqual(budgetSeconds)
+  })
+
+  it('main.bicep hands its value to the Front Door module', () => {
+    expect(read('infra/main.bicep')).toMatch(/originResponseTimeoutSeconds:\s*afdOriginResponseTimeoutSeconds/)
+  })
+
+  it('no parameter file overrides it below the budget', () => {
+    const dir = resolve(root, 'infra/parameters')
+    for (const f of readdirSync(dir).filter((n) => n.endsWith('.bicepparam'))) {
+      const m = readFileSync(resolve(dir, f), 'utf8').match(/^\s*param\s+afdOriginResponseTimeoutSeconds\s*=\s*(\d+)/m)
+      if (m) expect(Number(m[1]), f).toBeGreaterThanOrEqual(budgetSeconds)
+    }
   })
 })
 

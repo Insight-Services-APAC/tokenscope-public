@@ -10,8 +10,8 @@
  *   4. DEACTIVATION: the bound teammate must be `is_active = true`. Unlike (5)
  *      this is a durable STATE with no timestamp comparison — see below.
  *   5. ADR-0005 E2 revocation cascade: the bound teammate must NOT have been
- *      revoked AFTER the token was issued (teammate.revoked_at > access_issued_at),
- *      AND must still exist. This is the emit-path analogue of isRevoked() —
+ *      revoked AFTER the token was issued (teammate.revoked_at > access_issued_at;
+ *      emit_revoked_at for a device-bound emit token, #414), AND must still exist. This is the emit-path analogue of isRevoked() —
  *      `bearer.get.ts` historically never checked teammate.revoked_at.
  *
  * On any failure it throws a 401 createError carrying a WWW-Authenticate header
@@ -25,6 +25,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { consola } from 'consola'
 import { hashSessionToken } from './hmac'
 import { getDb } from '../db'
+import { deviceBoundEmitSql } from './emit-revocation'
 
 const legacyBindingLogger = consola.withTag('oauth-bearer')
 
@@ -200,7 +201,11 @@ export async function requireOAuthBearer(
            t.access_expires_at       AS access_expires_at,
            t.revoked_at              AS token_revoked_at,
            t.access_issued_at        AS access_issued_at,
-           tm.revoked_at             AS teammate_revoked_at,
+           -- The E2 anchor THIS token is judged against (#414): a device-bound
+           -- emit credential answers to emit_revoked_at, so a role or region
+           -- change does not void it; everything else answers to revoked_at.
+           CASE WHEN ${deviceBoundEmitSql(sql`t`)} THEN tm.emit_revoked_at
+                ELSE tm.revoked_at END AS teammate_revoked_at,
            tm.is_active              AS teammate_is_active,
            t.instance_id::text       AS instance_id,
            t.client_id::text         AS client_id,

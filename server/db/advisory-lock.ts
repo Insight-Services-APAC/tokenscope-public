@@ -171,6 +171,17 @@ export function advisoryXactLock(ns: LockNamespace, key: string): SQL {
 }
 
 /**
+ * The non-blocking form of advisoryXactLock: the SAME key derivation, so it
+ * contends with it exactly. Returns one row, `{ locked: boolean }`: true when the
+ * lock is now held (until COMMIT or ROLLBACK, like advisoryXactLock), false when
+ * another transaction holds it — never a wait. The ascending-order rule still
+ * applies to whatever the caller takes after it.
+ */
+export function advisoryXactTryLock(ns: LockNamespace, key: string): SQL {
+  return sql`SELECT pg_try_advisory_xact_lock(${LOCK_NAMESPACE[ns]}::int, hashtext(${key})::int) AS locked`
+}
+
+/**
  * The two global caps count DISJOINT populations: `confirmed` is the
  * authenticated self-provision path (emit-provision), `provisional` is the
  * unauthenticated enrol path (enroll-provision). Each cap's count filters to

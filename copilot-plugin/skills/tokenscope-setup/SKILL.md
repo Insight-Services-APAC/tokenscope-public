@@ -137,9 +137,10 @@ old → new` note so the old deployment's credentials/endpoints don't linger.
 2. Turns on Copilot's extensions feature (`enabledFeatureFlags.EXTENSIONS` in Copilot's
    `settings.json`, with `extensions.mode: load_only` unless the user chose a mode: the
    helper prints the mode in effect), so the plugin's usage extension loads and
-   captures each model call's usage. Tell the user plainly: with the feature on, a
-   repository they trust in Copilot can also run its own Copilot extensions, as it can
-   already run repository hooks. It also removes the
+   captures each model call's usage. Tell the user, in these words or close to
+   them: "Setup turned on Copilot extensions so TokenScope can see your usage. This
+   also lets a repository you trust in Copilot run its own extensions, the same way
+   it can already run its hooks." It also removes the
    `# >>> TokenScope >>>` block an earlier setup wrote into your shell rc, and the old
    forwarder's files from your projects: nothing is written into your shell or your
    repositories any more.
@@ -148,30 +149,38 @@ old → new` note so the old deployment's credentials/endpoints don't linger.
 
 ### Step 5: Confirm
 
-Call `my_usage` again to confirm the MCP connection still answers. Then tell the user:
+Call `my_usage` again to confirm the MCP connection still answers. Then tell the
+user, in these words or close to them (one short line each):
 
-- **Connected** — read/tag tools authorised for your TokenScope account.
-- **Emitting provisioned** — this device's TokenScope credential store holds the
-  emit credential, and Copilot extensions are enabled. If the helper said it could
-  not update Copilot's settings, relay its one-line instruction.
-- **Restart copilot**, so the next session loads the usage extension.
-- **`my_usage` confirms the credential, not delivery.** A successful `my_usage`
-  call (and a healthy status line) means the emit credential can mint an ingest
-  bearer — the emission path is _configured and authorised_. It does **not** prove
-  any record physically landed. Azure Monitor OTLP ingest is ~minutes downstream and
-  is **not observable client-side**, so don't read a clean setup as "telemetry
-  arrived".
-- **Confirm actual landing out-of-band.** After a few minutes of real `copilot`
-  usage, run `my_usage` (or open the dashboard) and look for this device's spend.
-  That — not the setup output — is what tells you records are being attributed.
-- **A valid credential is not proof of capture either.** Run the `status`
-  skill and read `emission_healthy` (not `emitting` alone) and `usage_capture`:
-  `enabled: false` means Copilot extensions are off: only sessions from a terminal
-  that still exports the old `COPILOT_OTEL_FILE_EXPORTER_PATH` are captured (by the
-  legacy forwarder), and nothing else is. Re-run setup.
-- **Next:** commit a `.tokenscope` per repo via the `project` skill. Copilot
-  spend in a repo with one is tagged to that project; elsewhere it lands untagged until
-  tagged with `tag_session`.
+- **You're signed in** to TokenScope.
+- **Tracking is on** for this computer. If the helper said it could not update
+  Copilot's settings, say that instead and relay its one-line instruction.
+- **Restart Copilot:** "Quit `copilot` and start it again. The next session is the
+  first one that sends usage."
+- **Check it works:** "After a few minutes of using Copilot, type `/` and run the
+  TokenScope **status** skill. Green means you're done. Your usage shows in
+  TokenScope about 5 minutes after you use Copilot."
+- **Next:** "To bill a repo to a project, run the `project` skill in that repo.
+  Usage anywhere else shows as untagged until you tag it."
+
+Background for you (do not recite it; use it to answer questions):
+
+- The restart is needed because the usage extension loads when a session starts.
+- **`my_usage` confirms the sign-in, not sending.** A successful `my_usage` call
+  proves the MCP (chat tools) sign-in works. It does **not** exercise the separate
+  device-bound emit credential: the `status` skill's local emission probe is what
+  checks that. Neither proves a record landed — Azure Monitor ingest is minutes
+  downstream and not observable client-side, so never present a clean setup as
+  "telemetry arrived". Landing is confirmed by `my_usage` (or the dashboard)
+  showing this device's spend after a few minutes of real `copilot` usage.
+- **A valid credential is not proof of capture either.** The `status` skill's
+  `emission_healthy` (not `emitting` alone) and `usage_capture` say whether usage is
+  captured: `enabled: false` means Copilot extensions are off: only sessions from a
+  terminal that still exports the old `COPILOT_OTEL_FILE_EXPORTER_PATH` are captured
+  (by the legacy forwarder), and nothing else is. The fix is to re-run setup.
+- Copilot spend in a repo with a committed `.tokenscope` (written by the `project`
+  skill) is tagged to that project; elsewhere it lands untagged until tagged with
+  `tag_session`.
 
 ## Troubleshooting
 

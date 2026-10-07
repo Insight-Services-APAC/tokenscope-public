@@ -2,7 +2,7 @@
 description: Check whether your Copilot CLI sessions are emitting to TokenScope, whether a record landed, and whether that spend actually ATTRIBUTED to a project
 ---
 
-# tokenscope-status — Is My Copilot CLI Emitting AND Attributing?
+# status — Is My Copilot CLI Emitting AND Attributing?
 
 Check the health of TokenScope emission for this device across three things, not two:
 is the emit credential valid (sessions are **emitting**), did a record actually
@@ -75,7 +75,7 @@ It prints a JSON object:
 }
 ```
 
-The probe runs the **real emit path** (`otel-headers-helper.sh` against the creds in
+The probe runs the **real emit path** (`otel-headers-helper.sh`, `.ps1` on Windows, against the creds in
 `~/.tokenscope/config.copilot-cli.json`) — success means the credential minted an Azure Monitor
 bearer. It then calls `GET /api/v1/instances/{id}/health` with the cached emit token
 to see whether a real record has landed. It never prints the bearer.
@@ -120,7 +120,9 @@ of delivery on its own:**
   off in `/extensions`, or keys in Copilot's `config.json` overriding its settings:
   re-run `tokenscope-setup`, which fixes it or says exactly what to change by hand,
   then restart copilot. Managed telemetry (1.5) does NOT affect this lane — do not
-  report it as a cause.
+  report it as a cause. Say, in these words or close to them: "TokenScope can't see
+  your Copilot usage because its extension isn't loading. Run the
+  **tokenscope-setup** skill again, then restart Copilot."
 - `usage_capture.backlog.error` set → the usage spool directory cannot be read
   (permissions): its records can be neither checked nor sent.
 - `usage_capture.lane: "forwarder"` → the script was run directly in a terminal that

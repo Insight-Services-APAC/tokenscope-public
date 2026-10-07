@@ -182,7 +182,7 @@ resource statStatementsTrack 'Microsoft.DBforPostgreSQL/flexibleServers/configur
   // Serial chain: the server accepts one write at a time and refuses a
   // concurrent one with ServerIsBusy, so every server-level write follows the
   // previous: extensions → Query Store → slow log → pg_stat_statements →
-  // preload → database → firewall.
+  // preload → max_connections → database → firewall.
   dependsOn: [slowStatementLog]
 }
 
@@ -275,6 +275,36 @@ resource preloadLibraries 'Microsoft.DBforPostgreSQL/flexibleServers/configurati
   dependsOn: [statStatementsUtility]
 }
 
+// ── max_connections ─────────────────────────────────────────────────────────
+//
+// ⚠ STATIC, like shared_preload_libraries: the apply writes the value, and the
+// server keeps running on the old one until it is RESTARTED (see that block for
+// how; the db-performance probe shows `pendingRestart` for this row until then). ⚠
+//
+// Same rule as the preload list above: AN UNMEASURED ENVIRONMENT IS NOT
+// MANAGED. Azure's default is a function of the SKU's memory and changes with
+// the SKU, so 0 (the default) emits nothing and leaves the server's value
+// alone. An environment that sets it has read its live value and sized it
+// against the app's pools; tests/unit/infra/postgres-connection-budget.test.ts
+// checks maxReplicas × (request + worker + dispatch-lock pool) + 15 reserved
+// fits under it for every parameter file that sets it.
+@description('max_connections. 0 (default) = unmanaged: the server keeps its own value. STATIC — a change takes effect only after a server restart. Set it only after reading the live value, and keep it at or above maxReplicas × (request pool + worker pool + dispatch-lock pool) + 15.')
+@minValue(0)
+@maxValue(5000)
+param maxConnections int = 0
+
+resource maxConnectionsSetting 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2024-08-01' = if (maxConnections > 0) {
+  parent: postgresql
+  name: 'max_connections'
+  properties: {
+    value: string(maxConnections)
+    source: 'user-override'
+  }
+  // preloadLibraries can be condition-false, and a skipped dependency does not
+  // serialise, so the last unconditional write is named too.
+  dependsOn: [preloadLibraries, statStatementsUtility]
+}
+
 // ── Database ────────────────────────────────────────────────────────
 
 resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = {
@@ -284,7 +314,7 @@ resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-0
     charset: 'UTF8'
     collation: 'en_US.utf8'
   }
-  dependsOn: [preloadLibraries, statStatementsUtility]
+  dependsOn: [maxConnectionsSetting, preloadLibraries, statStatementsUtility]
 }
 
 // Allow Azure-services traffic when NOT using a private endpoint — this is

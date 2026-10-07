@@ -420,6 +420,14 @@ function persistedState(a: ReturnType<typeof decideConditionAction>) {
 }
 
 describe('decideConditionAction — the A3 step', () => {
+  it('a delivered state stored before channelDelivered existed resolves it at its OWN severity, so a later drop to warning still pushes the all-clear', () => {
+    // Reverting to "carry the field only when present" leaves it absent here, and
+    // the recovery would then judge the pushed critical by the new severity.
+    const legacy = { severity: 'critical', activeRuns: 4, delivered: true, lastSentAtMs: NOW, clearRuns: 0 } as const
+    const a = decideConditionAction(legacy, WARN, NOW + 15 * MIN, REMIND)
+    expect('state' in a && (a as { state: { channelDelivered?: boolean } }).state.channelDelivered).toBe(true)
+  })
+
   it('CRITICAL is two-run damped like a warning (D3): one observation persists, two send', () => {
     // The D3 assertion. Reverting `damped` to the severity-scoped
     // `obs.severity === 'warning' && …` turns the first expectation red:

@@ -56,7 +56,7 @@ import { execFileSync } from 'node:child_process'
 import { trustedGitPath } from './trusted-git.mjs'
 import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { isMainModule } from './is-main.mjs'
 import {
   transcodeChatSpans,
   transcodeSignalSpans,
@@ -860,7 +860,7 @@ async function main() {
     const managed = await detectManagedTelemetry()
     if (managed.classification === 'hostile') {
       console.error(
-        `[tokenscope-fwd] WARNING: an enterprise-managed Copilot telemetry setting (source: ${managed.source}) is HOSTILE to the file exporter — Copilot itself may never write to ${filePath} regardless of COPILOT_OTEL_FILE_EXPORTER_PATH. Run the tokenscope-status skill for detail; this is a policy-level block, not a credential problem.`,
+        `[tokenscope-fwd] WARNING: an enterprise-managed Copilot telemetry setting (source: ${managed.source}) is HOSTILE to the file exporter — Copilot itself may never write to ${filePath} regardless of COPILOT_OTEL_FILE_EXPORTER_PATH. Run the TokenScope status skill for detail; this is a policy-level block, not a credential problem.`,
       )
     } else if (managed.classification === 'unknown') {
       console.error(
@@ -891,7 +891,7 @@ async function main() {
 
 // Only run main() when executed directly (not when imported as a module for testing).
 // Same pattern as copilot-redeem.mjs — makes L5 forwarder unit tests possible.
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isMainModule(import.meta.url)) {
   main().catch((err) => {
     console.error(`[tokenscope-fwd] fatal: ${String(err)}`)
     process.exit(1)

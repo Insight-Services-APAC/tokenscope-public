@@ -21,7 +21,8 @@
 // composite "AFD + WAF + policy-binding" module.
 //
 // Health probe path: `/api/health` (Nuxt convention; matches
-// container-app.bicep's startup/liveness/readiness probes).
+// container-app.bicep's startup/readiness probes, so it includes the DB check.
+// Only the liveness probe uses `?probe=live`, which skips it).
 //
 // Custom domains are added out-of-band via `az afd custom-domain create`
 // AFTER DNS validation (managing custom domains in Bicep races DNS
@@ -40,10 +41,10 @@ param environment string
 @description('Container App FQDN (from container-app module output). The AFD origin points at this host AND uses it as the originHostHeader so the CA ingress accepts the request.')
 param originFqdn string
 
-@description('AFD origin response timeout (seconds). TokenScope long-running endpoints (CSV exports, region admin queries) should stay under 60s. Tune per env if a long-poll endpoint is added.')
+@description('AFD origin response timeout (seconds). Defaults to 240, the maximum Azure allows. Scheduled worker jobs call through Front Door when it is enforced, so this must stay at or above the 200 s worker dispatch budget (DISPATCH_TIMEOUT_MS in shared/workers/dispatch-budget.ts); below it, a finished worker is reported as a failed job execution.')
 @minValue(16)
 @maxValue(240)
-param originResponseTimeoutSeconds int = 60
+param originResponseTimeoutSeconds int = 240
 
 @description('ISO-3166 alpha-2 country codes allowed to reach the app. Empty array (default) = no geo restriction. Populate with e.g. [\'AU\', \'US\'] to restrict.')
 param wafGeoAllowedCountries array = []

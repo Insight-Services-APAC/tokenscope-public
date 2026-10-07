@@ -3,6 +3,11 @@ description: Turn the TokenScope status line (emission health + session id) on o
 allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/statusline-toggle.mjs":*)
 ---
 
+**Needs Node.** The status line is a Node script that Claude Code runs on every
+refresh. If `node` is not found (a Windows device set up without Node), do not
+run anything: say "the status line needs Node on this device; install Node and
+re-run `/tokenscope:setup` to turn it on", and stop. Emitting is unaffected.
+
 TokenScope's status line is OFF until the developer turns it on with this
 command. When on, it shows, every refresh, a **landing-driven** health plus the
 session id. The primary signal is whether your

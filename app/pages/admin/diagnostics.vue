@@ -1114,6 +1114,11 @@ interface InstanceTelemetryResp {
     clientPluginVersion: string | null
     clientCliVersion: string | null
     clientVersionAt: string | null
+    // Same trust model (mig 0150): `<os>-<arch>`, launch surface, and the mode
+    // of the latest setup redeem (full | emit-only).
+    clientPlatform: string | null
+    clientSurface: string | null
+    setupMode: string | null
   } | null
   ingest:
     | { reachable: true; records: number; usageRecords: number; firstSeen: string | null; lastSeen: string | null }
@@ -1190,6 +1195,7 @@ interface RecoveryRequestRow {
   reason: string | null
   error: string | null
   requestedByEmail: string | null
+  kind: 'operator' | 'scheduled'
   requestedAt: string
   startedAt: string | null
   finishedAt: string | null
@@ -3511,7 +3517,7 @@ function pretty(obj: unknown): string {
                           &nbsp;·&nbsp; ledger: {{ (diagnosis[i.instanceId] as InstanceTelemetryResp).attribution.records }} record(s)
                         </p>
                         <!--
-                          Client-asserted (mig 0092). Shown because it is the first
+                          Client-asserted (mig 0092, 0150). Shown because it is the first
                           thing you want once the verdict says "client side" — and
                           "not reported" is itself the answer: the device is on a
                           build older than the one that reports its version.
@@ -3520,10 +3526,16 @@ function pretty(obj: unknown): string {
                           client claims — plugin
                           <strong>{{ (diagnosis[i.instanceId] as InstanceTelemetryResp).instance?.clientPluginVersion ?? 'not reported' }}</strong>,
                           CLI
-                          <strong>{{ (diagnosis[i.instanceId] as InstanceTelemetryResp).instance?.clientCliVersion ?? 'not reported' }}</strong>
+                          <strong>{{ (diagnosis[i.instanceId] as InstanceTelemetryResp).instance?.clientCliVersion ?? 'not reported' }}</strong>,
+                          platform
+                          <strong data-testid="client-platform">{{ (diagnosis[i.instanceId] as InstanceTelemetryResp).instance?.clientPlatform ?? 'not reported' }}</strong>,
+                          surface
+                          <strong data-testid="client-surface">{{ (diagnosis[i.instanceId] as InstanceTelemetryResp).instance?.clientSurface ?? 'not reported' }}</strong>
                           <template v-if="(diagnosis[i.instanceId] as InstanceTelemetryResp).instance?.clientVersionAt">
                             (as of {{ (diagnosis[i.instanceId] as InstanceTelemetryResp).instance!.clientVersionAt!.slice(0, 16) }})
                           </template>
+                          · last setup
+                          <strong data-testid="setup-mode">{{ (diagnosis[i.instanceId] as InstanceTelemetryResp).instance?.setupMode ?? 'not reported' }}</strong>
                           — self-reported, not attested.
                         </p>
                       </template>
@@ -3562,8 +3574,8 @@ function pretty(obj: unknown): string {
                   {{ recoverySubmitting ? 'Queueing…' : `Re-read these ${gapsData.count} device(s)` }}
                 </UiButton>
                 <p v-if="recoveryData?.inFlight" class="text-xs text-carbon-3">
-                  A recovery is already in flight — widened reads run one at a time so they
-                  cannot contend for Log Analytics query budget.
+                  An operator recovery is already in flight. They run one at a time; the
+                  daily pass yields to them between ticks.
                 </p>
               </div>
               <p v-else class="text-xs text-carbon-3">
@@ -3600,7 +3612,7 @@ function pretty(obj: unknown): string {
                   <tbody>
                     <tr v-for="r in recoveryData.requests" :key="r.id" class="border-t border-carbon-6">
                       <td class="py-1 pr-3">{{ r.requestedAt?.slice(0, 16) }}</td>
-                      <td class="py-1 pr-3">{{ r.lookbackDays }}d</td>
+                      <td class="py-1 pr-3">{{ r.lookbackDays }}d<span v-if="r.kind === 'scheduled'"> · daily pass</span></td>
                       <td class="py-1 pr-3">{{ r.status }}<span v-if="r.error"> — {{ r.error }}</span></td>
                       <td class="py-1 pr-3">{{ r.instancesProcessed }}/{{ r.instanceCount }} ({{ r.percentComplete }}%)</td>
                       <!-- Kept visually distinct from progress: 100% processed with

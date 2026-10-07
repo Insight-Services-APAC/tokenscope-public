@@ -19,7 +19,7 @@
  *
  * So the NORMAL setup flow — no attacker, every device — pulled a long-lived
  * credential into the model's context and the session transcript. This script
- * is the fix: it reads the store in a SUBPROCESS and prints ONLY the five
+ * is the fix: it reads the store in a SUBPROCESS and prints ONLY the
  * non-secret identity fields listed under `Out:` below, so the prompts can name
  * a command instead of a credential-bearing file.
  *
@@ -47,12 +47,19 @@
  *
  * CLI:  node device-id.mjs [--tool claude-code|copilot-cli]
  * Out:  {"enrolled":bool,"tool":string|null,"instance_id":string|null,
- *        "bearer_host":string|null,"reason":string|null}
+ *        "bearer_host":string|null,"reason":string|null,
+ *        "platform":string,"node":string}
+ *
+ * `platform` (process.platform) and `node` (process.version) are setup's step 0
+ * (#408 S6): they tell the setup prompt which lane this device takes. A device
+ * where this script cannot run at all has no Node, and on Windows takes the
+ * PowerShell lane instead (device-id.ps1, which prints the same keys with
+ * `node: null`).
  */
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { isMainModule } from './is-main.mjs'
 import { realHome } from './real-home.mjs'
 import { resolveStorePath } from './device-store.mjs'
 
@@ -61,7 +68,7 @@ const EMIT_TOOLS = ['claude-code', 'copilot-cli']
 
 /**
  * Shape every branch returns, so the printed object can only ever carry these
- * five keys. Never spread a parsed store into it.
+ * seven keys. Never spread a parsed store into it.
  */
 function result({ enrolled = false, tool = null, instanceId = null, bearerHost = null, reason = null }) {
   return {
@@ -70,6 +77,8 @@ function result({ enrolled = false, tool = null, instanceId = null, bearerHost =
     instance_id: instanceId,
     bearer_host: bearerHost,
     reason,
+    platform: process.platform,
+    node: process.version,
   }
 }
 
@@ -210,7 +219,7 @@ export function parseArgs(argv) {
 
 // CLI entry guard so tests can import the pure helpers without running the read
 // (mirrors status.mjs / backfill.mjs).
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
+const isMain = isMainModule(import.meta.url)
 if (isMain) {
   console.log(JSON.stringify(deviceIdentity(parseArgs(process.argv.slice(2))), null, 2))
 }
