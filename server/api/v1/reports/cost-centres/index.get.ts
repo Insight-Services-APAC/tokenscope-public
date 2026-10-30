@@ -109,8 +109,6 @@ export default defineEventHandler(async (event) => {
       providerStates: providerStatesForWindow(win, now),
       coverage: await reportCoverageMeta(tx),
       scope: 'cost-centre',
-      // Burn is the point-in-time emit-home cost_owning_unit_id (usage lane).
-      pointInTimeDims: true,
       ...(win.isMonth ? {} : { range: { from: win.from, to: win.to } }),
     }
 

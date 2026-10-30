@@ -1,10 +1,9 @@
 <script setup lang="ts">
 /*
  * CcDrill — the per-cost-centre §A USAGE BURN drill (the SAME lane as the budget
- * tracker's card burn: `v_complete_usage WHERE cost_owning_unit_id`). Reached by
- * selecting a row in the tracker; it answers "WHO/WHAT is burning this budget?" and
- * reconciles to the tracker row — including a spender whose current placement has
- * moved (§A homes by emit-time cost_owning_unit_id, so they never vanish).
+ * tracker's card burn: `v_complete_usage_current WHERE cost_owning_unit_id`). Reached
+ * by selecting a row in the tracker; it answers "WHO/WHAT is burning this budget?" and
+ * reconciles to the tracker row.
  *
  * Built to the reporting design language: a burn headline (framed against the CC
  * allocation when set), a slim "Burn by vendor" bar over the §A vendor split
@@ -238,8 +237,8 @@ const zeroBurnTagged = computed(() => hasAllocation.value && props.drill.burnUsd
     </nav>
 
     <!-- The homing rule, stated the way the lane actually works: `cost_owning_unit_id`
-         is the TAGGED PROJECT's cost centre on the emitted arm, and the SPENDER's own
-         centre (a placement snapshot at ingest) on the untaggable provider arm. It is
+         is the TAGGED PROJECT's cost centre on the emitted arm, and the SPENDER's
+         CURRENT centre on the untaggable provider arm (the current-org lens). It is
          not "where usage was emitted" — a teammate placed in another centre who tags
          this centre's project lands here, and the same teammate's Claude-chat usage
          lands in their own centre no matter whose project they work on. -->

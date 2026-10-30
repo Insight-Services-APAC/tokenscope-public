@@ -13,8 +13,7 @@ import { sql } from 'drizzle-orm'
 import { requireAuth } from '../../../../auth/rbac'
 import { allocationScopePredicate } from '../../../../auth/allocation-scope'
 import { withRequestRls } from '../../../../db/request-rls'
-import { InboxListQuery, REPORT_DATA_INBOX_CATEGORIES } from '../../../../../shared/schemas/inbox'
-import { activeReportDenySql } from '../../../../auth/report-deny-sql'
+import { InboxListQuery } from '../../../../../shared/schemas/inbox'
 
 interface InboxRow extends Record<string, unknown> {
   id: string
@@ -110,11 +109,6 @@ export default defineEventHandler(async (event) => {
          LIMIT 1
       ) target_alloc ON i.related_entity_kind = 'project'
       WHERE i.recipient_teammate_id = ${session.teammateId}::uuid
-        -- A deny granted after delivery hides what was already sent.
-        AND NOT (
-          i.category IN (${sql.join(REPORT_DATA_INBOX_CATEGORIES.map((c) => sql`${c}`), sql`, `)})
-          AND ${activeReportDenySql(sql`${session.teammateId}::uuid`)}
-        )
         AND ${ackStateFilter}
         ${categoryFilter}
         ${severityFilter}

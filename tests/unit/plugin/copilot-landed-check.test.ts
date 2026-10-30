@@ -133,6 +133,16 @@ describe('refreshLanded — fail-open guards', () => {
     expect(r).toEqual({ ok: false, reason: 'fetch-failed' })
   })
 
+  it('never follows a redirect: the scheme guard checked only the first URL', async () => {
+    writeConfig()
+    writeAccess()
+    const spy = vi.fn(() => ({ ok: false, status: 500 }))
+    vi.stubGlobal('fetch', spy as never)
+    await refreshLanded({ dir })
+    expect(spy).toHaveBeenCalledOnce()
+    expect((spy.mock.calls[0] as unknown[])[1]).toMatchObject({ redirect: 'error' })
+  })
+
   it('non-2xx → http-<status>', async () => {
     writeConfig()
     writeAccess()

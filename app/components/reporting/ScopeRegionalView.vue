@@ -430,7 +430,7 @@ function driversDrillable(row: DriverRow): DrillTarget | null {
           <ReportHeaderNotes
             :provider-states="providerStates"
             :coverage="coverage"
-            :point-in-time-dims="report?.meta.pointInTimeDims === true"
+            placement-note
             :lane="lane"
           />
           <!--

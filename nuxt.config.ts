@@ -14,6 +14,11 @@ export default defineNuxtConfig({
 
   css: ['~/assets/css/main.css'],
 
+  // The app has one (light) theme. @nuxt/ui's colour mode followed the OS (and
+  // remembers that choice in the browser), put `dark` on <html> and turned native
+  // checkboxes into solid black squares on a light page. Off, not just defaulted.
+  ui: { colorMode: false },
+
   // nuxt-echarts — tree-shaken ECharts wiring for the branded reporting chart
   // kit (app/components/reporting/charts/**). SVG renderer keeps the DOM
   // inspectable + CSP-clean (no canvas image data) and lets brand CSS vars
@@ -229,6 +234,11 @@ export default defineNuxtConfig({
   },
 
   routeRules: {
+    // API responses carry credentials and per-person data, so no shared cache
+    // may keep them. Nitro sets route-rule headers before the handler runs, so a
+    // handler that sets its own Cache-Control (report-cache's `private, max-age`,
+    // the plugin files' `immutable`) still wins.
+    '/api/**': { headers: { 'cache-control': 'no-store' } },
     // /api/health is probed by Container Apps' internal LB directly (no AFD →
     // no X-Azure-SocketIP). With ipHeader keying, every probe would share the
     // '' bucket and a 429'd health probe restart-loops the replicas — exempt

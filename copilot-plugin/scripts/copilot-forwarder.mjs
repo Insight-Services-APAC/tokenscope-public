@@ -340,16 +340,16 @@ export function isForeignOwned(st) {
 
 /**
  * True if `filePath` is tracked by git (staged or committed) in its containing
- * repo — the committed-file vector this guard exists to kill. `git ls-files
- * --error-unmatch` exits 0 iff the path is tracked; anything else (not a repo, git
- * absent, untracked, any spawn failure) is treated as "not tracked" — this check
- * NEVER throws, so a missing git binary degrades to "no extra protection", not a
- * crashed forwarder. Exported for unit testing.
+ * repo — the committed-file vector this guard exists to kill — or if there is no
+ * trusted git to ask: an unanswerable check fails CLOSED, so the legacy span file
+ * is not read on such a host. `git ls-files --error-unmatch` exits 0 iff the path
+ * is tracked; any other outcome (not a repo, untracked, a spawn failure) is "not
+ * tracked". NEVER throws. Exported for unit testing.
  */
 export function isGitTracked(filePath) {
   try {
     const git = trustedGitPath()
-    if (!git) return false // no trusted git — treat as untracked, never name-lookup
+    if (!git) return true // no trusted git — cannot tell, so refuse; never name-lookup
     execFileSync(git, ['ls-files', '--error-unmatch', filePath], {
       cwd: dirname(filePath),
       stdio: ['ignore', 'ignore', 'ignore'],
@@ -389,7 +389,7 @@ export function readNewSpans(filePath) {
   }
   if (isGitTracked(filePath)) {
     console.error(
-      `[tokenscope-fwd] refusing ${filePath}: file is tracked by git — a committed span file is never forwarded (provenance guard)`,
+      `[tokenscope-fwd] refusing ${filePath}: file is tracked by git, or no trusted git was found to check — a committed span file is never forwarded (provenance guard)`,
     )
     return []
   }

@@ -652,6 +652,13 @@ assert_safe_endpoint() {
   esac
   case "$_ep" in
     https://*) return 0 ;;
+    # Userinfo: curl reads http://localhost:x@evil/ as user 'localhost', password
+    # 'x', host evil, so the loopback globs below would pass an off-box host.
+    http://*@*)
+      echo "TokenScope: emission auth FAILED (${_label} must not carry userinfo) — telemetry is being DROPPED." >&2
+      write_sentinel 0 "${_label} carries userinfo"
+      exit 1
+      ;;
     http://127.0.0.1|http://127.0.0.1:*|http://127.0.0.1/*) return 0 ;;
     http://localhost|http://localhost:*|http://localhost/*) return 0 ;;
     http://\[::1\]|http://\[::1\]:*|http://\[::1\]/*) return 0 ;;

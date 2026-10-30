@@ -360,7 +360,7 @@ async function save() {
           </select>
           <p v-if="isEdit" class="text-[11px] text-carbon-3 mt-1">Provider can't change after creation.</p>
           <p v-else-if="!canCreateAnthropicOrg" class="text-[11px] text-carbon-3 mt-1" data-testid="po-anthropic-platform-only">
-            Anthropic orgs are added by a platform admin, because they hold a credential.
+            Anthropic orgs are added by an Admin, because they hold a credential.
           </p>
         </div>
 

@@ -89,7 +89,7 @@ export default defineEventHandler(async (event) => {
     // by region per design-notes §Screen 5.
     const regionCode = regionRow.code
     const connectorStatusByRegion: Record<string, { label: string; status: 'configured' | 'planned' | 'unconfigured' | 'none' }> = {
-      apac: { label: 'PSR (APAC, planned)', status: 'planned' },
+      apac: { label: 'Pathway (APAC, planned)', status: 'planned' },
       emea: { label: 'None', status: 'none' },
       us: { label: 'None', status: 'none' },
     }

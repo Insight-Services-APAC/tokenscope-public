@@ -101,6 +101,7 @@ interface CurrentRow extends Record<string, unknown> {
   credential_secret_name: string | null
   region_id: string | null
   cost_owning_unit_id: string | null
+  provider_enterprise_id: string | null
 }
 
 export default defineEventHandler(async (event) => {
@@ -127,7 +128,8 @@ export default defineEventHandler(async (event) => {
       : null
     const rows = await tx.execute<CurrentRow>(sql`
       SELECT provider, external_org_id, reconciliation_mode, api_kind, credential_secret_name,
-             region_id::text AS region_id, cost_owning_unit_id::text AS cost_owning_unit_id
+             region_id::text AS region_id, cost_owning_unit_id::text AS cost_owning_unit_id,
+             provider_enterprise_id::text AS provider_enterprise_id
       FROM provider_org WHERE id = ${id}::uuid LIMIT 1
     `)
     const cur = [...rows][0]
@@ -193,6 +195,17 @@ export default defineEventHandler(async (event) => {
     }
     if (nextCred !== cur.credential_secret_name && !isPlatformAdmin(caller.role)) {
       platformAdminOnly('The credential namespace is deployment-wide; only platform-admin may assign credentialSecretName.')
+    }
+    // An Anthropic org with no key of its own falls back to its enterprise's key
+    // (resolveOrgCredential), so the link is a credential assignment. GitHub's link is the
+    // billing-unit picker region admins are meant to use.
+    if (
+      provider === 'anthropic' &&
+      has('providerEnterpriseId') &&
+      (body.providerEnterpriseId ?? null) !== cur.provider_enterprise_id &&
+      !isPlatformAdmin(caller.role)
+    ) {
+      platformAdminOnly("Linking an Anthropic org to an enterprise can hand it the enterprise's key; only platform-admin may change providerEnterpriseId on an Anthropic org.")
     }
 
     const apiKindErr = validateApiKindForProvider(provider, nextApiKind)

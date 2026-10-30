@@ -71,6 +71,11 @@ const isPlatformAdmin = computed(() => session.value?.role === 'platform-admin')
 const route = useRoute()
 const router = useRouter()
 const regionId = String(route.params.id)
+// Interpolated into request URLs below, and Vue Router has already decoded it:
+// a crafted `..%2F` link must not re-route a PATCH to another resource.
+if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(regionId)) {
+  throw createError({ statusCode: 404, statusMessage: 'Region not found', fatal: true })
+}
 
 const activeTab = computed(() => String(route.query.tab ?? 'cost-centres'))
 function setTab(key: string) {
@@ -104,7 +109,7 @@ function openUnplacedWorklist() {
 // All five reads are lazy, client-only, null-default and never awaited — concurrent
 // by construction: docs/design/admin-nav-responsiveness.md D1/D2.
 const { data: region, error: regionError, refresh: refreshRegion } = useLazyFetch<RegionResp | null>(
-  () => `/api/v1/admin/region/${regionId}`,
+  () => `/api/v1/admin/region/${encodeURIComponent(regionId)}`,
   { server: false, default: () => null, immediate: isAdmin.value },
 )
 
@@ -122,7 +127,7 @@ watch(
 
 const { data: tree, error: treeError, refresh: refreshTree } = useLazyFetch<
   { nodes: OrgNode[]; default_unit_warn_threshold: number } | null
->(() => `/api/v1/admin/org-units?region=${regionId}`, {
+>(() => `/api/v1/admin/org-units?region=${encodeURIComponent(regionId)}`, {
   server: false,
   default: () => null,
   immediate: isAdmin.value,
@@ -154,7 +159,7 @@ interface UnitRule {
 // return null over an empty list), so the offer would promise an outcome a
 // higher-precedence rule already overrides — it is withheld instead.
 const { data: rulesData, error: rulesError, refresh: refreshRules } = useLazyFetch<{ rules: UnitRule[] } | null>(
-  () => `/api/v1/admin/directory-region-rules?region=${regionId}`,
+  () => `/api/v1/admin/directory-region-rules?region=${encodeURIComponent(regionId)}`,
   { server: false, default: () => null, immediate: isAdmin.value },
 )
 const unitRules = computed(() => rulesData.value?.rules ?? [])
@@ -184,7 +189,7 @@ interface TeammatesResp {
   spend_window: { start: string; end: string }
 }
 const { data: teammates, error: teammatesError, refresh: refreshTeammates } = useLazyFetch<TeammatesResp | null>(
-  () => `/api/v1/admin/teammates?region=${regionId}&limit=200&placement=${placement.value}`,
+  () => `/api/v1/admin/teammates?region=${encodeURIComponent(regionId)}&limit=200&placement=${placement.value}`,
   { server: false, default: () => null, immediate: isAdmin.value, watch: [placement] },
 )
 
@@ -199,7 +204,7 @@ interface LifecycleResp {
 // fall back to LITERAL 2h/7d, so a failed read renders a fabricated platform
 // default as fact and seeds nothing into the two inputs.
 const { data: lifecycle, error: lifecycleError, refresh: refreshLifecycle } = useLazyFetch<LifecycleResp | null>(
-  () => `/api/v1/admin/regions/${regionId}/project-lifecycle`,
+  () => `/api/v1/admin/regions/${encodeURIComponent(regionId)}/project-lifecycle`,
   { server: false, default: () => null, immediate: isAdmin.value },
 )
 const lcGrace = ref<number | null>(null)
@@ -219,7 +224,7 @@ async function saveLifecycleOverride() {
   if (lcGrace.value === null || lcWarn.value === null) return
   lcSaving.value = true
   try {
-    await $fetch(`/api/v1/admin/regions/${regionId}/project-lifecycle`, {
+    await $fetch(`/api/v1/admin/regions/${encodeURIComponent(regionId)}/project-lifecycle`, {
       method: 'PUT',
       body: { grace_hours: lcGrace.value, warn_days: lcWarn.value },
     })
@@ -234,7 +239,7 @@ async function saveLifecycleOverride() {
 async function clearLifecycleOverride() {
   lcSaving.value = true
   try {
-    await $fetch(`/api/v1/admin/regions/${regionId}/project-lifecycle`, { method: 'DELETE' })
+    await $fetch(`/api/v1/admin/regions/${encodeURIComponent(regionId)}/project-lifecycle`, { method: 'DELETE' })
     flashToast('ok', 'Reverted to platform default.')
     await refreshLifecycle()
   } catch (err) {
@@ -327,7 +332,7 @@ async function saveRename() {
   if (!name) return
   renameSaving.value = true
   try {
-    await $fetch(`/api/v1/admin/regions/${regionId}`, { method: 'PATCH', body: { display_name: name } })
+    await $fetch(`/api/v1/admin/regions/${encodeURIComponent(regionId)}`, { method: 'PATCH', body: { display_name: name } })
     flashToast('ok', 'Region renamed.')
     renaming.value = false
     await refreshRegion()
@@ -336,6 +341,30 @@ async function saveRename() {
     consola.warn('region rename failed', err)
   } finally {
     renameSaving.value = false
+  }
+}
+
+// ── Region delete (platform-admin only) ───────────────────────────────────
+// Only an empty region can go; the server decides and its refusal names what
+// is left, so the page does not repeat the rule.
+const deleting = ref(false)
+const deleteBusy = ref(false)
+const deleteError = ref<string | null>(null)
+function openDelete() {
+  deleteError.value = null
+  deleting.value = true
+}
+async function confirmDelete() {
+  deleteBusy.value = true
+  deleteError.value = null
+  try {
+    await $fetch(`/api/v1/admin/regions/${encodeURIComponent(regionId)}`, { method: 'DELETE' })
+    await navigateTo('/admin/regions')
+  } catch (err) {
+    deleteError.value = apiErrorDetail(err, 'Could not delete the region.')
+    consola.warn('region delete failed', err)
+  } finally {
+    deleteBusy.value = false
   }
 }
 
@@ -503,26 +532,17 @@ const ruleOffer = ref<{
 async function onBulkPlaced(summary: {
   placed: number
   noop: number
-  historyRepaired: number
   unitName: string
   unitId: string
   placedIds: string[]
 }) {
   bulkPlaceOpen.value = false
   selectedTeammateIds.value = []
-  /*
-   * THREE OUTCOMES, NAMED SEPARATELY. A repair is not a placement: those people
-   * did not move, their stranded history did. On the estate this exists to fix
-   * most of a batch can be repairs, and folding them into "Placed N" would
-   * report placements that never happened.
-   */
+  // A no-op is not a placement: those people did not move, so they are named apart.
   const already = summary.noop ? ` ${summary.noop} were already there.` : ''
-  const repaired = summary.historyRepaired
-    ? ` ${summary.historyRepaired} were already there and had their recorded usage brought across.`
-    : ''
   flashToast(
     'ok',
-    `Placed ${summary.placed} ${summary.placed === 1 ? 'teammate' : 'teammates'} into ${summary.unitName}.${already}${repaired}`,
+    `Placed ${summary.placed} ${summary.placed === 1 ? 'teammate' : 'teammates'} into ${summary.unitName}.${already}`,
   )
   ruleOffer.value = summary.placedIds.length
     ? {
@@ -649,6 +669,16 @@ async function refreshAfterPlacement() {
         >
           ✎ Rename
         </UiButton>
+        <UiButton
+          v-if="isPlatformAdmin"
+          kind="ghost"
+          size="sm"
+          data-testid="region-delete-open"
+          title="Delete this region. Only possible while nobody and nothing is in it."
+          @click="openDelete"
+        >
+          Delete
+        </UiButton>
         <UiBadge :kind="region.connector.status === 'planned' ? 'harmony' : 'neutral'">
           {{ region.connector.status === 'planned' ? region.connector.label : 'No connector' }}
         </UiBadge>
@@ -672,7 +702,7 @@ async function refreshAfterPlacement() {
       <UiKpi accent="harmony" label="Org units" :value="String(region.counts.org_units ?? 0)" :sub="`across ${region.counts.bus ?? 0} business ${region.counts.bus === 1 ? 'unit' : 'units'}`" />
       <UiKpi accent="vision" label="Teammates" :value="String(region.counts.teammates ?? 0)" sub="in this region" />
       <UiKpi accent="hunger" label="Projects" :value="String(region.counts.projects ?? 0)" :sub="`${region.counts.projects_onboarded ?? 0} onboarded · ${Math.max(0, (region.counts.projects ?? 0) - (region.counts.projects_onboarded ?? 0))} catalogue`" />
-      <UiKpi accent="zeal" label="Connector status" :value="region.connector.status === 'planned' ? 'PSR' : 'None'" :sub="region.connector.status === 'planned' ? 'planned for pilot' : 'manual setup mode'" />
+      <UiKpi accent="zeal" label="Connector status" :value="region.connector.status === 'planned' ? 'Pathway' : 'None'" :sub="region.connector.status === 'planned' ? 'planned for pilot' : 'manual setup mode'" />
     </div>
 
     <AdminTabs :tabs="tabs" :model-value="activeTab" @update:model-value="setTab" />
@@ -808,7 +838,9 @@ async function refreshAfterPlacement() {
               Owners
             </UiButton>
             <UiButton kind="ghost" size="sm" :data-testid="`cc-edit-${node.code}`" @click="openEdit(node)">Edit</UiButton>
+            <!-- The region's default unit and its holding node never move (move.post.ts). -->
             <UiButton
+              v-if="!(node.code === 'default' && !node.parent_id) && node.unit_type !== HOLDING_UNIT_TYPE"
               kind="ghost"
               size="sm"
               :data-testid="`move-btn-${node.id}`"
@@ -1087,13 +1119,13 @@ async function refreshAfterPlacement() {
         class="mb-5 p-3 rounded-md bg-brand-vision-lite/60 border border-brand-vision/30 text-xs text-[#1f4ea3] leading-relaxed"
       >
         <span class="font-bold">{{ region.region.display_name }} has no FIN-system connector yet.</span>
-        APAC will get a PSR-based connector during the pilot. US will stay manual through pilot.
+        APAC will get a Pathway-based connector during the pilot. US will stay manual through pilot.
       </div>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <ConnectorCard
-          name="PSR (APAC)"
+          name="Pathway (APAC)"
           scope="Inbound APAC"
-          description="Project + teammate sync from PSR. Coming during pilot."
+          description="Project + teammate sync from Pathway. Coming during pilot."
           :status="region.region.code === 'apac' ? 'planned' : 'unconfigured'"
           cta="configure"
         />
@@ -1184,6 +1216,7 @@ async function refreshAfterPlacement() {
       :region-id="leadersOpen ? regionId : null"
       :region-name="region.region.display_name"
       :region-code="region.region.code"
+      :read-only="!isPlatformAdmin"
       @close="leadersOpen = false"
       @changed="refreshRegion"
     />
@@ -1220,6 +1253,39 @@ async function refreshAfterPlacement() {
             <UiButton kind="ghost" data-testid="region-rename-cancel" @click="renaming = false">Cancel</UiButton>
             <UiButton kind="primary" :disabled="renameSaving" data-testid="region-rename-submit" @click="saveRename">
               {{ renameSaving ? 'Saving…' : 'Save' }}
+            </UiButton>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Delete region (platform-admin) -->
+    <div
+      v-if="deleting"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-carbon/40 p-4"
+      data-testid="region-delete-overlay"
+      @click.self="deleting = false"
+    >
+      <div
+        class="w-full max-w-sm bg-white rounded-xl shadow-xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="region-delete-title"
+        data-testid="region-delete-dialog"
+      >
+        <div class="px-6 py-4 border-b border-calm-2">
+          <p class="text-xs font-bold uppercase tracking-[1.4px] text-brand-harmony">Region</p>
+          <h2 id="region-delete-title" class="text-lg font-bold text-carbon mt-0.5">Delete {{ region.region.display_name }}?</h2>
+        </div>
+        <div class="px-6 py-4">
+          <p class="text-sm text-carbon-2">
+            Only an empty region can be deleted: no people, projects, Business Units, leaders, rules or recorded spend.
+          </p>
+          <p v-if="deleteError" class="mt-3 text-sm text-rag-red" role="alert" data-testid="region-delete-error">{{ deleteError }}</p>
+          <div class="flex justify-end gap-2 mt-5">
+            <UiButton kind="ghost" data-testid="region-delete-cancel" @click="deleting = false">Cancel</UiButton>
+            <UiButton kind="primary" :disabled="deleteBusy" data-testid="region-delete-submit" @click="confirmDelete">
+              {{ deleteBusy ? 'Deleting…' : 'Delete region' }}
             </UiButton>
           </div>
         </div>

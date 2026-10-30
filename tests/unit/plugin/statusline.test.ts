@@ -427,6 +427,23 @@ describe('emitEnvLabel (derived from the live emit endpoint, not hardcoded)', ()
   })
 })
 
+describe('tokenscopeStatusLine — the persisted command is a spawn site', () => {
+  it('names the interpreter by absolute, quoted path, never a bare node', () => {
+    const cmd = tokenscopeStatusLine('/p/scripts/statusline.mjs', { node: '/opt/node 22/bin/node', platform: 'linux' }).command
+    expect(cmd).toBe('"/opt/node 22/bin/node" "/p/scripts/statusline.mjs"')
+    expect(cmd).not.toMatch(/^node /)
+  })
+
+  it('defaults to the node running this script', () => {
+    expect(tokenscopeStatusLine('/p/scripts/statusline.mjs').command.startsWith(`"${process.execPath}" `)).toBe(true)
+  })
+
+  it('quotes for cmd.exe on Windows', () => {
+    const cmd = tokenscopeStatusLine('C:\\p\\statusline.mjs', { node: 'C:\\Program Files\\nodejs\\node.exe', platform: 'win32' }).command
+    expect(cmd).toBe('"C:\\Program Files\\nodejs\\node.exe" "C:\\p\\statusline.mjs"')
+  })
+})
+
 describe('installStatusLine (non-clobber)', () => {
   const PATH = '/p/scripts/statusline.mjs'
 
@@ -478,7 +495,7 @@ describe('reconcilePluginPaths (self-heal version-pinned settings on update)', (
       A,
     )
     expect(changed).toBe(true)
-    expect(settings.statusLine.command).toBe(`node ${JSON.stringify(A.statuslinePath)}`)
+    expect(settings.statusLine.command).toBe(tokenscopeStatusLine(A.statuslinePath, { platform: 'linux' }).command)
     expect(settings.statusLine.padding).toBe(0) // preserves other statusLine fields
     expect(settings.otelHeadersHelper).toBe(A_HELPER)
     expect(settings.env).toEqual({ X: '1' }) // untouched
@@ -486,7 +503,7 @@ describe('reconcilePluginPaths (self-heal version-pinned settings on update)', (
 
   it('is a no-op once both already point at the active version', () => {
     const { changed } = reconcilePluginPaths(
-      { statusLine: tokenscopeStatusLine(A.statuslinePath), otelHeadersHelper: A_HELPER },
+      { statusLine: tokenscopeStatusLine(A.statuslinePath, { node: '/usr/bin/node', platform: A.platform }), otelHeadersHelper: A_HELPER },
       A,
     )
     expect(changed).toBe(false)
@@ -561,6 +578,23 @@ describe('reconcilePluginPaths (self-heal version-pinned settings on update)', (
     const { changed } = reconcilePluginPaths(input, A)
     expect(changed).toBe(true)
     expect(input.statusLine.command).toBe(staleStatusCmd) // original untouched
+  })
+
+  it('rewrites a bare-node status line at the SAME version to the absolute interpreter', () => {
+    const { settings, changed } = reconcilePluginPaths(
+      { statusLine: { type: 'command', command: `node ${JSON.stringify(A.statuslinePath)}`, padding: 0 } },
+      A,
+    )
+    expect(changed).toBe(true)
+    expect(settings.statusLine.command).toBe(tokenscopeStatusLine(A.statuslinePath, { platform: 'linux' }).command)
+  })
+
+  it('re-heals a status line whose recorded node no longer exists, and leaves a working one alone', () => {
+    const gone = { statusLine: { type: 'command', command: `"/old/node" "${A.statuslinePath}"` } }
+    const missing = reconcilePluginPaths(gone, { ...A, exists: (p: string) => p !== '/old/node' })
+    expect(missing.changed).toBe(true)
+    // Another host's working node at the same version is not rewritten back and forth.
+    expect(reconcilePluginPaths(gone, A).changed).toBe(false)
   })
 
   it('skips a path target that is null (does not exist on disk)', () => {

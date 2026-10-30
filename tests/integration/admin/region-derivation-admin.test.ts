@@ -122,7 +122,7 @@ describe('region_leader — add / list / revoke', () => {
         method: 'POST',
         params: { id: regionA },
         body: { leader_oid: 'oid-leader-1', leader_email: 'Leader.One@x.test', kind: 'region-svp', display_name: 'Leader One' },
-        session: adminA(),
+        session: platformAdmin(),
       }),
     )) as Leader
     expect(created.leader_oid).toBe('oid-leader-1')
@@ -135,7 +135,7 @@ describe('region_leader — add / list / revoke', () => {
     expect(listed.leaders.map((l) => l.leader_oid)).toContain('oid-leader-1')
 
     const revoked = (await leaderDelete(
-      ev({ method: 'DELETE', params: { id: regionA, leaderId: created.id }, session: adminA() }),
+      ev({ method: 'DELETE', params: { id: regionA, leaderId: created.id }, session: platformAdmin() }),
     )) as { revoked: boolean }
     expect(revoked.revoked).toBe(true)
 
@@ -159,7 +159,7 @@ describe('region_leader — add / list / revoke', () => {
         method: 'POST',
         params: { id: regionA },
         body: { leader_oid: 'oid-dup', leader_email: 'dup@x.test', kind: 'region-svp' },
-        session: adminA(),
+        session: platformAdmin(),
       }),
     )
     await expect(
@@ -174,17 +174,36 @@ describe('region_leader — add / list / revoke', () => {
     ).rejects.toMatchObject({ statusCode: 409 })
   })
 
-  it('a region admin cannot manage another region (403)', async () => {
+  it('a region admin cannot assign or revoke leaders, even in their own region (403)', async () => {
     await expect(
       leadersPost(
         ev({
           method: 'POST',
-          params: { id: regionB },
-          body: { leader_oid: 'oid-foreign', leader_email: 'foreign@x.test', kind: 'region-svp' },
+          params: { id: regionA },
+          body: { leader_oid: 'oid-own-region', leader_email: 'own@x.test', kind: 'region-svp' },
           session: adminA(),
         }),
       ),
     ).rejects.toMatchObject({ statusCode: 403 })
+    const [none] = await t.client<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM region_leader WHERE leader_oid = 'oid-own-region'`
+    expect(none!.n).toBe(0)
+
+    const created = (await leadersPost(
+      ev({
+        method: 'POST',
+        params: { id: regionA },
+        body: { leader_oid: 'oid-keep', leader_email: 'keep@x.test', kind: 'region-svp' },
+        session: platformAdmin(),
+      }),
+    )) as Leader
+    await expect(
+      leaderDelete(ev({ method: 'DELETE', params: { id: regionA, leaderId: created.id }, session: adminA() })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    const [still] = await t.client<{ revoked_at: Date | null }[]>`
+      SELECT revoked_at FROM region_leader WHERE id = ${created.id}::uuid`
+    expect(still!.revoked_at).toBeNull()
+
     await expect(
       leadersGet(ev({ method: 'GET', params: { id: regionB }, session: adminA() })),
     ).rejects.toMatchObject({ statusCode: 403 })
@@ -196,16 +215,16 @@ describe('region_leader — add / list / revoke', () => {
         method: 'POST',
         params: { id: regionA },
         body: { leader_oid: 'oid-reassign', leader_email: 'r@x.test', kind: 'region-svp' },
-        session: adminA(),
+        session: platformAdmin(),
       }),
     )) as Leader
-    await leaderDelete(ev({ method: 'DELETE', params: { id: regionA, leaderId: first.id }, session: adminA() }))
+    await leaderDelete(ev({ method: 'DELETE', params: { id: regionA, leaderId: first.id }, session: platformAdmin() }))
     const second = (await leadersPost(
       ev({
         method: 'POST',
         params: { id: regionA },
         body: { leader_oid: 'oid-reassign', leader_email: 'r@x.test', kind: 'region-svp' },
-        session: adminA(),
+        session: platformAdmin(),
       }),
     )) as Leader
     expect(second.id).not.toBe(first.id)

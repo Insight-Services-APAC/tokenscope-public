@@ -4,8 +4,12 @@
  * alike (PO decision: full project transparency for current members; no role
  * asymmetry).
  *
- * Gate: current project_assignment membership — a non-member is
- * indistinguishable from a missing project (404, the [sid] posture).
+ * Gate: current project_assignment membership (or a cou_owner row), or an admin
+ * in scope of the project's region (platform-admin, or that region's admin):
+ * budget requests on a project with no PM go to those admins, and the queue
+ * they decide from is this page's Manage section. An admin who is not a member
+ * sees aggregates only, like a cou-owner. Anyone else is indistinguishable from
+ * a missing project (404, the [sid] posture).
  *
  * ── ONE WINDOW FOR EVERY FIGURE (W3 D16/D27, r1-H9) ──────────────────────────
  * The endpoint windows on the REPORT vocabulary — `?month=YYYY-MM` XOR
@@ -62,11 +66,13 @@ import { createError, defineEventHandler, getRouterParam, getValidatedQuery } fr
 import { sql as sqlRaw } from 'drizzle-orm'
 import { z } from 'zod'
 import { requireAuth } from '../../../../../auth/rbac'
+import { isProjectAdmin } from '../../../../../auth/project-authority'
 import { withRequestRls } from '../../../../../db/request-rls'
 import {
   fetchAdvisorySpend,
   fetchProjectAllocation,
   fetchProjectVelocity,
+  findProjectForAdmin,
   requireProjectMembership,
 } from '../../../../../usage/consumption'
 import { fetchUntaggedPressure } from '../../../../../usage/project-detail'
@@ -189,7 +195,11 @@ export default defineEventHandler(async (event) => {
   )
 
   return await withRequestRls(event, async (tx) => {
-    const project = await requireProjectMembership(tx, session.teammateId, codeParsed.data)
+    let project = await requireProjectMembership(tx, session.teammateId, codeParsed.data)
+    if (!project) {
+      const asAdmin = await findProjectForAdmin(tx, codeParsed.data)
+      if (asAdmin && isProjectAdmin(session, asAdmin.region_id)) project = asAdmin
+    }
     if (!project) {
       throw createError({
         statusCode: 404,
@@ -224,6 +234,9 @@ export default defineEventHandler(async (event) => {
       role: viewerRole,
       access: project.access,
       budget_allocation_id: [...baselineRows][0]?.id ?? null,
+      // The Manage section (spec §4): the project's current PM, or an admin in
+      // scope. The same two answers the PM routes gate on.
+      can_manage: viewerRole === 'manager' || isProjectAdmin(session, project.region_id),
     }
     const projectBlock = {
       id: project.id,

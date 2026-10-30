@@ -71,7 +71,7 @@ const skippedTotal = ref(0)
 async function run(dryRun: boolean): Promise<ReResolveResponse | null> {
   error.value = null
   try {
-    return await $fetch<ReResolveResponse>(`/api/v1/admin/region/${props.regionId}/re-resolve`, {
+    return await $fetch<ReResolveResponse>(`/api/v1/admin/region/${encodeURIComponent(props.regionId)}/re-resolve`, {
       method: 'POST',
       body: { dry_run: dryRun },
     })
@@ -213,7 +213,7 @@ const nothingToDo = computed(() => Boolean(preview.value) && preview.value!.cand
                 Another pass is needed for the remaining {{ preview.remaining }}.
               </span>
               <span v-if="preview.out_of_region > 0">
-                “Belong elsewhere” report into another region's Business Unit — a cross-region
+                “Belong elsewhere” are derived into another region — a cross-region
                 move revokes their sessions, so it is not this action's to make.
               </span>
               <!-- HONEST ABOUT THE LIMIT OF THAT LABEL. Telling "belongs elsewhere"

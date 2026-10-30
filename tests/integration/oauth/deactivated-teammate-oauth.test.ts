@@ -478,6 +478,39 @@ describe('auth code: a code minted BEFORE deactivation is not exchangeable AFTER
     expect(res.error).toBeUndefined()
     expect(res.access_token).toBeTruthy()
   })
+
+  it('a code minted BEFORE revoke-sessions (revoked_at) is refused; one minted after it exchanges', async () => {
+    const client = await registerClient()
+    const before = makePkce()
+    const staleCode = await authorizeForCode(client.client_id, before.challenge, sessionFor(subjectId, SUBJECT_EMAIL))
+
+    await new Promise((r) => setTimeout(r, 5))
+    await t.client`UPDATE teammate SET revoked_at = now() WHERE id = ${subjectId}::uuid`
+    await new Promise((r) => setTimeout(r, 5))
+
+    const exchange = (code: string, verifier: string) =>
+      ev({
+        body: {
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: REDIRECT_URI,
+          code_verifier: verifier,
+          client_id: client.client_id,
+          client_secret: client.client_secret,
+        },
+      })
+    const refusedEv = exchange(staleCode, before.verifier)
+    const refused = await call<{ access_token?: string; error?: string }>(tokenHandler, refusedEv)
+    expect(refused.error).toBe('invalid_grant')
+    expect(refused.access_token).toBeUndefined()
+    expect(statusOf(refusedEv)).toBe(400)
+
+    const after = makePkce()
+    const freshCode = await authorizeForCode(client.client_id, after.challenge, sessionFor(subjectId, SUBJECT_EMAIL))
+    const ok = await call<{ access_token?: string; error?: string }>(tokenHandler, exchange(freshCode, after.verifier))
+    expect(ok.error).toBeUndefined()
+    expect(ok.access_token).toBeTruthy()
+  })
 })
 
 // ── 4. The mint choke point ──────────────────────────────────────────────────

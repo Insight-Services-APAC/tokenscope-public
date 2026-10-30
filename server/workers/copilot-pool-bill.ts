@@ -57,6 +57,7 @@ import {
   persistCopilotOverageAllocation,
   type PersistCopilotOverageAllocationResult,
 } from '../governance/copilot-overage-allocation'
+import { describeError } from '../utils/redact-probe-error'
 
 type Db = PostgresJsDatabase<typeof schema>
 
@@ -613,7 +614,7 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
       } catch (err) {
         // MissingGithubAppKeyError (App-opted enterprise, key unwired) — fail-loud, isolated.
         result.enterprisesErrored += 1
-        consola.warn(`[copilot-pool-bill] credential resolve failed for ${ent.external_id}: ${String(err)}`)
+        consola.warn(`[copilot-pool-bill] credential resolve failed for ${ent.external_id}: ${describeError(err)}`)
         continue
       }
       if (!credential) {
@@ -638,7 +639,7 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
         // MEDIUM-1(a): an ABSENT/renamed NET money field makes the client's Zod parse THROW, so a
         // bill-shape drift lands HERE (fail-loud, month isolated) — never coerced to a $0 report.
         result.enterprisesErrored += 1
-        consola.warn(`[copilot-pool-bill] ${ent.external_id} billing report ${mk.monthStart} failed: ${String(err)}`)
+        consola.warn(`[copilot-pool-bill] ${ent.external_id} billing report ${mk.monthStart} failed: ${describeError(err)}`)
         continue
       }
       entRan = true
@@ -860,7 +861,7 @@ export async function runCopilotPoolBill(db: Db, opts?: CopilotPoolBillOptions):
       } catch (err) {
         result.enterprisesErrored += 1
         consola.warn(
-          `[copilot-pool-bill] ${ent.external_id} bill/allocation persist ${mk.monthStart} failed: ${String(err)}`,
+          `[copilot-pool-bill] ${ent.external_id} bill/allocation persist ${mk.monthStart} failed: ${describeError(err)}`,
         )
         continue
       }

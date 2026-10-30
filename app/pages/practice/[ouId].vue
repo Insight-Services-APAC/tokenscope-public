@@ -41,7 +41,12 @@ interface Resp {
 
 const route = useRoute()
 const ouId = computed(() => String(route.params.ouId))
-const { data, pending, error } = await useFetch<Resp>(() => `/api/v1/rollups/practice/${ouId.value}`)
+// Interpolated into request URLs below, and Vue Router has already decoded it:
+// a crafted `..%2F` link must not re-route a PATCH to another resource.
+if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ouId.value)) {
+  throw createError({ statusCode: 404, statusMessage: 'Practice not found', fatal: true })
+}
+const { data, pending, error } = await useFetch<Resp>(() => `/api/v1/rollups/practice/${encodeURIComponent(ouId.value)}`)
 
 const crumbs = computed(() => [{ label: 'Home', to: '/' }, { label: 'Reporting', to: '/reporting?scope=region' }, { label: data.value?.practice.displayName ?? 'Practice' }])
 

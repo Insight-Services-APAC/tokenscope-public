@@ -141,6 +141,18 @@ describe('/oauth/authorize — loopback delivery', () => {
     expect(statusCalls).toBe(1)
   })
 
+  it('the paste-back URL carries a "works like a password" warning in both approved branches', async () => {
+    tab = null
+    const undelivered = await mountAndSubmit()
+    expect(undelivered.find('[data-testid="authorize-undelivered"]').exists()).toBe(true)
+    expect(undelivered.find('[data-testid="authorize-url-warning"]').text()).toContain('works like a password')
+    undelivered.unmount()
+
+    const https = await mountAndSubmit({ redirectUri: 'https://client.example/cb', redirectUrl: `https://client.example/cb?code=${CODE}` })
+    expect(https.find('[data-testid="authorize-callback-url"]').exists()).toBe(true)
+    expect(https.find('[data-testid="authorize-url-warning"]').text()).toContain('works like a password')
+  })
+
   it('no status request starts at or after the 2-minute deadline', async () => {
     const t0 = Date.now()
     await mountAndSubmit()

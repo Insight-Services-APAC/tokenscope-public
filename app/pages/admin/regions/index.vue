@@ -145,7 +145,7 @@ async function createRegion() {
 
     <div class="mb-4 flex items-center justify-between gap-3">
       <p v-if="!isPlatformAdmin" class="text-xs text-carbon-3">
-        Only a platform admin can add regions.
+        Only an Admin can add regions.
       </p>
       <span v-else />
       <UiButton

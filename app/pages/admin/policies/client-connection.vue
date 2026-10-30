@@ -118,7 +118,7 @@ const inputClass =
       title="Client connection"
       sub="What the Connect dialog tells developers to install, for this deployment."
     />
-    <p v-if="!isPlatform" class="text-sm text-carbon-2">Only platform admins can view or change the client connection policy.</p>
+    <p v-if="!isPlatform" class="text-sm text-carbon-2">Only an Admin can view or change the client connection policy.</p>
     <template v-else>
       <UiFetchErrorBanner v-if="fetchError" :error="fetchError" label="the client connection policy" @retry="refresh" />
       <AdminPageSkeleton v-else-if="policy == null" :rows="6" :toolbar="false" class="max-w-2xl" />

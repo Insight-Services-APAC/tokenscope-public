@@ -16,7 +16,7 @@ import InboxFilterBar, {
   type InboxStatusFilter,
 } from '../components/inbox/InboxFilterBar.vue'
 import InboxDrawer from '../components/inbox/InboxDrawer.vue'
-import type { InboxItem } from '../components/inbox/types'
+import { categoryLabel, type InboxItem } from '../components/inbox/types'
 
 const category = ref<InboxCategoryFilter>('all')
 const severity = ref<InboxSeverityFilter>('all')
@@ -142,17 +142,6 @@ async function handleSnooze(id: string) {
   if (await ack(id, 'acknowledged')) closeDrawer()
 }
 
-function categoryBadgeLabel(cat: string): string {
-  if (cat === 'over-budget') return 'Over budget'
-  if (cat === 'velocity-warning') return 'Velocity'
-  if (cat === 'sync-conflict') return 'Sync conflict'
-  if (cat === 'untagged-backlog') return 'Untagged'
-  if (cat === 'structural-conflict') return 'Structural'
-  if (cat === 'connector-health') return 'Connector'
-  if (cat === 'over-emission-escalated') return 'Over-emission'
-  return cat
-}
-
 function severityIconColor(sev: string): string {
   if (sev === 'urgent') return 'bg-[#FEE2E2] text-rag-red'
   if (sev === 'attention') return 'bg-brand-hunger-lite text-brand-heart'
@@ -253,7 +242,7 @@ function severityIconColor(sev: string): string {
                 {{ item.related_entity_kind ?? '—' }} · {{ item.ack_state }}
               </div>
             </div>
-            <UiBadge kind="neutral">{{ categoryBadgeLabel(item.category) }}</UiBadge>
+            <UiBadge kind="neutral">{{ categoryLabel(item.category) }}</UiBadge>
             <span class="text-[11px] text-carbon-3 whitespace-nowrap">
               {{ fmtTimeAgo(item.created_at) }}
             </span>

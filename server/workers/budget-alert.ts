@@ -29,8 +29,9 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
 import type * as schema from '../../drizzle/schema'
 import { dispatchInbox } from '../notifications/dispatch'
-import { monthStartIso as monthStartIsoFor, monthToDateWindow, nextMonthStartIso } from '../utils/period'
+import { monthStartIso as monthStartIsoFor, monthToDateWindow } from '../utils/period'
 import { completeProjectSpend } from '../usage/complete-spend'
+import { fetchProjectAllocations } from '../usage/consumption'
 
 export interface BudgetAlertResult {
   projectsScanned: number
@@ -42,7 +43,6 @@ interface ProjectRow extends Record<string, unknown> {
   project_id: string
   project_code: string
   display_name: string
-  cap_usd: string
 }
 
 export async function runBudgetAlert(
@@ -52,29 +52,22 @@ export async function runBudgetAlert(
   const now = opts?.now ?? new Date()
   const monthStartIso = monthStartIsoFor(now)
   /*
-   * TWO windows, deliberately, because the alert asks two different questions
-   * (server/utils/period.ts):
-   *   spendWindow — MONTH TO DATE `[monthStart, now)`. What has been spent. A
-   *     row dated later this month has not been spent yet, and counting it
-   *     would page a PM for an overage that has not happened.
-   *   nextMonthStartIso — the CALENDAR-month upper bound, used ONLY for the
-   *     allocation overlap below. A top-up effective on the 28th is real budget
-   *     for the month on the 3rd, so the cap must see the whole month even
-   *     though the spend must not.
+   * spendWindow — MONTH TO DATE `[monthStart, now)`. What has been spent. A row
+   * dated later this month has not been spent yet, and counting it would page a
+   * PM for an overage that has not happened (server/utils/period.ts).
+   *
+   * The cap is NOT a window question: it is the project's budget as the project
+   * page shows it, read by the same reader at this run's `now` (below).
    */
   const spendWindow = monthToDateWindow(now)
-  const monthEndIso = nextMonthStartIso(now)
 
-  // Per-project MTD spend and the current allocation cap (baseline + top-up
-  // effective at month-start; burst excluded — matches usage.get.ts and the
-  // allocation_total_usd contract).
-  //
-  // Only projects with at least one allocation row (cap > 0) are
-  // candidates; a project with no allocation has no over-budget concept.
+  // Per-project MTD spend against the project's budget. Only projects with a
+  // budget (cap > 0) are candidates; a project with none has no over-budget
+  // concept.
   //
   // completeProjectSpend is THE project-spend definition (server/usage/
-  // complete-spend.ts) — the SAME call the project page, the /projects cards,
-  // the budget editor and the manager rollup make, with the SAME window and the
+  // complete-spend.ts) — the SAME call the project page, the /projects cards
+  // and the budget editor make, with the SAME window and the
   // SAME named `excludeProvisional` option. That is deliberate: the alert that
   // pages a PM must be computed on the number they will see when they click
   // through, or "Manage budget →" walks them from one figure to another at the
@@ -117,52 +110,26 @@ export async function runBudgetAlert(
    */
   const spendByProject = await completeProjectSpend(db, spendWindow, { excludeProvisional: true })
 
-  // Cap = baseline + top-up allocations OVERLAPPING the month (`&&`), not merely
-  // containing month-start (`@>`). A mid-month top-up is real budget: with `@>` it
-  // was invisible here while the dev's own usage page (which uses `&&`) counted it,
-  // so the worker could page "over budget" against a cap the PM had already raised.
-  const rows = await db.execute<ProjectRow>(
-    sql`
-      SELECT p.id::text   AS project_id,
-             p.code       AS project_code,
-             p.display_name AS display_name,
-             -- Cap = the ONE baseline in force at month-start + EVERY top-up
-             -- overlapping the month. The two kinds need different window rules:
-             --   baseline: point-containment (@>). Baselines are non-overlapping
-             --     but SUCCESSIVE ones are allowed (change the budget mid-month →
-             --     [May1,May15) + [May15,Jun1)). Range-overlap would SUM both and
-             --     silently double the cap, suppressing real over-budget pages.
-             --   top-up: range-overlap (&&). Top-ups stack by design, and a
-             --     mid-month top-up is real budget that must count — with @> it
-             --     was invisible here while the dev's own page counted it, so the
-             --     worker could page against a cap the PM had already raised.
-             COALESCE((
-               SELECT SUM(al.budget_usd)
-                 FROM allocation al
-                WHERE al.scope_type = 'project'
-                  AND al.scope_id = p.id
-                  AND (
-                    (al.allocation_kind = 'baseline'
-                       AND al.effective @> ${monthStartIso}::timestamptz)
-                    OR
-                    (al.allocation_kind = 'top-up'
-                       AND al.effective && tstzrange(${monthStartIso}::timestamptz, ${monthEndIso}::timestamptz, '[)'))
-                  )
-             ), 0)::text AS cap_usd
-        FROM project p
-       WHERE EXISTS (
-              SELECT 1 FROM allocation al
-               WHERE al.scope_type = 'project'
-                 AND al.scope_id = p.id
-                 AND (
-                   (al.allocation_kind = 'baseline' AND al.effective @> ${monthStartIso}::timestamptz)
-                   OR
-                   (al.allocation_kind = 'top-up'
-                      AND al.effective && tstzrange(${monthStartIso}::timestamptz, ${monthEndIso}::timestamptz, '[)'))
-                 )
-             )
-    `,
-  )
+  // Cap = the project's budget exactly as the project page shows it: the pool
+  // baseline and top-ups in force at this run's `now`, burst excluded, through
+  // the page's own reader (fetchProjectAllocations). It used to be the baseline
+  // in force at MONTH-START plus top-ups overlapping the month, so a baseline
+  // starting mid-month was left out while a top-up over the same period counted:
+  // $1,025 on the page, a $25 cap here. Only a project with spend can be over.
+  const spentOn = [...spendByProject.keys()].filter((id): id is string => !!id)
+  const capByProject = await fetchProjectAllocations(db, spentOn, now.toISOString())
+  const capped = [...capByProject].filter(([, cap]) => cap > 0).map(([id]) => id)
+  const rows =
+    capped.length === 0
+      ? []
+      : await db.execute<ProjectRow>(sql`
+          SELECT id::text AS project_id, code AS project_code, display_name
+          FROM project
+          WHERE id = ANY(ARRAY[${sql.join(
+            capped.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )}])
+        `)
 
   let alertsDispatched = 0
   let skippedExisting = 0
@@ -170,7 +137,7 @@ export async function runBudgetAlert(
 
   for (const r of rows) {
     const usedUsd = spendByProject.get(r.project_id)?.costUsd ?? 0
-    const capUsd = Number(r.cap_usd)
+    const capUsd = capByProject.get(r.project_id) ?? 0
     if (capUsd <= 0) continue
     if (usedUsd <= capUsd) continue
 

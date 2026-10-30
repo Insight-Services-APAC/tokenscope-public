@@ -34,7 +34,7 @@
  *   CLAUDE_PLUGIN_ROOT           where otel-headers-helper.sh lives (set by Claude)
  */
 import { isMainModule } from './is-main.mjs'
-import { degradedExpiryNote, readEmitDegraded, readEmitSentinel, runEmitHelper, safeProcessEnv, trustedGlobalSettingsEnv, trustedStateDir } from './plugin-runtime.mjs'
+import { claudeInstallStateDir, degradedExpiryNote, readEmitDegraded, readEmitSentinel, runEmitHelper, safeProcessEnv, storeHoldsEnrolment, trustedGlobalSettingsEnv, trustedStateDir } from './plugin-runtime.mjs'
 import { checkRepoProjectBillable } from './project-check.mjs'
 import { isMcpAuthed, probeMcpAuth } from './claude-credentials.mjs'
 import { desktopEnvVerdict, desktopRestartAdvice, isTrustedDesktopSession, readDesktopEnv, sessionDesktopAttrs } from './desktop-env.mjs'
@@ -120,13 +120,16 @@ export function interpretEmissionProbe({ status, stdoutHasAuth, sentinel, degrad
  * TOKENSCOPE_BEARER_ENDPOINT, say — and leave every other value looking
  * untouched.
  */
-export function probeEmissionAuth(env) {
+export function probeEmissionAuth(env, storeDir = claudeInstallStateDir()) {
   const endpoint = (env.TOKENSCOPE_BEARER_ENDPOINT ?? '').trim()
-  const hasOAuth = Boolean(
-    (env.TOKENSCOPE_OAUTH_REFRESH_TOKEN ?? '').trim() &&
-    (env.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT ?? '').trim() &&
-    (env.TOKENSCOPE_OAUTH_CLIENT_ID ?? '').trim(),
-  )
+  // The refresh token lives in the device store; an older redeem left it in settings.
+  const hasOAuth =
+    storeHoldsEnrolment('claude-code', endpoint, storeDir) ||
+    Boolean(
+      (env.TOKENSCOPE_OAUTH_REFRESH_TOKEN ?? '').trim() &&
+        (env.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT ?? '').trim() &&
+        (env.TOKENSCOPE_OAUTH_CLIENT_ID ?? '').trim(),
+    )
   if (!endpoint || !hasOAuth) {
     return {
       emitting: false,
@@ -135,7 +138,7 @@ export function probeEmissionAuth(env) {
         "Not configured: this session has no TokenScope credential. Run /tokenscope:setup, then restart Claude Code.",
     }
   }
-  const { ran, status, hasAuth } = runEmitHelper({ env })
+  const { ran, status, hasAuth } = runEmitHelper({ env, stateDir: storeDir })
   if (!ran) {
     return {
       emitting: false,
@@ -146,12 +149,13 @@ export function probeEmissionAuth(env) {
   return interpretEmissionProbe({
     status,
     stdoutHasAuth: hasAuth,
-    // The helper writes where runEmitHelper pinned it — trustedStateDir() — so
-    // read back from there. stateDir() honours a live TOKENSCOPE_STATE_DIR (which
-    // safeProcessEnv only strips from its copy), and reading through it missed
+    // The helper writes where runEmitHelper pinned it — storeDir, by default
+    // this install's own (claudeInstallStateDir) — so read back from there. stateDir() honours a live
+    // TOKENSCOPE_STATE_DIR (which safeProcessEnv only strips from its copy),
+    // and reading through it missed
     // the marker and reported "Emission auth OK" during an outage.
-    sentinel: readEmitSentinel(env, trustedStateDir()),
-    degraded: readEmitDegraded(env, trustedStateDir()),
+    sentinel: readEmitSentinel(env, storeDir),
+    degraded: readEmitDegraded(env, storeDir),
   })
 }
 
@@ -209,8 +213,9 @@ async function main() {
   // adjacent read below threads this SAME object through, so there is no
   // second, forgotten call site still reading raw process.env.
   const env = safeProcessEnv()
-  const probe = probeEmissionAuth(env)
-  const sentinel = readEmitSentinel(env, trustedStateDir())
+  const storeDir = claudeInstallStateDir()
+  const probe = probeEmissionAuth(env, storeDir)
+  const sentinel = readEmitSentinel(env, storeDir)
   const otherLaneFailure = readEmitSentinel(env, trustedStateDir(), 'copilot-cli')
   const mcpAuthed = probeMcpAuth()
   const project = await projectBlock(env)

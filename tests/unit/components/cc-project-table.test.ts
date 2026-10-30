@@ -295,7 +295,6 @@ const meta = {
   providerStates: [],
   coverage: null,
   scope: 'cost-centre' as const,
-  pointInTimeDims: true,
 }
 
 const report: CostCentreReport = {

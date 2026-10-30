@@ -412,6 +412,23 @@ describe('PATCH /api/v1/admin/users/:id — role change', () => {
     expect(rows[0]!.role, 'a retired role was re-assigned').toBe('developer')
   })
 
+  it('GRANTING Region admin is refused even for platform-admin (one admin role)', async () => {
+    const handler = await loadHandler()
+    const ev = makeEvent({
+      method: 'PATCH',
+      path: `/api/v1/admin/users/${devAId}`,
+      body: { role: 'admin' },
+      routerParams: { id: devAId },
+      initialSession: orgWideSession(),
+    })
+    await expect(handler(ev as never)).rejects.toMatchObject({
+      statusCode: 403,
+      data: { type: 'https://tokenscope.example.com/errors/role-grant', detail: 'Region admin (retired) can no longer be granted.' },
+    })
+    const rows = await t.client<{ role: string }[]>`SELECT role FROM teammate WHERE id = ${devAId}`
+    expect(rows[0]!.role).toBe('developer')
+  })
+
   it('admin self-demote → 400 self-role-change-blocked + role unchanged + no audit row', async () => {
     const handler = await loadHandler()
     const ev = makeEvent({
@@ -431,8 +448,10 @@ describe('PATCH /api/v1/admin/users/:id — role change', () => {
     expect(Number(audit[0]!.count)).toBe(0)
   })
 
-  it('demoting the last admin in region B → 409 last-admin-protected + role unchanged', async () => {
-    // Region B has only adminB. platform-admin attempts demotion.
+  it('demoting the last Region admin in region B → allowed (the role can no longer be granted, so its holders must be demotable)', async () => {
+    // Region B has only adminB. Before Region admin was retired this was 409
+    // last-admin-protected, with "promote a second admin first" as the way out;
+    // that way out is gone (canAssignRole refuses `admin`), so the guard went too.
     const handler = await loadHandler()
     const ev = makeEvent({
       method: 'PATCH',
@@ -441,12 +460,10 @@ describe('PATCH /api/v1/admin/users/:id — role change', () => {
       routerParams: { id: adminBId },
       initialSession: orgWideSession(),
     })
-    await expect(handler(ev as never)).rejects.toMatchObject({
-      statusCode: 409,
-      data: { reason: 'last-admin-protected' },
-    })
+    const result = (await handler(ev as never)) as { ok: boolean; previousRole: string; newRole: string }
+    expect(result).toEqual({ ok: true, previousRole: 'admin', newRole: 'developer' })
     const rows = await t.client<{ role: string }[]>`SELECT role FROM teammate WHERE id = ${adminBId}`
-    expect(rows[0]!.role).toBe('admin')
+    expect(rows[0]!.role).toBe('developer')
   })
 
   it('demoting admin A while admin A2 is also admin → allowed (count > 1)', async () => {

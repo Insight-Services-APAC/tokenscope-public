@@ -9,7 +9,7 @@
  *   - field    : string  (which field disagrees, e.g. "Cost-owning unit")
  *   - manual   : string  (value as stored by manual entry)
  *   - sync     : string  (value as reported by the upstream sync)
- *   - source   : string  (sync source name — PSR / Workday / NetSuite)
+ *   - source   : string  (sync source name — Pathway / Workday / NetSuite)
  */
 
 import UiCard from '../ui/Card.vue'

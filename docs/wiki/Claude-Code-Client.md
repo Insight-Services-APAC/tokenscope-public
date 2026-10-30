@@ -42,7 +42,7 @@ OAuth consent → global config), then **tag each repo** with a committed
 1. `/mcp` opens a browser consent at `/api/v1/oauth/authorize`. The PKCE exchange at `/api/v1/oauth/token` gives the MCP client a `tokenscope.read` + `tag` token, and the MCP tools start working.
 2. The `tokenscope-setup` prompt calls `provision_emit`. It locates or creates this device's `instance_attestation` and returns a single-use handoff code that expires in about five minutes. The code passes through the chat; the durable credential never does.
 3. The agent runs the redeem helper for its lane (see [Setup lanes](#setup-lanes-node-or-powershell-on-windows)): `plugin/scripts/claude-redeem.mjs`, or `claude-redeem.ps1` on Windows without Node. It POSTs the code to `/api/v1/setup/redeem`. The response carries `instance_id`, `bearer_endpoint`, the durable `tokenscope.emit` refresh token and `telemetry.claude`. The script writes them to the install's `settings.json` (`~/.claude`, or the install's own `CLAUDE_CONFIG_DIR` when it passes the gate in `plugin/scripts/claude-config-dir.mjs`) and to the device store `~/.tokenscope/config.claude-code.json`.
-4. The `project` prompt writes a one-line `.tokenscope` file holding the project code; the developer commits it. The plugin's `SessionStart` hook reads it, computes `sha256(code)` and writes `OTEL_RESOURCE_ATTRIBUTES` (the global `tokenscope.instance_id`, `project.code_hash`, `tool`) plus `otelHeadersHelper` into the repo's gitignored `.claude/settings.local.json`. The repo file carries no credential.
+4. The `project` prompt writes a one-line `.tokenscope` file holding the project code; the developer commits it. The plugin's `SessionStart` hook reads it, computes `sha256(code)` and writes `OTEL_RESOURCE_ATTRIBUTES` (a local `tokenscope.instance_id`, `project.code_hash`, `tool`) into the repo's gitignored `.claude/settings.local.json`. The hook writes no helper, endpoint or credential there (see [Project tag in the repo file](#project-tag-in-the-repo-file)).
 5. Claude Code reads its settings once, at startup. The session in which the hook writes the repo file still emits under the old attributes; the next launch carries the project claim.
 6. Claude Code gets its export headers from the headers helper for its OS (`otel-headers-helper.sh` on POSIX, `otel-headers-helper.ps1` on Windows; [ADR-0015](Design-Decisions.md#adr-0015--native-client-runtime-per-os)). It trades the refresh token for a `tokenscope.emit` access token and calls `GET /api/v1/instances/{id}/bearer`, which returns an Azure Monitor token minted from the app's managed identity.
 7. Claude Code sends OTLP `api_request` log events, with that bearer, to the data collection endpoint. The DCR lands them in `OTelLogs`.
@@ -64,10 +64,10 @@ OAuth consent → global config), then **tag each repo** with a committed
   `SessionStart` hook resolves it and writes `project.code_hash = sha256(code)`
   (with the DEVICE_SID) into the **repo-local** settings, so the project rides
   along with the repo across every ephemeral session — no per-repo token, no
-  re-provision. The repo-local block carries the resource attributes and the
-  `otelHeadersHelper` path but **neither the
-  telemetry-enabling keys** (they apply from user settings; see "Project tag in the
-  repo file" below) **nor the durable OAuth refresh token** — the emit helper reads
+  re-provision. The repo-local block carries the resource attributes only:
+  **not the helper, the endpoints or the
+  telemetry-enabling keys** (they apply from the install's own settings; see "Project tag in the
+  repo file" below) **and not the durable OAuth refresh token** — the emit helper reads
   that from the device's own store first (`~/.tokenscope/config.claude-code.json`:
   0600 in a 0700 dir on POSIX, the profile's own ACL on Windows;
   `~/.claude/settings.json` only while no store exists), so
@@ -415,13 +415,27 @@ The load-bearing detail. Claude Code emits OTLP **directly** to Azure Monitor �
 
 ### Project tag in the repo file
 
-The repo tag (`writeRepoTag`) writes a tagged repo's `.claude/settings.local.json`
-with the helper path and one env key, `OTEL_RESOURCE_ATTRIBUTES` carrying
-`project.code_hash`. Every other key applies from `~/.claude/settings.json`, because
-Claude Code merges `env` per key; none is copied into the repo. A git-tracked
-`settings.local.json` is never written. The project tag applies from the repo file
-(measured on Claude Code 2.1.232 and 2.1.283). Supported CLI builds are
-roughly the last 4-6 weeks.
+The repo tag (`writeRepoTag`) writes one key into a tagged repo's
+`.claude/settings.local.json`: `env.OTEL_RESOURCE_ATTRIBUTES`, carrying an instance
+id, `project.code_hash` and `tool`. The helper, the endpoints and the credential
+apply from the install's own `settings.json`, because Claude Code merges `env` per
+key, so Claude Desktop and the CLI each keep their own when they open the same repo.
+A key an earlier plugin copied in (`otelHeadersHelper`, `TOKENSCOPE_*`, the
+telemetry keys) is removed on the next session start; any other key in the file is
+yours and is left alone. A git-tracked `settings.local.json` is never written. The
+project tag applies from the repo file (measured on Claude Code 2.1.232 and
+2.1.283). Supported CLI builds are roughly the last 4-6 weeks.
+
+The instance in the tag stays as it is while another Claude install on the machine
+is enrolled with it (`~/.tokenscope/config.claude-code.json` or
+`~/.tokenscope/claude-config/*/config.claude-code.json`) against the same
+deployment (the same bearer-endpoint origin), so two installs do not rewrite it in
+turn and their sessions in that repo emit under one instance. Any other instance is
+replaced, with the "superseded device enrolment" warning. Backfill stamps the
+instance the tag keeps. A helper an earlier plugin copied into the file is removed
+only once the install's own settings name a usable one. The status line reads the
+landing state of the instance in the tag, and shows it as unconfirmed when that
+instance is not kept or the other install's answer is over two hours old.
 
 ### Why restart, and where to verify
 

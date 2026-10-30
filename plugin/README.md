@@ -319,17 +319,19 @@ you pick one, and it:
 
 - writes a committable `./.tokenscope` (`project.code: <code>`, preserving any
   existing fields) so the tag travels with the repo, then
-- writes the **repo-local** `./.claude/settings.local.json` (mode 0600 on POSIX) with the
-  `otelHeadersHelper` path and ONE env key, `OTEL_RESOURCE_ATTRIBUTES`:
+- writes the **repo-local** `./.claude/settings.local.json` (mode 0600 on POSIX) with
+  ONE env key, `OTEL_RESOURCE_ATTRIBUTES`:
   `tokenscope.instance_id=<DEVICE_SID>,project.code_hash=<sha256(code)>,tool=claude-code`.
-  Claude Code merges the `env` blocks **per key**, so every other key (exporter,
-  endpoints, credentials, and anything else you keep there) applies from your
-  user settings and is never copied into the repo. If that file is tracked by
-  git, nothing is written and the session start says so.
+  Claude Code merges the `env` blocks **per key**, so the helper, exporter,
+  endpoints and credentials apply from your install's own settings and are never
+  copied into the repo; any other key you keep in that file is left alone. If that
+  file is tracked by git, nothing is written and the session start says so.
 
-The device session id and helper path are restated from the global config on
-**every** `claude` launch in that repo, which is what lets a plugin upgrade or
-re-enrol reach every tagged repo automatically.
+The tag is checked on **every** `claude` launch in that repo. Its instance id is
+kept while another Claude install on this computer (the CLI, Claude Desktop) is
+enrolled with it against the same TokenScope server, so installs sharing a repo
+do not rewrite it in turn; any other instance (after a re-enrol, or one enrolled
+with a different server) is replaced.
 Commit the `.tokenscope`; teammates who clone it just run the `project` prompt
 with no project (or let the SessionStart hook auto-apply it). Restart `claude`
 in the repo — OTel resource attrs are read at startup, so the **next** session

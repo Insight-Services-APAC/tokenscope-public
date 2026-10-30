@@ -334,7 +334,7 @@ async function revokePersonalSubscription(tool: string) {
               <span :class="i.verified ? 'text-rag-green' : 'text-carbon-3'">{{ i.verified ? 'verified' : 'unverified' }}</span>
             </div>
           </div>
-          <UiButton kind="ghost" size="sm" :disabled="busy" :data-testid="`remove-${i.id}`" @click="removeIdentity(i.id)">
+          <UiButton v-if="i.source === 'self'" kind="ghost" size="sm" :disabled="busy" :data-testid="`remove-${i.id}`" @click="removeIdentity(i.id)">
             Remove
           </UiButton>
         </li>

@@ -20,7 +20,7 @@
  *   - Same revocation check (DB lookup by teammate id).
  *
  * Why one cookie (OIDC) for the normal path: see
- * docs/design/auth-session-cookie-architecture.md. a sibling project / PSR
+ * docs/design/auth-session-cookie-architecture.md. a sibling project / Pathway
  * pattern. No ts_session bridge, no h3 setCookie/getCookie race, no
  * SSR-internal-fetch propagation gap.
  *

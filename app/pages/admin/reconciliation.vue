@@ -870,7 +870,7 @@ useModalA11y({
 // (POST /map writes the enterprise lane) so the reconciler then attributes their spend. The list
 // is LIVE (an unmapped login is skipped before reconciliation_record is written, so it's not
 // persisted) — hence a per-enterprise on-demand button, like Verify.
-interface UnresolvedLogin { login: string; licenseOrg: string | null; credits: number | null; lastSeenDay: string | null; profileName: string | null; profileEmail: string | null }
+interface UnresolvedLogin { login: string; licenseOrg: string | null; credits: number | null; lastSeenDay: string | null; profileName: string | null; profileEmail: string | null; selfClaimedBy: string | null }
 interface UnresolvedResult {
   enterpriseId: string
   externalId: string
@@ -2004,6 +2004,9 @@ function onBackfillSaved() {
             <div class="flex items-center gap-3">
               <div class="min-w-0 flex-1">
                 <div class="text-sm font-mono text-carbon truncate">{{ l.login }}</div>
+                <div v-if="l.selfClaimedBy" class="text-[11px] text-carbon-2 truncate" :data-testid="`admin-recon-unresolved-claimed-${l.login}`">
+                  Claimed by {{ l.selfClaimedBy }}, unverified: its overage share stays Unallocated until mapped
+                </div>
                 <!-- Self-asserted github profile text. Labelled as such because it looks
                      authoritative and is not: it informs the admin's choice, it never makes
                      one. See getUserProfile in github-client.ts. -->

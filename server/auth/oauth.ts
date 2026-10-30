@@ -15,7 +15,7 @@
  * the MCP SDK requires (NOT the RFC-9457 problem+json our own APIs use).
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, eq, isNull, or, sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { hashSessionToken, constantTimeEqualHex } from './hmac'
 import { oauthClient, oauthAuthCode, oauthToken } from '../../drizzle/schema'
@@ -183,9 +183,10 @@ export const MAX_CLIENT_SECRET_AGE_MS = 365 * 24 * 60 * 60 * 1000
  * HARD_MAX_OAUTH_CLIENTS, which refuses everyone). This in-memory sliding
  * window (no Redis in MVP, consistent with the global cap's "no Redis; a
  * COUNT(*) is cheap" posture) is per-process — it blunts a single-replica
- * flood rather than providing airtight cross-replica limiting, and the
- * session-gc.ts abandonment sweep reclaims a flood's rows within the hour
- * regardless of which replica served it.
+ * flood rather than providing airtight cross-replica limiting. At the global
+ * ceiling, registration first reaps abandoned registrations
+ * (reapAbandonedOAuthClients), so a flood keeps the hard ceiling shut only
+ * while it sustains HARD_MAX_OAUTH_CLIENTS registrations per grace hour.
  */
 const SOURCE_WINDOW_MS = 60 * 60 * 1000
 export const SOURCE_REGISTRATION_LIMIT = 20
@@ -257,6 +258,33 @@ export function trackedSourceCountForTest(): number {
 }
 
 /**
+ * A real register → authorize → token flow completes in seconds, so a public
+ * client this old that has never had a token or auth code was abandoned.
+ */
+export const ABANDONED_REGISTRATION_GRACE_HOURS = 1
+
+/**
+ * Delete abandoned public registrations: older than the grace and never issued
+ * a token or auth code. Shared by session-gc and registerClient so the
+ * predicate cannot drift. Run it BEFORE any delete of dead tokens or codes, or
+ * "never had one" becomes "has none left".
+ */
+export async function reapAbandonedOAuthClients(
+  db: Pick<Db, 'execute'>,
+  nowIso: string,
+): Promise<string[]> {
+  const rows = await db.execute<{ client_id: string }>(sql`
+    DELETE FROM oauth_client c
+     WHERE c.internal = false
+       AND c.created_at < ${nowIso}::timestamptz - (${ABANDONED_REGISTRATION_GRACE_HOURS} * INTERVAL '1 hour')
+       AND NOT EXISTS (SELECT 1 FROM oauth_token t WHERE t.client_id = c.client_id)
+       AND NOT EXISTS (SELECT 1 FROM oauth_auth_code ac WHERE ac.client_id = c.client_id)
+    RETURNING client_id::text AS client_id
+  `)
+  return [...rows].map((r) => r.client_id)
+}
+
+/**
  * Register a new dynamic PUBLIC client; returns the raw secret ONCE.
  *
  * Always writes `internal = false` — the internal emit client is created ONLY
@@ -325,10 +353,17 @@ export async function registerClient(
   const clientSecret = randomBytes(32).toString('hex')
   const row = await db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('oauth_client_registration'))`)
-    const countRows = await tx.execute<{ count: string }>(
-      sql`SELECT COUNT(*)::text AS count FROM oauth_client`,
-    )
-    const globalCount = Number([...countRows][0]?.count ?? 0)
+    const countClients = async () => {
+      const countRows = await tx.execute<{ count: string }>(
+        sql`SELECT COUNT(*)::text AS count FROM oauth_client`,
+      )
+      return Number([...countRows][0]?.count ?? 0)
+    }
+    let globalCount = await countClients()
+    if (globalCount >= MAX_OAUTH_CLIENTS) {
+      const reaped = await reapAbandonedOAuthClients(tx, new Date(now).toISOString())
+      if (reaped.length > 0) globalCount = await countClients()
+    }
     const sourceCount = recentSourceRegistrationCount(source, now)
     if (globalCount >= HARD_MAX_OAUTH_CLIENTS) {
       throw new OAuthError('temporarily_unavailable', 'Client registration limit reached')
@@ -465,7 +500,8 @@ export interface ConsumedAuthCode {
 
 /**
  * Consume an auth code: atomically mark it consumed iff it was unconsumed AND
- * not expired AND its teammate is still active. The
+ * not expired AND its teammate is still active AND was not revoked
+ * (teammate.revoked_at) after the code was minted. The
  * `consumed_at IS NULL AND expires_at > now()` predicate + RETURNING makes this
  * a single-statement compare-and-swap — concurrent exchanges of the same code
  * see at most one success (replay-safe).
@@ -476,7 +512,10 @@ export interface ConsumedAuthCode {
  * cleanup worker inspects existing oauth_token rows before retiring an account
  * (privileged-identity-cleanup.ts's has_live_token gate) but an OUTSTANDING auth
  * code is invisible to it, so this is the one path by which a retired account
- * could re-arm itself with a fresh 30-day token pair.
+ * could re-arm itself with a fresh 30-day token pair. Revocation is the same
+ * hole for revoke-sessions, which revokes oauth_token rows but cannot see codes:
+ * the minted token's issued_at would postdate revoked_at and pass every later
+ * E2 check.
  *
  * A refused code is left UNBURNED (the CAS simply matches no row) and the caller
  * reports the same opaque invalid_grant as for an unknown code — no
@@ -504,6 +543,7 @@ export async function consumeAuthCode(db: Db, rawCode: string): Promise<Consumed
              SELECT 1 FROM teammate tm
               WHERE tm.id = oauth_auth_code.teammate_id
                 AND tm.is_active IS TRUE
+                AND (tm.revoked_at IS NULL OR tm.revoked_at < oauth_auth_code.created_at)
            )
     RETURNING id::text AS id,
               client_id::text AS client_id,
@@ -721,7 +761,7 @@ export async function refreshAccessToken(
   db: Db,
   refreshToken: string,
   clientId: string,
-): Promise<IssuedTokens> {
+): Promise<IssuedTokens & { teammateId: string }> {
   const refreshHash = hashSessionToken(refreshToken)
   const newAccessToken = randomBytes(32).toString('base64url')
   const now = Date.now()
@@ -783,28 +823,42 @@ export async function refreshAccessToken(
     expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
     refresh_token: refreshToken,
     scope: row.scope,
+    teammateId: row.teammate_id,
   }
 }
 
 /**
- * Revoke a refresh token (RFC 7009). Idempotent and silent — revokes the row if
- * one matches; otherwise no-op. The endpoint always returns 200 regardless.
+ * Revoke a token (RFC 7009): the refresh token, the current access token, or
+ * the access token a refresh just superseded. All three live on one
+ * oauth_token row, so revoking the row ends both tokens (RFC 7009 §2.1 permits
+ * that). Returns the row's teammate, or null when nothing was revoked; the
+ * endpoint answers 200 either way.
  */
-export async function revokeRefreshToken(db: Db, refreshToken: string, clientId: string): Promise<void> {
-  const refreshHash = hashSessionToken(refreshToken)
+export async function revokeOAuthToken(
+  db: Db,
+  token: string,
+  clientId: string,
+): Promise<{ teammateId: string } | null> {
+  const hash = hashSessionToken(token)
   // RFC 7009 §2.1: a client may only revoke a token issued TO IT. Bind the
   // revoke to the authenticated client so a registered client can't revoke
-  // another client's token even if it learns the raw value (R2 LOW).
-  await db
+  // another client's token even if it learns the raw value.
+  const [row] = await db
     .update(oauthToken)
     .set({ revokedAt: new Date() })
     .where(
       and(
-        eq(oauthToken.refreshTokenHash, refreshHash),
+        or(
+          eq(oauthToken.refreshTokenHash, hash),
+          eq(oauthToken.accessTokenHash, hash),
+          eq(oauthToken.prevAccessTokenHash, hash),
+        ),
         eq(oauthToken.clientId, clientId),
         isNull(oauthToken.revokedAt),
       ),
     )
+    .returning({ teammateId: oauthToken.teammateId })
+  return row ?? null
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

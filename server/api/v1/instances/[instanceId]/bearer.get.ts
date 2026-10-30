@@ -349,5 +349,6 @@ async function mintFor(event: H3Event, row: InstanceRow) {
   // cached bearer back until Azure itself rejects it (#409) — the expiry is
   // diagnostics for the sentinel/status, never a gate on that fallback.
   setResponseHeader(event, BEARER_EXPIRES_AT_HEADER, String(Math.floor(Date.now() / 1000) + obo.expiresInSeconds))
+  setResponseHeader(event, 'cache-control', 'no-store')
   return { Authorization: `Bearer ${obo.bearer}` }
 }

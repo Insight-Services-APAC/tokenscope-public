@@ -112,6 +112,8 @@ export async function refreshLanded({ dir } = {}) {
     res = await fetch(healthUrl, {
       headers: { Authorization: `Bearer ${token}` },
       signal: ctrl.signal,
+      // Never follow: the scheme guard checked only this URL (curl/PowerShell lanes agree).
+      redirect: 'error',
     })
     clearTimeout(t)
   } catch {

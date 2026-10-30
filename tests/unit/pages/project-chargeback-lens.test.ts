@@ -163,6 +163,8 @@ const STUBS = {
     template:
       '<div data-testid="cb-bars" :data-rows="rows.length" :data-end="endDay" :data-days="windowDays" :data-partial="partialDay" />',
   },
+  ManagePanel: { template: '<div data-testid="project-manage" />' },
+  BudgetRequestCard: { template: '<div data-testid="budget-request-card" />' },
   ExportCsvButton: {
     props: ['endpoint', 'params', 'filename'],
     template: '<a data-testid="csv-export" :data-lane="params.lane" :data-filename="filename" />',
@@ -342,6 +344,18 @@ describe('/projects/[code] member depth — chargeback lane', () => {
     expect(w.findAll('[data-testid="proj-cb-contributor"]')).toHaveLength(0)
     expect(w.find('[data-testid="proj-cb-remainder"]').text()).toBe('3 teammates$123.45')
     expect(w.find('[data-testid="csv-export"]').exists()).toBe(false)
+  })
+})
+
+describe('/projects/[code] — budgets do not follow the reporting lens', () => {
+  it('a PM sees the Manage section and the budget request card under chargeback, as under usage', async () => {
+    for (const urlLane of ['usage', 'chargeback'] as const) {
+      const v = { ...viewer, can_manage: true }
+      const member = urlLane === 'chargeback' ? { ...memberChargeback(), viewer: v } : memberUsage({ viewer: v })
+      const { w } = await mountPage({ member, urlLane })
+      expect(w.find('[data-testid="project-manage"]').exists(), urlLane).toBe(true)
+      expect(w.find('[data-testid="budget-request-card"]').exists(), urlLane).toBe(true)
+    }
   })
 })
 

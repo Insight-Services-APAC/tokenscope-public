@@ -9,10 +9,10 @@
  *
  *   - REPO  ./.claude/settings.local.json — per-repo tag (written by the
  *     SessionStart hook via tag-repo.mjs): overrides OTEL_RESOURCE_ATTRIBUTES
- *     with the device instance id PLUS the repo's project.code_hash.
+ *     with an instance id PLUS the repo's project.code_hash, and nothing else.
  *   - the status-line install/remove helpers (statusline-toggle.mjs).
  *   - readDeviceEnrolment — reads the instance id + helper command back out of
- *     the global config so the repo tag can self-heal against it (ADR-0006).
+ *     the global config.
  *   - buildHelperCommand — the ONE producer of the `otelHeadersHelper` string.
  */
 import { existsSync } from 'node:fs'
@@ -58,8 +58,8 @@ function quoteCmd(value, { always = false } = {}) {
  * (the plugin install whose script it names).
  *
  * The ONLY producer of that string. Every writer (redeem, enrol, the
- * session-start self-heal, the repo pin) goes through it, so the state dir and
- * the platform choice cannot be dropped by one of four hand-built copies again
+ * session-start self-heal) goes through it, so the state dir and
+ * the platform choice cannot be dropped by one of several hand-built copies again
  * (#410). The record is `{ tool, platform, stateDir? }` (assertHelperRecord):
  *   POSIX:   "<scripts>/otel-headers-helper.sh" --tool <tool> [--state-dir <abs>]
  *   Windows: "<abs>\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass
@@ -215,11 +215,9 @@ export function buildRepoResourceAttrs(sessionId, projectCodeHash) {
  * Top-level non-`env` keys (e.g. `permissions`) are always preserved. The `env`
  * block is handled per `replaceEnv`:
  *   - false (default): ADDITIVE key-merge onto the existing env.
- *   - true: REPLACE the env block wholesale with `envBlock` — used by the repo
- *     pin (writeRepoTag), which must re-derive env from the CURRENT global
- *     enrolment each launch (ADR-0006 self-heal). A key the current global no
- *     longer emits (e.g. a legacy session token after migrating to OAuth) must
- *     NOT survive in the repo file — an additive merge would leave it at rest.
+ *   - true: REPLACE the env block wholesale with `envBlock` — used by redeem on
+ *     a cross-environment move, so a key the new environment does not emit
+ *     (e.g. a legacy session token) does not survive at rest.
  */
 export function mergeClaudeSettings(existing, helper, envBlock, { replaceEnv = false } = {}) {
   if (typeof helper === 'string') throw new TypeError('mergeClaudeSettings takes { record, scriptsDir }, not a path')
@@ -229,9 +227,35 @@ export function mergeClaudeSettings(existing, helper, envBlock, { replaceEnv = f
   return settings
 }
 
-/** The TokenScope status-line config (emission health + session id). */
-export function tokenscopeStatusLine(statuslinePath) {
-  return { type: 'command', command: `node ${JSON.stringify(statuslinePath)}`, padding: 0 }
+/**
+ * The TokenScope status-line config (emission health + session id).
+ *
+ * The interpreter is an ABSOLUTE, quoted path (the node running this), never a
+ * bare `node`: Claude Code resolves a bare name through its own PATH, which a
+ * repository's settings env can set, and on Windows cmd.exe searches the
+ * current directory (the repository) first. Same rule as buildHelperCommand.
+ */
+export function tokenscopeStatusLine(statuslinePath, { node = process.execPath, platform = process.platform } = {}) {
+  const quote = platform === 'win32' ? quoteCmd : quoteSh
+  return {
+    type: 'command',
+    command: `${quote(node, { always: true })} ${quote(statuslinePath, { always: true })}`,
+    padding: 0,
+  }
+}
+
+/**
+ * Does a status-line command start with an interpreter that is not an existing
+ * absolute path (the old bare `node`, or a node since removed by an upgrade)?
+ */
+function statusLineNeedsInterpreter(command, platform, exists) {
+  const token = readToken(command, 0, platform === 'win32' ? 'cmd' : 'sh')
+  if (!token) return true
+  try {
+    return !pathFor(platform).isAbsolute(token[0]) || !exists(token[0])
+  } catch {
+    return true
+  }
 }
 
 /** True if `settings.statusLine` is TokenScope's (so we can refresh/remove only OUR own). */
@@ -340,8 +364,23 @@ export function reconcilePluginPaths(
 
   const sl = settings.statusLine
   if (statuslinePath && isOurStatusLine(sl) && isOurPluginPath(sl.command)) {
-    const wantCommand = tokenscopeStatusLine(statuslinePath).command
-    if (sl.command !== wantCommand && isForwardMove(sl.command, statuslinePath)) {
+    let wantCommand = null
+    try {
+      wantCommand = tokenscopeStatusLine(statuslinePath, { platform }).command
+    } catch {
+      // inexpressible on this platform: leave it rather than break it
+    }
+    // Same version: only the interpreter is repaired, so two hosts sharing one
+    // home with different (working) node paths do not rewrite it back and forth.
+    const curVer = pluginPathVersion(sl.command)
+    const actVer = pluginPathVersion(statuslinePath)
+    const sameVersion = Boolean(curVer && actVer && curVer.join('.') === actVer.join('.'))
+    if (
+      wantCommand &&
+      sl.command !== wantCommand &&
+      (isForwardMove(sl.command, statuslinePath) ||
+        (sameVersion && statusLineNeedsInterpreter(sl.command, platform, exists)))
+    ) {
       settings.statusLine = { ...sl, command: wantCommand }
       changed = true
     }
@@ -454,11 +493,7 @@ export function readDeviceEnrolment(globalSettings) {
       typeof globalSettings.otelHeadersHelper === 'string'
         ? globalSettings.otelHeadersHelper
         : null,
-    // The full device env block (endpoint, exporter, bearer endpoint + OAuth emit
-    // credential, resource attrs). The repo-local tag copies ALL of it (overriding
-    // only OTEL_RESOURCE_ATTRIBUTES) so it's self-contained — Claude applies the
-    // highest-precedence `env` by REPLACEMENT, not key-merge, so a repo-local
-    // env block carrying only the resource attrs would drop the endpoint/bearer.
+    // The full device env block (endpoint, exporter, bearer endpoint, resource attrs).
     env: globalSettings.env && typeof globalSettings.env === 'object' ? globalSettings.env : null,
   }
 }

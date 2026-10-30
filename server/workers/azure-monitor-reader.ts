@@ -61,6 +61,7 @@ import {
   type SpanCostPlan,
   type SpanRow,
 } from '../usage/span-costing'
+import { describeError } from '../utils/redact-probe-error'
 
 /**
  * One (region, day) bucket of NEWLY-WRITTEN telemetry-only spend this tick —
@@ -392,7 +393,7 @@ async function auditFailSoft(
   try {
     await recordAuditEvent(db, input)
   } catch (err) {
-    console.warn(`[azure-monitor-read] audit write failed (${input.eventType}); continuing: ${String(err)}`)
+    console.warn(`[azure-monitor-read] audit write failed (${input.eventType}); continuing: ${describeError(err)}`)
   }
 }
 
@@ -983,9 +984,9 @@ export async function selectJoinableInstances(
     -- least recently READ first. Neither the cap nor the tick's deadline
     -- (JOINER_DEADLINE_MS) can read the whole eligible set on a large fleet, and
     -- the scheduled tick stamps joiner_read_at on every device it attempted. So a
-    -- device shed this tick sorts ahead of every device with the same
-    -- identity_state that was read, and each eligible confirmed device is
-    -- attempted within ceil(eligible / attempted per tick) ticks. NULL (never read
+    -- device shed this tick sorts ahead of its teammate's devices that were read,
+    -- and a teammate's devices are visited in turn, one rank per teammate at a
+    -- time across the fleet (the rank key below). NULL (never read
     -- by a scheduled tick: a new enrolment, or one only ever read by operator or
     -- recovery runs) sorts first.
     --
@@ -998,10 +999,21 @@ export async function selectJoinableInstances(
     -- them out: runReadJoiner gives provisional teammates every
     -- JOINER_PROVISIONAL_EVERY-th group it takes.
     --
+    -- Per-teammate rank comes before the rotation too: every teammate's
+    -- least-recently-read device is selected before anyone's second. A developer
+    -- can mint and end devices at will, each with a NULL joiner_read_at, so
+    -- without this key one person's churn would hold the head of the rotation.
+    --
     -- The old order (open first, then most recent activity) breaks ties within one
     -- read time, which in practice means among never-read devices: a new open,
     -- emitting device is read before a dormant or closed one.
     ORDER BY (sa.identity_state <> 'provisional') DESC,
+             ROW_NUMBER() OVER (
+               PARTITION BY sa.teammate_id, (sa.identity_state <> 'provisional')
+               ORDER BY sa.joiner_read_at ASC NULLS FIRST,
+                        (sa.ts_actual_end IS NULL) DESC,
+                        COALESCE(sa.last_bearer_at, sa.ts_start) DESC
+             ) ASC,
              sa.joiner_read_at ASC NULLS FIRST,
              (sa.ts_actual_end IS NULL) DESC,
              COALESCE(sa.last_bearer_at, sa.ts_start) DESC
@@ -1128,7 +1140,7 @@ export async function recordJoinerSelectionCap(
       cap: capHit,
       summary:
         `The scheduled selection matched more joinable devices than its per-run cap (${capHit}), so the surplus was not scanned on this run. ` +
-        'Candidates are ordered confirmed before provisional, then least recently read first, so a device skipped on this run is among the first selected on the next: the surplus waits longer between reads rather than being dropped. Provisional devices are selected only on a run whose confirmed devices all fit under the cap.',
+        'Candidates are ordered confirmed before provisional, then by rank within their teammate, then least recently read first, so a device skipped on this run is among the first selected on the next: the surplus waits longer between reads rather than being dropped. Provisional devices are selected only on a run whose confirmed devices all fit under the cap.',
       hint:
         'Raise NUXT_JOINER_INSTANCE_CAP (default 500) above the joinable-device count and redeploy the reader; this clears itself on the first run whose selection fits. A run starts no device later than 80 s into its tick, so a larger cap does not lengthen the run; check devicesAttempted and oldestReadAgeMinutes in the run result for how far behind the reads are.',
       detectedAt: now.toISOString(),
@@ -2313,7 +2325,7 @@ export async function runReadJoiner(
           // query that hit its timeout or abort lands here like any other fault.
           errors += 1
           console.warn(
-            `[azure-monitor-read] instance ${session.instance_id} failed; continuing with remaining sessions: ${String(err)}`,
+            `[azure-monitor-read] instance ${session.instance_id} failed; continuing with remaining sessions: ${describeError(err)}`,
           )
         }
         // Signal lane in its OWN try/catch — a signal-path fault must never affect the
@@ -2323,7 +2335,7 @@ export async function runReadJoiner(
         } catch (err) {
           signalErrors += 1
           console.warn(
-            `[azure-monitor-read] signal landing failed for instance ${session.instance_id}; token attribution unaffected: ${String(err)}`,
+            `[azure-monitor-read] signal landing failed for instance ${session.instance_id}; token attribution unaffected: ${describeError(err)}`,
           )
         }
         heapPeak = Math.max(heapPeak, process.memoryUsage().heapUsed)

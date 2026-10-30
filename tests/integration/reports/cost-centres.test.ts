@@ -7,8 +7,8 @@
  *   - RBAC: owner sees only owned + subtree cost-owning; non-owner/foreign 403;
  *     anti-IDOR on `ccId` (foreign region → 403, missing → 404);
  *   - the burn drill RECONCILES to the tracker card burn (both the §A PROJECT-CoU
- *     usage axis) — incl. a spender whose CURRENT placement moved (§A homes by
- *     emit-time cost_owning_unit_id, so they never vanish from the burn), and the
+ *     usage axis) — incl. a spender who now sits in another region, whose
+ *     project-tagged spend stays on the project's Business Unit, and the
  *     NULL-CoU Copilot gap is excluded from both;
  *   - forecast (run-rate $) + exhaustion (budget DATE) are distinct mechanics;
  *   - burn drivers sum-back = headline (each drill axis, incl. the NULL bucket);
@@ -221,7 +221,8 @@ beforeAll(async () => {
   // ccCur — carol: current-month burn 100 (forecast/exhaustion fixture).
   await ar(carolInst, carol, regionA, ccCur, 'claude-sonnet-4-6', 100, currentMonthStartIso, projCur)
   // ccA — phil: July opus 90, emit-homed to ccA (region A) though he now sits in region B.
-  // Proves §A groups by emit-time cost_owning_unit_id: a placement-moved spender STAYS.
+  // His row is tagged to projA, so it counts toward projA's Business Unit (ccA)
+  // wherever he sits (the current-org lens keeps the project axis).
   await ar(philInst, phil, regionA, ccA, 'claude-opus-4-6', 90, '2026-07-04T00:00:00Z', projA)
 
   // NULL-CoU Copilot gap (unaccounted): must NEVER appear in any CC burn.
@@ -506,10 +507,10 @@ describe('the burn drill is the §A usage axis — it RECONCILES to the tracker 
     expect(d.vendor.claudeUsd + d.vendor.copilotUsd + d.vendor.otherUsd).toBe(d.burnUsd)
   })
 
-  it('a spender whose CURRENT placement MOVED still appears in the burn drill (the bug fix)', async () => {
+  it("a spender who sits elsewhere still appears in the burn drill of their project's unit", async () => {
     const d = (await drillHandler(ev(adminA(), 'month=2026-07&axis=teammate', { ccId: ccA }))) as unknown as DrillResp
-    // Phil is now placed in region B, but his July usage homed to ccA at emit — §A groups
-    // by emit-time cost_owning_unit_id, so he is ccA's LARGEST driver, not dropped.
+    // Phil sits in region B, but his July usage is TAGGED to projA, and project-tagged
+    // usage counts toward the project's Business Unit (ccA), so he is ccA's LARGEST driver.
     const phil = d.rows.find((r) => r.label === 'phil@b.test')
     expect(phil).toBeDefined()
     expect(phil!.usd).toBe(90)
@@ -713,7 +714,7 @@ describe('GET /reports/cost-centres/[ccId] — range/quarter mode reconciles to 
     const d = (await drillHandler(ev(adminA(), `${RANGE}&axis=teammate`, { ccId: ccA }))) as unknown as DrillResp
     const phil = d.rows.find((r) => r.label === 'phil@b.test')
     expect(phil).toBeDefined()
-    expect(phil!.usd).toBe(90) // §A homes by emit-time cost_owning_unit_id — never dropped
+    expect(phil!.usd).toBe(90) // tagged to projA → ccA's burn, wherever he sits
     expect(d.rows.reduce((a, r) => a + r.usd, 0)).toBeCloseTo(155, 6) // Σ drivers = range burn
   })
 })

@@ -3,11 +3,11 @@
  * for a cost-owning org_unit. docs/design/aeuf-region-practice-views.md.
  *
  * DUAL LANE (the TokenScope differentiator):
- *   - USAGE signal — attribution_record summed over the practice SUBTREE by emit-home
- *     `org_unit_id <@ practice.path` (the same homing the org-tree rollup uses; counts untagged
- *     spend, NOT the project-CoU key). tool 'claude-code'/'copilot-cli' → vendor; else 'other'.
+ *   - USAGE signal — usage of the people who sit in the practice SUBTREE NOW
+ *     (teammate.org_unit_id; the rows' stamped placement is never read, current-org-lens §2).
+ *     Counts untagged spend, NOT the project-CoU key. tool 'claude-code'/'copilot-cli' → vendor; else 'other'.
  *   - RECONCILED bill — v_finance_bill_SHOWBACK summed by `cost_owning_unit_id <@ practice.path`
- *     (the view already homes each teammate-day-tool to its nearest cost-owning ancestor). Same
+ *     (the view homes each teammate-day-tool on the teammate's current unit). Same
  *     population as the usage subtree → the two lanes reconcile. Intent: ADR-0010 rule 3 —
  *     showback shows ALL genuine cost incl. NFR/exempt; the chargeback-exempt exclusion lives
  *     ONLY in v_finance_bill_chargeback (the finance lane), never here.
@@ -28,7 +28,7 @@ import { monthStartIso } from '../../../../utils/period'
 import { toolToVendor, vendorCostSql, VENDOR_LANES, VENDOR_LABELS, type Vendor } from '../../../../../shared/usage/vendor'
 
 // Flag a user when their current-week spend ≥ FLAG_MULT × their trailing weekly mean (lean
-// fixed threshold; the governance-dial version lives in the manager rollup).
+// fixed threshold; the governance-dial version lives in server/reports/velocity.ts).
 const FLAG_MULT = 2
 
 // Per-vendor MTD cost split over ar.cost_usd (shared definition — see shared/usage/vendor.ts).
@@ -64,8 +64,10 @@ export default defineEventHandler(async (event) => {
     const p = [...pRows][0]
     if (!p) throw createError({ statusCode: 403, statusMessage: 'practice not in your scope' })
 
-    // Practice usage subtree (emit-home units) and bill subtree (cost-owning units), region-clamped.
-    const usageScope = sql`ar.org_unit_id IN (${orgSubtreeIds(p.path, p.region_id)})`
+    // Scope by the PEOPLE who sit in the subtree now (current-org-lens §3.1): every usage source
+    // carries teammate_id, and a row's stamped placement must not decide where its usage lands.
+    const practicePeople = sql`SELECT id FROM teammate WHERE org_unit_id IN (${orgSubtreeIds(p.path, p.region_id)})`
+    const usageScope = sql`ar.teammate_id IN (${practicePeople})`
 
     // 2. Usage header + vendor split (one MTD pass).
     const hdrRows = await tx.execute<{ usage_usd: string; tokens: string; users: number; claude: string; copilot: string; other: string }>(sql`
@@ -138,7 +140,8 @@ export default defineEventHandler(async (event) => {
         SELECT COALESCE(SUM(ar.cost_usd), 0)::text AS region_usd,
                (SELECT COUNT(*)::int FROM org_unit WHERE region_id = ${p.region_id}::uuid AND is_cost_owning_unit = TRUE AND retired_at IS NULL) AS practice_count
         FROM v_complete_usage ar
-        WHERE ar.region_id = ${p.region_id}::uuid AND ar.ts_event >= ${monthStart}::timestamptz`)
+        WHERE ar.teammate_id IN (SELECT id FROM teammate WHERE region_id = ${p.region_id}::uuid)
+          AND ar.ts_event >= ${monthStart}::timestamptz`)
       const reg = [...regRows][0] ?? { region_usd: '0', practice_count: 0 }
       const regionUsd = Number(reg.region_usd)
       pctOfRegion = regionUsd > 0 ? usageUsd / regionUsd : null
@@ -189,7 +192,7 @@ export default defineEventHandler(async (event) => {
              COALESCE(SUM(es.cost_usd) FILTER (WHERE es.tool = 'copilot-cli'), 0)::text  AS copilot
       FROM v_effective_spend es
       WHERE es.source IN ('attribution', 'rollup')
-        AND es.org_unit_id IN (${orgSubtreeIds(p.path, p.region_id)})
+        AND es.teammate_id IN (${practicePeople})
         AND es.occurred_at >= date_trunc('week', NOW()) - INTERVAL '13 weeks'
       GROUP BY 1 ORDER BY 1`)
 
@@ -210,7 +213,8 @@ export default defineEventHandler(async (event) => {
              ${claudeUsd}::text AS claude, ${copilotUsd}::text AS copilot
       FROM sibs
       LEFT JOIN org_unit ou ON ou.path <@ sibs.path AND ou.region_id = ${p.region_id}::uuid
-      LEFT JOIN v_complete_usage ar ON ar.org_unit_id = ou.id AND ar.ts_event >= ${monthStart}::timestamptz
+      LEFT JOIN teammate tm ON tm.org_unit_id = ou.id
+      LEFT JOIN v_complete_usage ar ON ar.teammate_id = tm.id AND ar.ts_event >= ${monthStart}::timestamptz
       GROUP BY sibs.id, sibs.display_name, sibs.code
       ORDER BY SUM(ar.cost_usd) DESC NULLS LAST LIMIT 8`)
 

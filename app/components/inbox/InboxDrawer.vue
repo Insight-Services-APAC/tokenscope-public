@@ -23,7 +23,9 @@ import DrawerBodySyncConflict from './DrawerBodySyncConflict.vue'
 import DrawerBodyUntagged from './DrawerBodyUntagged.vue'
 import DrawerBodyPersonalSubscription from './DrawerBodyPersonalSubscription.vue'
 import DrawerBodyOverEmission from './DrawerBodyOverEmission.vue'
-import { variantForCategory, type InboxItem } from './types'
+import DrawerBodyProjectRequest from './DrawerBodyProjectRequest.vue'
+import DrawerBodyBudgetRequest from './DrawerBodyBudgetRequest.vue'
+import { categoryLabel, variantForCategory, type InboxItem } from './types'
 
 const props = defineProps<{
   item: InboxItem
@@ -65,7 +67,7 @@ const severityBadgeKind = computed<
     <header class="px-6 py-5 border-b border-calm-2">
       <div class="flex items-start justify-between gap-3">
         <div class="flex items-center gap-2 flex-wrap">
-          <UiBadge kind="neutral">{{ item.category }}</UiBadge>
+          <UiBadge kind="neutral">{{ categoryLabel(item.category) }}</UiBadge>
           <UiBadge :kind="severityBadgeKind">{{ item.severity }}</UiBadge>
         </div>
         <button
@@ -104,6 +106,8 @@ const severityBadgeKind = computed<
       <DrawerBodyUntagged v-else-if="variant === 'untagged'" :body="item.body" />
       <DrawerBodyPersonalSubscription v-else-if="variant === 'personal-subscription'" :body="item.body" />
       <DrawerBodyOverEmission v-else-if="variant === 'over-emission'" :body="item.body" />
+      <DrawerBodyProjectRequest v-else-if="variant === 'project-request'" :category="item.category" :body="item.body" />
+      <DrawerBodyBudgetRequest v-else-if="variant === 'budget-request'" :category="item.category" :body="item.body" />
       <div v-else class="text-sm text-carbon-2 leading-relaxed">
         Details for this category aren't laid out yet. Use the
         actions below to acknowledge, resolve, or dismiss.

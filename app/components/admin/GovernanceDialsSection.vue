@@ -29,6 +29,10 @@ import { apiErrorDetail } from '../../composables/useApiError'
 
 export interface GovernanceDialsData {
   keys: string[]
+  /** Keys that hold 0 or 1, edited as a yes/no switch. */
+  switch_keys?: string[]
+  /** Keys with no region override; editable only at platform scope. */
+  platform_only_keys?: string[]
   platform: { key: string; value: number; updated_at: string }[]
   region_overrides: {
     key: string
@@ -92,6 +96,11 @@ const DIAL_META: Record<string, { label: string; explanation: string }> = {
     explanation:
       'How many people may sit in a region’s (default) unit without reporting to its owner before the region page warns. It is a span of control, so it differs by organisation.',
   },
+  'projects.pm_own_region_only': {
+    label: 'Project Managers create only in their own region',
+    explanation:
+      'When on, someone on the Project managers list can create projects only in the region they are placed in now. Admins and approved project requests are not affected.',
+  },
 }
 
 // Scope selection. 'platform' or a region id — org-wide only; a region admin
@@ -110,6 +119,9 @@ interface DialRow {
   overrideValue: number | null
   effective: number | null
   source: 'platform' | 'region override'
+  isSwitch: boolean
+  /** Platform-only key while a region scope is selected: shown, not editable. */
+  locked: boolean
 }
 
 const rows = computed<DialRow[]>(() => {
@@ -130,6 +142,8 @@ const rows = computed<DialRow[]>(() => {
       overrideValue,
       effective: overrideValue ?? platformValue,
       source: overrideValue !== null ? ('region override' as const) : ('platform' as const),
+      isSwitch: d.switch_keys?.includes(key) ?? false,
+      locked: scopeRegionId.value !== null && (d.platform_only_keys?.includes(key) ?? false),
     }
   })
 })
@@ -283,7 +297,36 @@ const scopeLabel = computed(() => {
               </div>
             </dl>
           </div>
-          <div class="flex items-center gap-2">
+          <p
+            v-if="row.locked"
+            class="text-xs text-carbon-3 italic max-w-[220px]"
+            :data-testid="`governance-locked-${row.key}`"
+          >
+            Platform-wide: set at the platform default scope, not per region.
+          </p>
+          <div v-else-if="row.isSwitch" class="flex items-center gap-2">
+            <label class="flex items-center gap-2 text-sm text-carbon cursor-pointer">
+              <input
+                :id="`governance-input-${row.key}`"
+                type="checkbox"
+                :checked="drafts[row.key] === 1"
+                :aria-label="row.label"
+                :data-testid="`governance-input-${row.key}`"
+                @change="drafts[row.key] = ($event.target as HTMLInputElement).checked ? 1 : 0"
+              >
+              {{ drafts[row.key] === 1 ? 'Yes' : 'No' }}
+            </label>
+            <UiButton
+              kind="primary"
+              size="sm"
+              :disabled="savingKey === row.key"
+              :data-testid="`governance-save-${row.key}`"
+              @click="saveDial(row)"
+            >
+              {{ savingKey === row.key ? 'Saving…' : 'Save' }}
+            </UiButton>
+          </div>
+          <div v-else class="flex items-center gap-2">
             <label class="sr-only" :for="`governance-input-${row.key}`">{{ row.label }}</label>
             <input
               :id="`governance-input-${row.key}`"

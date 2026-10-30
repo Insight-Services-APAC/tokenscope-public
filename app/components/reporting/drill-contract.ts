@@ -88,7 +88,7 @@ export function drillQuery(frame: DrillFrame): Record<string, string> {
  *
  * `hasInScopeWindowRow` DEFAULTS to `true` — on a scope-clamped report the row
  * was computed over exactly the predicate its `?src=` frame names, so the row's
- * own existence IS D34's emit-time evidence.
+ * own existence IS D34's in-frame evidence.
  *
  * IT IS NOT ALWAYS TRUE, AND THE DEFAULT IS NOT A LICENCE (r3-M4). A surface
  * whose rows are computed over a DIFFERENT predicate than the frame it carries

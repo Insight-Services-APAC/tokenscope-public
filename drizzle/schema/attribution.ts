@@ -32,8 +32,9 @@ export const attributionRecord = pgTable('attribution_record', {
     .notNull()
     .references(() => teammate.id),
   // Nullable (mig 0021): a project-LESS row is unallocated spend (untagged or
-  // tagged-only). NULL means "no project budget". region/org still describe the
-  // emitting teammate and stay NOT NULL.
+  // tagged-only). NULL means "no project budget". region/org are the emitting
+  // teammate's RECORDED placement and stay NOT NULL; reports group by the
+  // teammate's current placement instead (mig 0162, docs/design/current-org-lens).
   projectId: uuid('project_id').references(() => project.id),
   regionId: uuid('region_id')
     .notNull()
@@ -184,7 +185,7 @@ export const attributionAggregate = pgTable(
 // (sentinel uuid for nullable project_id/cost_owning_unit_id, '' for
 // activity/query_source) which this drizzle def can't render — 0053 is the
 // source of truth. project_id/cost_owning_unit_id/activity/query_source are
-// nullable grain dims; region/org are point-in-time, CARRIED from raw.
+// nullable grain dims; region/org are the recorded placement, CARRIED from raw.
 export const spendRollupDaily = pgTable(
   'spend_rollup_daily',
   {

@@ -286,7 +286,7 @@ const exportParams = computed(() => ({
             class="mt-4"
             :provider-states="data.meta.providerStates"
             :coverage="data.meta.coverage ?? undefined"
-            :point-in-time-dims="true"
+            placement-note
             lane="usage"
           />
 

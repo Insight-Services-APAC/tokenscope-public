@@ -17,16 +17,31 @@
 # has been pushed. Resources that depend on the app were skipped, so the next
 # apply after the image exists creates them. With Private Link it then waits for the Front Door endpoint to serve the
 # app, and fails if it never does. A deployment without Front Door Premium on a
-# VNet just waits. Front Door
-# can file more than one request; every pending one carrying this deployment's
-# request message is approved. Uses the Container Apps API: the generic
-# `az network private-endpoint-connection` commands report a stale status for
-# this resource type.
+# VNet just waits.
+#
+# Microsoft documents one Front Door private endpoint per Private Link origin
+# (location, resource and group); changing any of them files another. The
+# request message is not secret (the Front Door ID it hashes is a deployment
+# output and often sits in a committed parameter file) and anyone can name a
+# resource group eafd-*, so neither tells Front Door's request apart from one an
+# outsider files against this environment. So a Pending request carrying this
+# deployment's message from an eafd-* group is approved only when it is the
+# only one, it was not already Pending when this script started, and no
+# connection is Approved with this deployment's message (old or new). Anything
+# else stops the script, listing every such connection with the command that
+# approves one by hand and keeps the message, for an operator to decide. That
+# narrows an outsider to a request filed during the apply, before Front Door's,
+# and then the script still stops when Front Door's arrives. Re-approval touches
+# only connections that are already Approved, never one an operator Rejected; it
+# also accepts the message releases before 1.0.4 wrote. Uses the Container
+# Apps API: the generic `az network private-endpoint-connection` commands report
+# a stale status for this resource type.
 set -euo pipefail
 
 RG="${1:?usage: $0 <resource-group> [deployment-name]}"
 DEPLOYMENT="${2:-main}"
 API=2025-07-01
+CDN_API=2024-02-01
 TIMEOUT_MIN=90
 
 # Deployment state; empty while it does not exist yet. Any other CLI error
@@ -55,20 +70,54 @@ if [ "$(param enableFrontDoor)" = "true" ] && [ "$(param frontDoorSku)" = "Premi
   echo "Front Door Premium over Private Link: approving its request when it appears."
 fi
 
-# Re-approve every approved connection carrying our message. Idempotent; a new
-# endpoint has been seen to keep answering 404 until the connection was
-# approved again.
-reapprove() {
-  local name
-  while read -r name; do
-    [ -n "$name" ] || continue
-    az rest --method put \
-      --url "https://management.azure.com$ENV_ID/privateEndpointConnections/$name?api-version=$API" \
-      --body "{\"properties\":{\"privateLinkServiceConnectionState\":{\"status\":\"Approved\",\"description\":\"$MESSAGE\",\"actionsRequired\":\"None\"}}}" \
-      -o none || true
-  done < <(az rest --method get \
+# Every private endpoint connection on the environment, one per line:
+# name, status, private endpoint id, description (tab-separated; description
+# last because it is free text). Tab is whitespace to `read`, so an empty field
+# would shift the rest: nulls become "-".
+connections() {
+  az rest --method get \
     --url "https://management.azure.com$ENV_ID/privateEndpointConnections?api-version=$API" \
-    --query "value[?properties.privateLinkServiceConnectionState.description=='$MESSAGE'].name" -o tsv 2>/dev/null || true)
+    --query "value[].[name, properties.privateLinkServiceConnectionState.status, properties.privateEndpoint.id || '-', properties.privateLinkServiceConnectionState.description || '-']" \
+    -o tsv 2>/dev/null || true
+}
+
+# Front Door's own private endpoints live in Microsoft-managed resource groups
+# named eafd-<...>.
+front_door_endpoint() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    */resourcegroups/eafd-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Our message, or the one releases before 1.0.4 wrote on approval.
+ours() {
+  [ "$1" = "$MESSAGE" ] || [ "$1" = "$LEGACY_MESSAGE" ]
+}
+
+# The hand-approval command for one connection. It sets this deployment's
+# message as the description: a portal or `az network` approval replaces it,
+# and this script would no longer recognise the connection.
+approve_command() {
+  printf "az rest --method put --url 'https://management.azure.com%s/privateEndpointConnections/%s?api-version=%s' --body '{\"properties\":{\"privateLinkServiceConnectionState\":{\"status\":\"Approved\",\"description\":\"%s\",\"actionsRequired\":\"None\"}}}'" "$ENV_ID" "$1" "$API" "$MESSAGE"
+}
+
+approve() {
+  az rest --method put \
+    --url "https://management.azure.com$ENV_ID/privateEndpointConnections/$1?api-version=$API" \
+    --body "{\"properties\":{\"privateLinkServiceConnectionState\":{\"status\":\"Approved\",\"description\":\"$MESSAGE\",\"actionsRequired\":\"None\"}}}" \
+    -o none
+}
+
+# Re-approve every connection already Approved with our message. Idempotent; a
+# new endpoint has been seen to keep answering 404 until the connection was
+# approved again. A Rejected connection is left alone.
+reapprove() {
+  local name status pe desc
+  while IFS=$'\t' read -r name status pe desc; do
+    [ -n "$name" ] && [ "$status" = Approved ] && ours "$desc" || continue
+    approve "$name" || true
+  done < <(connections)
 }
 
 # Front Door answers its own 404 until the new configuration reaches its edge.
@@ -123,6 +172,34 @@ first_apply_without_image() {
   [ -z "$ready" ]
 }
 
+# Requests already Pending when this script started. On a first apply Front
+# Door has not filed yet; on a re-apply its connection is already Approved. So
+# none of these is approved automatically. An environment that does not exist
+# yet has none; a read that fails is not "none", so it stops the script.
+before=" "
+snapshot() {
+  local env list name status
+  env=$(az resource list -g "$RG" --resource-type Microsoft.App/managedEnvironments --query "[0].id" -o tsv 2>/dev/null) || return 1
+  [ -n "$env" ] || return 0
+  ENV_ID=$env
+  list=$(az rest --method get \
+    --url "https://management.azure.com$ENV_ID/privateEndpointConnections?api-version=$API" \
+    --query "value[].[name, properties.privateLinkServiceConnectionState.status, properties.privateEndpoint.id || '-', properties.privateLinkServiceConnectionState.description || '-']" \
+    -o tsv 2>/dev/null) || return 1
+  while IFS=$'\t' read -r name status _; do
+    [ "$status" = Pending ] && before="$before$name "
+  done <<< "$list"
+  return 0
+}
+if [ "$PRIVATE_LINK" = 1 ]; then
+  ok=0
+  for _ in 1 2 3; do snapshot && { ok=1; break; }; sleep 10; done
+  if [ "$ok" != 1 ]; then
+    echo "Could not read the environment's private endpoint connections, so requests already pending cannot be told from Front Door's. Nothing was approved; run this script again." >&2
+    exit 1
+  fi
+fi
+
 approved=0
 errors=0
 sent=" "   # requests already approved; the listing can lag an approval by minutes
@@ -130,30 +207,62 @@ deadline=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
 while :; do
   if [ "$PRIVATE_LINK" = 1 ]; then
     # The template's profile is fd-<project>-<env>-<region>; other Front Door
-    # or CDN profiles in the group are ignored.
-    PROFILE=$(az resource list -g "$RG" --resource-type Microsoft.Cdn/profiles --query "[?starts_with(name, 'fd-')] | [0].name" -o tsv 2>/dev/null || true)
+    # or CDN profiles in the group are ignored. The request message is read from
+    # the origin the template created, which exists once Front Door has filed
+    # its request.
+    PROFILE_ID=$(az resource list -g "$RG" --resource-type Microsoft.Cdn/profiles --query "[?starts_with(name, 'fd-')] | [0].id" -o tsv 2>/dev/null || true)
     ENV_ID=$(az resource list -g "$RG" --resource-type Microsoft.App/managedEnvironments --query "[0].id" -o tsv 2>/dev/null || true)
-    if [ -n "$PROFILE" ] && [ -n "$ENV_ID" ]; then
-      MESSAGE="TokenScope Front Door $PROFILE"
-      while IFS=$'\t' read -r name status; do
-        [ -n "$name" ] || continue
-        if [ "$status" = "Pending" ] && [[ "$sent" != *" $name "* ]]; then
-          # Retried on the next poll if Azure refuses it transiently (409/429).
-          if az rest --method put \
-            --url "https://management.azure.com$ENV_ID/privateEndpointConnections/$name?api-version=$API" \
-            --body "{\"properties\":{\"privateLinkServiceConnectionState\":{\"status\":\"Approved\",\"description\":\"$MESSAGE\",\"actionsRequired\":\"None\"}}}" \
-            -o none; then
-            echo "Approved Front Door's private endpoint request $name"
-            sent="$sent$name "
+    MESSAGE=""
+    LEGACY_MESSAGE="TokenScope Front Door ${PROFILE_ID##*/}"
+    if [ -n "$PROFILE_ID" ]; then
+      MESSAGE=$(az rest --method get \
+        --url "https://management.azure.com$PROFILE_ID/originGroups/og-tokenscope/origins/origin-tokenscope?api-version=$CDN_API" \
+        --query properties.sharedPrivateLinkResource.requestMessage -o tsv 2>/dev/null || true)
+    fi
+    if [ -n "$MESSAGE" ] && [ -n "$ENV_ID" ]; then
+      candidates=()
+      held=()   # connections Approved with this deployment's message, old or new
+      while IFS=$'\t' read -r name status pe desc; do
+        [ -n "$name" ] && ours "$desc" || continue
+        if [ "$status" = "Approved" ]; then
+          approved=1
+          held+=("$name  $pe")
+        elif [ "$status" = "Pending" ] && [ "$desc" = "$MESSAGE" ] && [[ "$sent" != *" $name "* ]]; then
+          # The old message is guessable: a new request on it is never approved.
+          if front_door_endpoint "$pe"; then
+            candidates+=("$name  $pe")
           else
-            echo "Approving $name failed; retrying on the next poll" >&2
+            echo "Not approving $name: it carries the request message but its private endpoint is not in a Front Door managed group ($pe). If it is Front Door's, approve it with: $(approve_command "$name")" >&2
           fi
         fi
-        [ "$status" = "Approved" ] && approved=1
-      done < <(az rest --method get \
-        --url "https://management.azure.com$ENV_ID/privateEndpointConnections?api-version=$API" \
-        --query "value[?properties.privateLinkServiceConnectionState.description=='$MESSAGE'].[name, properties.privateLinkServiceConnectionState.status]" \
-        -o tsv 2>/dev/null || true)
+      done < <(connections)
+      name=""
+      if [ "${#candidates[@]}" -gt 0 ]; then name="${candidates[0]%%  *}"; fi
+      if [ "${#candidates[@]}" -eq 1 ] && [ "${#held[@]}" -eq 0 ] && [ "$sent" = " " ] \
+         && [[ "$before" != *" $name "* ]]; then
+        # Retried on the next poll if Azure refuses it transiently (409/429).
+        if approve "$name"; then
+          echo "Approved Front Door's private endpoint request $name"
+          sent="$sent$name "
+          approved=1
+        else
+          echo "Approving $name failed; retrying on the next poll" >&2
+        fi
+      elif [ "${#candidates[@]}" -gt 0 ]; then
+        {
+          echo "Not approving: Front Door files one request for this origin, and this one is not the only candidate (another is pending or approved, or it was pending before this apply started). Something else may have filed a request against the environment, and the order they arrived in does not show which is Front Door's: its private endpoint is in a Microsoft-managed subscription, an outsider's is in their own. Check each, reject any that is not Front Door's, approve Front Door's with the command below, then run this script again."
+          echo "Pending:"
+          for c in "${candidates[@]}"; do
+            printf '  %s\n    %s\n' "$c" "$(approve_command "${c%%  *}")"
+          done
+          if [ "${#held[@]}" -gt 0 ]; then
+            echo "Already approved:"
+            printf '  %s\n' "${held[@]}"
+          fi
+          echo "The deployment is still running."
+        } >&2
+        exit 1
+      fi
     fi
   fi
 

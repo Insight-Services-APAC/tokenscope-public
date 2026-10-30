@@ -10,6 +10,7 @@
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { consola } from 'consola'
 import { withReportingEntry } from '#shared/nav/reporting-entry'
+import { roleLabel } from '#shared/auth/roles'
 
 const { session, devLogin, logout, stopImpersonating } = useSession()
 const router = useRouter()
@@ -98,11 +99,7 @@ onBeforeUnmount(() => {
   }
 })
 
-const role = computed(() => {
-  const r = session.value?.role
-  if (!r) return 'Guest'
-  return r.charAt(0).toUpperCase() + r.slice(1)
-})
+const role = computed(() => (session.value?.role ? roleLabel(session.value.role) : 'Guest'))
 const userInitials = computed(() => {
   const name = session.value?.displayName ?? session.value?.email ?? '?'
   const parts = name.split(/[\s.@]+/).filter(Boolean)

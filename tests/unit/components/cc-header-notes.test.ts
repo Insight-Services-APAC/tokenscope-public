@@ -4,7 +4,7 @@
  * design test 24 / r1-M5).
  *
  * The header used to stack THREE per-provider "chip + text" settlement pairs,
- * the coverage sentence, the point-in-time note, the lane explainer under the
+ * the coverage sentence, the placement note, the lane explainer under the
  * toggle and an italic axis paragraph. D8b collapses that to ONE settlement
  * chip (least-settled across providers, popover carrying each provider's own
  * clock) plus a compact coverage chip (sentence in its tooltip). Prose/layout
@@ -23,6 +23,7 @@ import { ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import CcHeaderNotes from '../../../app/components/reporting/cost-centre/CcHeaderNotes.vue'
 import ScopeCostCentreView from '../../../app/components/reporting/ScopeCostCentreView.vue'
+import { PLACEMENT_NOTE } from '../../../app/components/reporting/lane-captions'
 import type { CostCentreReport } from '../../../app/components/reporting/cost-centre/cost-centre-view-types'
 import type { ProviderState, ReportCoverageMeta } from '#shared/reports/types'
 
@@ -145,7 +146,6 @@ const meta = {
   providerStates: mixedStates,
   coverage: coverageUnknown,
   scope: 'cost-centre' as const,
-  pointInTimeDims: true,
 }
 
 function makeReport(): CostCentreReport {
@@ -239,10 +239,12 @@ describe('ScopeCostCentreView — the top layer carries the collapse (D8b wiring
     // Exactly one occurrence in the DOM text — the sr-only one. Zero visible.
     expect(text.split(COVERAGE_UNKNOWN_SENTENCE).length - 1).toBe(1)
 
-    // POPOVER-PRESERVED — the point-in-time note appears exactly once, in the panel.
+    // POPOVER-PRESERVED — the placement note appears exactly once, in the panel.
     const panel = w.find('[data-testid="cc-header-notes-panel"]')
-    expect(panel.text()).toContain('Usage dimensions as at emit (point-in-time)')
-    expect(text.split('Usage dimensions as at emit (point-in-time)')).toHaveLength(2)
+    expect(panel.find('[data-testid="cc-notes-placement"]').text()).toBe(PLACEMENT_NOTE)
+    expect(text.split(PLACEMENT_NOTE)).toHaveLength(2)
+    // The retired point-in-time claim is gone (current-org lens).
+    expect(text).not.toContain('point-in-time')
 
     // POPOVER-PRESERVED — the lane explainer left the control (the REAL LaneToggle
     // renders here, captionless) and appears exactly once, in the panel.

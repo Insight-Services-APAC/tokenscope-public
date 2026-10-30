@@ -447,7 +447,7 @@ async function createCard() {
                 @retry="refreshRegions"
               />
               <p v-if="!isOrgWide" class="text-[11px] text-carbon-3 mt-1">
-                Region admins create cards for their own region. Global cards need platform-admin.
+                Region admins create cards for their own region. Global cards need an Admin.
               </p>
             </div>
             <div>

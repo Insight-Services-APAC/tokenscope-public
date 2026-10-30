@@ -106,6 +106,14 @@ describe('checkRepoProjectBillable — fail-open firewall (all silent)', () => {
     expect(r.status).toBe('no-tag')
   })
 
+  it('never follows a redirect: the scheme guard checked only the first URL', async () => {
+    const spy = vi.fn(() => ({ ok: true, json: async () => ({ billable: true }) }))
+    vi.stubGlobal('fetch', spy as never)
+    await run()
+    expect(spy).toHaveBeenCalledOnce()
+    expect((spy.mock.calls[0] as unknown[])[1]).toMatchObject({ redirect: 'error' })
+  })
+
   it('builds the /project-resolve URL from the cached /bearer endpoint', async () => {
     const spy = vi.fn(() => ({ ok: true, json: async () => ({ billable: true }) }))
     vi.stubGlobal('fetch', spy as never)

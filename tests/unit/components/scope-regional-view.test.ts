@@ -26,6 +26,7 @@ import type { ActiveTrend, Seasonality } from '../../../shared/reports/types'
 // Asserted through the CONSTANT: these tests are about the CLAIM, and pinning
 // the noun made a vocabulary change read as a behaviour regression.
 import { BU_LABEL_LOWER } from '#shared/reports/vocabulary'
+import { PLACEMENT_NOTE } from '../../../app/components/reporting/lane-captions'
 
 // DateRangeControl self-wires to the auto-imported useReportState (undefined outside
 const global = regionalViewGlobal
@@ -232,6 +233,9 @@ describe('ScopeRegionalView — the four exclusive states', () => {
     expect(w.find('[data-testid="report-header-notes-trigger"]').text().length).toBeGreaterThan(0)
     // The lens explainer came too; it is no longer printed under the control.
     expect(w.find('[data-testid="lane-caption"]').exists()).toBe(false)
+    // Where usage is counted: the current-org lens, stated in the panel.
+    expect(panel.find('[data-testid="notes-placement"]').text()).toBe(PLACEMENT_NOTE)
+    expect(w.text()).not.toContain('point-in-time')
   })
 })
 

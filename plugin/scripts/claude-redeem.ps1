@@ -61,6 +61,9 @@ $ProgressPreference = 'SilentlyContinue'
 # ships it empty, which means "no default" (#415).
 $Tool = 'claude-code'
 $RetiredEnvKeys = @('TOKENSCOPE_SESSION_TOKEN', 'TOKENSCOPE_READ_REFRESH_TOKEN', 'TOKENSCOPE_READ_CLIENT_ID')
+# claude-redeem.mjs STORE_ONLY_ENV_KEYS: in the device store, never in settings.json,
+# whose env block every process Claude Code spawns inherits.
+$StoreOnlyEnvKeys = @('TOKENSCOPE_OAUTH_REFRESH_TOKEN')
 
 function Test-TsWindows {
   return ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
@@ -778,16 +781,10 @@ function Write-TsDeviceStore($Fields, [string]$Dir) {
     Write-TsTemp $tmp ((ConvertTo-TsJson $Fields) + "`n")
     Move-TsIntoPlace $tmp $path
   } catch {
-    # Best-effort only while nothing is left to shadow this enrolment: the
-    # helper prefers a store on disk over the environment.
-    $shadow = $true
-    try { $shadow = [System.IO.File]::Exists($path) -or [System.IO.File]::Exists([System.IO.Path]::Combine($Dir, 'config.json')) } catch { }
-    if ($shadow) {
-      throw ("TokenScope: could not update the device credential store in $Dir, and an existing " +
-        'store is still there. The emit helper prefers that store over the environment and ' +
-        'requires the token AND both endpoints in it, so this device would stop emitting. ' +
-        'Enrolment is NOT complete: make the directory writable and re-run setup.')
-    }
+    # Always fatal: settings.json no longer carries the credential.
+    throw ("TokenScope: could not write the device credential store in $Dir. The emit helper " +
+      'reads the durable credential only from that store, so this device would not emit. ' +
+      'Enrolment is NOT complete: make the directory writable and re-run setup.')
   } finally {
     if ($tmp -and [System.IO.File]::Exists($tmp)) { try { [System.IO.File]::Delete($tmp) } catch { } }
   }
@@ -894,7 +891,7 @@ function Write-TsClaudeSettings([string]$SettingsPath, [string]$HelperCommand, $
       $newEnv = Copy-TsJsonSpread $base
       foreach ($k in @($EnvBlock.get_Keys())) { $newEnv[$k] = $EnvBlock[$k] }
     }
-    foreach ($k in $RetiredEnvKeys) { if ($newEnv.Contains($k)) { $newEnv.Remove($k) } }
+    foreach ($k in ($RetiredEnvKeys + $StoreOnlyEnvKeys)) { if ($newEnv.Contains($k)) { $newEnv.Remove($k) } }
     $merged['env'] = $newEnv
     return ((ConvertTo-TsJson $merged) + "`n")
   }

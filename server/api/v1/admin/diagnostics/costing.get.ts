@@ -25,7 +25,7 @@
  * a region admin cannot be clamped to their own region there. For a region
  * admin the drift query never runs; `costDrift` is null, `reads` carries no
  * `costDrift` entry, and `costDriftScopedOut` states why. `costingRungs` stays
- * region-clamped as before.
+ * region-clamped, on the region each teammate sits in now.
  */
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -108,10 +108,12 @@ export default defineEventHandler(async (event) => {
   // §"Where cost comes from") — so including it would park a permanent
   // non-provider bucket on the card and train operators to ignore red.
   //
-  // Region admins see their own region (same explicit filter the pipeline block
-  // uses: the RLS policy treats 'admin' as org-wide, so scoping is the app's job).
+  // Region admins see the people who sit in their region now, the same filter
+  // the pipeline block uses (the RLS policy treats 'admin' as org-wide).
   const regionAnd =
-    session.role === 'admin' ? sql`AND region_id = ${session.regionId}::uuid` : sql``
+    session.role === 'admin'
+      ? sql`AND teammate_id IN (SELECT id FROM teammate WHERE region_id = ${session.regionId}::uuid)`
+      : sql``
   const COSTING_WINDOW_DAYS = 7
   let costingRungs: {
     windowDays: number

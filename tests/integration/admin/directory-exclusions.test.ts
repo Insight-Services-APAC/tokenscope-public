@@ -119,7 +119,7 @@ describe('admin directory-exclusions CRUD', () => {
     // matches either way, so this assertion alone pins the regression.
     expect(added.matched_existing_count).toBe(1)
 
-    // Preview (DB-side LIKE) and enforcement (isExcludedUpn / upnGlobToRegExp,
+    // Preview (DB-side LIKE) and enforcement (isExcludedUpn / upnGlobMatches,
     // in-process) must AGREE over the identical roster — the "Must not break"
     // invariant: the retro-cleanup worker consumes isExcludedUpn, not the LIKE
     // path, so a desync here means the preview lied about what the worker will

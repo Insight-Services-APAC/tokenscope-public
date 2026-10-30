@@ -3,8 +3,9 @@
  * Project dashboard, member depth (brief §5; developer-pages W3 D27) — window
  * presets, hero tiles in the ScopeHero idiom, the daily burn stack on its own
  * trailing window, Top models through ModelSplitPanel, team contribution with
- * share bars + CSV export, untagged pressure. Same view for PM and member
- * (project transparency); the budget affordance is the PM's only extra.
+ * share bars + CSV export, untagged pressure. Same figures for PM and member
+ * (project transparency). Members can ask for more budget; the project's PM (or
+ * an admin in scope) also gets the Manage section (spec §4/§5).
  *
  * ONE window (fix 1 / r1-H9): `?month=` XOR `?from&to`, owned by
  * useReportState, resolved server-side — the hero, Top models, the activity mix
@@ -34,6 +35,9 @@ import ExportCsvButton from '../../components/reporting/ExportCsvButton.vue'
 import LaneToggle from '../../components/reporting/LaneToggle.vue'
 import ProjectChargebackView from '../../components/projects/ChargebackView.vue'
 import DrillName from '../../components/reporting/DrillName.vue'
+import ManagePanel from '../../components/projects/ManagePanel.vue'
+import BudgetRequestCard from '../../components/projects/BudgetRequestCard.vue'
+import type { BudgetRequestListResponse } from '#shared/schemas/project-budget'
 import {
   entryReportRoute,
   teammateDrillTarget,
@@ -73,8 +77,10 @@ interface ProjectResp {
   }
   viewer: {
     role: 'manager' | 'member'
-    access: 'member' | 'cou-owner'
+    access: 'member' | 'cou-owner' | 'admin'
     budget_allocation_id: string | null
+    /** The project's current PM, or an admin in scope: shows the Manage section. */
+    can_manage: boolean
   }
   /** The resolved page window every figure shares (D16). */
   window: {
@@ -186,7 +192,7 @@ const windowQuery = computed(() => ({
   lane: lane.value,
 }))
 
-const { data: payload, error, pending } = await useFetch<ProjectResp | ProjectChargebackResp>(
+const { data: payload, error, pending, refresh: refreshProject } = await useFetch<ProjectResp | ProjectChargebackResp>(
   () => `/api/v1/me/projects/${encodeURIComponent(code.value)}`,
   { query: windowQuery, lazy: true },
 )
@@ -197,6 +203,51 @@ const data = computed<ProjectResp | null>(() =>
 const cbData = computed<ProjectChargebackResp | null>(() =>
   payload.value?.lane === 'chargeback' ? payload.value : null,
 )
+
+/*
+ * Budget requests (spec §5): the member's own, and the pending queue when the
+ * viewer may decide. Fetched only once the project payload says the viewer is a
+ * member or a manager of it.
+ */
+// Read off either lens's payload: both carry `viewer` and `project`, and the
+// Manage section must not disappear when the chargeback lens is selected.
+const budgetRequestsEligible = computed(
+  () => !!payload.value && (payload.value.viewer.access === 'member' || payload.value.viewer.can_manage === true),
+)
+const {
+  data: budgetRequests,
+  error: budgetRequestsError,
+  refresh: refreshBudgetRequests,
+} = await useFetch<BudgetRequestListResponse>(
+  () => `/api/v1/projects/${payload.value?.project.id ?? ''}/budget-requests`,
+  { lazy: true, immediate: false },
+)
+watch(
+  () => (budgetRequestsEligible.value ? payload.value?.project.id : null),
+  (id) => {
+    if (id) refreshBudgetRequests?.()
+  },
+  { immediate: true },
+)
+const myBudgetRequests = computed(() =>
+  Array.isArray(budgetRequests.value?.mine) ? budgetRequests.value.mine : [],
+)
+const pendingBudgetRequests = computed(() =>
+  Array.isArray(budgetRequests.value?.pending) ? budgetRequests.value.pending : [],
+)
+/*
+ * Loading, failed and empty are three different things: an empty list must
+ * never stand in for one that did not load, or "No requests waiting" is a lie.
+ */
+const budgetRequestsState = computed<'loading' | 'error' | 'ready'>(() =>
+  budgetRequestsError.value ? 'error' : budgetRequests.value == null ? 'loading' : 'ready',
+)
+function retryBudgetRequests() {
+  void refreshBudgetRequests?.()
+}
+async function onManaged() {
+  await Promise.all([refreshProject?.(), refreshBudgetRequests?.()])
+}
 
 const notFound = computed(() => (error.value as { statusCode?: number } | null)?.statusCode === 404)
 
@@ -1042,7 +1093,7 @@ const memberIngestOnlyTools = computed(
             </table>
           </div>
           <p
-            v-if="!data.team.members.length && data.viewer.access === 'cou-owner'"
+            v-if="!data.team.members.length && data.viewer.access !== 'member'"
             class="text-sm text-carbon-3 italic py-4"
             data-testid="team-owner-aggregate-note"
           >
@@ -1095,30 +1146,32 @@ const memberIngestOnlyTools = computed(
           </p>
         </UiCard>
 
-        <!-- PM depth does not fork (D27.7): the budget affordance is the ONLY extra. -->
-        <UiCard v-if="data.viewer.role === 'manager'" data-testid="pm-budget-card">
-          <UiEyebrow>Budget</UiEyebrow>
-          <p class="text-[11px] text-carbon-3 mt-1 mb-2">
-            PM affordance — rides the assignment role, not an org role.
-          </p>
-          <NuxtLink
-            v-if="data.viewer.budget_allocation_id"
-            :to="`/allocations/${data.viewer.budget_allocation_id}`"
-            class="inline-block text-[12px] font-semibold text-brand-harmony hover:underline"
-            data-testid="pm-manage-budget"
-          >
-            Manage budget →
-          </NuxtLink>
-          <p
-            v-else
-            class="text-[11px] text-carbon-3 italic"
-            data-testid="pm-no-budget-hint"
-            title="Project managers manage top-ups on an existing budget; creating the baseline is a manager/admin action."
-          >
-            No active budget period — ask your manager or admin to set one.
-          </p>
-        </UiCard>
         </template>
+
+        <!-- Figures do not fork (D27.7). A member may ask for more budget; the
+             project's PM, or an admin in scope, also manages it (spec §4/§5).
+             Outside the lens branches: a budget is not a reporting lens. -->
+        <BudgetRequestCard
+          v-if="payload.viewer.access === 'member'"
+          :project-id="payload.project.id"
+          :ended="payload.project.ended"
+          :mine="myBudgetRequests"
+          :requests-state="budgetRequestsState"
+          @changed="onManaged"
+          @retry="retryBudgetRequests"
+        />
+        <ManagePanel
+          v-if="payload.viewer.can_manage"
+          :project-id="payload.project.id"
+          :end-date="payload.project.end_date"
+          :ended="payload.project.ended"
+          :budget-allocation-id="payload.viewer.budget_allocation_id"
+          :today-utc="todayIso"
+          :pending-requests="pendingBudgetRequests"
+          :requests-state="budgetRequestsState"
+          @changed="onManaged"
+          @retry="retryBudgetRequests"
+        />
       </div>
     </template>
 
@@ -1184,7 +1237,7 @@ const memberIngestOnlyTools = computed(
           <CcHeaderNotes
             :provider-states="reportsData.meta.providerStates"
             :coverage="reportsData.meta.coverage ?? undefined"
-            :point-in-time-dims="true"
+            placement-note
             lane="usage"
           />
         </div>

@@ -25,6 +25,7 @@ import { sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { requireRole } from '../../../../auth/rbac'
 import { withRequestRls } from '../../../../db/request-rls'
+import { isRealUtcDay } from '#shared/schemas/activity'
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -37,8 +38,8 @@ const Query = z.object({
   provider: z.enum(['anthropic', 'github']).optional(),
   scope: z.enum(['teammate', 'org']).optional(),
   category: z.string().max(60).optional(),
-  periodFrom: z.string().regex(DATE_RE).optional(),
-  periodTo: z.string().regex(DATE_RE).optional(),
+  periodFrom: z.string().regex(DATE_RE).refine(isRealUtcDay, 'not a real calendar day').optional(),
+  periodTo: z.string().regex(DATE_RE).refine(isRealUtcDay, 'not a real calendar day').optional(),
   teammateId: z.string().uuid().optional(),
 })
 

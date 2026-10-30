@@ -141,6 +141,18 @@ describe.each(BUNDLES)('%s — endpoint provenance', (_label, HELPER) => {
     expect(hostsCalled()).toContain('device.local')
   })
 
+  it('REFUSES userinfo in a loopback-looking http endpoint (http://localhost:x@evil/ is host evil)', () => {
+    run({
+      TOKENSCOPE_BEARER_ENDPOINT: REAL_BEARER_EP,
+      TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'rt',
+      TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'http://localhost:x@evil.example/api/v1/oauth/token',
+      TOKENSCOPE_OAUTH_CLIENT_ID: 'cid',
+    })
+    expect(hostsCalled()).not.toContain('evil.example')
+    const sentinel = JSON.parse(readFileSync(join(stateDir, 'emit-failure.claude-code.json'), 'utf8'))
+    expect(sentinel.message).toMatch(/userinfo/)
+  })
+
   it('REFUSES to pair a STORED credential with an environment destination', () => {
     /*
      * The legacy-enrolment hole. A device provisioned before the endpoints were

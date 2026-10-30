@@ -75,9 +75,14 @@ function uiToServerMode(m: AllocatorMode): 'shared_pool' | 'per_dev_fixed' {
 
 const route = useRoute()
 const id = computed(() => String(route.params.id))
+// Interpolated into request URLs below, and Vue Router has already decoded it:
+// a crafted `..%2F` link must not re-route a PATCH to another resource.
+if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id.value)) {
+  throw createError({ statusCode: 404, statusMessage: 'Allocation not found', fatal: true })
+}
 
 const { data, refresh, pending } = await useFetch<AllocDetail>(
-  () => `/api/v1/allocations/${id.value}`,
+  () => `/api/v1/allocations/${encodeURIComponent(id.value)}`,
   { default: () => null as unknown as AllocDetail },
 )
 
@@ -176,7 +181,7 @@ async function save() {
   saving.value = true
   saveError.value = null
   try {
-    await $fetch(`/api/v1/allocations/${id.value}`, {
+    await $fetch(`/api/v1/allocations/${encodeURIComponent(id.value)}`, {
       method: 'PATCH',
       body: {
         budget_usd: budgetUsd.value,
@@ -214,7 +219,7 @@ async function addTopup(payload: {
   topupSubmitting.value = true
   topupError.value = null
   try {
-    await $fetch(`/api/v1/allocations/${id.value}/topups`, {
+    await $fetch(`/api/v1/allocations/${encodeURIComponent(id.value)}/topups`, {
       method: 'POST',
       body: {
         budget_usd: payload.budget_usd,
@@ -232,15 +237,16 @@ async function addTopup(payload: {
 
 /* ── Member management ────────────────────────────────────────────── */
 
-const { session, ensure } = useSession()
-await ensure()
-const regionId = computed(() => session.value?.regionId ?? '')
-
+/*
+ * Existing teammates, from the scoped picker any signed-in user may call (spec
+ * A13), so a developer-role PM can add members here too. Cross-region is fine:
+ * project membership may span regions. Adding someone not yet in TokenScope is
+ * an admin's directory pick (A2).
+ */
 interface TeammateResult {
   id: string
   email: string
   display_name: string | null
-  org_unit_display_name: string | null
 }
 
 const addSearch = ref('')
@@ -251,9 +257,9 @@ const addError = ref<string | null>(null)
 // responses for an earlier term can no longer overwrite the current results.
 const teammateSearch = useDebouncedSearch<TeammateResult[]>({
   search: async (term) => {
-    const res = await $fetch<{ teammates: TeammateResult[] }>(
-      `/api/v1/admin/teammates?region=${regionId.value}&q=${encodeURIComponent(term)}`,
-    )
+    const res = await $fetch<{ teammates: TeammateResult[] }>('/api/v1/pickers/teammates', {
+      query: { q: term },
+    })
     return res.teammates.slice(0, 8)
   },
   apply: (results) => {
@@ -267,7 +273,8 @@ const teammateSearch = useDebouncedSearch<TeammateResult[]>({
 function onAddSearch() {
   addError.value = null
   const term = addSearch.value.trim()
-  if (!term || !regionId.value) {
+  // GET /pickers/teammates refuses q shorter than 2 characters.
+  if (term.length < 2) {
     teammateSearch.cancel()
     addResults.value = []
     return
@@ -355,7 +362,7 @@ async function saveSplit() {
             })),
           }
         : { mode: 'shared_pool' as const }
-    await $fetch(`/api/v1/allocations/${id.value}/split`, {
+    await $fetch(`/api/v1/allocations/${encodeURIComponent(id.value)}/split`, {
       method: 'POST',
       body,
     })

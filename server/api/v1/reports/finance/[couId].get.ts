@@ -123,8 +123,6 @@ export default defineEventHandler(async (event) => {
       providerStates: providerStatesForWindow(win, now),
       coverage: await reportCoverageMeta(tx),
       scope: 'finance',
-      // Current-org homing (D-Homing interim).
-      pointInTimeDims: false,
       // Present only in custom-range (quarter) mode so the drill discloses the window.
       ...(win.isMonth ? {} : { range: { from: win.from, to: win.to } }),
     }

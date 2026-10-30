@@ -359,7 +359,6 @@ const drillEmptyCopy = computed(() => {
 const activeMeta = computed(() => (props.isDrill ? props.drill?.meta : props.report?.meta) ?? null)
 const providerStates = computed<ProviderState[]>(() => activeMeta.value?.providerStates ?? [])
 const coverage = computed(() => activeMeta.value?.coverage ?? null)
-const pointInTime = computed(() => activeMeta.value?.pointInTimeDims ?? false)
 
 // ── Summary strip (whole-scope rollup, computed server-side from the cards) ──
 const summary = computed(() => props.report?.summary ?? null)
@@ -430,7 +429,7 @@ const copilotPartialMonth = computed(() => props.report?.copilotChargebackPartia
         />
         <!-- CONTROLS stay above the fold; COMMENTARY goes one popover deeper.
              The three per-provider "Estimated · month in progress" chip+text
-             pairs, the coverage sentence and the point-in-time note used to
+             pairs, the coverage sentence and the placement note used to
              stack here before the first figure. Now: ONE settlement chip on the
              least-settled clock (popover carrying each provider's own — D8b,
              r1-M5) + the compact coverage chip (sentence in its tooltip). -->
@@ -438,7 +437,7 @@ const copilotPartialMonth = computed(() => props.report?.copilotChargebackPartia
           <CcHeaderNotes
             :provider-states="providerStates"
             :coverage="coverage"
-            :point-in-time-dims="pointInTime"
+            placement-note
             :lane="lane"
           />
         </div>

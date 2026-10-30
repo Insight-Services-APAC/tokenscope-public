@@ -364,6 +364,9 @@ async function copyCallbackUrl() {
             connection error (close it): copy the URL below and paste it into your client when prompted.
           </p>
           <p v-else class="mt-1 text-xs text-carbon-2">Copy the URL below and paste it into your MCP client when prompted.</p>
+          <p v-if="delivery !== 'delivering'" class="mt-1 text-xs font-semibold text-carbon" data-testid="authorize-url-warning">
+            This URL works like a password. Paste it only into the session that asked you to sign in, never for anyone else.
+          </p>
         </div>
         <div class="relative rounded-lg border border-calm-2 bg-calm p-3">
           <button class="absolute right-2 top-2 rounded px-2 py-0.5 text-[11px] font-medium bg-calm-2 text-carbon-2 hover:bg-calm-3" data-testid="authorize-copy" @click="copyCallbackUrl">

@@ -112,7 +112,7 @@ export async function checkRepoProjectBillable({
   try {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), timeoutMs)
-    res = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: ctrl.signal })
+    res = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: ctrl.signal, redirect: 'error' })
     clearTimeout(timer)
   } catch {
     return { status: 'unverifiable', reason: 'fetch-failed' }

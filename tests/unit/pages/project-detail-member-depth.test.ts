@@ -13,8 +13,9 @@
  *        carries its own trailing 30/90 window (D28 restored it; the assertion
  *        that it did NOT is inverted, not deleted).
  *  T23 — team share bars sum to 100±rounding; Export CSV is present for a
- *        member; PM sees the budget card and NOTHING else differs from the
- *        member render (project-transparency).
+ *        member; a viewer who may manage the project (its PM, or an admin)
+ *        sees the Manage section and NOTHING else differs from the member
+ *        render (project-transparency).
  *
  * Mounting idiom: my-projects-list.test.ts (stub Nuxt auto-import globals,
  * pass-through UI kit, <Suspense>). Presentational leaves (ScopeKpiTile,
@@ -43,7 +44,7 @@ const payload = (over: Payload = {}): Payload => ({
     end_date: null,
     ended: false,
   },
-  viewer: { role: 'member', access: 'member', budget_allocation_id: null },
+  viewer: { role: 'member', access: 'member', budget_allocation_id: null, can_manage: false },
   window: {
     from: '2026-08-01',
     to: '2026-08-31',
@@ -175,6 +176,12 @@ const STUBS = {
   UiEmptyState: true,
   NuxtLink: { props: ['to'], template: '<a><slot /></a>' },
   DateRangeControl: { template: '<div data-testid="date-range-control" />' },
+  // Their own behaviour is not this page's contract; their presence is.
+  ManagePanel: { props: ['requestsState'], template: '<div data-testid="project-manage" :data-requests-state="requestsState" />' },
+  BudgetRequestCard: {
+    props: ['requestsState'],
+    template: '<div data-testid="budget-request-card" :data-requests-state="requestsState" />',
+  },
   // Chart primitives only — the shared panels mount REAL.
   ChartRankedBar: {
     props: ['rows'],
@@ -195,7 +202,10 @@ const fmtPct = (v: number) => `${Math.round(v * 100)}%`
 const fmtTokens = (v: number) => String(v)
 const fmtTimeAgo = () => 'just now'
 
-async function mountPage(data: Payload) {
+/** Per-URL fetch results; the project payload answers every URL not listed. */
+type FetchOverrides = Record<string, { data: unknown; error: unknown }>
+
+async function mountPage(data: Payload, overrides: FetchOverrides = {}) {
   // Re-stubbed per mount, not once in beforeEach: one test below calls
   // `vi.unstubAllGlobals()` between its two mounts.
   stubServerClock(TODAY)
@@ -212,7 +222,13 @@ async function mountPage(data: Payload) {
     patch: vi.fn(),
   }))
   vi.stubGlobal('usePersonalLens', () => ref<'usage' | 'chargeback'>('usage'))
-  vi.stubGlobal('useFetch', () => ({ data: ref(data), pending: ref(false), error: ref(null) }))
+  vi.stubGlobal('useFetch', (url: string | (() => string)) => {
+    const u = typeof url === 'function' ? url() : url
+    const hit = Object.entries(overrides).find(([suffix]) => u.endsWith(suffix))?.[1]
+    return hit
+      ? { data: ref(hit.data), pending: ref(false), error: ref(hit.error), refresh: vi.fn() }
+      : { data: ref(data), pending: ref(false), error: ref(null) }
+  })
   const Parent = defineComponent({
     components: { ProjectPage },
     template: '<Suspense><ProjectPage /></Suspense>',
@@ -491,7 +507,7 @@ describe('/projects/[code] — team table + transparency (T23)', () => {
   it('a cou-owner observer gets no named rows and no named-row export', async () => {
     const w = await mountPage(
       payload({
-        viewer: { role: 'member', access: 'cou-owner', budget_allocation_id: null },
+        viewer: { role: 'member', access: 'cou-owner', budget_allocation_id: null, can_manage: false },
         team: { members: [], member_count: 2, concentration_top2_share: null },
       }),
     )
@@ -499,25 +515,46 @@ describe('/projects/[code] — team table + transparency (T23)', () => {
     expect(w.find('[data-testid="export-csv-button"]').exists()).toBe(false)
   })
 
-  it('PM sees the member view PLUS the budget card — and NOTHING else differs', async () => {
+  it('a member gets the budget-request card; a cou-owner observer does not', async () => {
+    expect((await mountPage(payload())).find('[data-testid="budget-request-card"]').exists()).toBe(true)
+    vi.unstubAllGlobals()
+    const owner = await mountPage(
+      payload({ viewer: { role: 'member', access: 'cou-owner', budget_allocation_id: null, can_manage: false } }),
+    )
+    expect(owner.find('[data-testid="budget-request-card"]').exists()).toBe(false)
+  })
+
+  it('a failed budget-request load reaches the card and the Manage section as an error, not as an empty list', async () => {
+    const manager = { viewer: { role: 'manager' as const, access: 'member' as const, budget_allocation_id: 'a1', can_manage: true } }
+    const failed = await mountPage(payload(manager), { '/budget-requests': { data: undefined, error: { statusCode: 500 } } })
+    expect(failed.find('[data-testid="budget-request-card"]').attributes('data-requests-state')).toBe('error')
+    expect(failed.find('[data-testid="project-manage"]').attributes('data-requests-state')).toBe('error')
+    vi.unstubAllGlobals()
+    const notYet = await mountPage(payload(manager), { '/budget-requests': { data: undefined, error: null } })
+    expect(notYet.find('[data-testid="project-manage"]').attributes('data-requests-state')).toBe('loading')
+    vi.unstubAllGlobals()
+    const loaded = await mountPage(payload(manager), { '/budget-requests': { data: { mine: [], pending: [] }, error: null } })
+    expect(loaded.find('[data-testid="project-manage"]').attributes('data-requests-state')).toBe('ready')
+  })
+
+  it('a viewer who may manage sees the member view PLUS the Manage section — and NOTHING else differs', async () => {
     const member = await mountPage(payload())
     const memberSet = testidSet(member)
     vi.unstubAllGlobals()
     const pm = await mountPage(
-      payload({ viewer: { role: 'manager', access: 'member', budget_allocation_id: 'a1' } }),
+      payload({ viewer: { role: 'manager', access: 'member', budget_allocation_id: 'a1', can_manage: true } }),
     )
     const pmSet = testidSet(pm)
     const extra = [...pmSet].filter((t) => !memberSet.has(t)).sort()
     const missing = [...memberSet].filter((t) => !pmSet.has(t))
-    expect(extra).toEqual(['pm-budget-card', 'pm-manage-budget'])
+    expect(extra).toEqual(['project-manage'])
     expect(missing).toEqual([])
   })
 
-  it('a PM with no baseline gets the signposted hint, not silence', async () => {
+  it('the Manage section follows can_manage, not the assignment role alone', async () => {
     const w = await mountPage(
-      payload({ viewer: { role: 'manager', access: 'member', budget_allocation_id: null } }),
+      payload({ viewer: { role: 'manager', access: 'member', budget_allocation_id: null, can_manage: false } }),
     )
-    expect(w.find('[data-testid="pm-manage-budget"]').exists()).toBe(false)
-    expect(w.find('[data-testid="pm-no-budget-hint"]').text()).toContain('No active budget period')
+    expect(w.find('[data-testid="project-manage"]').exists()).toBe(false)
   })
 })

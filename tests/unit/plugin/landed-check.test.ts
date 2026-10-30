@@ -58,6 +58,17 @@ describe('refreshLanded (Claude) — fail-open guards leave the cache untouched'
     expect(existsSync(join(dir, 'last-landed.json'))).toBe(false)
   })
 
+  it("attrs naming another instance than the endpoint's → instance-mismatch, no cache written", async () => {
+    // A repo tag can carry another local install's instance id; this /health
+    // answer would then be cached under that install's name.
+    writeAccess()
+    mockFetch(() => ({ ok: true, json: async () => ({ last_emission: '2026-10-15T11:00:00Z' }) }))
+    const other ='tokenscope.instance_id=7c2e9a41-5b0d-4f38-a6e2-d19b8c3f0a57,tool=claude-code'
+    const r = await refreshLanded({ env: { ...env, OTEL_RESOURCE_ATTRIBUTES: other }, stateDir: dir })
+    expect(r).toEqual({ ok: false, reason: 'instance-mismatch' })
+    expect(existsSync(join(dir, 'last-landed.json'))).toBe(false)
+  })
+
   it('no cached access token → no-token', async () => {
     writeAccess(null)
     const r = await refreshLanded({ env, stateDir: dir })
@@ -72,6 +83,15 @@ describe('refreshLanded (Claude) — fail-open guards leave the cache untouched'
     const r = await refreshLanded({ env, stateDir: dir })
     expect(r).toEqual({ ok: false, reason: 'fetch-failed' })
     expect(existsSync(join(dir, 'last-landed.json'))).toBe(false)
+  })
+
+  it('never follows a redirect: the scheme guard checked only the first URL', async () => {
+    writeAccess()
+    const spy = vi.fn(() => ({ ok: false, status: 500 }))
+    vi.stubGlobal('fetch', spy as never)
+    await refreshLanded({ env, stateDir: dir })
+    expect(spy).toHaveBeenCalledOnce()
+    expect((spy.mock.calls[0] as unknown[])[1]).toMatchObject({ redirect: 'error' })
   })
 
   it('non-2xx → http-<status>', async () => {

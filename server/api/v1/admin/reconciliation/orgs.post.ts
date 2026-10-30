@@ -108,6 +108,10 @@ export default defineEventHandler(async (event) => {
   if (!isPlatformAdmin(caller.role)) {
     if (!body.regionId) platformAdminOnly('An unmapped provider org (no region) is estate-wide; only platform-admin may write it.')
     if (body.credentialSecretName) platformAdminOnly('The credential namespace is deployment-wide; only platform-admin may assign credentialSecretName.')
+    // See orgs/[id].patch.ts: for Anthropic the enterprise link can carry a key.
+    if (body.provider === 'anthropic' && body.providerEnterpriseId) {
+      platformAdminOnly("Linking an Anthropic org to an enterprise can hand it the enterprise's key; only platform-admin may change providerEnterpriseId on an Anthropic org.")
+    }
   }
   if (body.regionId) await requireRegionScope(event, body.regionId)
 

@@ -177,6 +177,7 @@ export async function getMyUsage(
   const monthStartIso = monthStartIsoFor(now)
   const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
   const monthEndIso = monthEnd.toISOString()
+  const nowIso = now.toISOString()
   /*
    * TWO windows, and they are not interchangeable (server/utils/period.ts):
    *
@@ -287,7 +288,37 @@ export async function getMyUsage(
         -- project BY CONSTRUCTION (ADR 0012 decision 1).
         COALESCE(pu.cost_usd, 0)::text AS cost_usd,
         COALESCE(pu.tokens, 0)::text AS tokens,
+        /*
+         * The personal figure: the member's own cap in force at the reader's
+         * instant; else, when a pool is in force, that pool (an uncapped member
+         * draws on it); else, as before, any cap or pool overlapping the month.
+         * Without the first two, a cap whose period ended mid-month would stay
+         * the figure after a new period began, and an approved budget request
+         * (which raises the pool in force) would move it by $0.
+         */
         COALESCE(
+          (SELECT SUM(al.budget_usd)::text
+             FROM allocation al
+            WHERE al.scope_type = 'project'
+              AND al.scope_id = p.id
+              AND al.allocation_kind IN ('baseline', 'top-up')
+              AND al.effective @> ${nowIso}::timestamptz
+              AND al.teammate_id = ${teammateId}::uuid),
+          CASE WHEN EXISTS (
+            SELECT 1 FROM allocation al
+             WHERE al.scope_type = 'project'
+               AND al.scope_id = p.id
+               AND al.allocation_kind = 'baseline'
+               AND al.teammate_id IS NULL
+               AND al.effective @> ${nowIso}::timestamptz)
+          THEN (SELECT SUM(al.budget_usd)::text
+             FROM allocation al
+            WHERE al.scope_type = 'project'
+              AND al.scope_id = p.id
+              AND al.allocation_kind IN ('baseline', 'top-up')
+              AND al.effective && tstzrange(${monthStartIso}::timestamptz, ${monthEndIso}::timestamptz, '[)')
+              AND al.teammate_id IS NULL)
+          END,
           (SELECT SUM(al.budget_usd)::text
              FROM allocation al
             WHERE al.scope_type = 'project'
@@ -314,7 +345,7 @@ export async function getMyUsage(
              -- §A integrity: a dev-confirmed forgery must not make a project look "active".
              AND NOT EXISTS (
                SELECT 1 FROM session_quarantine sq
-               WHERE sq.teammate_id = arn.teammate_id AND sq.conversation_id = arn.claude_session_id
+               WHERE sq.teammate_id = arn.teammate_id AND sq.conversation_id = COALESCE(arn.claude_session_id, arn.instance_id::text)
                  AND sq.resolved_at IS NULL AND sq.reason = 'api-uncorroborated')
         ) AS is_active_now,
         CASE
@@ -514,7 +545,7 @@ export async function getUnallocatedSummary(
            -- → session_quarantine reason='api-uncorroborated') is excluded from usage.
            AND NOT EXISTS (
              SELECT 1 FROM session_quarantine sq
-             WHERE sq.teammate_id = ar.teammate_id AND sq.conversation_id = ar.claude_session_id
+             WHERE sq.teammate_id = ar.teammate_id AND sq.conversation_id = COALESCE(ar.claude_session_id, ar.instance_id::text)
                AND sq.resolved_at IS NULL AND sq.reason = 'api-uncorroborated')
          GROUP BY COALESCE(ar.claude_session_id, ar.instance_id::text)
       ),

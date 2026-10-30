@@ -804,7 +804,9 @@ async function triggerRepull() {
           <p class="text-[12px] font-bold uppercase tracking-[1.2px] text-brand-harmony">Historical bill re-pull</p>
           <p class="text-[12px] text-carbon-2 mt-1">
             Re-pull the Copilot pooled bill straight from GitHub for one explicit month and recompute
-            its overage allocation. Refused for a CLOSED finance period — reopen or restate it first.
+            its overage allocation. The allocation splits the overage by the Business Unit each person
+            sits in when it is computed: the current and previous month follow a restructure on the
+            next scheduled run, and an older month keeps its split until you re-pull it here.
           </p>
           <div class="mt-2 flex flex-wrap items-end gap-2">
             <div>

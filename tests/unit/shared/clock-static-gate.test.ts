@@ -50,6 +50,10 @@ const WINDOWING_PATHS = [
   'app/components/reporting/ScopeAcrossRegions.vue',
   // The money-shaped one: `dayOfMonth` is every card's pace divisor.
   'app/pages/projects/index.vue',
+  // The default budget period on the project create and request forms.
+  'app/composables/useProjectFormOptions.ts',
+  'app/pages/projects/new.vue',
+  'app/pages/projects/request.vue',
   // The §A / §B day-series SQL — where `CURRENT_DATE` was the third clock.
   'server/reporting/engine/usage-series.ts',
   'server/reporting/engine/chargeback-series.ts',

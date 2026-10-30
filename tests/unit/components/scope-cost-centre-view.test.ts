@@ -52,7 +52,6 @@ const meta = {
   ],
   coverage: { applicable: true, denominator: 3, connected: 3, nonConnected: 0, stale: false },
   scope: 'cost-centre' as const,
-  pointInTimeDims: true,
 }
 
 function forecast(projectedUsd: number) {
@@ -182,7 +181,7 @@ function makeDrill(over: Partial<CostCentreDrill> = {}): CostCentreDrill {
       unmatchedUsd: 0,
       scopeLabel: 'AI Apps & Data',
     },
-    meta: { ...meta, pointInTimeDims: true },
+    meta,
     cc: { id: 'a', code: 'a', displayName: 'Practice A', regionCode: 'ra' },
     overSoftCap: makeOverSoftCap(),
     // §A usage BURN — the SAME lane as the tracker card burn.

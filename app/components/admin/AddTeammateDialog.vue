@@ -36,7 +36,6 @@ interface DirectoryHit {
   division: string | null
   already_member: boolean
   existing_region_code: string | null
-  existing_role: string | null
   /** Teammate exists but bound to this person's OTHER Entra identity (#121). */
   teammate_via_other_identity?: boolean
 }

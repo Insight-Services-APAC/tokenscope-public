@@ -61,7 +61,13 @@ export interface ProjectChargebackWindow {
 
 /** `GET /api/v1/me/projects/[code]?lane=chargeback`. */
 export interface MeProjectChargebackResponse {
-  viewer: { role: string; access: 'member' | 'cou-owner'; budget_allocation_id: string | null }
+  viewer: {
+    role: string
+    access: 'member' | 'cou-owner' | 'admin'
+    budget_allocation_id: string | null
+    /** The viewer may manage this project: its current PM, or an admin in scope (spec §4). */
+    can_manage: boolean
+  }
   project: {
     id: string
     code: string

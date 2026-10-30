@@ -42,7 +42,6 @@ const meta = {
   ],
   coverage: { applicable: true, denominator: 5, connected: 4, nonConnected: 1, stale: false },
   scope: 'across' as const,
-  pointInTimeDims: true,
 }
 
 const dailyMetrics = [

@@ -1,3 +1,4 @@
+// @vitest-environment node
 /*
  * /tokenscope:backfill — transcript-parsing + windowing + cap + dry-run unit
  * tests (ADR-0005 slice 3). Pure: no network, no live OTLP endpoint (per the
@@ -27,6 +28,8 @@ import {
   readSettingsEnv,
 } from '../../../plugin/scripts/plugin-runtime.mjs'
 import { execFileSync } from 'node:child_process'
+import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http'
+import type { AddressInfo } from 'node:net'
 
 
 /**
@@ -78,6 +81,21 @@ describe('parseArgs', () => {
   it('--all-projects defaults off, opts in to host-wide sweep', () => {
     expect(parseArgs([]).allProjects).toBe(false)
     expect(parseArgs(['--all-projects']).allProjects).toBe(true)
+  })
+  it('--projects-dir is confined to the transcripts root: a planted directory elsewhere is refused', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ts-bf-confine-'))
+    try {
+      const projectsRoot = join(home, '.claude', 'projects')
+      const inside = join(projectsRoot, '-work-repo')
+      mkdirSync(inside, { recursive: true })
+      const planted = join(home, 'repo', '.cache')
+      mkdirSync(planted, { recursive: true })
+      expect(parseArgs(['--projects-dir', inside], { projectsRoot }).projectsDir).toContain('-work-repo')
+      expect(() => parseArgs(['--projects-dir', planted], { projectsRoot })).toThrow(/--projects-dir/)
+      expect(() => parseArgs(['--projects-dir', join(projectsRoot, '..', '..', 'repo')], { projectsRoot })).toThrow()
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })
 
@@ -468,6 +486,71 @@ describe('run — S1 fix 3: the ingest endpoint is validated BEFORE any network 
      * next gate is now the real auth step, which is what this asserts. Assert
      * the INTENT, not the incidental downstream error.
      */
+  })
+})
+
+describe('run — the OTLP POST does not follow a redirect', () => {
+  let root: string
+  let servers: Server[] = []
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'ts-backfill-redirect-'))
+    const projDir = join(root, 'proj')
+    mkdirSync(projDir, { recursive: true })
+    writeFileSync(join(projDir, 's.jsonl'), assistantLine('2026-05-15T11:00:00Z', { output_tokens: 100 }) + '\n')
+  })
+  afterAll(async () => {
+    await Promise.all(servers.map((srv) => new Promise((r) => srv.close(r))))
+    servers = []
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const listen = (handler: (req: IncomingMessage, res: ServerResponse) => void) =>
+    new Promise<number>((done) => {
+      const srv = createServer(handler)
+      servers.push(srv)
+      srv.listen(0, '127.0.0.1', () => done((srv.address() as AddressInfo).port))
+    })
+
+  it('a 307 from the ingest endpoint fails the run; the redirect target receives nothing', async () => {
+    let targetHits = 0
+    const target = await listen((_req, res) => {
+      targetHits += 1
+      res.writeHead(204).end()
+    })
+    const ingest = await listen((_req, res) => {
+      res.writeHead(307, { location: `http://127.0.0.1:${target}/v1/logs` }).end()
+    })
+    const toolDir = stubToolDir(root)
+    // The emit helper's curl: mints an access token, then a bearer, with no network.
+    writeFileSync(
+      join(toolDir, 'curl'),
+      `#!/bin/sh
+case "$*" in
+  *oauth/token*) cat >/dev/null 2>&1; printf '{"access_token":"a","expires_in":3600}\n200' ;;
+  *bearer*) printf '{"Authorization":"Bearer b"}\n200' ;;
+  *) printf '\n000'; exit 7 ;;
+esac
+`,
+      { mode: 0o755 },
+    )
+    const stateDir = join(root, 'state')
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 })
+    await expect(
+      run(
+        { projectsDir: root, maxRecords: 5000, maxWindowHours: 48, since: null, until: null, dryRun: false, stateDir, toolDir },
+        {
+          PATH: process.env.PATH ?? '/usr/bin:/bin',
+          OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=inst-1,tool=claude-code',
+          OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `http://127.0.0.1:${ingest}/v1/logs`,
+          TOKENSCOPE_BEARER_ENDPOINT: 'https://stub.local/api/v1/instances/inst-1/bearer',
+          TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'rt',
+          TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://stub.local/api/v1/oauth/token',
+          TOKENSCOPE_OAUTH_CLIENT_ID: 'cid',
+        },
+        NOW,
+      ),
+    ).rejects.toThrow()
+    expect(targetHits).toBe(0)
   })
 })
 

@@ -25,6 +25,8 @@ import { applyRehome, RehomePlanStale, type RehomeRange } from '../../../../gove
 import { resetReportCache } from '../../../../reporting/report-cache'
 import { isRealUtcDay } from '#shared/schemas/activity'
 import { displayText, PROJECT_NAME_MAX } from '#shared/schemas/display-text'
+import { ProjectEndDateSchema } from '#shared/schemas/project-budget'
+import { endDateAssignment } from '../../../../projects/end-date'
 
 /**
  * The fields that actually WRITE to `project`. Named because the body also
@@ -94,7 +96,8 @@ const Body = z
     // a future value = a planned end); null clears it (re-open / un-end).
     // Setting end_date is NOT retroactive over already-frozen attribution rows
     // — only future events spill (D2). See docs/design/project-lifecycle.md.
-    end_date: z.string().datetime({ offset: true }).nullable().optional(),
+    // Shared with the PM's PATCH /projects/{id}/timeline.
+    end_date: ProjectEndDateSchema.optional(),
   })
   /*
    * "At least one field" is not enough once the migrate fields exist: they are
@@ -231,9 +234,7 @@ export default defineEventHandler(async (event) => {
       changed.is_authorised = body.is_authorised
     }
     if (body.end_date !== undefined) {
-      sets.push(
-        body.end_date === null ? sql`end_date = NULL` : sql`end_date = ${body.end_date}::timestamptz`,
-      )
+      sets.push(endDateAssignment(body.end_date))
       changed.end_date = body.end_date
     }
 

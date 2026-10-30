@@ -179,7 +179,16 @@ fails. It exits 3 when the only failure is a new Container App's missing
 image (`MANIFEST_UNKNOWN`), which is how a first apply ends: build the image,
 then apply again. With Front Door Premium on a VNet deployment it also approves Front
 Door's Private Link request while the apply runs: Front Door does not finish
-until that request is approved. For every other posture it only waits.
+until that request is approved. Front Door files one request per origin, so
+the script approves it only when it is the only one. If another request
+carries the same message, one is already approved, or the request was already
+waiting before the script started, the script approves none and stops. It
+lists each request with the command that approves it. Neither the order nor
+the message shows which request is Front Door's. Its private endpoint is in a
+Microsoft-managed subscription, while an outsider's is in their own. Reject
+any request that is not Front Door's, approve Front Door's with the printed
+command (an approval in the portal replaces the message the script looks
+for), and run the script again. For every other posture it only waits.
 
 Preview any apply with `az deployment group what-if` and the same `--parameters`.
 
@@ -262,10 +271,13 @@ each side needs the other's identity:
    workers must call Front Door too.
 
 With Standard the app's own address stays public, and the header check is the
-only thing keeping callers on Front Door. The ID it checks is not a secret, so
-this deters casual bypass of the WAF but is not a network boundary. That is
-fine for a sandbox; for production use the VNet posture with Front Door
-Premium, where the app has no public address at all.
+only thing keeping callers on Front Door. Between applies 2 and 3 there is no
+check at all: the app answers on its own address and the WAF can be walked
+around. After apply 3 the ID it checks is not a secret, so this deters casual
+bypass of the WAF but is not a network boundary; a caller who skips Front Door
+also picks the address the rate limiter counts against. App sign-in still
+applies either way. That is fine for a sandbox; for production use the VNet
+posture with Front Door Premium, where the app has no public address at all.
 
 ## 4. Staging and production (VNet-integrated)
 

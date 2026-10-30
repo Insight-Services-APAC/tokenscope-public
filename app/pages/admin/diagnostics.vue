@@ -967,39 +967,28 @@ const PERSONA_LABEL = Object.fromEntries(
   REPORT_VISIBILITY_PERSONAS.map((p) => [p.key, p.label]),
 ) as Record<(typeof REPORT_VISIBILITY_PERSONAS)[number]['key'], string>
 
-/** The role that owns a region-scoped fix — and cannot read this page. */
-const REGION_ADMIN_LABEL = PERSONA_LABEL.admin
-/** The role that owns an estate-wide fix, and is reading this page. */
+/** The one admin role owns every fix here, and is the one reading this page. */
 const ORG_WIDE_LABEL = PERSONA_LABEL['platform-admin']
 
-/*
- * Each cause names its ACTION and its OWNER. Two of the four owners cannot read
- * this page (it is platform-admin only, for a sound reason — see the endpoint),
- * so the panel says the work must be handed over rather than implying the reader
- * can fix everything.
- */
-const UNHOMED_ACTIONS: Record<UnhomedCause, { action: string; owner: string; handover: boolean }> = {
+/* Each cause names its ACTION and its OWNER. */
+const UNHOMED_ACTIONS: Record<UnhomedCause, { action: string; owner: string }> = {
   'no-region': {
     action:
       'Give the person a region, or add a directory region rule / region leader so the re-enrichment worker heals the whole population in bulk.',
     owner: ORG_WIDE_LABEL,
-    handover: false,
   },
   'region-no-unit': {
     action: 'Place the person into a cost-owning unit in their own region.',
-    owner: `${REGION_ADMIN_LABEL} for that region`,
-    handover: true,
+    owner: ORG_WIDE_LABEL,
   },
   'no-cost-owning-ancestor': {
     action:
       'Mark a unit in that ancestry cost-owning, or un-retire the unit that carried it. (Setting a unit’s directory cost-centre code has no admin surface today — see the counters below.)',
-    owner: `${REGION_ADMIN_LABEL} for that region`,
-    handover: true,
+    owner: ORG_WIDE_LABEL,
   },
   'pooled-copilot': {
     action: 'Home the provider organisation to a cost-owning unit, on the reconciliation surface.',
-    owner: `${REGION_ADMIN_LABEL}, escalating to ${ORG_WIDE_LABEL} for an organisation in no region`,
-    handover: true,
+    owner: ORG_WIDE_LABEL,
   },
 }
 const UNHOMED_COUNT_NOUNS: Record<UnhomedCauseRow['countKind'], [string, string]> = {
@@ -2363,8 +2352,8 @@ function pretty(obj: unknown): string {
           </div>
         </div>
         <p class="text-xs text-carbon-3 mb-3">
-          Requires <strong>platform-admin</strong> — region admins will see a 403
-          here. Resolves every private-link host the app depends on, and TCP-dials
+          Requires <strong>Admin</strong>.
+          Resolves every private-link host the app depends on, and TCP-dials
           the ones it actually calls — the other AMPLS members share that private
           endpoint, so their DNS answer is the evidence, not a dial.
         </p>
@@ -2374,7 +2363,7 @@ function pretty(obj: unknown): string {
              render it as a calm scoped-out note, not an alarming error.
              Genuine failures (500 / network) keep the red treatment. -->
         <p v-if="netError && netError.statusCode === 403" class="text-sm text-carbon-3" data-testid="admin-diag-network-scoped">
-          Scoped out — this probe is platform-admin only, so your role can't read private-link/DNS
+          Scoped out — this probe is Admin only, so your role can't read private-link/DNS
           validation. Nothing is wrong; every other card above still applies to your region.
         </p>
         <UiFetchErrorBanner
@@ -2467,7 +2456,7 @@ function pretty(obj: unknown): string {
           </UiButton>
         </div>
         <p class="text-xs text-carbon-3 mb-3">
-          Requires <strong>platform-admin</strong> — region admins will see a 403 here. Probes the
+          Requires <strong>Admin</strong>. Probes the
           Log Analytics query path the worker reads telemetry from.
         </p>
 
@@ -2475,7 +2464,7 @@ function pretty(obj: unknown): string {
              probe) — render it as a calm scoped-out note, not an alarming
              error. Genuine failures (500 / network) keep the red treatment. -->
         <p v-if="otelError && otelError.statusCode === 403" class="text-sm text-carbon-3" data-testid="admin-diag-otel-scoped">
-          Scoped out — this probe is platform-admin only, so your role can't read the Log Analytics
+          Scoped out — this probe is Admin only, so your role can't read the Log Analytics
           query path. Nothing is wrong; every other card above still applies to your region.
         </p>
         <UiFetchErrorBanner
@@ -2617,12 +2606,12 @@ function pretty(obj: unknown): string {
           </UiButton>
         </div>
         <p class="text-xs text-carbon-3 mb-3">
-          Requires <strong>platform-admin</strong> — region admins will see a 403
-          here. Read-only: catalog queries only — no role is created and no table is changed.
+          Requires <strong>Admin</strong>.
+          Read-only: catalog queries only — no role is created and no table is changed.
         </p>
 
         <p v-if="rlsError && rlsError.statusCode === 403" class="text-sm text-carbon-3" data-testid="admin-diag-rls-scoped">
-          Scoped out — this probe is platform-admin only, so your role can't read database-role
+          Scoped out — this probe is Admin only, so your role can't read database-role
           capability. Nothing is wrong; every other card above still applies to your region.
         </p>
         <UiFetchErrorBanner
@@ -3409,22 +3398,6 @@ function pretty(obj: unknown): string {
                     {{ snapshotConsequence.unknown }}
                   </p>
                 </div>
-
-                <!--
-                  PB-1, said out loud rather than left for the reader to
-                  discover: this is a whole-estate finance view, and two of the
-                  four fixes belong to a Region admin who cannot open this page.
-                  The endpoint is platform-admin-only because a region filter would
-                  drop the pooled lanes from §B and blow the residual for an
-                  artefact reason — so the worklist is something to HAND OVER, not
-                  a reason to widen who reads it.
-                -->
-                <p class="text-[11px] text-carbon-3 mt-3" data-testid="admin-diag-unhomed-handover">
-                  This is a whole-estate finance view. Placing a person into a unit, and marking a
-                  unit cost-owning, are region-scoped actions that belong to the
-                  <strong>{{ REGION_ADMIN_LABEL }}</strong> for the region concerned — who cannot
-                  see this page. Those rows are work to hand over, not work to do here.
-                </p>
               </template>
             </div>
           </template>
@@ -3677,7 +3650,7 @@ function pretty(obj: unknown): string {
         </div>
 
         <p class="text-xs text-carbon-3 mb-3">
-          Requires <strong>platform-admin</strong>. Reports the <strong>shape</strong> of provider
+          Requires <strong>Admin</strong>. Reports the <strong>shape</strong> of provider
           payloads — key paths, types and how often each key is present. A successful response body
           is never shown, stored or logged.
           <strong>Scan stored payloads</strong> reads what the pollers already saved: no provider
@@ -3690,7 +3663,7 @@ function pretty(obj: unknown): string {
           class="text-sm text-carbon-3"
           data-testid="admin-diag-wire-scoped"
         >
-          Scoped out — this probe is platform-admin only. Nothing is wrong; every other card on this
+          Scoped out — this probe is Admin only. Nothing is wrong; every other card on this
           page still applies to your role.
         </p>
 

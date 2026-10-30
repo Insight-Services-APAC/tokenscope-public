@@ -62,7 +62,6 @@ describe('ForecastBanner', () => {
     asOfDate: '2026-07-10',
     providerStates: [],
     scope: 'across',
-    pointInTimeDims: false,
   }
 
   it('shows the data-anchored projection for the in-progress month', () => {
@@ -121,7 +120,6 @@ describe('ForecastBanner', () => {
       asOfDate: '2026-05-31',
       providerStates: [{ vendor: 'anthropic', state: 'settling', settlesAt: '2026-06-30', closeRun: false }],
       scope: 'across',
-      pointInTimeDims: true,
     }
     const w = mount(ForecastBanner, { props: { forecast: null, actualUsd: 980, meta: closedMeta } })
     expect(w.find('[data-testid="forecast-actual"]').text()).toContain('$980')
