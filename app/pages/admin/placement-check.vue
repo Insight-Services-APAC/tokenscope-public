@@ -276,7 +276,7 @@ async function onApplied() {
         <UiCard v-if="view === 'managers'" data-testid="placement-check-managers">
           <p class="text-sm text-carbon-2 mb-3">
             {{ needsOwnerCount }} {{ needsOwnerCount === 1 ? 'person reaches' : 'people reach' }} the top of the reporting line with no {{ BU_LABEL }} owner above them.
-            A manager who owns exactly one cost-owning {{ BU_LABEL }} places the people below them who have no closer owner.
+            A manager who owns exactly one {{ BU_LABEL }} places the people below them who have no closer owner.
             Owners are set on each region's page.
           </p>
           <ul class="divide-y divide-calm-2 border border-calm-2 rounded-md">

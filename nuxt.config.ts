@@ -246,6 +246,15 @@ export default defineNuxtConfig({
     // matches the path without its query, so this also covers the liveness
     // probe's /api/health?probe=live.
     '/api/health': { security: { rateLimiter: false } },
+    // The consent page delivers an approved code to the MCP client's loopback in
+    // a popup and closes it once the outcome is known (#478): on redeemed, and on
+    // undelivered, where the popup shows a browser error over the paste-back
+    // steps. Under the default COOP `same-origin` the popup's cross-origin
+    // navigation severs this page's handle and close() does nothing.
+    // `same-origin-allow-popups` keeps the handle for popups this page opens;
+    // the only ones it opens are the client's own loopback callback, whose
+    // opener is cleared before it navigates. Every other page keeps the default.
+    '/oauth/authorize': { security: { headers: { crossOriginOpenerPolicy: 'same-origin-allow-popups' } } },
   },
 
   nitro: {

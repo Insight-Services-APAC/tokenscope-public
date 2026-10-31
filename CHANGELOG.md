@@ -7,7 +7,7 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
-## v1.0.4 — 2026-10-30 (snapshot 63c18d81)
+## v1.0.4 — 2026-10-31 (snapshot 463724c9)
 
 - **Before upgrading:**
   - Region admin can no longer be granted; Admin is the one admin role. People
@@ -21,6 +21,78 @@ the public mirror.)
     `POST /api/v1/admin/users/{id}/placement-span` and the rollup endpoints
     `GET /api/v1/rollups/manager`, `GET /api/v1/rollups/org-tree` and
     `GET /api/v1/rollups/practice/{ouId}/velocity` are removed.
+  - GitHub credentials have generic slots: secrets `GH_PAT_1`, `GH_PAT_2`,
+    `GH_PAT_3` and `GH_APP_KEY_1`, read under the credential names `github-1`,
+    `github-2`, `github-3` (and `github-1` for the App key). Nothing breaks if
+    you do nothing: the earlier secrets (`GH_PAT_PARTNER_DEMO`,
+    `GH_PAT_PRODUCTION`, `GH_PAT_ENTERPRISE_NFR`, `GH_APP_KEY_PARTNER_DEMO`) are still
+    read, under their old credential names (`partner-demo`, `production`,
+    `enterprise-nfr`). To move each enterprise without a gap: add the new secret
+    next to the old one in your secrets file or GitHub environment, with the
+    same value (`GH_PAT_PARTNER_DEMO` becomes `GH_PAT_1`, `GH_PAT_PRODUCTION`
+    becomes `GH_PAT_2`, `GH_PAT_ENTERPRISE_NFR` becomes `GH_PAT_3`,
+    `GH_APP_KEY_PARTNER_DEMO` becomes `GH_APP_KEY_1`); apply the infrastructure;
+    change the enterprise's credential name under Admin, Reconciliation
+    (`partner-demo` to `github-1`, `production` to `github-2`, `enterprise-nfr` to
+    `github-3`); then delete the old secret and apply again. The old secret
+    names are read in this release and at least the next; the release that
+    stops reading them will say so here first.
+- The `project` prompt now writes `.tokenscope` in the documented
+  `project:` / `code:` form, and the setup and usage prompts name only commands
+  that exist in the client reading them. Tagging a session by id says where the
+  full id is (the session detail on My usage), and the device-limit message
+  names the My account page. (Copilot plugin 0.1.29: the project skill's note
+  on one-line files is corrected. Claude plugin 0.1.54: `/tokenscope:backfill`
+  says plainly why the server refused a payload format.)
+- The example deploy workflow rolls the Container App to the registry the app
+  pulls from, not the first registry the resource group lists, and stops with
+  a clear error when the group holds more than one Container App. A failed
+  first deploy, with no earlier working build, no longer fails a second time
+  trying to roll back. The manual steps in `docs/DEPLOY-AZURE.md` match.
+- A project's Manage and Request more budget are now buttons at the top of its
+  page, opening a side panel; Manage shows how many budget requests are
+  waiting. A project's managers no longer see Request more budget.
+- Sending a project request again, unchanged, after a lost connection no longer
+  files it twice.
+- `/tokenscope:activity research` tags the session you are in with an activity,
+  with no session id to find (the Copilot plugin has an `activity` skill). The
+  status line and `/tokenscope:status` show the project and activity a session
+  is tagged with, and where each came from.
+- Plugins (Claude 0.1.52, Copilot 0.1.28): `/tokenscope:status` now says when
+  usage from this computer last arrived, not only that the credential works.
+- The Claude and Copilot plugins on one computer no longer overwrite each
+  other's "last arrived" record, so the status line stops flipping to unknown.
+- A repo tagged with a one-line `.tokenscope` (just the project code, as the
+  project prompt wrote it) is now tagged; it used to be read as untagged.
+- The Copilot skills find a plugin installed straight from a folder, not only
+  one installed from a marketplace.
+- Setup stops, before using its one-time code, when the session started before
+  a plugin update; restart Claude Code and run it again.
+- Where one `~/.claude` is shared with containers, sessions on each side no
+  longer break the other side's telemetry; the side the path does not suit says
+  so and how to fix it. A plugin set up from a local checkout moves to the
+  installed copy at the next session start.
+- On Windows without Node, setup and `/tokenscope:status` now use the Claude
+  app's own settings folder when it has one, so the app and the command-line
+  Claude Code no longer share one TokenScope device.
+- When telemetry is refused because the device store is missing, the message
+  now says so and names the files it found.
+- Plugin (Claude 0.1.53): when the Claude app and the Claude Code CLI on one
+  computer work in the same tagged folder, a session is counted under the
+  device it ran on, not whichever one tagged the folder last, once its session
+  start has reached TokenScope (usage recorded before that stays where it
+  was, and Windows without Node is not covered).
+  `/tokenscope:status` names this install's device as the Account page shows
+  it.
+- `/tokenscope:status` checks whether the folder's project tag is billable on
+  a computer that is online and signed in (it used to say "unverified"), and
+  when it cannot check, it says why.
+- A project tag set while that session's usage is arriving now applies to all
+  of it; some rows could stay on the old project.
+- A folder's default activity is applied to new sessions from it (only
+  standard activity names count; anything else is ignored), and a tag made
+  while that session's usage is still arriving is no longer lost.
+
 - A project manager removed from a project while one of their changes was
   waiting can no longer complete it: removing or changing the role of a
   member, editing the budget and adding a top-up now check that they are
@@ -171,6 +243,18 @@ the public mirror.)
 - The Front Door Private Link approval script approves only requests from
   Front Door's own private endpoint carrying the deployment's own message, and
   never re-approves a connection an operator rejected.
+- The Reconciliation records ledger now shows each record's Business Unit, not
+  the person's team.
+- The GitHub connection check's seats line counts only logins bound by
+  directory sync or an admin as matched, and shows logins claimed only by the
+  teammate as a separate number.
+- Signing an MCP client in from a container or over SSH no longer leaves a
+  browser error page in front: the sign-in is handed over in a small popup that
+  closes by itself, and when the client cannot be reached the consent page says
+  to copy the URL and paste it at the client's prompt (Claude Code's `URL >`).
+- A sign-in made while an admin changes your role or region, or ends your
+  sessions, now has to sign in again like every other session, instead of
+  keeping its token.
 
 ## v1.0.3 — 2026-10-14 (snapshot d358530b)
 

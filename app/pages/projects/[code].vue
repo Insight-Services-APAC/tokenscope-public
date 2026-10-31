@@ -5,7 +5,7 @@
  * trailing window, Top models through ModelSplitPanel, team contribution with
  * share bars + CSV export, untagged pressure. Same figures for PM and member
  * (project transparency). Members can ask for more budget; the project's PM (or
- * an admin in scope) also gets the Manage section (spec §4/§5).
+ * an admin in scope) also gets Manage (spec §4/§5; header actions, #477).
  *
  * ONE window (fix 1 / r1-H9): `?month=` XOR `?from&to`, owned by
  * useReportState, resolved server-side — the hero, Top models, the activity mix
@@ -22,7 +22,7 @@
  * Prose lives behind (i) (D12); the freshness paragraph retired for the
  * CcHeaderNotes chip row fed by the payload's real operands (D14).
  */
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
 import { provideReportStateKeys, WINDOW_STATE_KEYS } from '../../composables/useReportState'
 import { modelDisplay } from '../../composables/useModelDisplay'
 import ReportSkeleton from '../../components/reporting/ReportSkeleton.vue'
@@ -35,8 +35,10 @@ import ExportCsvButton from '../../components/reporting/ExportCsvButton.vue'
 import LaneToggle from '../../components/reporting/LaneToggle.vue'
 import ProjectChargebackView from '../../components/projects/ChargebackView.vue'
 import DrillName from '../../components/reporting/DrillName.vue'
-import ManagePanel from '../../components/projects/ManagePanel.vue'
+import ManagePanel, { type ManageTab } from '../../components/projects/ManagePanel.vue'
 import BudgetRequestCard from '../../components/projects/BudgetRequestCard.vue'
+import ProjectActionDrawer from '../../components/projects/ActionDrawer.vue'
+import { focusTarget } from '../../composables/useModalA11y'
 import type { BudgetRequestListResponse } from '#shared/schemas/project-budget'
 import {
   entryReportRoute,
@@ -79,7 +81,9 @@ interface ProjectResp {
     role: 'manager' | 'member'
     access: 'member' | 'cou-owner' | 'admin'
     budget_allocation_id: string | null
-    /** The project's current PM, or an admin in scope: shows the Manage section. */
+    /** The latest top-up in effect when the budget is top-ups only (no baseline), else null (#513). */
+    budget_topup_allocation_id: string | null
+    /** The project's current PM, or an admin in scope: shows Manage. */
     can_manage: boolean
   }
   /** The resolved page window every figure shares (D16). */
@@ -210,7 +214,7 @@ const cbData = computed<ProjectChargebackResp | null>(() =>
  * member or a manager of it.
  */
 // Read off either lens's payload: both carry `viewer` and `project`, and the
-// Manage section must not disappear when the chargeback lens is selected.
+// Manage button must not disappear when the chargeback lens is selected.
 const budgetRequestsEligible = computed(
   () => !!payload.value && (payload.value.viewer.access === 'member' || payload.value.viewer.can_manage === true),
 )
@@ -248,6 +252,98 @@ function retryBudgetRequests() {
 async function onManaged() {
   await Promise.all([refreshProject?.(), refreshBudgetRequests?.()])
 }
+
+/*
+ * Header actions (#477, docs/design/ideas/project-page-actions/SPEC.md): Manage
+ * for a viewer who may manage the project (its managers, admins in scope),
+ * Request more budget for a member who may not. Both show under either lens:
+ * a budget is not a reporting lens. Hiding the member button from a manager is
+ * a display rule only; the server still decides every request.
+ */
+const canManage = computed(() => payload.value?.viewer.can_manage === true)
+const canRequestBudget = computed(() => payload.value?.viewer.access === 'member' && !canManage.value)
+/** Requests waiting on a manager. No count while the list is loading or failed to load. */
+const waitingForManager = computed(() =>
+  budgetRequestsState.value === 'ready' ? pendingBudgetRequests.value.length : 0,
+)
+const mineWaiting = computed(() =>
+  budgetRequestsState.value === 'ready' ? myBudgetRequests.value.filter((r) => r.status === 'pending').length : 0,
+)
+const requestButtonLabel = computed(() =>
+  mineWaiting.value === 0
+    ? 'Request more budget'
+    : `${mineWaiting.value} request${mineWaiting.value === 1 ? '' : 's'} waiting`,
+)
+
+const manageOpen = ref(false)
+const manageTab = ref<ManageTab>('budget')
+const requestOpen = ref(false)
+const manageBtn = ref<ComponentPublicInstance | null>(null)
+const projectName = computed(() => payload.value?.project.display_name ?? payload.value?.project.code ?? '')
+
+function openManage(tab?: ManageTab) {
+  manageTab.value = tab ?? (waitingForManager.value > 0 ? 'requests' : 'budget')
+  manageOpen.value = true
+}
+
+/*
+ * `#manage` (the inbox's budget request link) opens Manage on Budget requests,
+ * once the payload says the viewer may manage. Anyone else gets the page with
+ * no drawer. The hash is dropped on close, so the inbox link opens it again and
+ * a reload does not.
+ */
+const router = useRouter()
+/*
+ * The browser's own hash, read once mounted (#514). The server never sees a
+ * hash, so on a full page load the route this page rendered with can lack it;
+ * the location is the one place it is sure to be.
+ */
+const locationHash = ref('')
+onMounted(() => {
+  locationHash.value = window.location.hash
+})
+const wantsManage = computed(() => route.hash === '#manage' || locationHash.value === '#manage')
+watch(
+  () => [wantsManage.value, canManage.value, manageBtn.value] as const,
+  ([wants, can, btn]) => {
+    // Wait for the button itself: the drawer returns focus to whatever had it at open.
+    if (!wants || !can || !btn || manageOpen.value) return
+    focusTarget(btn)?.focus()
+    openManage('requests')
+  },
+  { immediate: true, flush: 'post' },
+)
+function closeManage() {
+  manageOpen.value = false
+  locationHash.value = ''
+  if (route.hash === '#manage') void router.replace({ query: route.query, hash: '' })
+  else if (import.meta.client && window.location.hash === '#manage') {
+    history.replaceState(history.state, '', window.location.pathname + window.location.search)
+  }
+}
+/*
+ * A drawer whose viewer lost the right to it (a PM who just made themselves a
+ * member, say) closes, rather than staying open-but-hidden and reappearing
+ * later. Its button went with it, so focus goes to the button the viewer has
+ * now, or the page itself, not to <body>.
+ */
+const dashboardEl = ref<HTMLElement | null>(null)
+async function refocusAfterLostAction() {
+  await nextTick()
+  if (!import.meta.client) return
+  const next = document.querySelector<HTMLElement>('[data-testid="project-request-budget"], [data-testid="project-manage-open"]')
+  ;(next ?? dashboardEl.value)?.focus()
+}
+watch(canManage, (can) => {
+  if (can || !manageOpen.value) return
+  closeManage()
+  void refocusAfterLostAction()
+})
+watch(canRequestBudget, (can) => {
+  if (can || !requestOpen.value) return
+  requestOpen.value = false
+  void refocusAfterLostAction()
+})
 
 const notFound = computed(() => (error.value as { statusCode?: number } | null)?.statusCode === 404)
 
@@ -346,6 +442,9 @@ const reportsFrame = computed(() => ({
   month: rs.month.value,
   from: rs.from.value,
   to: rs.to.value,
+  // The server's day names the default window when the URL carries none
+  // (drill-contract.ts frameWindow); declared below with the page's clock.
+  today: todayIso.value,
 }))
 const reportsBackRoute = computed(() => entryReportRoute(reportsFrame.value))
 
@@ -787,7 +886,7 @@ const memberIngestOnlyTools = computed(
 </script>
 
 <template>
-  <div v-if="session" class="max-w-[1400px] mx-auto px-10 py-8 pb-20" data-testid="project-dashboard">
+  <div v-if="session" ref="dashboardEl" tabindex="-1" class="max-w-[1400px] mx-auto px-4 sm:px-10 py-8 pb-20 outline-none" data-testid="project-dashboard">
     <template v-if="payload">
       <UiPageHead
         eyebrow="My projects"
@@ -796,9 +895,36 @@ const memberIngestOnlyTools = computed(
         :crumbs="['My projects', payload.project.code]"
       >
         <template #actions>
-          <UiBadge v-if="data?.velocity.is_flagged" kind="rag-amber" data-testid="velocity-flag">
-            velocity {{ Math.round((data.velocity.delta_pct ?? 0) * 100) }}% above 4-week mean
-          </UiBadge>
+          <!-- id="manage": the inbox link's hash lands on the button its drawer returns focus to. -->
+          <div id="manage" class="flex items-center gap-3 flex-wrap">
+            <UiBadge v-if="data?.velocity.is_flagged" kind="rag-amber" data-testid="velocity-flag">
+              velocity {{ Math.round((data.velocity.delta_pct ?? 0) * 100) }}% above 4-week mean
+            </UiBadge>
+            <UiButton
+              v-if="canRequestBudget"
+              kind="secondary"
+              aria-haspopup="dialog"
+              data-testid="project-request-budget"
+              @click="requestOpen = true"
+            >
+              {{ requestButtonLabel }}
+            </UiButton>
+            <UiButton
+              v-if="canManage"
+              ref="manageBtn"
+              kind="primary"
+              aria-haspopup="dialog"
+              data-testid="project-manage-open"
+              @click="openManage()"
+            >
+              Manage
+              <span
+                v-if="waitingForManager > 0"
+                class="ml-1.5 inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-white text-brand-harmony text-[11px] font-bold"
+                data-testid="project-manage-count"
+              >{{ waitingForManager }}<span class="sr-only"> budget request{{ waitingForManager === 1 ? '' : 's' }} waiting</span></span>
+            </UiButton>
+          </div>
         </template>
       </UiPageHead>
 
@@ -811,10 +937,10 @@ const memberIngestOnlyTools = computed(
 
         <!-- The lens once with (i) (fix 6) + the chip row (D14) instead of freshness prose. -->
         <div v-if="data" class="flex items-center gap-2 flex-wrap">
-          <UiBadge kind="neutral" data-testid="proj-lane-pill">§A · attributed usage</UiBadge>
+          <UiBadge kind="neutral" data-testid="proj-lane-pill">Attributed usage</UiBadge>
           <InfoDot label="About this page's lane">
-            Attributed usage (§A). Every figure follows the selected window and is live off the
-            §A lane; the velocity flag alone comes from the cron-refreshed
+            Attributed usage. Every figure follows the selected window and is live off
+            attributed usage; the velocity flag alone comes from the cron-refreshed
             rollup<template v-if="aggregateAge">, last refreshed {{ aggregateAge }} ago</template>.
             Switch to Chargeback for this project's share of the bill.
           </InfoDot>
@@ -825,7 +951,7 @@ const memberIngestOnlyTools = computed(
           />
         </div>
         <div v-else class="flex items-center gap-2 flex-wrap">
-          <UiBadge kind="neutral" data-testid="proj-lane-pill">§B · bill chargeback</UiBadge>
+          <UiBadge kind="neutral" data-testid="proj-lane-pill">Chargeback</UiBadge>
           <InfoDot label="About this page's lane">
             {{ PROJECT_LENS_COPY.chargeback.caption }} Budgets and allocations still read
             attributed usage.
@@ -1117,7 +1243,7 @@ const memberIngestOnlyTools = computed(
               ({{ memberIngestOnlyTools.join(', ') }})</template>.
           </p>
           <p class="text-[11px] text-carbon-3 mt-1">
-            Real spend, counted in company and cost-centre totals — but it is untaggable at
+            Real spend, counted in company and Business Unit totals — but it is untaggable at
             source, so no project budget on any view includes it. It is not missing, and it is
             not zero.
           </p>
@@ -1148,11 +1274,19 @@ const memberIngestOnlyTools = computed(
 
         </template>
 
-        <!-- Figures do not fork (D27.7). A member may ask for more budget; the
-             project's PM, or an admin in scope, also manages it (spec §4/§5).
-             Outside the lens branches: a budget is not a reporting lens. -->
+      </div>
+
+      <!-- The header actions' drawers (#477). Outside the lens branches: a
+           budget is not a reporting lens. -->
+      <ProjectActionDrawer
+        v-if="canRequestBudget"
+        :open="requestOpen"
+        title="Request more budget"
+        :eyebrow="projectName"
+        testid="project-request-drawer"
+        @close="requestOpen = false"
+      >
         <BudgetRequestCard
-          v-if="payload.viewer.access === 'member'"
           :project-id="payload.project.id"
           :ended="payload.project.ended"
           :mine="myBudgetRequests"
@@ -1160,19 +1294,29 @@ const memberIngestOnlyTools = computed(
           @changed="onManaged"
           @retry="retryBudgetRequests"
         />
+      </ProjectActionDrawer>
+      <ProjectActionDrawer
+        v-if="canManage"
+        :open="manageOpen"
+        title="Manage this project"
+        :eyebrow="projectName"
+        testid="project-manage-drawer"
+        @close="closeManage"
+      >
         <ManagePanel
-          v-if="payload.viewer.can_manage"
+          v-model:tab="manageTab"
           :project-id="payload.project.id"
           :end-date="payload.project.end_date"
           :ended="payload.project.ended"
           :budget-allocation-id="payload.viewer.budget_allocation_id"
+          :budget-topup-allocation-id="payload.viewer.budget_topup_allocation_id ?? null"
           :today-utc="todayIso"
           :pending-requests="pendingBudgetRequests"
           :requests-state="budgetRequestsState"
           @changed="onManaged"
           @retry="retryBudgetRequests"
         />
-      </div>
+      </ProjectActionDrawer>
     </template>
 
     <!-- ── REPORTS DEPTH (D37) ────────────────────────────────────────────
@@ -1213,7 +1357,7 @@ const memberIngestOnlyTools = computed(
           <LaneToggle v-model="shownLane" :captions="PROJECT_LENS_CAPTIONS" />
         </div>
         <div v-if="reportsCb" class="flex items-center gap-2 flex-wrap">
-          <UiBadge kind="neutral" data-testid="proj-reports-lane-pill">§B · bill chargeback</UiBadge>
+          <UiBadge kind="neutral" data-testid="proj-reports-lane-pill">Chargeback</UiBadge>
           <InfoDot label="About this page's lane">
             {{ PROJECT_LENS_COPY.chargeback.caption }} Budgets and allocations still read
             attributed usage.
@@ -1229,9 +1373,9 @@ const memberIngestOnlyTools = computed(
 
         <template v-if="reportsData">
         <div class="flex items-center gap-2 flex-wrap">
-          <UiBadge kind="neutral" data-testid="proj-reports-lane-pill">§A · attributed usage</UiBadge>
+          <UiBadge kind="neutral" data-testid="proj-reports-lane-pill">Attributed usage</UiBadge>
           <InfoDot label="About this page's lane">
-            Attributed usage (§A) for the whole project. Switch to Chargeback for its share of
+            Attributed usage for the whole project. Switch to Chargeback for its share of
             the bill.
           </InfoDot>
           <CcHeaderNotes
@@ -1335,9 +1479,9 @@ const memberIngestOnlyTools = computed(
             </li>
           </ul>
           <p class="text-[11px] text-carbon-3 mt-2" data-testid="project-reports-foot">
-            Σ = {{ fmtUsd(Number(reportsData.contribution.rows_total_usd)) }}
+            Total = {{ fmtUsd(Number(reportsData.contribution.rows_total_usd)) }}
             <InfoDot label="What this sum is">
-              A project headline reconciles over ALL members, never over visible ones (C3).
+              A project headline adds up over all members, not only the ones shown here.
             </InfoDot>
           </p>
         </UiCard>

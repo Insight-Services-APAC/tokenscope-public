@@ -680,7 +680,7 @@ const sumbackSpan = computed(
           :data-mismatch="mismatch"
         >
           <td :colspan="sumbackSpan" class="py-2.5 font-semibold">
-            Σ drivers
+            Sum of drivers
             <span v-if="mismatch" class="ml-1 text-[11px] font-bold">
               ≠ {{ sumbackLabel }} — does not reconcile
             </span>

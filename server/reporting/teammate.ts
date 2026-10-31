@@ -146,7 +146,7 @@ export async function resolveDrillScope(
   }
 
   if (src.startsWith('cc:')) {
-    if (grants.costCentre === false) forbidSrc('Your role does not grant a cost-centre frame.')
+    if (grants.costCentre === false) forbidSrc('Your role does not grant a Business Unit view.')
     const ccId = src.slice(3)
     // `isUuid`, NOT the legacy lax `/^[0-9a-f-]{36}$/i` (the known-bad API-5
     // pattern retired by server/utils/require-uuid-param.ts). The lax form

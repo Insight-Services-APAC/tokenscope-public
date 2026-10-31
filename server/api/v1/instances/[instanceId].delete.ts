@@ -61,7 +61,7 @@ export default defineEventHandler(async (event) => {
     // that window this app-level gate is the only one running.
     await requireRegionScope(event, row.regionId)
     if (!canModifyHolderOf(session.role, row.teammateRole as Role)) {
-      throw createError({ statusCode: 403, statusMessage: 'Only a platform-admin may act on this teammate' })
+      throw createError({ statusCode: 403, statusMessage: 'Only an Admin may act on this teammate' })
     }
 
     if (!row.tsActualEnd) {

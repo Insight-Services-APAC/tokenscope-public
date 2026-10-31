@@ -204,7 +204,7 @@ export default defineEventHandler(async (event) => {
     offset: query.offset,
     regionScoped: isRegionScoped,
     scopeNote: isRegionScoped
-      ? 'Region-scoped: teammate records in your region only. Org-grain (cross-region) records are visible to platform-admin.'
+      ? 'Region-scoped: teammate records in your region only. Org-grain (cross-region) records are visible to an Admin.'
       : null,
   }
 })

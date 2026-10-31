@@ -11,7 +11,11 @@
  * never silently clobbers a developer's own custom status line.
  */
 import { describe, it, expect } from 'vitest'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
+  readLandedCache,
   formatStatusLine,
   emitEnvLabel,
   classifyLanding,
@@ -534,6 +538,20 @@ describe('reconcilePluginPaths (self-heal version-pinned settings on update)', (
     expect(changed).toBe(true)
   })
 
+  // #455: a directory-marketplace setup wrote the checkout's paths.
+  it('moves a checkout status line and helper to the versioned active install', () => {
+    const { settings, changed } = reconcilePluginPaths(
+      {
+        statusLine: { type: 'command', command: '"/usr/bin/node" "/home/u/src/TokenScope/plugin/scripts/statusline.mjs"' },
+        otelHeadersHelper: '"/home/u/src/TokenScope/plugin/scripts/otel-headers-helper.sh" --tool claude-code',
+      },
+      A,
+    )
+    expect(changed).toBe(true)
+    expect(settings.statusLine.command).toBe(tokenscopeStatusLine(A.statuslinePath, { platform: 'linux' }).command)
+    expect(settings.otelHeadersHelper).toBe(A_HELPER)
+  })
+
   it('no-ops when neither path is present', () => {
     expect(reconcilePluginPaths({ env: {} }, A).changed).toBe(false)
     expect(reconcilePluginPaths({}, A).changed).toBe(false)
@@ -620,5 +638,45 @@ describe('removeStatusLine', () => {
     const { settings, removed } = removeStatusLine(s)
     expect(removed).toBe(false)
     expect(settings.statusLine.command).toBe('my-prompt.sh')
+  })
+})
+
+// #453: the Claude and Copilot plugins wrote one shared last-landed.json, so each
+// overwrote the other's landing record. Each now has its own name.
+describe('readLandedCache — per-tool landing record', () => {
+  const withDir = (fn: (dir: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), 'ts-landed-'))
+    try {
+      fn(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('reads the Claude record, not the Copilot one beside it', () => {
+    withDir((dir) => {
+      writeFileSync(join(dir, 'last-landed.claude-code.json'), JSON.stringify({ instanceId: 'claude-inst' }))
+      writeFileSync(join(dir, 'last-landed.copilot-cli.json'), JSON.stringify({ instanceId: 'copilot-inst' }))
+      expect(readLandedCache(dir)?.instanceId).toBe('claude-inst')
+    })
+  })
+
+  it('falls back to the old shared name until the first refresh after an upgrade', () => {
+    withDir((dir) => {
+      writeFileSync(join(dir, 'last-landed.json'), JSON.stringify({ instanceId: 'old' }))
+      expect(readLandedCache(dir)?.instanceId).toBe('old')
+    })
+  })
+
+  it('prefers the new name over the old one', () => {
+    withDir((dir) => {
+      writeFileSync(join(dir, 'last-landed.json'), JSON.stringify({ instanceId: 'old' }))
+      writeFileSync(join(dir, 'last-landed.claude-code.json'), JSON.stringify({ instanceId: 'new' }))
+      expect(readLandedCache(dir)?.instanceId).toBe('new')
+    })
+  })
+
+  it('is null when there is no record', () => {
+    withDir((dir) => expect(readLandedCache(dir)).toBeNull())
   })
 })

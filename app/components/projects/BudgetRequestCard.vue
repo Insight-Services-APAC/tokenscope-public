@@ -4,6 +4,7 @@
  * managers to add to its budget, see what happened to earlier asks, withdraw
  * one still waiting. One request may wait at a time; the server enforces it.
  * Budgets are for reporting, so the copy never says spend is blocked.
+ * The body of the Request more budget drawer (#477); the drawer carries the title.
  */
 import { computed, ref } from 'vue'
 import type { BudgetRequestRow } from '#shared/schemas/project-budget'
@@ -82,8 +83,7 @@ const STATUS_WORD: Record<string, string> = {
 </script>
 
 <template>
-  <UiCard data-testid="budget-request-card">
-    <UiEyebrow>Request more budget</UiEyebrow>
+  <div data-testid="budget-request-card">
     <p v-if="ended" class="text-[12px] text-carbon-3 mt-1">This project has ended, so its budget no longer changes.</p>
     <p v-else-if="requestsState === 'loading'" class="text-[12px] text-carbon-3 mt-1" data-testid="budget-request-loading">
       Loading your requests…
@@ -113,7 +113,8 @@ const STATUS_WORD: Record<string, string> = {
       </div>
     </template>
 
-    <ul v-if="mine.length" class="mt-3 space-y-1" data-testid="budget-request-mine">
+    <div v-if="mine.length" class="mt-5 text-xs text-carbon-3 font-bold uppercase tracking-[1px] mb-2">Your requests</div>
+    <ul v-if="mine.length" class="space-y-1" data-testid="budget-request-mine">
       <li v-for="r in mine" :key="r.id" class="text-[12px] text-carbon-2 flex items-center gap-2 flex-wrap">
         <span>
           {{ fmtUsd(r.amount_usd) }} · {{ STATUS_WORD[r.status] ?? r.status }}<template
@@ -135,5 +136,5 @@ const STATUS_WORD: Record<string, string> = {
       </li>
     </ul>
     <p v-if="error" class="text-[12px] text-brand-heart mt-2" data-testid="budget-request-error">{{ error }}</p>
-  </UiCard>
+  </div>
 </template>

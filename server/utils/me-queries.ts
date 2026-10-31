@@ -28,6 +28,7 @@ import {
   type NonCodeClaudeTool,
 } from '../../shared/usage/surface'
 import { monthToDateWindow, monthStartIso as monthStartIsoFor } from './period'
+import { activityDisplayLabel } from './activity-vocabulary'
 import { baseAllowanceUsd } from './base-allowance'
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
@@ -951,15 +952,6 @@ export interface ActivityType {
 }
 
 /**
- * Display label for a vocabulary entry: title-case only entries that are ALL
- * lowercase (the lazily-seeded ones like 'research' -> 'Research'), preserving
- * any intentional mixed casing an admin chose (e.g. 'WorkIQ' stays 'WorkIQ').
- */
-function displayLabel(s: string): string {
-  return s === s.toLowerCase() ? s.replace(/\b\w/g, (c) => c.toUpperCase()) : s
-}
-
-/**
  * The activity-tag suggestion list, ordered for the human doing the tagging:
  *   1. the caller's OWN previously-used activities (most-used first, in THEIR
  *      casing) — the ones they actually reach for;
@@ -1019,7 +1011,7 @@ export async function getActivityTypes(
   for (const r of stdRows) {
     // Admin-authored and shown to every member's agent: bounded on the way out
     // (rows before mig 0155 are not covered by its NOT VALID constraint).
-    const display = cleanDisplayText(displayLabel(r.label), ACTIVITY_LABEL_MAX)
+    const display = cleanDisplayText(activityDisplayLabel(r.label), ACTIVITY_LABEL_MAX)
     if (!display) continue
     const key = display.toLowerCase()
     if (seen.has(key)) continue

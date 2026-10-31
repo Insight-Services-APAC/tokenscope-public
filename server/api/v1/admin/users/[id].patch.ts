@@ -129,7 +129,7 @@ export default defineEventHandler(async (event) => {
           // when the target holds `global-finops` or `finance`.
           detail: isUngrantableRole(newRole)
             ? `${roleLabel(newRole)} can no longer be granted.`
-            : `Role '${caller.role}' cannot change '${target.role}' to '${newRole}': only platform-admin may grant org-wide roles or modify a holder of an org-wide or retired role.`,
+            : `${roleLabel(caller.role)} cannot change ${roleLabel(target.role)} to ${roleLabel(newRole)}: only an Admin may grant org-wide roles or modify a holder of an org-wide or retired role.`,
         },
       })
     }
@@ -146,7 +146,7 @@ export default defineEventHandler(async (event) => {
       }
       const detailByReason: Record<string, string> = {
         'self-role-change-blocked':
-          'You cannot change your own role. Have another admin (or platform-admin) do it.',
+          'You cannot change your own role. Have another Admin do it.',
         'same-role-noop':
           'Target already has the requested role; no change applied.',
       }

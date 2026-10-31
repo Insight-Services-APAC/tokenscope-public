@@ -2,14 +2,10 @@
  * Budget-alert worker — emits `over-budget` inbox items for projects whose
  * MTD attributed cost has exceeded their current baseline+top-up allocation.
  *
- * Why this exists: prior to MVP-Final convergence, inbox over-budget items
- * were hard-coded in `drizzle/seed.ts` while the homepage rendered live
- * numbers from `attribution_record + allocation`. The two surfaces diverged
- * — homepage said "Healthy" while the inbox said "$210 over". This worker
- * is the producer that closes that gap: it calls the SAME `completeProjectSpend`
- * the project page, the /projects cards and the budget editor call, with the
- * same window and the same options, so the surfaces agree by construction
- * rather than by coincidence (server/usage/complete-spend.ts).
+ * It calls the SAME `completeProjectSpend` the project page, the /projects
+ * cards and the budget editor call, with the same window and the same options,
+ * so the inbox and those surfaces agree by construction
+ * (server/usage/complete-spend.ts).
  *
  * Mirrors `runReconciliation`'s shape:
  *   - Pure SQL scan, no external clients.
@@ -20,10 +16,9 @@
  * Body field contract: matches app/components/inbox/DrawerBodyOverBudget.vue
  * exactly — `project`, `usedUsd`, `capUsd`, `overBy`, `otelPct`, `anthroPct`.
  *
- * On otelPct / anthroPct: both are now the REAL arm split of the figure that
+ * On otelPct / anthroPct: both are the REAL arm split of the figure that
  * tripped the alert, taken from the same `completeProjectSpend` row (arm 1
- * `otel-emitted` vs arm 2 `api-reconciled`). See the loop below for why the old
- * hard-coded 1.0/0.0 was wrong.
+ * `otel-emitted` vs arm 2 `api-reconciled`).
  */
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
@@ -82,7 +77,7 @@ export async function runBudgetAlert(
    * threshold can be crossed while a recompute is in flight.
    *
    * The protection is implemented WHERE THE PARTIAL STATE IS PRODUCED, not
-   * here: `reconcileUnaccountedUsage` now writes its upsert and both orphan
+   * here: `reconcileUnaccountedUsage` writes its upsert and both orphan
    * passes in ONE transaction, so this read cannot land between them. Putting a
    * guard in this worker instead would have protected the alert and left every
    * report and project page exposed to the same intermediate state.
@@ -112,10 +107,8 @@ export async function runBudgetAlert(
 
   // Cap = the project's budget exactly as the project page shows it: the pool
   // baseline and top-ups in force at this run's `now`, burst excluded, through
-  // the page's own reader (fetchProjectAllocations). It used to be the baseline
-  // in force at MONTH-START plus top-ups overlapping the month, so a baseline
-  // starting mid-month was left out while a top-up over the same period counted:
-  // $1,025 on the page, a $25 cap here. Only a project with spend can be over.
+  // the page's own reader (fetchProjectAllocations), so a baseline starting
+  // mid-month counts the same as a top-up. Only a project with spend can be over.
   const spentOn = [...spendByProject.keys()].filter((id): id is string => !!id)
   const capByProject = await fetchProjectAllocations(db, spentOn, now.toISOString())
   const capped = [...capByProject].filter(([, cap]) => cap > 0).map(([id]) => id)
@@ -156,11 +149,9 @@ export async function runBudgetAlert(
          WHERE category = 'over-budget'
            AND related_entity_kind = 'project'
            AND related_entity_id = ${r.project_id}::uuid
-           -- ANY item this month, regardless of ack_state. Counting only OPEN
-           -- states meant a DISMISSED or RESOLVED item stopped suppressing the
-           -- next tick, so a still-over project re-paged its PM + CoU owner +
-           -- every contributor on EVERY tick for the rest of the month. Dismiss
-           -- must stick: one over-budget item per project per month, full stop.
+           -- ANY item this month, regardless of ack_state, so a dismissed or
+           -- resolved item still suppresses the next tick: one over-budget item
+           -- per project per month.
            AND created_at >= ${monthStartIso}::timestamptz
          LIMIT 1
       `,
@@ -172,18 +163,13 @@ export async function runBudgetAlert(
 
     const overBy = usedUsd - capUsd
     // "How we know" (DrawerBodyOverBudget): the REAL arm split of the figure
-    // that tripped the alert. This used to be hard-coded otelPct=1.0 /
-    // anthroPct=0.0 on the claim that a per-project API split "isn't directly
-    // computable" — untrue since this worker moved to the §A lane: arm 2 IS the
-    // reconciled API−OTel gap, per project, and it is exactly the share the PM
-    // most needs disclosed (it is the part `attribution_aggregate` never had).
+    // that tripped the alert. Arm 2 is the reconciled API−OTel gap, per project,
+    // and it is exactly the share the PM most needs disclosed.
     const spend = spendByProject.get(r.project_id)
     // ONE denominator, guarded once. This branch only runs when usedUsd > capUsd,
-    // and an allocation is non-negative, so usedUsd > 0 is already implied — the
-    // per-share `usedUsd > 0` tests it replaced were each individually dead, which
-    // is what static analysis flagged. The guard is not dead, though: it is the
-    // only thing standing between a nonsensical negative cap and a NaN percentage
-    // on a PM's alert. Kept as a floor rather than repeated as a test.
+    // and an allocation is non-negative, so usedUsd > 0 is already implied; the
+    // floor stands between a nonsensical negative cap and a NaN percentage on a
+    // PM's alert.
     const denom = usedUsd > 0 ? usedUsd : 1
     const otelPct = (spend?.otelUsd ?? 0) / denom
     const anthroPct = (spend?.reconciledUsd ?? 0) / denom

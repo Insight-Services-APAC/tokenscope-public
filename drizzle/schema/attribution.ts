@@ -28,6 +28,11 @@ export const attributionRecord = pgTable('attribution_record', {
   // grouping on this rolls subagent spend into the parent conversation. Nullable:
   // historical rows (pre-0016) stay NULL and fall back to instance grouping.
   claudeSessionId: text('claude_session_id'),
+  // mig 0166 (#494): the tokenscope.instance_id the telemetry record NAMED, set
+  // only when the joiner booked the row to another instance of the same
+  // teammate from a session_instance_report. NULL = booked as named. The dedup
+  // index keys on COALESCE(emitted_instance_id, instance_id).
+  emittedInstanceId: uuid('emitted_instance_id').references(() => instanceAttestation.instanceId),
   teammateId: uuid('teammate_id')
     .notNull()
     .references(() => teammate.id),
@@ -119,11 +124,12 @@ export const attributionRecord = pgTable('attribution_record', {
   billingLane: text('billing_lane').notNull().default('unknown'),
   metadata: jsonb('metadata'),
 }, (t) => [
-  // Read-joiner idempotency (migrations 0011 + 0017 + 0035): one row per
-  // (instance, conversation, event, token-type, model, source_run_id). The live
-  // index keys on COALESCE(claude_session_id, '') and COALESCE(source_run_id, '')
-  // — migrations are hand-written, so this drizzle def (which can't express the
-  // COALESCE) is approximate; 0035 is the source of truth.
+  // Read-joiner idempotency (migrations 0011 + 0017 + 0035 + 0166): one row per
+  // (EMITTED instance, conversation, event, token-type, model, source_run_id).
+  // The live index keys on COALESCE(emitted_instance_id, instance_id),
+  // COALESCE(claude_session_id, '') and COALESCE(source_run_id, '') —
+  // migrations are hand-written, so this drizzle def (which can't express the
+  // COALESCE) is approximate; 0166 is the source of truth.
   // source_run_id (= spanId/requestId) is added in 0035 for Copilot parallel-
   // subagent safety: same-ms chat calls to the same model no longer collide.
   uniqueIndex('attribution_record_session_event_unique').on(

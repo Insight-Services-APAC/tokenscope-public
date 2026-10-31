@@ -143,18 +143,22 @@ remove it from the file and the next apply unhooks it from the app.
   organisation under **Admin → Reconciliation**.
 - **GitHub** (Copilot usage and billing): a classic PAT with
   `manage_billing:enterprise` and `read:org`, or a GitHub App private key
-  (base64-encoded PEM). The template has fixed slots, each tied to the
-  credential name you then use when registering the enterprise:
+  (base64-encoded PEM). The template has three PAT slots and one App key
+  slot, each tied to the credential name you then use when registering the
+  enterprise:
 
   | Secrets-file variable | Credential name |
   |---|---|
-  | `GH_PAT_PARTNER_DEMO` | `partner-demo` |
-  | `GH_PAT_PRODUCTION` | `production` |
-  | `GH_PAT_ENTERPRISE_NFR` | `enterprise-nfr` |
-  | `GH_APP_KEY_PARTNER_DEMO` (App key) | `partner-demo` |
+  | `GH_PAT_1` | `github-1` |
+  | `GH_PAT_2` | `github-2` |
+  | `GH_PAT_3` | `github-3` |
+  | `GH_APP_KEY_1` (App key) | `github-1` |
 
-  Any other credential name needs a template change
-  (`infra/modules/container-app.bicep`). See [PROVIDERS.md](PROVIDERS.md).
+  An App key and a PAT can share a credential name: the enterprise's GitHub
+  App id decides which one it uses. Any other credential name needs a template
+  change (`infra/modules/container-app.bicep`). Upgrading from a release that
+  used the earlier named GitHub secrets: see the upgrade note in
+  [CHANGELOG.md](../CHANGELOG.md). See [PROVIDERS.md](PROVIDERS.md).
 
 Both can be added later: add the value and apply again.
 
@@ -213,7 +217,10 @@ Preview any apply with `az deployment group what-if` and the same `--parameters`
 3. **Build the image into the new registry.**
 
    ```bash
-   ACR=$(az acr list -g "$RG" --query "[0].name" -o tsv)
+   # The registry the Container App from step 2 pulls from (it exists, failing):
+   APP=$(az containerapp list -g "$RG" --query "[0].name" -o tsv)
+   ACR=$(az containerapp show -g "$RG" -n "$APP" --query "properties.configuration.registries[0].server" -o tsv)
+   ACR=${ACR%%.*}
    az acr build --registry "$ACR" --image tokenscope:latest \
      --build-arg GIT_COMMIT_SHA="$(git rev-parse HEAD)" --file Dockerfile .
    ```
@@ -355,7 +362,10 @@ that combination before deploying anything.
    workflow (`docker` on your runner, or `acr-agent-pool`) or by hand:
 
    ```bash
-   ACR=$(az acr list -g "$RG" --query "[0].name" -o tsv)
+   # The registry the Container App from step 2 pulls from (it exists, failing):
+   APP=$(az containerapp list -g "$RG" --query "[0].name" -o tsv)
+   ACR=$(az containerapp show -g "$RG" -n "$APP" --query "properties.configuration.registries[0].server" -o tsv)
+   ACR=${ACR%%.*}
    # agent pool (created once; see examples/github-actions/README.md)
    az acr build --registry "$ACR" --agent-pool tokenscope-builds \
      --image tokenscope:latest --build-arg GIT_COMMIT_SHA="$(git rev-parse HEAD)" --file Dockerfile .
@@ -495,14 +505,16 @@ works).
 
 ```bash
 TAG=$(git rev-parse --short HEAD)
-ACR=$(az acr list -g "$RG" --query "[0].name" -o tsv)
+APP=$(az containerapp list -g "$RG" --query "[0].name" -o tsv)   # one TokenScope app per group
+# The registry the app pulls from (a group can also hold an older registry):
+ACR=$(az containerapp show -g "$RG" -n "$APP" --query "properties.configuration.registries[0].server" -o tsv)
+ACR=${ACR%%.*}
 
 # Sandbox: build in Azure
 az acr build --registry "$ACR" --image "tokenscope:$TAG" \
   --build-arg GIT_COMMIT_SHA="$(git rev-parse HEAD)" --file Dockerfile .
 # VNet: build inside the network instead (runner or agent pool; see the examples README)
 
-APP=$(az containerapp list -g "$RG" --query "[0].name" -o tsv)
 az containerapp update -g "$RG" -n "$APP" --image "$ACR.azurecr.io/tokenscope:$TAG"
 
 # Check https://<public-host>/api/v1/meta/build reports $TAG, then:

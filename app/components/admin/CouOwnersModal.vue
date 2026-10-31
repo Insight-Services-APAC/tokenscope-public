@@ -159,7 +159,7 @@ watch(
           v-model="query"
           type="search"
           placeholder="Search the directory by name or email…"
-          class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+          class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
           data-testid="cou-owners-search"
           @input="search"
         >
@@ -263,7 +263,7 @@ watch(
             </li>
           </ul>
           <p v-else class="text-[12px] text-carbon-3 mt-2">
-            No owners yet — this centre's projects have no P&L viewer.
+            No owners yet — this Business Unit's projects have no P&L viewer.
           </p>
         </div>
       </div>

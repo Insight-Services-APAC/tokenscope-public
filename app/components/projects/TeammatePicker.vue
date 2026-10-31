@@ -78,7 +78,7 @@ function pick(hit: PickedTeammate) {
         type="search"
         :placeholder="props.placeholder"
         :disabled="props.disabled"
-        class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+        class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
         :data-testid="`${props.testid}-search`"
         @input="onInput"
       >

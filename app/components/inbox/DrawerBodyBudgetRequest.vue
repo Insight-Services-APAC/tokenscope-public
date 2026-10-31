@@ -3,7 +3,7 @@
  * A budget request (quota_request, spec §5): either a member asking the
  * project's managers for more budget ('quota-request'), or the requester being
  * told the decision ('quota-request-decided'). The inbox only notifies (A10):
- * deciding happens on the project page's Manage section, which this links to.
+ * deciding happens in the project page's Manage drawer (Budget requests), which this links to.
  */
 import { computed } from 'vue'
 
@@ -47,12 +47,12 @@ const projectHref = computed(() =>
         “{{ reason }}”
       </p>
       <p class="mt-3 text-[12px] text-carbon-3 leading-relaxed">
-        Approve it, with this amount or another, or decline it with a note, from the project's
-        Manage section. Every pending request stays listed there, whatever happens to this message.
+        Approve it, with this amount or another, or decline it with a note, under Manage at the top of
+        the project's page. Every pending request stays listed there, whatever happens to this message.
       </p>
       <p v-if="toAdmins" class="mt-2 text-[12px] text-carbon-3 leading-relaxed" data-testid="budget-request-no-manager">
         This project has no manager, so the request came to its region's admins. Decide it from the
-        project's Manage section, which opens for you as an admin. Name a manager under Admin → Projects
+        project's page, where Manage opens for you as an admin. Name a manager under Admin → Projects
         (Members) and later requests go to them instead.
       </p>
     </div>

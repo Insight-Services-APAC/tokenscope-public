@@ -1,12 +1,15 @@
 /*
  * Roles + demo personas — pilot-shaped.
  *
- * Six canonical roles per the design / chrome.jsx RoleMenu (see ROLES below:
- * developer, manager, admin, finance, global-finops, platform-admin). Per
- * docs/build/mvp-lite-epic.md §Epic 3: "4 demo personas → each lands on
- * role-correct page". Two members are RETIRED and hold no capability:
- * `finance` (never minted) and `global-finops` (retired 2026-09-05) — both are
- * kept in the enum for historical rows only. See the banner above ADMIN_ROLES.
+ * Six enum members, first shaped by the prototype's RoleMenu
+ * (docs/archive/ux-pilot/tokenscope-pilot-design/project/src/chrome.jsx; see ROLES below: developer, manager, admin, finance,
+ * global-finops, platform-admin). Per docs/archive/build-plans/mvp-lite-epic.md
+ * §Epic 3: "4 demo personas → each lands on role-correct page". Three are
+ * assignable today: developer, manager and platform-admin ("Admin"). `admin`
+ * ("Region admin") can no longer be granted, though a remaining holder keeps
+ * region-scoped access. `finance` (never minted) and `global-finops` (retired
+ * 2026-09-05) hold no capability and are kept in the enum for historical rows
+ * only. See the banner above ADMIN_ROLES.
  *
  * Persona records below are the dev-mode mapping. Real Entra OIDC
  * (Epic 10) replaces dev-login but the role enum stays.

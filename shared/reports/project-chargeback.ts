@@ -65,6 +65,8 @@ export interface MeProjectChargebackResponse {
     role: string
     access: 'member' | 'cou-owner' | 'admin'
     budget_allocation_id: string | null
+    /** The latest top-up in effect when the budget is top-ups only (no baseline), else null (#513). */
+    budget_topup_allocation_id: string | null
     /** The viewer may manage this project: its current PM, or an admin in scope (spec §4). */
     can_manage: boolean
   }

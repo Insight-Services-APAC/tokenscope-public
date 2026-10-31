@@ -452,7 +452,7 @@ function humaniseEventType(eventType: string): string {
                 v-model="budgetUsd"
                 type="text"
                 inputmode="decimal"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md font-mono focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md font-mono focus:border-brand-harmony"
                 data-testid="alloc-budget"
               >
             </label>
@@ -461,7 +461,7 @@ function humaniseEventType(eventType: string): string {
               <input
                 v-model="fromIso"
                 type="date"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
                 data-testid="alloc-from"
               >
             </label>
@@ -470,7 +470,7 @@ function humaniseEventType(eventType: string): string {
               <input
                 v-model="toIso"
                 type="date"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
                 data-testid="alloc-to"
               >
             </label>
@@ -478,7 +478,7 @@ function humaniseEventType(eventType: string): string {
         </UiCard>
 
         <UiCard>
-          <div class="text-sm font-bold text-carbon mb-3">Assigned developers</div>
+          <div class="text-sm font-bold text-carbon mb-3">Members</div>
           <DevChipPicker :devs="data.devs" @remove="removeMember" />
 
           <div class="mt-4 pt-4 border-t border-calm-2">
@@ -489,7 +489,7 @@ function humaniseEventType(eventType: string): string {
               v-model="addSearch"
               type="text"
               placeholder="Search teammates by name or email…"
-              class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+              class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
               data-testid="dev-add-search"
               @input="onAddSearch"
             >
@@ -562,7 +562,7 @@ function humaniseEventType(eventType: string): string {
                 step="0.01"
                 min="0"
                 inputmode="decimal"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md font-mono text-right focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md font-mono text-right focus:border-brand-harmony"
                 :data-testid="`cap-${d.teammate_id}`"
               >
             </div>
@@ -652,7 +652,7 @@ function humaniseEventType(eventType: string): string {
               <dd class="text-carbon">{{ data.focused.region_code ?? '—' }}</dd>
             </div>
             <div class="flex justify-between">
-              <dt class="text-carbon-3">Cost-owning unit</dt>
+              <dt class="text-carbon-3">Business Unit</dt>
               <dd class="text-carbon">{{ data.focused.cou_display_name ?? '—' }}</dd>
             </div>
             <div class="flex justify-between">

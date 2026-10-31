@@ -24,7 +24,7 @@ type Tx = PostgresJsDatabase<typeof schema>
 
 export interface AppendTopupInput {
   projectId: string
-  /** The pool baseline the top-up was added from — the audit row's subject. */
+  /** The pool row the top-up was added from (its baseline, or a top-up when the budget is top-ups only) — the audit row's subject. */
   focusedAllocationId: string
   budgetUsd: string
   /** tstzrange literal. */

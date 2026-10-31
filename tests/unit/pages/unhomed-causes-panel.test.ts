@@ -272,8 +272,8 @@ describe('unhomed cause-split panel', () => {
       'Across regions',
       'Regional (own region)',
       'Regional (all regions)',
-      'Cost centres (owned)',
-      'Cost centres (all)',
+      'Business Units (owned)',
+      'Business Units (all)',
       'Finance (whole company)',
     ]) {
       expect(PANEL, `scope name hard-coded in the template: ${scope}`).not.toContain(scope)
@@ -330,7 +330,7 @@ describe('unhomed cause-split panel', () => {
     // Stops an operator chasing a discrepancy against the reconciliation
     // surface, and stops them calling the split wrong when it is merely scoped.
     expect(says(PANEL, 'covers CHARGEABLE spend only')).toBe(true)
-    expect(says(PANEL, 'chargeback-exempt spend can also carry no cost-owning unit')).toBe(true)
+    expect(says(PANEL, 'chargeback-exempt spend can also carry no Business Unit')).toBe(true)
   })
 
   it('admits the history is half live and half snapshot, not uniformly recomputed', () => {

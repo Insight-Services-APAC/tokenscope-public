@@ -101,10 +101,10 @@ export async function createProject(
     regionId: input.region_id,
     mustBeActive: true,
     mustBeCostOwning: true,
-    statusMessage: 'cost_owning_unit_id is not an active cost-owning unit in this region',
+    statusMessage: 'cost_owning_unit_id is not an active Business Unit in this region',
     data: {
       type: 'https://tokenscope.example.com/errors/unprocessable',
-      title: 'Invalid cost-owning unit',
+      title: 'Invalid Business Unit',
       status: 422,
       detail: 'cost_owning_unit_id must reference an active Business Unit in the project\'s region.',
     },

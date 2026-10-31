@@ -185,7 +185,7 @@ v-for="seg in billLanes" :key="seg.lane" class="flex items-center gap-1.5 text-[
              summed with the §A usage-signal trend below. -->
         <UiCard data-testid="practice-bill-weekly">
           <div class="text-sm font-semibold mb-1">Bill by surface · weekly</div>
-          <div class="text-[11px] text-carbon-3 mb-3">Reconciled §B bill per week, by surface · 14-week rolling · billed, not the usage signal</div>
+          <div class="text-[11px] text-carbon-3 mb-3">Reconciled bill per week, by surface · 14-week rolling · billed, not the usage signal</div>
           <div v-if="billWeekly.bars.length" class="flex items-end gap-1 h-[140px]">
             <div
               v-for="b in billWeekly.bars" :key="b.weekStart"

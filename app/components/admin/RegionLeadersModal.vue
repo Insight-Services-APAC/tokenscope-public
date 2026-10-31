@@ -177,13 +177,13 @@ watch(
             v-model="query"
             type="search"
             placeholder="Search the directory by name or email…"
-            class="flex-1 px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+            class="flex-1 px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
             data-testid="region-leaders-search"
             @input="search"
           >
           <select
             v-model="kind"
-            class="px-2 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+            class="px-2 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony"
             data-testid="region-leaders-kind"
             title="Region SVP — a geographic leader. Shared-function global — IT/HR-style global function."
           >

@@ -196,7 +196,7 @@ async function discover() {
       v-if="toast"
       :data-testid="`region-rules-toast-${toast.kind}`"
       class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok' ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30' : 'bg-brand-hunger/10 text-brand-hunger border border-brand-hunger/30'"
+      :class="toast.kind === 'ok' ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30' : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
     >
       {{ toast.message }}
     </div>
@@ -268,7 +268,7 @@ async function discover() {
         </label>
         <label class="text-[12px] font-semibold text-carbon">
           Value
-          <input v-model="formValue" data-testid="rule-value" :placeholder="regionAttribute(formAttribute)?.example" class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none">
+          <input v-model="formValue" data-testid="rule-value" :placeholder="regionAttribute(formAttribute)?.example" class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony">
         </label>
         <div>
           <label class="text-[12px] font-semibold text-carbon">
@@ -325,6 +325,6 @@ async function discover() {
     </div>
   </div>
   <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/department-map">
-    <div class="text-lg font-bold text-carbon">Global finance access required.</div>
+    <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

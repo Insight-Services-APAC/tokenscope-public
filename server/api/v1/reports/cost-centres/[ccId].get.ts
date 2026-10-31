@@ -97,7 +97,7 @@ export default defineEventHandler(async (event) => {
    * ZodError that is not an H3Error — another 500. Fixed on /trend first; the
    * sibling kept them, which is how the pattern would have been copied again.
    */
-  const ccId = requireUuidParam(event, 'ccId', 'cost centre id')
+  const ccId = requireUuidParam(event, 'ccId', 'Business Unit id')
   const query = await getValidated(event, Query)
   /*
    * ONE clock for this request, the same ownership rule every other scope

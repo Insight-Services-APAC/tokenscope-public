@@ -213,8 +213,14 @@ export default defineEventHandler(async (event) => {
       })
     }
 
-    // J5: the PM's budget entry point — role from the caller's own assignment;
-    // budget_allocation_id is the currently-effective baseline.
+    // J5: the PM's budget entry point — role from the caller's own assignment.
+    // budget_allocation_id is the pool baseline in effect now: the row the
+    // allocation editor changes and splits. A project can also be budgeted by
+    // top-ups alone (the rows fetchProjectAllocation sums for
+    // `budget.allocation_usd` are baseline AND top-up), so when there is no
+    // baseline budget_topup_allocation_id names its latest top-up, which a
+    // top-up can be added from, and Manage says the budget exists instead of
+    // offering to create one (#513). Neither is set: no budget in effect.
     const viewerRows = await tx.execute<{ role: string }>(sqlRaw`
       SELECT role FROM project_assignment
       WHERE project_id = ${project.id}::uuid
@@ -223,17 +229,20 @@ export default defineEventHandler(async (event) => {
       LIMIT 1
     `)
     const viewerRole = [...viewerRows][0]?.role ?? 'member'
-    const baselineRows = await tx.execute<{ id: string }>(sqlRaw`
-      SELECT id::text AS id FROM allocation
+    const poolRows = await tx.execute<{ id: string; kind: string }>(sqlRaw`
+      SELECT id::text AS id, allocation_kind AS kind FROM allocation
       WHERE scope_type = 'project' AND scope_id = ${project.id}::uuid
-        AND teammate_id IS NULL AND allocation_kind = 'baseline'
+        AND teammate_id IS NULL AND allocation_kind IN ('baseline', 'top-up')
         AND effective @> now()
+      ORDER BY (allocation_kind = 'baseline') DESC, lower(effective) DESC, id
       LIMIT 1
     `)
+    const pool = [...poolRows][0]
     const viewer = {
       role: viewerRole,
       access: project.access,
-      budget_allocation_id: [...baselineRows][0]?.id ?? null,
+      budget_allocation_id: pool?.kind === 'baseline' ? pool.id : null,
+      budget_topup_allocation_id: pool?.kind === 'top-up' ? pool.id : null,
       // The Manage section (spec §4): the project's current PM, or an admin in
       // scope. The same two answers the PM routes gate on.
       can_manage: viewerRole === 'manager' || isProjectAdmin(session, project.region_id),

@@ -1364,7 +1364,7 @@ export function cardsToCsv(
 ): string {
   const lines = [
     csvMetaLine(
-      `# tokenscope cost-centres · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'}`
+      `# tokenscope business-units · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'}`
     ),
     // `charge_usd` (§B chargeback, the bill lane) sits beside `burn_usd` (§A usage) and is
     // ALWAYS present regardless of the on-screen lane, so the export is complete in both.
@@ -1412,7 +1412,7 @@ export function overSoftCapToCsv(
 ): string {
   const lines = [
     csvMetaLine(
-      `# tokenscope cost-centre over-soft-cap · cc=${meta.ccLabel} · month=${meta.month}` +
+      `# tokenscope business-unit over-soft-cap · bu=${meta.ccLabel} · month=${meta.month}` +
       ` · soft_cap_usd=${usd(data.softCapUsd)} · roster=${data.rosterCount}` +
       ` · roster_usd=${usd(data.rosterUsd)}` +
       ` · within_allowance=${data.withinAllowance.teammates}` +
@@ -1443,7 +1443,7 @@ export function driversToCsv(
 ): string {
   const lines = [
     csvMetaLine(
-      `# tokenscope cost-centre drivers · cc=${meta.ccLabel} · axis=${meta.axis} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'}`
+      `# tokenscope business-unit drivers · bu=${meta.ccLabel} · axis=${meta.axis} · month=${meta.month} · as_of=${meta.asOfDate ?? 'n/a'}`
     ),
     'driver,spend_usd,share_pct,spend_class,otel_emitted_usd,api_reconciled_usd,provider_usage_usd,surface_mix',
     ...rows.map(

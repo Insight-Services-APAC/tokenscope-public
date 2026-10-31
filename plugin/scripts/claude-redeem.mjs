@@ -66,6 +66,7 @@ import { isMainModule } from './is-main.mjs'
 import { resolveApiBase, configuredServerUrl, knownApiOrigins } from './api-base.mjs'
 import { discoverMcpOrigin } from './mcp-origin.mjs'
 import { resolveClaudeConfigDir } from './claude-config-dir.mjs'
+import { staleInstall, staleInstallMessage } from './stale-install.mjs'
 import {
   acceptApiBaseArg,
   assertConfinedPath,
@@ -613,6 +614,18 @@ async function main() {
     console.error(
       '[tokenscope] handoff code is required (pass it as the first argument or via --handoff-code)',
     )
+    process.exit(1)
+  }
+
+  // #456: a session open across a plugin update still serves the old version's
+  // setup text, pointing here. Stop before the handoff is spent, so nothing an
+  // older redeem would write (or undo) reaches this install.
+  const stale = staleInstall({
+    pluginRoot: fileURLToPath(new URL('..', import.meta.url)),
+    configDir: resolveClaudeConfigDir({ home: realHome() }).dir,
+  })
+  if (stale) {
+    console.error(staleInstallMessage(stale))
     process.exit(1)
   }
 

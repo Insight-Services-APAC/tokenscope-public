@@ -310,7 +310,7 @@ export default defineEventHandler(async (event) => {
       costDrift: null,
       costDriftScopedOut: {
         reason: 'platform-admin-only' as const,
-        detail: 'Cost drift is estate-wide (v_cost_drift has no region), so only platform-admin can read it.',
+        detail: 'Cost drift is estate-wide (it has no region), so only an Admin can read it.',
       },
       costingRungs,
       reads: { costingRungs: rungsRead },

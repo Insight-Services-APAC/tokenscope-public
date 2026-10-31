@@ -176,6 +176,16 @@ export function matchAdminNavItem(pathOrFullPath: string): AdminNavItem | null {
   return best
 }
 
+/**
+ * The Policies pages `role` can open, in sidebar order. System info lists these
+ * as "editable settings live under Policies"; it used to hand-copy the list and
+ * fell two pages behind the sidebar (Provider governance, Client connection).
+ */
+export function policyNavItemsFor(role: string | null | undefined): AdminNavItem[] {
+  const group = ADMIN_NAV.find((g) => g.label === 'Policies')
+  return (group?.items ?? []).filter((i) => roleMeetsAccess(role, i.access))
+}
+
 /** The group containing an item (by identity), or null. */
 export function groupForItem(item: AdminNavItem | null): AdminNavGroup | null {
   if (!item) return null

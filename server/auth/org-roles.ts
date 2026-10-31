@@ -69,14 +69,27 @@ export type CanCreateProjectsVerdict =
   | { ok: true }
   | { ok: false; reason: 'not-on-list' | 'outside-own-region' | 'no-placement-region' | 'connector-unsupported' }
 
-/** True when the teammate holds a live PMO-list grant (mig 0164). */
-export async function hasProjectManagerGrant(db: Db, teammateId: string): Promise<boolean> {
-  const rows = await db.execute<{ ok: boolean }>(sql`
-    SELECT TRUE AS ok FROM project_manager_grant
-    WHERE teammate_id = ${teammateId}::uuid AND revoked_at IS NULL
-    LIMIT 1
+/**
+ * The teammate as a Project managers list holder: present only when they hold a
+ * live grant (mig 0164) AND are an active teammate. The one definition both
+ * `canCreateProjects` and GET /me/capabilities read, so the hint cannot offer
+ * what the create refuses.
+ */
+async function activeProjectManager(db: Db, teammateId: string): Promise<{ region_id: string | null } | null> {
+  const rows = await db.execute<{ region_id: string | null }>(sql`
+    SELECT t.region_id::text AS region_id
+    FROM teammate t
+    WHERE t.id = ${teammateId}::uuid
+      AND t.is_active
+      AND EXISTS (SELECT 1 FROM project_manager_grant g
+                   WHERE g.teammate_id = t.id AND g.revoked_at IS NULL)
   `)
-  return [...rows].length > 0
+  return [...rows][0] ?? null
+}
+
+/** True when the teammate is an active holder of a live PMO-list grant. */
+export async function isActiveProjectManager(db: Db, teammateId: string): Promise<boolean> {
+  return (await activeProjectManager(db, teammateId)) !== null
 }
 
 /** The platform value of `projects.pm_own_region_only` (A4): true = own region only. */
@@ -105,15 +118,8 @@ export async function canCreateProjects(
   regionId: string,
 ): Promise<CanCreateProjectsVerdict> {
   if (actor.kind === 'connector') return { ok: false, reason: 'connector-unsupported' }
-  const rows = await db.execute<{ is_active: boolean; region_id: string | null }>(sql`
-    SELECT t.is_active, t.region_id::text AS region_id
-    FROM teammate t
-    WHERE t.id = ${actor.teammateId}::uuid
-      AND EXISTS (SELECT 1 FROM project_manager_grant g
-                   WHERE g.teammate_id = t.id AND g.revoked_at IS NULL)
-  `)
-  const holder = [...rows][0]
-  if (!holder?.is_active) return { ok: false, reason: 'not-on-list' }
+  const holder = await activeProjectManager(db, actor.teammateId)
+  if (!holder) return { ok: false, reason: 'not-on-list' }
   if (await pmOwnRegionOnly(db)) {
     if (!holder.region_id) return { ok: false, reason: 'no-placement-region' }
     if (holder.region_id !== regionId) return { ok: false, reason: 'outside-own-region' }

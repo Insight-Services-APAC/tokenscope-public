@@ -10,7 +10,7 @@
  */
 import { computed, ref, type ComponentPublicInstance } from 'vue'
 import UiButton from '../ui/Button.vue'
-import { apiErrorDetail } from '../../composables/useApiError'
+import { mutationErrorDetail } from '../../composables/useApiError'
 import { useModalA11y } from '../../composables/useModalA11y'
 import type { PlacementApplyResponse, PlacementCheckRow } from '#shared/placement/placement-check'
 import { applyPlacementInBatches } from '../../utils/placement-apply'
@@ -69,9 +69,18 @@ async function submit() {
   error.value = null
   const { done, error: e } = await applyPlacementInBatches(buildPlacementApplyItems(props.rows, confirmManual.value))
   if (e) {
+    // "Not changed" only when the server refused the batch; otherwise it may have landed.
     error.value = done.results.length
-      ? apiErrorDetail(e, `Apply stopped after ${done.results.length}; the rest were not changed.`)
-      : apiErrorDetail(e, 'Apply failed. Nothing was changed.')
+      ? mutationErrorDetail(
+          e,
+          `Apply stopped after ${done.results.length}; the rest were not changed.`,
+          `Apply stopped after ${done.results.length}. We could not tell whether the next batch was applied: reload the placement check to see where everyone is now.`,
+        )
+      : mutationErrorDetail(
+          e,
+          'Apply failed. Nothing was changed.',
+          'We could not tell whether the apply went through. Reload the placement check to see where everyone is now before applying again.',
+        )
   }
   saving.value = false
   if (done.results.length) {

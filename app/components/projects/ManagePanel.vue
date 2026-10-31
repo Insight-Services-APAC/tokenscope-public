@@ -1,8 +1,10 @@
 <script setup lang="ts">
 /*
- * Manage section of the project page (docs/design/project-requests/00-spec.md
- * §4): what the project's PM, or an admin in scope, can change here — budget,
- * end date, members, and pending budget requests.
+ * Manage drawer body on the project page (docs/design/project-requests/00-spec.md
+ * §4; layout docs/design/ideas/project-page-actions, #477): what the project's
+ * PM, or an admin in scope, can change here, one tab each: pending budget
+ * requests, budget, end date, members. Hidden tabs stay mounted (v-show), so a
+ * half-filled form survives a look at another tab.
  *
  * Every action calls the route that decides; nothing here re-derives the gate.
  * The server's own refusal text is shown as-is (e.g. the last-PM 409).
@@ -20,7 +22,10 @@ const props = defineProps<{
   /** project.end_date as the server sent it (timestamptz text) or null. */
   endDate: string | null
   ended: boolean
+  /** The pool baseline in effect: what the allocation editor changes and splits. */
   budgetAllocationId: string | null
+  /** The latest top-up in effect when the budget is top-ups only (no baseline) (#513). */
+  budgetTopupAllocationId?: string | null
   /** The server's UTC day (YYYY-MM-DD), null until the clock lands. */
   todayUtc: string | null
   pendingRequests: BudgetRequestRow[]
@@ -29,6 +34,18 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ changed: []; retry: [] }>()
+
+const tab = defineModel<ManageTab>('tab', { default: 'budget' })
+const tabs = computed(() => [
+  {
+    key: 'requests',
+    // The count only once the list loaded: "(0)" for a list that failed would be a claim.
+    label: props.requestsState === 'ready' ? `Budget requests (${props.pendingRequests.length})` : 'Budget requests',
+  },
+  { key: 'budget', label: 'Budget' },
+  { key: 'end-date', label: 'End date' },
+  { key: 'members', label: 'Members' },
+])
 
 /**
  * The message for a failed save. When the server refused (a 4xx), its reason.
@@ -254,17 +271,36 @@ async function decide(r: BudgetRequestRow, kind: 'approve' | 'reject') {
 const who = (r: BudgetRequestRow) => r.requester_display_name ?? r.requester_email.split('@')[0]
 </script>
 
+<script lang="ts">
+export type ManageTab = 'requests' | 'budget' | 'end-date' | 'members'
+</script>
+
 <template>
-  <UiCard id="manage" data-testid="project-manage">
-    <UiEyebrow>Manage this project</UiEyebrow>
-    <p class="text-[11px] text-carbon-3 mt-1">
-      You are a manager of this project, or an admin. Budgets here are for reporting: they block nothing.
+  <div data-testid="project-manage">
+    <div class="overflow-x-auto mb-3">
+      <UiTabs class="!mb-0" :tabs="tabs" :model-value="tab" @update:model-value="tab = $event as ManageTab" />
+    </div>
+    <p class="text-[11px] text-carbon-3 mb-4">Budgets here are for reporting: they block nothing.</p>
+    <p v-if="ended" class="text-[12px] text-carbon-3 -mt-2 mb-4" data-testid="manage-ended">
+      This project has ended, so its budget no longer changes.
     </p>
 
     <!-- Budget -->
-    <section class="mt-4" data-testid="manage-budget">
-      <div class="text-xs text-carbon-3 font-bold uppercase tracking-[1px] mb-2">Budget</div>
-      <div v-if="budgetAllocationId" class="flex items-center gap-4 flex-wrap">
+    <section v-show="tab === 'budget'" aria-label="Budget" data-testid="manage-budget">
+      <!-- Ended: the budget no longer changes (the line above says so), so no
+           top-up, change or create offer; only the way to look at it. -->
+      <div v-if="ended" class="text-[12px]" data-testid="manage-budget-ended">
+        <NuxtLink
+          v-if="budgetAllocationId || budgetTopupAllocationId"
+          :to="`/allocations/${budgetAllocationId ?? budgetTopupAllocationId}`"
+          class="font-semibold text-brand-harmony hover:underline"
+          data-testid="manage-see-budget"
+        >
+          See the budget →
+        </NuxtLink>
+        <span v-else class="text-carbon-3">It has no budget for the current period.</span>
+      </div>
+      <div v-else-if="budgetAllocationId" class="flex items-center gap-4 flex-wrap">
         <NuxtLink
           :to="`/allocations/${budgetAllocationId}?focus=topup`"
           class="text-[12px] font-semibold text-brand-harmony hover:underline"
@@ -281,7 +317,24 @@ const who = (r: BudgetRequestRow) => r.requester_display_name ?? r.requester_ema
         </NuxtLink>
       </div>
       <div v-else class="space-y-2" data-testid="manage-set-budget">
-        <p class="text-[12px] text-carbon-2">This project has no budget for the current period. Set one:</p>
+        <!-- Budgeted by top-ups alone (#513): the budget exists, so say so; a
+             baseline set here adds to the top-ups, it does not replace them. -->
+        <template v-if="budgetTopupAllocationId">
+          <p class="text-[12px] text-carbon-2" data-testid="manage-topups-only">
+            This project's budget for the current period is top-ups only, with no baseline.
+          </p>
+          <NuxtLink
+            :to="`/allocations/${budgetTopupAllocationId}?focus=topup`"
+            class="inline-block text-[12px] font-semibold text-brand-harmony hover:underline"
+            data-testid="manage-topup"
+          >
+            Add to the budget →
+          </NuxtLink>
+          <p class="text-[12px] text-carbon-2">
+            To change the total or split it per developer, set a baseline. It is added to the top-ups, it does not replace them:
+          </p>
+        </template>
+        <p v-else class="text-[12px] text-carbon-2">This project has no budget for the current period. Set one:</p>
         <div class="flex items-end gap-2 flex-wrap">
           <label class="text-[11px] text-carbon-3">
             Amount (USD)
@@ -304,8 +357,7 @@ const who = (r: BudgetRequestRow) => r.requester_display_name ?? r.requester_ema
     </section>
 
     <!-- End date -->
-    <section class="mt-5" data-testid="manage-end-date">
-      <div class="text-xs text-carbon-3 font-bold uppercase tracking-[1px] mb-2">End date</div>
+    <section v-show="tab === 'end-date'" aria-label="End date" data-testid="manage-end-date">
       <div class="flex items-end gap-2 flex-wrap">
         <label class="text-[11px] text-carbon-3">
           Ends at 00:00 UTC on
@@ -357,8 +409,7 @@ const who = (r: BudgetRequestRow) => r.requester_display_name ?? r.requester_ema
     </section>
 
     <!-- Members -->
-    <section class="mt-5" data-testid="manage-members">
-      <div class="text-xs text-carbon-3 font-bold uppercase tracking-[1px] mb-2">Members</div>
+    <section v-show="tab === 'members'" aria-label="Members" data-testid="manage-members">
       <ul class="space-y-1">
         <li
           v-for="m in members"
@@ -433,8 +484,7 @@ const who = (r: BudgetRequestRow) => r.requester_display_name ?? r.requester_ema
     </section>
 
     <!-- Pending budget requests: this list is the work queue (A10). -->
-    <section class="mt-5" data-testid="manage-budget-requests">
-      <div class="text-xs text-carbon-3 font-bold uppercase tracking-[1px] mb-2">Budget requests</div>
+    <section v-show="tab === 'requests'" aria-label="Budget requests" data-testid="manage-budget-requests">
       <p v-if="requestsState === 'loading'" class="text-[12px] text-carbon-3" data-testid="manage-requests-loading">
         Loading budget requests…
       </p>
@@ -498,5 +548,5 @@ const who = (r: BudgetRequestRow) => r.requester_display_name ?? r.requester_ema
         </li>
       </ul>
     </section>
-  </UiCard>
+  </div>
 </template>

@@ -1060,6 +1060,20 @@ describe('overview', () => {
     expect(postsTo((u) => u === `/api/v1/admin/org-units/${U_CORE}/owners`)).toHaveLength(1)
   })
 
+  it('owner left: a removal that failed without an answer does not claim the old owner stayed', async () => {
+    vi.useFakeTimers()
+    server.decisions.decisions = allDecisions().filter((d) => d.kind === 'owner-left')
+    server.search = [{ oid: 'oid-new', email: 'new@example.com', display_name: 'Nia New', department: null, job_title: null }]
+    server.revoke = async () => {
+      throw new TypeError('Failed to fetch')
+    }
+    const w = await mountPage()
+    await replace(w, 'owner-left')
+    expect(w.find(tid('org-setup-decision-notice')).text()).toBe(
+      'New owner set. We could not tell whether the old owner was removed: check the region page.',
+    )
+  })
+
   it('no placement opens Regions with that person unfolded; not read retries the failed lookups', async () => {
     vi.useFakeTimers()
     server.decisions.decisions = [decision('no-placement', { oid: 'oid-a1a', name: 'Cat Lee' }), decision('not-read', {})]
@@ -1129,6 +1143,39 @@ describe('overview', () => {
     await w.find(tid('org-setup-decision-keep')).trigger('click')
     await flushPromises()
     expect(postsTo((u) => u.endsWith('/org-setup/dismissals'))[0]!.body).toEqual({ kind: 'unit-under-other-region', subjectKey: 'key-unit-under-other-region' })
+  })
+
+  /** Keep fails with `err`; `landed` = the dismissal took effect before the failure. */
+  async function keepFailing(err: unknown, landed = false) {
+    server.decisions.decisions = [decision('unit-under-other-region', { orgUnitId: U_FAR, unitName: 'Far', regionId: EMEA })]
+    fetchMock.mockImplementation(async (url: string, opts: { method?: string; body?: unknown } = {}) => {
+      if (url === '/api/v1/admin/org-setup/dismissals') {
+        calls.push({ url, method: opts.method ?? 'GET', body: opts.body })
+        if (landed) server.decisions.decisions = []
+        throw err
+      }
+      return route(url, opts)
+    })
+    const w = await mountPage()
+    await w.find(tid('org-setup-decision-keep')).trigger('click')
+    await flushPromises()
+    return w
+  }
+
+  it('a refused action shows the server reason on the card', async () => {
+    const w = await keepFailing({ statusCode: 409, data: { data: { detail: 'Already dismissed.' } } })
+    expect(w.find(tid('org-setup-decision-error')).text()).toBe('Already dismissed.')
+    expect(w.find(tid('org-setup-decision-notice')).exists()).toBe(false)
+  })
+
+  it('an action that failed without an answer says the outcome is unknown, never "Nothing was changed", and reloads', async () => {
+    const w = await keepFailing(new TypeError('Failed to fetch'), true)
+    const notice = w.find(tid('org-setup-decision-notice')).text()
+    expect(notice).toContain('We could not tell whether that went through')
+    expect(notice).not.toContain('Nothing was changed')
+    // The reload shows the dismissal landed: the card is gone, the notice stays.
+    expect(w.find(tid('org-setup-decision-keep')).exists()).toBe(false)
+    expect(w.find(tid('org-setup-decision-error')).exists()).toBe(false)
   })
 })
 

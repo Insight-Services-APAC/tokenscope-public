@@ -14,6 +14,9 @@ import { selfHealPluginPaths, dropSettingsRefreshToken } from '../../../plugin/h
 import { writeClaudeSettings } from '../../../plugin/scripts/claude-redeem.mjs'
 import { buildHelperCommand } from '../../../plugin/scripts/env-builder.mjs'
 
+// Windows (#430): skipped on win32 because this file expects the .sh helper; on win32 the helper is the .ps1.
+const POSIX_ONLY = process.platform === 'win32'
+
 let dir = ''
 let settingsPath = ''
 let storeDir = '' // the state dir; never the real ~/.tokenscope
@@ -37,7 +40,7 @@ beforeEach(() => {
 })
 afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
-describe('selfHealPluginPaths', () => {
+describe.skipIf(POSIX_ONLY)('selfHealPluginPaths', () => {
   it('repoints stale paths to the active version and PRESERVES the credential + other keys', () => {
     writeFileSync(settingsPath, JSON.stringify(STALE, null, 2))
     selfHealPluginPaths({ settingsPath, scriptsDir, storeDir, home: dir })
@@ -100,7 +103,7 @@ describe('selfHealPluginPaths', () => {
  * active path, so a `--state-dir` was dropped at the next session start, and a
  * session-scoped settings file was never reached at all.
  */
-describe('selfHealPluginPaths — rebuilds from the record', () => {
+describe.skipIf(POSIX_ONLY)('selfHealPluginPaths — rebuilds from the record', () => {
   const active = () => `"${join(scriptsDir, 'otel-headers-helper.sh')}" --tool claude-code`
   const helperOf = (p: string) => JSON.parse(readFileSync(p, 'utf8')).otelHeadersHelper
 
@@ -217,7 +220,7 @@ describe('selfHealPluginPaths — rebuilds from the record', () => {
  * start never reads X (it is neither the default store nor the dir the global
  * helper names), so a plugin update left S on the removed version for good.
  */
-describe('selfHealPluginPaths — a settings file enrolled in another state dir', () => {
+describe.skipIf(POSIX_ONLY)('selfHealPluginPaths — a settings file enrolled in another state dir', () => {
   const bundleEnv = {
     TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'rt_isolated',
     TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://ts.example.com/api/v1/oauth/token',
@@ -286,7 +289,7 @@ describe('selfHealPluginPaths — a settings file enrolled in another state dir'
   })
 })
 
-describe('dropSettingsRefreshToken — the durable credential leaves the global env block', () => {
+describe.skipIf(POSIX_ONLY)('dropSettingsRefreshToken — the durable credential leaves the global env block', () => {
   const IID = '9a1e0000-0000-4000-8000-000000000001'
   const BEARER = `https://ts.example.com/api/v1/instances/${IID}/bearer`
   const writeStore = (inDir: string, bearer = BEARER) => {

@@ -1,6 +1,6 @@
 /*
  * DrawerBodyBudgetRequest — the inbox side of budget requests (spec §5, A10).
- * A manager's item links to the project's Manage section; an item that fell
+ * A manager's item links to the project's Manage drawer; an item that fell
  * back to the region's admins (routing_scope stamped) says so and links there
  * too (the project page opens for an admin in scope); the requester's item
  * states the decision.
@@ -20,7 +20,7 @@ const request = {
 }
 
 describe('DrawerBodyBudgetRequest', () => {
-  it('a manager’s request item links to the Manage section', () => {
+  it('a manager’s request item links to the Manage drawer', () => {
     const w = mount(DrawerBodyBudgetRequest, { props: { category: 'quota-request', body: request }, global: { stubs } })
     expect(w.find('[data-testid="budget-request-facts"]').text()).toContain('Ada asked for $50.00 more budget on Acme')
     expect(w.find('[data-testid="budget-request-open-project"]').attributes('href')).toBe('/projects/ACME-1#manage')
@@ -32,7 +32,7 @@ describe('DrawerBodyBudgetRequest', () => {
       props: { category: 'quota-request', body: { ...request, routing_scope: 'region:x' } },
       global: { stubs },
     })
-    expect(w.find('[data-testid="budget-request-no-manager"]').text()).toContain('Manage section')
+    expect(w.find('[data-testid="budget-request-no-manager"]').text()).toContain('where Manage opens for you as an admin')
     expect(w.find('[data-testid="budget-request-open-project"]').attributes('href')).toBe('/projects/ACME-1#manage')
   })
 

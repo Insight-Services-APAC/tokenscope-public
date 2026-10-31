@@ -461,7 +461,7 @@ export async function resolveFinanceCou(tx: Tx, couId: string): Promise<FinanceC
     WHERE ou.id = ${couId}::uuid AND ou.is_cost_owning_unit = TRUE AND ou.retired_at IS NULL
     LIMIT 1`)
   const cou = [...rows][0]
-  if (!cou) throw createError({ statusCode: 404, statusMessage: 'cost-owning unit not found' })
+  if (!cou) throw createError({ statusCode: 404, statusMessage: 'Business Unit not found' })
   return {
     id: cou.id,
     code: cou.code,

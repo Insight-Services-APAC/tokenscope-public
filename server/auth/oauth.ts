@@ -462,7 +462,14 @@ export async function validateClientCredentials(
 }
 
 // ── Authorization codes (single-use) ────────────────────────────────────────
-/** Issue an auth code bound to a teammate; returns the raw code for the redirect. */
+/**
+ * Issue an auth code bound to a teammate; returns the raw code for the redirect.
+ *
+ * `sessionIssuedAt` is the approving cookie session's mint time (Session.issuedAt,
+ * the value isRevoked() judges). consumeAuthCode refuses the code if
+ * teammate.revoked_at is later, so a consent approved while a role change or
+ * region move was committing cannot outlive the session it came from (#431).
+ */
 export async function issueAuthCode(
   db: Db,
   params: {
@@ -472,8 +479,12 @@ export async function issueAuthCode(
     scope: string
     codeChallenge: string
     codeChallengeMethod: string
+    sessionIssuedAt: string
   },
 ): Promise<string> {
+  // An unreadable mint time sorts to epoch, as in server/utils/auth.ts: it must
+  // fail the revocation check, never pass it.
+  const sessionIssuedMs = Date.parse(params.sessionIssuedAt)
   const code = randomBytes(32).toString('hex')
   await db.insert(oauthAuthCode).values({
     codeHash: hashSessionToken(code),
@@ -484,6 +495,7 @@ export async function issueAuthCode(
     codeChallengeMethod: params.codeChallengeMethod,
     scope: params.scope,
     expiresAt: new Date(Date.now() + AUTH_CODE_TTL_MS),
+    sessionIssuedAt: new Date(Number.isFinite(sessionIssuedMs) ? sessionIssuedMs : 0),
   })
   return code
 }
@@ -501,7 +513,8 @@ export interface ConsumedAuthCode {
 /**
  * Consume an auth code: atomically mark it consumed iff it was unconsumed AND
  * not expired AND its teammate is still active AND was not revoked
- * (teammate.revoked_at) after the code was minted. The
+ * (teammate.revoked_at) after the code, or the session that approved it, was
+ * minted. The
  * `consumed_at IS NULL AND expires_at > now()` predicate + RETURNING makes this
  * a single-statement compare-and-swap — concurrent exchanges of the same code
  * see at most one success (replay-safe).
@@ -522,9 +535,44 @@ export interface ConsumedAuthCode {
  * deactivation oracle. Unburned is deliberate and not a weakening: the code is
  * useless while the account is retired, its TTL is 5 minutes
  * (AUTH_CODE_TTL_MS), and holding it still requires the raw secret.
+ *
+ * THE REVOCATION ANCHOR is the earlier of the code's created_at and the mint
+ * time of the cookie session that approved it (session_issued_at, mig 0168). A
+ * consent approved while a role change or region move was committing read the
+ * old revoked_at, and its code was created after the move's NOW(); judging
+ * created_at alone let that code through although its session was void (#431).
+ *
+ * CALL IT INSIDE THE EXCHANGE TRANSACTION. It first locks the teammate row FOR
+ * NO KEY UPDATE, the lock every role change, region move and revoke-sessions
+ * holds from its revoked_at bump to its commit (#431). Either the exchange
+ * locks first, and the move's token revocation, a later statement, sees the
+ * token this transaction commits; or the move does, and the CAS below, a new
+ * statement under READ COMMITTED, reads its committed revoked_at. Without the
+ * lock a token inserted between the move's revocation query and its commit
+ * escaped both. Not FOR UPDATE: moves rely on not conflicting with an FK's
+ * FOR KEY SHARE (#417). `teammate` is in the RLS bootstrap set, so the lock
+ * works on this endpoint's context-less lane.
+ *
+ * The wait is capped (lock_timeout, transaction-local). A bulk placement can
+ * hold many teammate rows in one transaction; waiting it out could outlast the
+ * client's own request timeout, and the exchange would then burn the code and
+ * mint a token nobody receives. On timeout the statement throws, the exchange
+ * transaction rolls back with the code unconsumed, and the client may retry.
+ *
+ * Two comparisons differ in detail from the cookie check (revocationDenies):
+ * the code is refused when revoked_at EQUALS the anchor (the cookie only when
+ * it is later), and session_issued_at comes from the app's clock while
+ * revoked_at and created_at come from the database's. The clock skew is the
+ * one the cookie check already lives with; the equal case fails closed here.
  */
 export async function consumeAuthCode(db: Db, rawCode: string): Promise<ConsumedAuthCode | null> {
   const codeHash = hashSessionToken(rawCode)
+  await db.execute(sql`SET LOCAL lock_timeout = '5s'`)
+  await db.execute(sql`
+    SELECT 1 FROM teammate
+     WHERE id = (SELECT teammate_id FROM oauth_auth_code WHERE code_hash = ${codeHash})
+       FOR NO KEY UPDATE
+  `)
   const rows = await db.execute<{
     id: string
     client_id: string
@@ -543,7 +591,8 @@ export async function consumeAuthCode(db: Db, rawCode: string): Promise<Consumed
              SELECT 1 FROM teammate tm
               WHERE tm.id = oauth_auth_code.teammate_id
                 AND tm.is_active IS TRUE
-                AND (tm.revoked_at IS NULL OR tm.revoked_at < oauth_auth_code.created_at)
+                AND (tm.revoked_at IS NULL
+                     OR tm.revoked_at < LEAST(oauth_auth_code.created_at, oauth_auth_code.session_issued_at))
            )
     RETURNING id::text AS id,
               client_id::text AS client_id,

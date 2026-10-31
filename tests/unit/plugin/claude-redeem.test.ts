@@ -35,6 +35,9 @@ import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { writeFakeHomePreload, fakeHomeNode, realIsolatedIndex } from './helpers/fake-home'
 
+// Windows (#430): skipped on win32 because this file expects EACCES on an unwritable path; Windows reports EPERM (claude-redeem-ps1 covers the Windows redeem).
+const POSIX_ONLY = process.platform === 'win32'
+
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — mjs import resolved by Vitest
 const { buildClaudeDeviceEnv, assertClaudeRedeemResponse, writeClaudeSettings, writeSharedCredentialStore, parseArgs } = await import(
@@ -96,7 +99,7 @@ afterEach(() => {
   else process.env.TOKENSCOPE_STATE_DIR = savedStateDir
 })
 
-describe('buildClaudeDeviceEnv', () => {
+describe.skipIf(POSIX_ONLY)('buildClaudeDeviceEnv', () => {
   it('maps the bundle + OAuth credential into the env keys the helper requires', () => {
     const env = buildClaudeDeviceEnv(FAKE_CLAUDE_BUNDLE, FAKE_OAUTH)
     expect(env.CLAUDE_CODE_ENABLE_TELEMETRY).toBe('1')
@@ -131,7 +134,7 @@ describe('buildClaudeDeviceEnv', () => {
   })
 })
 
-describe('assertClaudeRedeemResponse', () => {
+describe.skipIf(POSIX_ONLY)('assertClaudeRedeemResponse', () => {
   it('returns {claude, oauth} for a complete valid response', () => {
     const { claude, oauth } = assertClaudeRedeemResponse(FAKE_REDEEM_RESPONSE)
     expect(claude.otel_headers_helper_url).toBe('https://ts.example.com/api/v1/instances/f825e796/bearer')
@@ -227,7 +230,7 @@ describe('assertClaudeRedeemResponse', () => {
   })
 })
 
-describe('writeClaudeSettings', () => {
+describe.skipIf(POSIX_ONLY)('writeClaudeSettings', () => {
   // The helper RECORD the command is built from (buildHelperCommand), plus the
   // install it runs from. HELPER_CMD is what lands in settings.json.
   const HELPER = { record: { tool: 'claude-code', platform: 'linux' }, scriptsDir: '/plugin/scripts' }
@@ -709,7 +712,7 @@ describe('writeClaudeSettings', () => {
   })
 })
 
-describe('parseArgs', () => {
+describe.skipIf(POSIX_ONLY)('parseArgs', () => {
   it('accepts a bare positional handoff code', () => {
     expect(parseArgs(['abc123']).handoffCode).toBe('abc123')
   })
@@ -729,7 +732,7 @@ describe('parseArgs', () => {
 // End-to-end: spawn the real helper (main()) against a mock /setup/redeem server.
 // Covers the orchestration unit tests can't reach: URL resolution, the POST,
 // instance_id binding, exit codes, and the on-disk write.
-describe('main() against a mock redeem server', () => {
+describe.skipIf(POSIX_ONLY)('main() against a mock redeem server', () => {
   // Vitest runs with cwd at the repo root; resolve the helper from there.
   const HELPER = join(process.cwd(), 'plugin/scripts/claude-redeem.mjs')
   let server: ReturnType<typeof createServer>

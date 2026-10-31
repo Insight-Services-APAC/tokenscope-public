@@ -64,7 +64,7 @@ export const PLACEMENT_REFUSAL_TEXT: Record<PlacementApplyRefusal, string> = {
   'changed-since-check': 'Their placement changed after this page loaded. Reload and review.',
   'manual-not-confirmed': 'An admin placed them since this page loaded. Reload and confirm the move.',
   'derivation-changed': 'The directory no longer proposes this move. Reload and review.',
-  'target-invalid': `The target ${BU_LABEL} is no longer active or cost-owning.`,
+  'target-invalid': `The target unit is retired or no longer a ${BU_LABEL}.`,
   'not-found': 'This teammate no longer exists or is inactive.',
   error: 'The move failed. Nothing was changed for this person.',
 }

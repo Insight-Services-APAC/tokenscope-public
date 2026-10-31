@@ -161,7 +161,7 @@ describe('refreshLanded — fail-open guards', () => {
 })
 
 describe('refreshLanded — success path', () => {
-  it('200 → ok with last_emission + writes last-landed.json cache', async () => {
+  it('200 → ok with last_emission + writes last-landed.copilot-cli.json cache', async () => {
     writeConfig()
     writeAccess()
     mockFetch(() => ({
@@ -174,8 +174,8 @@ describe('refreshLanded — success path', () => {
     expect(r.silent).toBe(false)
     expect(r.revoked).toBe(false)
 
-    expect(existsSync(join(dir, 'last-landed.json'))).toBe(true)
-    const cache = JSON.parse(readFileSync(join(dir, 'last-landed.json'), 'utf8'))
+    expect(existsSync(join(dir, 'last-landed.copilot-cli.json'))).toBe(true)
+    const cache = JSON.parse(readFileSync(join(dir, 'last-landed.copilot-cli.json'), 'utf8'))
     expect(cache.instanceId).toBe(INSTANCE)
     expect(cache.lastEmission).toBe('2026-06-22T08:14:03Z')
     expect(cache.checkedAt).toBeTruthy()

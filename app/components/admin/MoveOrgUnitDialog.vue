@@ -130,7 +130,7 @@ async function move() {
           id="mou-parent"
           ref="firstField"
           v-model="newParentId"
-          class="mt-1 mb-2 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+          class="mt-1 mb-2 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony"
           data-testid="move-parent-select"
         >
           <option value="" disabled>Choose a parent</option>

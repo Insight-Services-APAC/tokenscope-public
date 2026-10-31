@@ -41,6 +41,7 @@ import {
 import { recordAuditEvent } from '../db/audit'
 import { z } from 'zod'
 import { SKILL_SETUP, SKILL_TAG, SKILL_PROJECT, SKILL_USAGE } from './skill-prompts.gen'
+import { copilotScriptLocator } from './copilot-locator'
 
 const logger = consola.withTag('mcp')
 
@@ -204,14 +205,14 @@ export function createMcpServer(dbOverride?: Db, publicOrigin?: string): McpServ
   // ── tag_session (WRITE — requires tokenscope.tag) ──────────────────────────
   server.tool(
     'tag_session',
-    'Tag (categorise) one of YOUR Claude conversations: assign it to a BUDGET (a project of any type — billable / pursuit / internal) and/or set an ACTIVITY label. project_id null = move OFF budget (unallocated); activity null = clear it; omit a field to leave it unchanged. This is TAGGING (categorisation), NOT budget allocation (which is admin-only). Get budget ids from list_my_projects and activity suggestions from list_activity_types. Requires the tokenscope.tag scope.',
+    'Tag (categorise) one of YOUR Claude sessions: assign it to a BUDGET (a project of any type — billable / pursuit / internal) and/or set an ACTIVITY label. project_id null = move OFF budget (unallocated); activity null = clear it; omit a field to leave it unchanged. This is TAGGING (categorisation), NOT budget allocation (which is admin-only). Get budget ids from list_my_projects and activity suggestions from list_activity_types. The session id is the full Claude session.id: see the session_id parameter for where the user finds it. Requires the tokenscope.tag scope.',
     {
       session_id: z
         .string()
         .min(1)
         .max(256)
         .describe(
-          "The conversation id (Claude's session.id), as shown by my_usage / the dashboard.",
+          "The full session id (Claude's session.id); it must match exactly. Where it comes from: in Claude Code, /tokenscope:activity tags the CURRENT session without needing one. For any other session, the user opens it from Recent sessions on TokenScope's My usage page, and the session detail shows the full id under its title. my_usage does not return session ids, and the status line shows only the first 8 characters, which will not match.",
         ),
       project_id: z
         .string()
@@ -419,7 +420,7 @@ export function createMcpServer(dbOverride?: Db, publicOrigin?: string): McpServ
             content: [
               {
                 type: 'text' as const,
-                text: 'Device provisioning limit reached for your account. Revoke an unused device (Settings → Your devices, or ask an admin) before provisioning another.',
+                text: 'Device provisioning limit reached for your account. Revoke an unused device first: in TokenScope, open My account (the page headed Linked identities) and use Your devices, or ask an admin. Then provision again.',
               },
             ],
             isError: true,
@@ -460,7 +461,8 @@ export function createMcpServer(dbOverride?: Db, publicOrigin?: string): McpServ
         //     has a stable absolute path: Claude's plugin lives under a versioned
         //     cache dir, and Copilot's lives under
         //     ~/.copilot/installed-plugins/<marketplace>/<plugin>/ — the MARKETPLACE
-        //     segment varies by how the marketplace was added. The old Copilot branch
+        //     segment varies by how the marketplace was added, and a direct (path)
+        //     install lives under _direct/<folder>/ (copilot-locator.ts). The old Copilot branch
         //     baked ~/.copilot/plugins/tokenscope/scripts/, a path that does not exist
         //     on a real install; setup failed at the redeem step (reproduced live
         //     2026-07-28). Both are now located by glob. That dead path was briefly
@@ -525,7 +527,7 @@ export function createMcpServer(dbOverride?: Db, publicOrigin?: string): McpServ
         const apiBaseArgv = publicOrigin ? ` "${publicOrigin}"` : ''
         const redeemCommand =
           emitTool === 'copilot-cli'
-            ? `sh -c 's=$(ls -d "$HOME"/.copilot/installed-plugins/*/tokenscope-copilot/scripts/copilot-redeem.mjs 2>/dev/null | sort -V | tail -n1); ` +
+            ? `sh -c '${copilotScriptLocator('copilot-redeem.mjs')}; ` +
               `[ -n "$s" ] || { echo "tokenscope: copilot-redeem.mjs not found under ~/.copilot - install/enable the tokenscope plugin, then retry." >&2; exit 1; }; ` +
               `exec node "$s" --handoff-code "$1"${apiBaseArgs}' tokenscope-redeem "${handoff.code}"${apiBaseArgv}`
             : `sh -c 's=$(ls -d "$HOME"/.claude/plugins/cache/*/tokenscope/*/scripts/claude-redeem.mjs 2>/dev/null | sort -V | tail -n1); ` +
@@ -594,7 +596,7 @@ export function createMcpServer(dbOverride?: Db, publicOrigin?: string): McpServ
           .string()
           .max(500)
           .optional()
-          .describe("The conversation id to tag (Claude's session.id); omit to be asked."),
+          .describe("The session id to tag (Claude's session.id); omit to be asked."),
       },
     },
     async (args) => makePromptMessages(SKILL_TAG, 'Session id provided', args.session_id),

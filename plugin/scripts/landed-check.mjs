@@ -138,7 +138,9 @@ export async function refreshLanded({ env = {}, stateDir } = {}) {
   try {
     mkdirSync(dir, { recursive: true })
     writeFileSync(
-      join(dir, 'last-landed.json'),
+      // Per tool (#453): the Copilot plugin writes its own landing record into the
+      // same ~/.tokenscope, and a shared name let each overwrite the other's.
+      join(dir, 'last-landed.claude-code.json'),
       // `ok:true` records that /health was REACHED (auth + read path both work) —
       // it lets the statusline tell a live-but-stale answer (dead export) apart
       // from an unreachable endpoint (unknown). `checkedAt` doubles as the poll

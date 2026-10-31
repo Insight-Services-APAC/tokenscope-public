@@ -165,13 +165,15 @@ async function reject() {
   }
 }
 
-const inputClass = 'w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none disabled:bg-calm/40'
+const inputClass = 'w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony disabled:bg-calm/40'
 const labelClass = 'block text-carbon-3 font-bold uppercase tracking-[1px] mb-1'
 </script>
 
 <template>
   <div class="max-w-[1100px] mx-auto px-10 py-8 pb-20" data-testid="admin-project-request" data-admin-page="/admin/project-requests">
-    <UiPageHead eyebrow="Project requests" :title="req?.display_name ?? 'Project request'" :crumbs="['Project requests', 'Request']" />
+    <!-- No :crumbs here: the admin layout already renders the linked trail
+         (Admin › Organisation › Project requests), so a second one doubled it. -->
+    <UiPageHead eyebrow="Project requests" :title="req?.display_name ?? 'Project request'" />
     <NuxtLink to="/admin/project-requests" class="text-xs text-brand-harmony hover:underline">← All requests</NuxtLink>
 
     <UiFetchErrorBanner v-if="error" :error="error" label="project request" class="mt-4" @retry="refresh" />

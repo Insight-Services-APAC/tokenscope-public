@@ -233,7 +233,7 @@ function ensureRepoTagGitignored(root) {
  * writing anything when the root cannot be resolved (not inside a git work
  * tree, or no `.git` found walking up) — refusing beats guessing a directory.
  */
-export function writeRepoTag({ cwd, enrolment, codeHash, storeDir = trustedStateDir() }) {
+export function writeRepoTag({ cwd, enrolment, codeHash, activity = null, storeDir = trustedStateDir() }) {
   const root = resolveRepoRoot(cwd)
   if (!root) {
     return { settingsPath: null, changed: false, healed: false, instanceDrifted: false }
@@ -320,7 +320,7 @@ export function writeRepoTag({ cwd, enrolment, codeHash, storeDir = trustedState
 
   const env = { ...prevEnv }
   for (const k of Object.keys(env)) if (isCopiedEnvKey(k)) delete env[k]
-  env.OTEL_RESOURCE_ATTRIBUTES = buildRepoResourceAttrs(instance, codeHash)
+  env.OTEL_RESOURCE_ATTRIBUTES = buildRepoResourceAttrs(instance, codeHash, activity)
   const target = { ...existing, env }
   // The repo copy is this install's only helper until its global one is usable.
   const stripHelper = 'otelHeadersHelper' in existing && hasUsableHelper(enrolment)
@@ -403,6 +403,16 @@ function parseInstanceId(attrs) {
  * hash match alone must never gate the rewrite, or a plugin upgrade / re-enrol
  * (which leaves the hash unchanged) would never reach a pinned repo.
  */
+/** True when the repo-local tag's attrs carry a `tokenscope.activity` (#475). */
+export function repoTagCarriesActivity(cwd) {
+  try {
+    const attrs = JSON.parse(readFileSync(join(cwd, '.claude', 'settings.local.json'), 'utf8'))?.env?.OTEL_RESOURCE_ATTRIBUTES
+    return typeof attrs === 'string' && /(?:^|,)\s*tokenscope\.activity=/.test(attrs)
+  } catch {
+    return false
+  }
+}
+
 export function readRepoTaggedHash(cwd) {
   const settingsPath = join(cwd, '.claude', 'settings.local.json')
   if (!existsSync(settingsPath)) return null

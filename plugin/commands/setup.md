@@ -15,6 +15,14 @@ process-to-process.
 - Your sessions stopped emitting and you want to re-provision.
 - After reinstalling the plugin or moving to a new host.
 
+After a plugin update, quit and restart Claude Code before running setup: a
+session that was open during the update still runs the old version's steps.
+From this version on, the Node redeem helper checks this and stops, before using
+the one-time code, with "This session is running TokenScope <old>, but <new> is
+installed now"; if you see that, tell the user to restart Claude Code and run
+`/tokenscope:setup` again. Older versions' helpers and the PowerShell lane do
+not check, so the restart is still the rule.
+
 ## Workflow
 
 ### 0. Detect the platform and runtime (BEFORE anything else)

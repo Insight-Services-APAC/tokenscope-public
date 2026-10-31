@@ -182,6 +182,87 @@ describe('submit', () => {
   })
 })
 
+describe('submit with an idempotency key (mig 0170)', () => {
+  const KEY = '9a1e0000-0000-4000-8000-0000000000f1'
+  const KEY_2 = '9a1e0000-0000-4000-8000-0000000000f2'
+  const other = () => session(pmId, 'developer', regionA)
+  const keyed = (key: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    display_name: 'Keyed request', type: 'internal', region_id: regionA, cost_owning_unit_id: buA,
+    budget: BUDGET, justification: 'Resent after a lost answer.', idempotency_key: key, ...extra,
+  })
+  const send = async (s: Session, body: Record<string, unknown>) =>
+    (await submit(routeEvent({ method: 'POST', body, session: s }))) as RequestView & { requester_teammate_id: string }
+  async function rowsWithKey(teammateId: string, key: string): Promise<number> {
+    const [{ n }] = (await t.client<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM project_request
+      WHERE requester_teammate_id = ${teammateId}::uuid AND idempotency_key = ${key}::uuid`) as [{ n: number }]
+    return n
+  }
+  async function sideEffects(requestId: string): Promise<{ audits: number; items: number }> {
+    const [row] = await t.client<{ audits: number; items: number }[]>`
+      SELECT (SELECT COUNT(*)::int FROM audit_event
+               WHERE event_type = 'project-request-created' AND subject_id = ${requestId}::uuid) AS audits,
+             (SELECT COUNT(*)::int FROM inbox_item
+               WHERE related_entity_id = ${requestId}::uuid AND category = 'project-request') AS items`
+    return row!
+  }
+
+  let filed: RequestView & { requester_teammate_id: string }
+
+  it('the first submit files the request and stores the key', async () => {
+    filed = await send(requester(), keyed(KEY))
+    expect(filed.status).toBe('pending')
+    const [row] = await t.client<{ k: string }[]>`SELECT idempotency_key::text AS k FROM project_request WHERE id = ${filed.id}::uuid`
+    expect(row!.k).toBe(KEY)
+  })
+
+  it('a resend with the same key returns the same request and files, audits and notifies nothing', async () => {
+    const before = await sideEffects(filed.id)
+    expect(before.audits).toBe(1)
+    expect(await send(requester(), keyed(KEY))).toEqual(filed)
+    expect(await rowsWithKey(requesterId, KEY)).toBe(1)
+    expect(await sideEffects(filed.id)).toEqual(before)
+  })
+
+  it('a resend returns the request as it is now, even once it is decided', async () => {
+    const body = keyed(KEY_2, { display_name: 'Keyed then withdrawn' })
+    const r = await send(requester(), body)
+    await withdraw(routeEvent({ method: 'POST', params: { id: r.id }, session: requester() }))
+    expect(await send(requester(), body)).toMatchObject({ id: r.id, status: 'withdrawn' })
+    expect(await rowsWithKey(requesterId, KEY_2)).toBe(1)
+  })
+
+  it('the same key with different content is 422 and files nothing', async () => {
+    await expect(send(requester(), keyed(KEY, { budget: { ...BUDGET, amount_usd: '900.00' } }))).rejects.toMatchObject({ statusCode: 422 })
+    await expect(send(requester(), keyed(KEY, { justification: 'Something else.' }))).rejects.toMatchObject({ statusCode: 422 })
+    await expect(send(requester(), keyed(KEY, { proposed_pm_teammate_id: pmId }))).rejects.toMatchObject({ statusCode: 422 })
+    expect(await rowsWithKey(requesterId, KEY)).toBe(1)
+  })
+
+  it('another requester using the same key files their own, independent request', async () => {
+    const theirs = await send(other(), keyed(KEY))
+    expect(theirs.id).not.toBe(filed.id)
+    expect(theirs.requester_teammate_id).toBe(pmId)
+    expect(await rowsWithKey(pmId, KEY)).toBe(1)
+    expect(await rowsWithKey(requesterId, KEY)).toBe(1)
+    // Each requester's resend finds their own row.
+    expect((await send(other(), keyed(KEY))).id).toBe(theirs.id)
+    expect((await send(requester(), keyed(KEY))).id).toBe(filed.id)
+  })
+
+  it('without a key, the same content files a second request (older clients)', async () => {
+    const plain = keyed(KEY, { display_name: 'Unkeyed twice' })
+    delete plain.idempotency_key
+    const a = await send(requester(), plain)
+    const b = await send(requester(), plain)
+    expect(a.id).not.toBe(b.id)
+  })
+
+  it('a malformed key is 400', async () => {
+    await expect(send(requester(), keyed('not-a-uuid'))).rejects.toMatchObject({ statusCode: 400 })
+  })
+})
+
 describe('admin reads are region-scoped', () => {
   it('region B’s admin sees none of region A’s requests and gets 404 on one', async () => {
     const r = await newRequest('Scoped')

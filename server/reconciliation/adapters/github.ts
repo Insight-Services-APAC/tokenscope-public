@@ -218,8 +218,10 @@ export function normaliseMetricsCreditLine(args: {
  * Shared roster reader: login (lowercased) → teammateId, from the directory-seeded
  * identity map for ONE github enterprise. Extracted from GithubAdapter.resolveRoster
  * so the health probe (github-health.ts) reuses the EXACT same login→teammate mapping
- * the reconciliation adapter uses — a health verdict of "roster matched N" is then the
- * same N the reconciler would attribute, never a re-implemented (and drifting) query.
+ * the reconciliation adapter uses, never a re-implemented (and drifting) query. The
+ * probe splits its count: logins found only through the self lane
+ * (resolveGithubSelfOnlyLogins) are reported as selfClaimed, not rosterMatched, and
+ * count as unmatched in the verdict; the reconciler attributes both.
  *
  * CANONICAL CASING (P1-7 / mig 0062): enterprise_slug is written lowercase by the
  * directory-sync UPSERT; the lower()=lower() match is the consistent read-side lookup

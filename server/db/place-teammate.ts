@@ -124,7 +124,7 @@ export async function assertCostOwningTarget(tx: Tx, orgUnitId: string): Promise
   const detail =
     unit && unit.retired
       ? 'That Business Unit is retired — pick an active one.'
-      : 'Placement targets must be cost-owning units — spend homed anywhere else still reaches no Business Unit.'
+      : 'Placement targets must be Business Units — spend homed anywhere else still reaches no Business Unit.'
   throw createError({
     statusCode: 422,
     statusMessage: detail,

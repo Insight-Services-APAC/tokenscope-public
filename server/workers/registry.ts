@@ -314,6 +314,9 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
           // have to special-case the empty tick).
           costingRungs: { provider: 0, rateCard: 0, carrier: 0, skipped: 0 },
           spansSpilledUnauthorized: 0,
+          sessionRecordsRepointed: 0,
+          sessionReportsRefused: 0,
+          projectFallbackRetries: 0,
           spansSpilledEnded: 0,
           errors: 0,
           // Nothing was read, so nothing was deep-read.
@@ -387,14 +390,14 @@ export const WORKERS: ReadonlyArray<WorkerEntry> = [
     run: (db, ctx) => runReconciliationSync(db, { runId: ctx?.runId ?? null }),
     recommendedCron: '0 */1 * * *', // hourly freshness; daily-grain truth, monthly invoice true-up
     description:
-      'Pull vendor billing via adapters and reconcile into reconciliation_record (Phase 0 foundation: clean no-op until an adapter registers)',
+      'Pull vendor billing via the registered adapters (Anthropic, GitHub) and reconcile into reconciliation_record, for every org or enterprise with a credential',
   },
   {
     name: 'identity-sync',
     run: (db) => runIdentitySync(db),
     recommendedCron: '0 3 * * *', // daily — seed teammate_identity_map from provider directories
     description:
-      'Seed teammate_identity_map from provider seats/SCIM directories (Phase 0 foundation: clean no-op until a resolver registers)',
+      'Seed teammate_identity_map from provider seats/SCIM directories via the registered resolvers (GitHub today)',
   },
   {
     name: 'usage-reconciliation',

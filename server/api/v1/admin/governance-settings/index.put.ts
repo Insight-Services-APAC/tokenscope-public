@@ -90,7 +90,7 @@ export default defineEventHandler(async (event) => {
           type: 'https://tokenscope.example.com/errors/forbidden',
           title: 'Forbidden',
           status: 403,
-          detail: 'The platform default requires platform-admin.',
+          detail: 'The platform default requires an Admin.',
         },
       })
     }

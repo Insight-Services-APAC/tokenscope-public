@@ -177,7 +177,7 @@ async function save() {
             id="oud-parent"
             ref="firstField"
             v-model="parentId"
-            class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+            class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony"
             data-testid="oud-parent"
           >
             <option value="" disabled>Choose a parent</option>
@@ -201,7 +201,7 @@ async function save() {
           id="oud-code"
           v-model="code"
           placeholder="e.g. apac-eng-platform"
-          class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white font-mono focus:border-brand-harmony focus:outline-none"
+          class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white font-mono focus:border-brand-harmony"
           data-testid="oud-code"
         >
         <div
@@ -219,7 +219,7 @@ async function save() {
           :ref="(el) => { if (mode === 'edit') firstField = el as HTMLElement | null }"
           v-model="displayName"
           placeholder="e.g. Platform Engineering"
-          class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+          class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony"
           data-testid="oud-name"
         >
 
@@ -232,7 +232,7 @@ async function save() {
           v-if="!isHoldingNode"
           id="oud-type"
           v-model="unitType"
-          class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+          class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony"
           data-testid="oud-type"
         >
           <option v-for="t in UNIT_TYPES" :key="t" :value="t">{{ t }}</option>
@@ -254,17 +254,17 @@ async function save() {
               class="w-4 h-4 accent-brand-harmony"
               data-testid="oud-cou"
             >
-            Cost-owning unit
+            Business Unit (a P&amp;L node)
           </label>
-          <p class="text-[11px] text-carbon-3 mb-2">Projects bill to the nearest cost-owning ancestor.</p>
+          <p class="text-[11px] text-carbon-3 mb-2">Projects bill to the nearest Business Unit above them.</p>
         </template>
         <div
           v-else
-          class="mt-1 mb-2 p-3 rounded-md bg-brand-vision-lite/60 border border-brand-vision/30 text-[11px] text-[#1f4ea3] leading-relaxed"
+          class="mt-1 mb-2 p-3 rounded-md bg-brand-vision-lite/60 border border-brand-vision/30 text-[11px] text-brand-vision-ink leading-relaxed"
           data-testid="oud-holding-note"
         >
           <span class="font-bold">This is the holding node for teammates with no Business Unit.</span>
-          It cannot be made cost-owning: that would home every unplaced teammate's
+          It cannot be made a Business Unit: that would home every unplaced teammate's
           spend to a bucket nobody owns, dropping the unhomed figure to zero
           without placing a single person. Place them into real Business Units from
           the Teammates tab instead.

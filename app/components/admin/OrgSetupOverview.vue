@@ -8,7 +8,7 @@ import { computed, ref, watch } from 'vue'
 import UiButton from '../ui/Button.vue'
 import DirectoryPeoplePicker, { type DirectoryHit } from './DirectoryPeoplePicker.vue'
 import OrgSetupMoveConfirm from './OrgSetupMoveConfirm.vue'
-import { apiErrorDetail } from '../../composables/useApiError'
+import { apiErrorDetail, isConfirmedRejection } from '../../composables/useApiError'
 import { fmtTimeAgo } from '../../composables/useFormat'
 import { applyShownRows, readLiveCheck } from '../../utils/placement-apply'
 import {
@@ -99,6 +99,9 @@ const notice = ref<string | null>(null)
 const pickerFor = ref<string | null>(null)
 const keyOf = (d: OrgSetupDecision) => `${d.kind}:${d.subjectKey}`
 
+/** The server answered and refused this item (a per-item refusal in a 200), so nothing changed. */
+class Refused extends Error {}
+
 async function act(d: OrgSetupDecision, run: () => Promise<string | null>) {
   const key = keyOf(d)
   busyKey.value = key
@@ -109,7 +112,13 @@ async function act(d: OrgSetupDecision, run: () => Promise<string | null>) {
     pickerFor.value = null
     await props.refreshAll()
   } catch (e: unknown) {
-    cardError.value = { ...cardError.value, [key]: apiErrorDetail(e, 'That did not work. Nothing was changed.') }
+    if (e instanceof Refused || isConfirmedRejection(e)) {
+      cardError.value = { ...cardError.value, [key]: apiErrorDetail(e, 'That did not work. Nothing was changed.') }
+    } else {
+      // It may have landed, and then this card is gone after the reload: say so where it stays visible.
+      notice.value = 'We could not tell whether that went through. The decisions below have been reloaded: check them before trying again.'
+      await props.refreshAll().catch(() => {})
+    }
   } finally {
     busyKey.value = null
   }
@@ -153,7 +162,11 @@ function moveGroup() {
     if (error && !done.results.length) throw error
     const moved = done.results.filter((r) => r.outcome === 'moved').length
     const left = done.results.length - moved
-    const stopped = error ? ' Moving stopped early; the rest were not moved.' : ''
+    const stopped = !error
+      ? ''
+      : isConfirmedRejection(error)
+        ? ' Moving stopped early; the rest were not moved.'
+        : ' Moving stopped early, and we could not tell whether the last batch moved: the list below has been reloaded.'
     return `${plural(moved, 'person moved', 'people moved')}${left ? `; ${left} could not be moved and were left as they were` : ''}.${stopped}`
   })
 }
@@ -189,7 +202,7 @@ function createTeam(d: OrgSetupDecision) {
       body: { items: [{ ownerOid: data.oid, name, regionId: data.regionId, parentUnitId: data.parentUnitId }] },
     })
     const r = res.results[0]
-    if (r?.status === 'refused') throw new Error(r.detail || r.reason)
+    if (r?.status === 'refused') throw new Refused(r.detail || r.reason)
     createFor.value = null
     return `Created ${name}. Nobody has moved yet; their moves wait here.`
   })
@@ -217,7 +230,9 @@ function pickReplacement(d: OrgSetupDecision, hit: DirectoryHit) {
       try {
         await $fetch(`${unit}/${encodeURIComponent(data.ownerTeammateId)}`, { method: 'DELETE' })
       } catch (e: unknown) {
-        return `New owner set, but the old owner could not be removed: ${reason(e)}. Remove them on the region page.`
+        return isConfirmedRejection(e)
+          ? `New owner set, but the old owner could not be removed: ${reason(e)}. Remove them on the region page.`
+          : 'New owner set. We could not tell whether the old owner was removed: check the region page.'
       }
       return done
     }
@@ -231,7 +246,9 @@ function pickReplacement(d: OrgSetupDecision, hit: DirectoryHit) {
     try {
       await $fetch(`${region}/${encodeURIComponent(data.leaderId)}`, { method: 'DELETE' })
     } catch (e: unknown) {
-      return `New leader set, but the old leader could not be removed: ${reason(e)}. Remove them on the region page.`
+      return isConfirmedRejection(e)
+        ? `New leader set, but the old leader could not be removed: ${reason(e)}. Remove them on the region page.`
+        : 'New leader set. We could not tell whether the old leader was removed: check the region page.'
     }
     return done
   })

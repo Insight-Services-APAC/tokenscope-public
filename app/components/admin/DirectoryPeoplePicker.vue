@@ -63,7 +63,7 @@ const inputId = `${props.testid}-input`
       type="search"
       autocomplete="off"
       placeholder="Search the directory by name or email"
-      class="mt-1 w-full min-h-[44px] px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+      class="mt-1 w-full min-h-[44px] px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
       :data-testid="`${testid}-search`"
       @input="onInput"
     >

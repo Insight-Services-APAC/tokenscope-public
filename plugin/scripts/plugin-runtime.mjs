@@ -822,11 +822,15 @@ export function launchResourceAttrs(cwd, globalEnv = trustedGlobalSettingsEnv(),
   const tag = /(?:^|,)project\.code_hash=([0-9a-f]{64})(?=,|$)/.exec(repo)?.[1]
   const own = attrsInstance(trusted)
   const kept = own ? keptRepoTagEnrolment(attrsInstance(repo), own, globalEnv?.TOKENSCOPE_BEARER_ENDPOINT, storeRoot) : null
+  // #475: the folder's default activity, as the repo tag wrote it: encodeURIComponent
+  // output, which leaves `. ! ~ * ' ( )` unescaped besides letters, digits, `-` and `_`.
+  const activity = /(?:^|,)tokenscope\.activity=([A-Za-z0-9%_.!~*'()-]{1,200})(?=,|$)/.exec(repo)?.[1]
   const attrs = trusted
     .split(',')
-    .filter((kv) => kv && !kv.startsWith('project.code_hash='))
+    .filter((kv) => kv && !kv.startsWith('project.code_hash=') && !kv.startsWith('tokenscope.activity='))
     .map((kv) => (kept && kv.trim().startsWith('tokenscope.instance_id=') ? `tokenscope.instance_id=${kept.instanceId}` : kv))
   if (tag) attrs.push(`project.code_hash=${tag}`)
+  if (activity) attrs.push(`tokenscope.activity=${activity}`)
   return attrs.join(',')
 }
 

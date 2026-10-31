@@ -339,7 +339,7 @@ export async function fetchDrivers(
       gaps.push({
         provider: POOLED_CHARGEBACK_PROVIDER,
         reason:
-          'The pooled Copilot chargeback is pending validation (Σ=bill on Dev), so it is not in this figure — this is Anthropic’s charge alone.',
+          'The pooled Copilot chargeback is pending validation against the bill, so it is not in this figure — this is Anthropic’s charge alone.',
       })
     } else if (!isMonthAlignedWindow(range)) {
       /*

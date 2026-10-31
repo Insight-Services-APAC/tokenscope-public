@@ -19,6 +19,9 @@ import { writeRepoTag, computeCodeHash } from '../../../plugin/scripts/tag-repo.
 import { buildHelperCommand } from '../../../plugin/scripts/env-builder.mjs'
 import { materialiseSandboxedPlugin } from './helpers/sandboxed-plugin.js'
 
+// Windows (#430): skipped on win32 because this file expects the .sh helper; on win32 the helper is the .ps1.
+const POSIX_ONLY = process.platform === 'win32'
+
 // --- fixtures ------------------------------------------------------------
 
 const CODE = 'TokenScope-MVP'
@@ -106,7 +109,7 @@ const REFUSED = [
   'OTEL_EXPORTER_OTLP_LOGS_PROTOCOL',
 ]
 
-describe('writeRepoTag change-detection', () => {
+describe.skipIf(POSIX_ONLY)('writeRepoTag change-detection', () => {
   it("never copies the removed forwarder's saved endpoint into a repo file", () => {
     const e = enrolment()
     writeRepoTag({ cwd, enrolment: { ...e, env: { ...e.env, TOKENSCOPE_DCE_LOGS_ENDPOINT: 'https://dce/logs' } }, codeHash: CODE_HASH })
@@ -346,7 +349,7 @@ function writeGlobal(home: string, { instance = 'inst-A', helper = pinned('0.1.3
  * is a no-op in the self-heal tests (it runs the REAL emit path otherwise); the
  * dedicated health-warning tests below drive that path via the sentinel instead.
  */
-describe('writeRepoTag — refuses a git-tracked settings.local.json (SS-CP-2)', () => {
+describe.skipIf(POSIX_ONLY)('writeRepoTag — refuses a git-tracked settings.local.json (SS-CP-2)', () => {
   const savedPluginRoot = process.env.CLAUDE_PLUGIN_ROOT
   beforeEach(() => {
     delete process.env.CLAUDE_PLUGIN_ROOT
@@ -418,7 +421,7 @@ function stubHelperRoot(_unusedDir: string, body: string): string {
   return dir
 }
 
-describe('session-start hook (end-to-end)', () => {
+describe.skipIf(POSIX_ONLY)('session-start hook (end-to-end)', () => {
   let home: string
   let repo: string
 

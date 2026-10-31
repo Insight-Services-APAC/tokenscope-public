@@ -47,13 +47,14 @@
  * `systemMessage` is shown to the developer; `additionalContext` goes to the
  * model). No credential/token material is ever written to stdout or stderr.
  */
-import { existsSync, realpathSync, readFileSync, rmSync, chmodSync } from 'node:fs'
+import { existsSync, realpathSync, readFileSync, rmSync, chmodSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isMainModule } from '../scripts/is-main.mjs'
-import { resolveRepoProjectCode, computeCodeHash, readGlobalEnrolment, writeRepoTag, resolveRepoRoot } from '../scripts/tag-repo.mjs'
-import { reconcilePluginPaths, parseHelperCommand } from '../scripts/env-builder.mjs'
+import { resolveRepoProjectCode, computeCodeHash, readGlobalEnrolment, writeRepoTag, resolveRepoRoot, readRepoTaggedHash, repoTagCarriesActivity } from '../scripts/tag-repo.mjs'
+import { readFolderActivity } from '../scripts/tokenscope-project.mjs'
+import { reconcilePluginPaths, parseHelperCommand, sharedHomeEquivalent } from '../scripts/env-builder.mjs'
 import { assertConfinedPath } from '../scripts/argv-guard.mjs'
 import { claudeSettingsPath } from '../scripts/claude-config-dir.mjs'
 import {
@@ -78,6 +79,7 @@ import {
 } from '../scripts/plugin-runtime.mjs'
 import { refreshLanded } from '../scripts/landed-check.mjs'
 import { checkRepoProjectBillable } from '../scripts/project-check.mjs'
+import { readHookInput, reportSessionInstance } from '../scripts/session-report.mjs'
 import { enrollIfNeeded } from '../scripts/enroll.mjs'
 import { assertSafeEndpoint, isLoopbackHostname } from '../scripts/endpoint-guard.mjs'
 import { configuredServerUrl } from '../scripts/api-base.mjs'
@@ -520,6 +522,8 @@ export function selfHealPluginPaths({
 } = {}) {
   const tool = 'claude-code'
   const recordFor = (dir) => (sd) => readHelperRecord(tool, sd ?? dir, sd)
+  // #447: record this side of a possibly shared Claude folder, and learn the others.
+  const otherSides = claudeOtherSides({ settingsPath, scriptsDir })
   const statuslineTarget = join(scriptsDir, 'statusline.mjs')
   // `onlyStateDir`: rebuild only a helper that names exactly this --state-dir.
   const heal = (path, onlyStateDir = undefined) => {
@@ -547,6 +551,7 @@ export function selfHealPluginPaths({
         // A value with no --state-dir runs with the default one, which is
         // where the emit-only redeem put its helper snapshot.
         defaultStateDir: storeDir,
+        otherSides,
       })
       helper = next.otelHeadersHelper
       if (!changed) return null
@@ -624,6 +629,28 @@ export function dropSettingsRefreshToken({
 }
 
 /**
+ * #475: what the repo tag should carry, given the `.tokenscope` hash (or null):
+ * `{ codeHash, activity }`, or null when there is nothing to write.
+ *   - the folder's default activity (readFolderActivity) rides along;
+ *   - a project tag already in the file with no `.tokenscope` behind it (an older
+ *     plugin's, or one written for an explicit code) is KEPT: adding a default
+ *     activity must not untag the repo. Only a well-formed hash is carried;
+ *   - a file that still carries an activity removed from the folder setting is
+ *     rewritten without it.
+ * Exported for tests.
+ */
+export function repoTagPlan(root, codeHash) {
+  const activity = root ? readFolderActivity(root) : null
+  let hash = codeHash
+  if (!hash && root) {
+    const kept = readRepoTaggedHash(root)
+    if (kept && /^[0-9a-f]{64}$/.test(kept)) hash = kept
+  }
+  if (!hash && !activity && !(root && repoTagCarriesActivity(root))) return null
+  return { codeHash: hash, activity }
+}
+
+/**
  * Job 1: reconcile the repo-local tag from the current global enrolment.
  *
  * Returns writeRepoTag's `{ settingsPath, changed, healed, instanceDrifted }`, or
@@ -636,22 +663,26 @@ function selfHealRepoTag() {
   const enrolment = readGlobalEnrolment()
   if (!enrolment) return // device not enrolled — nothing to do
 
-  let resolved
+  let codeHash = null
   try {
-    resolved = resolveRepoProjectCode({ arg: '', cwd }) // .tokenscope only in hook context
+    const resolved = resolveRepoProjectCode({ arg: '', cwd }) // .tokenscope only in hook context
+    if (resolved.source === 'tokenscope') codeHash = computeCodeHash(resolved.code)
   } catch {
-    return // no .tokenscope / no project.code — leave untagged
+    /* no .tokenscope / no project.code: untagged, unless the folder names an activity */
   }
-  if (resolved.source !== 'tokenscope') return
-
-  const codeHash = computeCodeHash(resolved.code)
+  // #475: the folder's default activity rides the same attrs; it applies from the
+  // NEXT session, since this one's attrs froze at startup.
+  const plan = repoTagPlan(resolveRepoRoot(cwd), codeHash)
+  if (!plan) return
+  ;({ codeHash } = plan)
+  const { activity } = plan
   // SELF-HEAL (ADR-0006): always re-derive from the CURRENT global enrolment.
   // writeRepoTag is change-detecting, so a true no-op leaves the file untouched.
   // The result is RETURNED, not discarded: when it reports `instanceDrifted` this
   // very session is emitting under the superseded instance (see the job-1 note at
   // the top of this file — resource attrs froze at startup, before this write), and
   // main() turns that into the one warning that tells the developer to relaunch.
-  return writeRepoTag({ cwd, enrolment, codeHash })
+  return writeRepoTag({ cwd, enrolment, codeHash, activity })
 }
 
 /**
@@ -823,6 +854,95 @@ export function insecureServerUrlWarning(serverUrl = configuredServerUrl()) {
   return `⚠ TokenScope: the plugin's server_url (${url.origin}) is not https, so Claude Code talks to TokenScope unencrypted. Set it to the https:// address in /plugin.`
 }
 
+const SIDES_FILE = 'tokenscope-sides.json'
+const SIDE_FRESH_MS = 14 * 24 * 60 * 60 * 1000
+
+/** The config folder a plugin path sits under (everything before `/plugins/`), or null. */
+function configPrefix(p) {
+  const m = typeof p === 'string' && /^(.*?)[\\/]plugins[\\/](?:cache|marketplaces)[\\/]/.exec(`${p}/`)
+  return m ? m[1] : null
+}
+
+/**
+ * #447: which OTHER sides of a shared Claude folder are still running. Every
+ * SessionStart records the config folder it sees the plugin under (for example
+ * /home/u/.claude on the host, /home/claude/.claude in a container) in
+ * `tokenscope-sides.json` beside the settings file; a side seen in the last 14
+ * days that is not this one is another side. A home that was renamed stops
+ * being seen, so its stale paths get repaired again (sharedHomeEquivalent).
+ * Records this side unless `record` is false; best-effort, never throws.
+ */
+export function claudeOtherSides({
+  settingsPath = claudeSettingsPath({ home: homedir() }), // homedir-ok: the file Claude Code reads; main() repaired HOME first (hookStateDir)
+  scriptsDir = resolve(HOOK_DIR, '..', 'scripts'),
+  now = Date.now(),
+  record = true,
+} = {}) {
+  const file = join(dirname(settingsPath), SIDES_FILE)
+  let sides = {}
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) sides = parsed
+  } catch {
+    /* none yet */
+  }
+  const own = configPrefix(scriptsDir)
+  if (record && own && existsSync(dirname(settingsPath))) {
+    const seen = Date.parse(sides[own] ?? '')
+    // Once a day is enough: the window is two weeks, and this keeps the file still.
+    if (!(seen > now - 24 * 60 * 60 * 1000)) {
+      const fresh = Object.fromEntries(
+        Object.entries(sides).filter(([, t]) => Date.parse(t) > now - SIDE_FRESH_MS),
+      )
+      fresh[own] = new Date(now).toISOString()
+      try {
+        writeFileSync(file, `${JSON.stringify(fresh, null, 2)}\n`, { mode: 0o600 })
+        sides = fresh
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+  return Object.entries(sides)
+    .filter(([side, t]) => side !== own && Date.parse(t) > now - SIDE_FRESH_MS)
+    .map(([side]) => side)
+}
+
+/**
+ * #447: the settings file is shared with another side (a host and its
+ * containers) that sees the plugin under another home, and the helper path it
+ * holds was written there. The self-heal leaves it (rewriting it broke the other
+ * side), so say plainly that THIS side is not sending usage and how to fix it.
+ * Pure over its inputs + exported for tests; null when nothing is wrong.
+ */
+export function sharedHomeHelperWarning({
+  settingsPath = claudeSettingsPath({ home: homedir() }), // homedir-ok: the file Claude Code reads; main() repaired HOME first (hookStateDir)
+  scriptsDir = resolve(HOOK_DIR, '..', 'scripts'),
+  exists = existsSync,
+  otherSides = claudeOtherSides({ settingsPath, scriptsDir, record: false }),
+} = {}) {
+  let settings
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, 'utf8'))
+  } catch {
+    return null
+  }
+  const script = parseHelperCommand(settings?.otelHeadersHelper)?.script
+  if (!script || exists(script)) return null
+  const here = sharedHomeEquivalent(script, scriptsDir, exists, otherSides)
+  if (!here) return null
+  // The config folder each side sees: everything before `/plugins/`.
+  const configOf = (p) => p.split(/[\\/]plugins[\\/]/)[0]
+  const ours = configOf(here)
+  const other = configOf(script)
+  return (
+    `⚠ TokenScope: ${settingsPath} is shared with another computer or container that sees this Claude folder as ${other}, ` +
+    `and its telemetry helper points there, so this session's usage is NOT being sent. ` +
+    `TokenScope leaves the path alone (changing it would stop the other side instead). ` +
+    `Make ${other} lead to ${ours} on this side too (a link or a mount), then restart Claude Code. See the plugin README, "One ~/.claude shared with containers".`
+  )
+}
+
 /**
  * Build the wrong-env project-tag warning from a checkRepoProjectBillable result,
  * or null. Warns ONLY on an explicit 'not-billable' (the firewall already made
@@ -944,6 +1064,13 @@ export function migrateOffForwarderEndpoint({
 }
 
 async function main() {
+  // Claude Code writes the hook's JSON (session_id, source, ...) to stdin at
+  // spawn and closes it. Read it to the end BEFORE the work below: several jobs
+  // block the event loop (the emit helper runs synchronously), and the read's
+  // timeout would then fire before the pipe's data is handled, losing the
+  // session id the report needs. Bounded at one second when nothing is written.
+  const hookInput = await readHookInput().catch(() => null)
+
   // FIRST: neutralise a repo-supplied TOKENSCOPE_STATE_DIR — and a repo-supplied
   // HOME — on this process's env, before anything resolves a state dir or opens
   // the global settings file. The jobs below reach modules that call
@@ -1030,6 +1157,13 @@ async function main() {
   if (forwarderWarning) lines.push(forwarderWarning)
 
   try {
+    const w = sharedHomeHelperWarning()
+    if (w) lines.push(w)
+  } catch {
+    /* fail-open: never warn on our own error */
+  }
+
+  try {
     const w = insecureServerUrlWarning()
     if (w) lines.push(w)
   } catch {
@@ -1057,6 +1191,13 @@ async function main() {
       // instance, and the cache would then label this /health answer with it.
       hasBearer ? refreshLanded({ env: globalSettingsEnv() }).catch(() => null) : Promise.resolve(null),
       hasBearer ? checkRepoProjectBillable({ env, cwd }).catch(() => null) : Promise.resolve(null),
+      // #494: "this session runs on THIS install", from this install's own
+      // settings and credential. Every session, tagged repo or not: the record's
+      // instance was fixed before this hook ran, from a file another install may
+      // have written, and the server ignores a report that changes nothing.
+      hasBearer
+        ? reportSessionInstance({ sessionId: hookInput?.session_id, env: globalSettingsEnv() }).catch(() => null)
+        : Promise.resolve(null),
     ])
     projectWarning = projectBillabilityWarning(projectResult)
   } catch {

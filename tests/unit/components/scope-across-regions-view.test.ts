@@ -567,7 +567,7 @@ describe('ScopeAcrossRegionsView — the §A/§B lane re-lens', () => {
     // nothing else on the row says. The three sentences that used to sit beside it
     // restated the Chargeable tile's own subline and the lane definition.
     const caveat = w.find('[data-testid="scope-chargeback-caveat"]').text()
-    expect(caveat).toBe('Active people and Median per person are attributed usage (§A) in both lenses.')
+    expect(caveat).toBe('Active people and Median per person are attributed usage in both lenses.')
 
     // §A/usage cards RE-LENS to their §B bill-lane analogue (not a usage-only
     // placeholder); the billed hero + donut are usage-view elements and yield too.

@@ -12,7 +12,7 @@
  * region; a duplicate active oid 409s.
  *
  * platform-admin only, like the other region-derivation inputs
- * (directory-region-rules, department-map): the manager walk is estate-wide,
+ * (directory-region-rules): the manager walk is estate-wide,
  * so a leader named for one region homes people from every region's chain.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'

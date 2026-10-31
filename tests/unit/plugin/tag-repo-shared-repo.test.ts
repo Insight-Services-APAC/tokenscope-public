@@ -179,7 +179,7 @@ describe('statusline — the repo tag instance', () => {
   const NOW = Date.parse('2026-10-15T12:00:00Z')
   function writeCache(dir: string, instance: string, lastEmission: string | null, checkedAt = '2026-10-15T11:55:00Z') {
     writeFileSync(
-      join(dir, 'last-landed.json'),
+      join(dir, 'last-landed.claude-code.json'),
       JSON.stringify({
         ok: true,
         instanceId: instance,

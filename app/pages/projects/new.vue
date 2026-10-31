@@ -203,7 +203,7 @@ async function submit() {
                 v-model="code"
                 type="text"
                 placeholder="e.g. ACME-2026"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md font-mono focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md font-mono focus:border-brand-harmony"
                 data-testid="new-project-code"
               >
             </label>
@@ -213,7 +213,7 @@ async function submit() {
                 v-model="displayName"
                 type="text"
                 placeholder="e.g. Acme platform rebuild"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
                 data-testid="new-project-name"
               >
             </label>
@@ -221,7 +221,7 @@ async function submit() {
               <span class="block text-carbon-3 font-bold uppercase tracking-[1px] mb-1">Type</span>
               <select
                 v-model="type"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony"
                 data-testid="new-project-type"
               >
                 <option value="billable">Billable</option>
@@ -233,7 +233,7 @@ async function submit() {
               <span class="block text-carbon-3 font-bold uppercase tracking-[1px] mb-1">Region</span>
               <select
                 v-model="regionId"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony"
                 data-testid="new-project-region"
               >
                 <option v-for="r in regionOptions" :key="r.id" :value="r.id">{{ r.name }}</option>
@@ -243,7 +243,7 @@ async function submit() {
               <span class="block text-carbon-3 font-bold uppercase tracking-[1px] mb-1">{{ BU_LABEL }}</span>
               <select
                 v-model="couId"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony"
                 data-testid="new-project-cou"
               >
                 <option value="" disabled>Select a {{ BU_LABEL.toLowerCase() }}…</option>
@@ -257,7 +257,7 @@ async function submit() {
                 type="text"
                 maxlength="64"
                 placeholder="e.g. 1.2.3 — finance-system correlation"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md font-mono focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md font-mono focus:border-brand-harmony"
                 data-testid="new-project-wbs"
               >
             </label>
@@ -270,7 +270,7 @@ async function submit() {
               <input
                 v-model="endDate"
                 type="date"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
                 data-testid="new-project-end-date"
               >
             </label>
@@ -287,7 +287,7 @@ async function submit() {
                 type="text"
                 inputmode="decimal"
                 placeholder="1000.00"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md font-mono focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md font-mono focus:border-brand-harmony"
                 data-testid="new-project-budget"
               >
             </label>
@@ -296,7 +296,7 @@ async function submit() {
               <input
                 v-model="fromIso"
                 type="date"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
                 data-testid="new-project-from"
               >
             </label>
@@ -305,7 +305,7 @@ async function submit() {
               <input
                 v-model="toIso"
                 type="date"
-                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+                class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
                 data-testid="new-project-to"
               >
             </label>

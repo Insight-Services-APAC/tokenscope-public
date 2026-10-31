@@ -462,7 +462,8 @@ describe('the burn drill is the §A usage axis — it RECONCILES to the tracker 
     // alice 30+20 + phil 90 (emit-homed to ccA) = 140; dave's NULL-CoU copilot 30 EXCLUDED.
     expect(a.burnUsd).toBe(140)
     expect(a.allocationUsd).toBe(100)
-    expect(r.laneNote.toLowerCase()).toContain('cost-owning')
+    // #489: the lane note names the unit as a Business Unit, never "cost-owning unit".
+    expect(r.laneNote).toContain('Business Unit burn is usage on the projects')
   })
 
   it('the drill burn EQUALS the tracker card burn (same §A lane); the NULL-CoU gap is excluded', async () => {
@@ -724,7 +725,7 @@ describe('GET /reports/export?scope=cost-centre — byte-identical to the screen
     const json = (await cardsHandler(ev(adminA(), 'month=2026-07'))) as unknown as CardsResp
     const csv = (await exportHandler(ev(adminA(), 'scope=cost-centre&report=cards&month=2026-07'))) as unknown as string
     const lines = csv.trim().split('\n')
-    expect(lines[0]).toMatch(/^# tokenscope cost-centres/)
+    expect(lines[0]).toMatch(/^# tokenscope business-units/)
     expect(lines[1]).toBe('cost_centre,region,burn_usd,charge_usd,allocation_usd,utilisation_pct,exhaustion_date,projected_month_end_usd')
     const byBurn = new Map<string, string[]>()
     for (const line of lines.slice(2)) {
@@ -744,7 +745,7 @@ describe('GET /reports/export?scope=cost-centre — byte-identical to the screen
     const json = (await drillHandler(ev(adminA(), 'month=2026-07&axis=teammate', { ccId: ccA }))) as unknown as DrillResp
     const csv = (await exportHandler(ev(adminA(), `scope=cost-centre&report=drivers&cc=${ccA}&axis=teammate&month=2026-07`))) as unknown as string
     const lines = csv.trim().split('\n')
-    expect(lines[0]).toMatch(/^# tokenscope cost-centre drivers/)
+    expect(lines[0]).toMatch(/^# tokenscope business-unit drivers/)
     expect(lines[1]).toBe('driver,spend_usd,share_pct,spend_class,otel_emitted_usd,api_reconciled_usd,provider_usage_usd,surface_mix')
     const csvByLabel = new Map<string, { usd: number; share: number; klass: string }>()
     for (const line of lines.slice(2)) {

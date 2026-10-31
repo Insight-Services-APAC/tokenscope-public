@@ -238,7 +238,7 @@ function cancelRevoke() {
       class="mb-4 p-3 rounded-md text-sm font-medium"
       :class="toast.kind === 'ok'
         ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-hunger border border-brand-hunger/30'"
+        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
     >
       {{ toast.message }}
     </div>
@@ -254,7 +254,7 @@ function cancelRevoke() {
           v-model="query"
           type="search"
           placeholder="Search teammates by name or email…"
-          class="mt-2 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+          class="mt-2 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
           data-testid="report-access-search"
           @input="onSearchInput"
         >
@@ -293,7 +293,7 @@ function cancelRevoke() {
             v-for="p in REPORT_ACCESS_PERMISSIONS"
             :key="p"
             class="block rounded-md border p-3 cursor-pointer transition-colors"
-            :class="permission === p ? 'border-brand-vision bg-brand-vision/5' : 'border-calm-2 hover:border-calm-3'"
+            :class="permission === p ? 'border-brand-vision bg-brand-vision/5' : 'border-calm-2 hover:border-cloud'"
           >
             <div class="flex items-start gap-2.5">
               <input

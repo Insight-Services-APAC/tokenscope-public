@@ -25,6 +25,7 @@
 import { computed, ref, watch } from 'vue'
 import UiButton from '../ui/Button.vue'
 import { apiErrorDetail } from '../../composables/useApiError'
+import { useModalA11y } from '../../composables/useModalA11y'
 import { BU_LABEL } from '#shared/reports/vocabulary'
 
 interface TargetUnit {
@@ -92,6 +93,17 @@ watch(
   { immediate: true },
 )
 
+// Shared dialog contract: Escape closes, Tab is trapped, the Business Unit
+// picker takes focus on open and focus returns to the opener on close.
+const dialogEl = ref<HTMLElement | null>(null)
+const targetEl = ref<HTMLSelectElement | null>(null)
+useModalA11y({
+  isOpen: () => props.open,
+  dialogEl,
+  firstField: targetEl,
+  onClose: () => emit('close'),
+})
+
 async function submit() {
   if (!targetId.value || !props.teammateIds.length) return
   saving.value = true
@@ -154,6 +166,7 @@ async function submit() {
     @click.self="emit('close')"
   >
     <div
+      ref="dialogEl"
       class="w-full max-w-lg bg-white rounded-xl shadow-xl max-h-[85vh] overflow-y-auto"
       role="dialog"
       aria-modal="true"
@@ -174,8 +187,9 @@ async function submit() {
         <label for="bulk-place-target" class="text-[12px] font-semibold text-carbon">Business Unit</label>
         <select
           id="bulk-place-target"
+          ref="targetEl"
           v-model="targetId"
-          class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony focus:outline-none"
+          class="mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony"
           data-testid="bulk-place-target"
         >
           <option value="">Choose a Business Unit…</option>
@@ -184,7 +198,7 @@ async function submit() {
           </option>
         </select>
         <p class="text-[11px] text-carbon-3 mt-1">
-          Only cost-owning units are listed. Their spend then rolls up to this
+          Only Business Units are listed. Their spend then rolls up to this
           unit's P&amp;L instead of stopping at the region.
         </p>
 
@@ -196,7 +210,7 @@ async function submit() {
         </p>
 
         <p v-if="!targets.length" class="text-xs text-rag-amber mt-3" data-testid="bulk-place-no-targets">
-          This region has no cost-owning units yet — create one on the Business Units
+          This region has no Business Units yet — create one on the Business Units
           tab first, otherwise there is nowhere for this spend to land.
         </p>
 

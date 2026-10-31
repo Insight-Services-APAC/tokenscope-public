@@ -25,10 +25,11 @@
  * response carries `remaining` / `more`. The dialog shows cumulative progress and
  * keeps offering the next pass instead of pretending one click finished the job.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, type ComponentPublicInstance } from 'vue'
 import { consola } from 'consola'
 import UiButton from '../ui/Button.vue'
 import { apiErrorDetail } from '../../composables/useApiError'
+import { useModalA11y } from '../../composables/useModalA11y'
 
 interface Move {
   teammate_id: string
@@ -116,6 +117,17 @@ watch(
   { immediate: true },
 )
 
+// Shared dialog contract: Escape closes, Tab is trapped, Close takes focus on
+// open (the preview is still loading) and focus returns on close.
+const dialogEl = ref<HTMLElement | null>(null)
+const closeBtn = ref<ComponentPublicInstance | null>(null)
+useModalA11y({
+  isOpen: () => props.open,
+  dialogEl,
+  firstField: closeBtn,
+  onClose: () => emit('close'),
+})
+
 const viable = computed(() => preview.value?.routes.viable ?? false)
 const nothingToDo = computed(() => Boolean(preview.value) && preview.value!.candidates === 0)
 </script>
@@ -128,6 +140,7 @@ const nothingToDo = computed(() => Boolean(preview.value) && preview.value!.cand
     @click.self="emit('close')"
   >
     <div
+      ref="dialogEl"
       class="w-full max-w-2xl bg-white rounded-xl shadow-xl max-h-[85vh] overflow-y-auto"
       role="dialog"
       aria-modal="true"
@@ -141,7 +154,7 @@ const nothingToDo = computed(() => Boolean(preview.value) && preview.value!.cand
             Re-resolve placement — {{ regionName }}
           </h2>
         </div>
-        <UiButton kind="ghost" size="sm" data-testid="re-resolve-close" @click="emit('close')">Close</UiButton>
+        <UiButton ref="closeBtn" kind="ghost" size="sm" data-testid="re-resolve-close" @click="emit('close')">Close</UiButton>
       </div>
 
       <div class="px-6 py-4">

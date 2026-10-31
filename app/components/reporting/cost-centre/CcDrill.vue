@@ -250,7 +250,7 @@ const zeroBurnTagged = computed(() => hasAllocation.value && props.drill.burnUsd
       Burn = usage <span class="font-semibold not-italic">homed to this {{ BU_LABEL_LOWER }}</span> —
       <span class="font-semibold not-italic">not</span> a person's total usage.
       <span v-if="chargebackLens" data-testid="cc-drill-lane-mismatch">
-        The headline above is what this centre is
+        The headline above is what this {{ BU_LABEL_LOWER }} is
         <span class="font-semibold not-italic">charged</span>; the two tables below
         stay on <span class="font-semibold not-italic">attributed usage</span>,
         because there is no chargeback breakdown of who drove a charge. They do not
@@ -308,7 +308,7 @@ const zeroBurnTagged = computed(() => hasAllocation.value && props.drill.burnUsd
            budget anyone set on the centre. -->
       <span v-if="hasAllocation" class="text-[12px] text-carbon-2">
         of <span class="font-semibold tabular-nums">{{ fmtUsd(drill.allocationUsd) }}</span>
-        allocated — <span class="italic">derived</span>, the roll-up of this centre's
+        allocated — <span class="italic">derived</span>, the roll-up of this {{ BU_LABEL_LOWER }}'s
         {{ BUDGET_LABEL_PLURAL.toLowerCase() }}
       </span>
       <span v-else class="text-[12px] text-carbon-3">no budget set for this {{ BU_LABEL_LOWER }}</span>
@@ -354,8 +354,8 @@ const zeroBurnTagged = computed(() => hasAllocation.value && props.drill.burnUsd
              answer to "why is Copilot not here", which a reader only asks after
              noticing. Behind the (i), per the dashboard-prose rule. -->
         <InfoDot label="About burn by vendor">
-          This is the §A attributed-usage burn, never the billed §B figure. Copilot
-          pooled usage carries no cost-owning unit, so it is outside this burn — a
+          This is the attributed-usage burn, never the billed chargeback figure. Copilot
+          pooled usage carries no {{ BU_LABEL_LOWER }}, so it is outside this burn — a
           reader can see that money elsewhere and cannot find it here.
         </InfoDot>
       </div>

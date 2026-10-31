@@ -19,6 +19,11 @@ export interface InboxItem {
    * exists or the related entity is not a project.
    */
   target_allocation_id: string | null
+  /*
+   * Server-resolved target for "Open project →": the project's code, emitted
+   * only when this recipient can open /projects/{code}. Null otherwise.
+   */
+  target_project_code: string | null
   ack_state: 'unread' | 'read' | 'acknowledged' | 'dismissed' | 'resolved'
   ack_at: string | null
   created_at: string

@@ -84,7 +84,9 @@ import {
   trustedGlobalSettingsEnv,
   trustedStateDir,
 } from './plugin-runtime.mjs'
-import { resolveRepoRoot } from './tag-repo.mjs'
+import { resolveRepoRoot, resolveRepoProjectCode } from './tag-repo.mjs'
+import { readFolderActivity } from './tokenscope-project.mjs'
+import { readSessionActivity } from './session-activity.mjs'
 
 const C = {
   green: '\x1b[32m',
@@ -289,12 +291,20 @@ export function formatStatusLine({
   envLabel = null,
   color = true,
   degraded = false,
+  project = null,
+  activity = null,
 }) {
   const paint = (c, s) => (color ? `${c}${s}${C.reset}` : s)
   if (!configured) return paint(C.dim, 'TokenScope · not configured')
   const sid = sessionId ? ` ${paint(C.dim, `#${String(sessionId).slice(0, 8)}`)}` : ''
   const tag = envLabel ? ` ${paint(C.dim, `(${envLabel})`)}` : ''
-  const line = (c, label) => `${paint(c, `TokenScope ${label}`)}${sid}${tag}`
+  // #475: what the work is, after the health label (nothing when unset).
+  const what = [project, activity]
+    .filter((v) => typeof v === 'string' && v.trim())
+    // eslint-disable-next-line no-control-regex -- a label is display text: drop control characters
+    .map((v) => ` · ${v.replace(/[\u0000-\u001f\u007f]/g, '').trim()}`)
+    .join('')
+  const line = (c, label) => `${paint(c, `TokenScope ${label}`)}${what}${sid}${tag}`
   // 1. Auth itself broken — can't even mint a bearer. Root cause; outranks all.
   if (!emitting) return line(C.red, '✗ emit-auth failing')
   // 1b. Emitting on the CACHED bearer because TokenScope is unreachable (#409):
@@ -406,17 +416,24 @@ function instanceIdOf(env) {
 }
 
 /**
- * Read the last-landed cache (`<state>/last-landed.json`) — the parsed object, or
- * null on any failure. landed-check.mjs writes it from the server /health response;
- * the always-on statusline only READS it here (never a synchronous network call).
- * classifyLanding() turns it into the render state.
+ * Read the last-landed cache (`<state>/last-landed.claude-code.json`) — the parsed
+ * object, or null on any failure. landed-check.mjs writes it from the server
+ * /health response; the always-on statusline only READS it here (never a
+ * synchronous network call). classifyLanding() turns it into the render state.
+ *
+ * Until the first refresh after an upgrade only the old shared name exists, so it
+ * is read as a fallback (#453). It may hold the Copilot plugin's record; that is
+ * safe because classifyLanding() rejects a cache naming another instance.
  */
-function readLandedCache(dir = claudeInstallStateDir()) {
-  try {
-    return JSON.parse(readFileSync(join(dir, 'last-landed.json'), 'utf8'))
-  } catch {
-    return null
+export function readLandedCache(dir = claudeInstallStateDir()) {
+  for (const name of ['last-landed.claude-code.json', 'last-landed.json']) {
+    try {
+      return JSON.parse(readFileSync(join(dir, name), 'utf8'))
+    } catch {
+      /* try the next name */
+    }
   }
+  return null
 }
 
 /**
@@ -538,6 +555,31 @@ function maybeSpawnLandedRefresh(env, cache) {
   }
 }
 
+/**
+ * #475: the project and activity this session's work is tagged with, as far as
+ * this install knows: what /tokenscope:activity recorded for the session, else
+ * the repo's `.tokenscope` code and the folder's default activity. Never throws.
+ * Exported for tests.
+ */
+export function sessionWork(sessionId, cwd, stateDir = claudeInstallStateDir()) {
+  const out = { project: null, activity: null }
+  try {
+    const set = sessionId ? readSessionActivity(sessionId, stateDir) : null
+    let code = null
+    try {
+      code = resolveRepoProjectCode({ arg: '', cwd }).code
+    } catch {
+      /* untagged repo */
+    }
+    const root = resolveRepoRoot(cwd)
+    out.project = set?.project ?? code ?? null
+    out.activity = set?.activity ?? (root ? readFolderActivity(root) : null)
+  } catch {
+    /* never break the render */
+  }
+  return out
+}
+
 function main() {
   let out = ''
   try {
@@ -571,6 +613,7 @@ function main() {
       sessionId: input.session_id ?? null,
       // Where this client emits OTel — derived from the configured endpoint.
       envLabel: configured ? emitEnvLabel(env) : null,
+      ...sessionWork(input.session_id ?? null, process.cwd()),
     })
   } catch {
     // Never break the UI — `out` stays '' from the initializer.

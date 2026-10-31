@@ -23,7 +23,7 @@ function str(k: string, fallback: string): string {
   return typeof v === 'string' ? v : fallback
 }
 
-const field = str('field', 'Cost-owning unit')
+const field = str('field', 'Business Unit')
 const manualVal = str('manual', '—')
 const syncVal = str('sync', '—')
 const source = str('source', 'sync source')

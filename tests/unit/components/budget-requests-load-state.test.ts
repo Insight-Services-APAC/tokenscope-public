@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 /*
- * Budget requests on the project page (spec §5): the Manage section and a
+ * Budget requests on the project page (spec §5): the Manage drawer and a
  * member's card tell loading, failed and empty apart. A list that did not load
  * must never read as "No requests waiting", and a failed load offers a retry.
  */

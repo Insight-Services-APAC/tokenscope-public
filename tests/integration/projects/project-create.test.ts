@@ -236,6 +236,27 @@ describe('GET /api/v1/me/capabilities', () => {
     })
     expect(await capabilities(routeEvent({ method: 'GET', session: dev() }))).toMatchObject({ can_create_projects: false })
   })
+
+  it('agrees with the create: a deactivated grant holder is offered nothing and refused (403)', async () => {
+    await t.client`UPDATE teammate SET is_active = FALSE WHERE id = ${holderId}::uuid`
+    try {
+      expect(await capabilities(routeEvent({ method: 'GET', session: holder() }))).toMatchObject({ can_create_projects: false })
+      await expect(pmoCreate(routeEvent({ method: 'POST', body: body('PC-INACTIVE'), session: holder() }))).rejects.toMatchObject({ statusCode: 403 })
+      expect((await t.client`SELECT 1 FROM project WHERE code = 'PC-INACTIVE'`).length).toBe(0)
+    } finally {
+      await t.client`UPDATE teammate SET is_active = TRUE WHERE id = ${holderId}::uuid`
+    }
+    expect(await capabilities(routeEvent({ method: 'GET', session: holder() }))).toMatchObject({ can_create_projects: true })
+  })
+
+  it('agrees with the create: a revoked grant is offered nothing', async () => {
+    await t.client`UPDATE project_manager_grant SET revoked_at = now(), revoked_by = ${adminAId}::uuid WHERE teammate_id = ${holderId}::uuid AND revoked_at IS NULL`
+    try {
+      expect(await capabilities(routeEvent({ method: 'GET', session: holder() }))).toMatchObject({ can_create_projects: false })
+    } finally {
+      await grant(holderId)
+    }
+  })
 })
 
 describe('project delete keeps working (A12)', () => {

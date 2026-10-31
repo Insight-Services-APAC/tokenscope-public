@@ -116,11 +116,42 @@ describe('/projects/request', () => {
   it('a network failure says the request may have been sent and where to check', async () => {
     const text = await submitWith(NETWORK)
     expect(text).toContain('could not tell whether your request was sent')
+    expect(text).toContain('it is not sent twice')
     expect(text).toContain('My projects')
+  })
+
+  it('without crypto.randomUUID no key is sent, and the copy does not promise a safe resend', async () => {
+    vi.stubGlobal('crypto', {})
+    const text = await submitWith(NETWORK)
+    expect(text).toContain('could not tell whether your request was sent')
+    expect(text).toContain('before sending it again')
+    expect(text).not.toContain('not sent twice')
   })
 
   it('a server refusal shows the server reason', async () => {
     expect(await submitWith(REFUSED)).toBe('Code ACME-1 is taken.')
+  })
+
+  it('a resend of the same content carries the same idempotency key; a change starts a new one', async () => {
+    const post = vi.fn().mockRejectedValue(NETWORK)
+    stubNuxt('developer', post)
+    const w = await mountPage(RequestPage)
+    await w.find('[data-testid="project-request-name"]').setValue('Acme data platform')
+    await w.find('[data-testid="project-request-justification"]').setValue('Client work.')
+    await w.find('[data-testid="project-request-budget"]').setValue('500')
+    const send = async () => {
+      await w.find('[data-testid="project-request-submit"]').trigger('click')
+      await flushPromises()
+    }
+    await send()
+    await send()
+    await w.find('[data-testid="project-request-budget"]').setValue('600')
+    await send()
+    const keys = post.mock.calls.map((c) => (c[1] as { body: { idempotency_key: string } }).body.idempotency_key)
+    expect(keys).toHaveLength(3)
+    expect(keys[0]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(keys[1]).toBe(keys[0])
+    expect(keys[2]).not.toBe(keys[0])
   })
 })
 

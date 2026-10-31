@@ -47,9 +47,14 @@ export type BudgetInput = z.infer<typeof BudgetInputSchema>
 /** Free prose (a justification or a decision note): newlines allowed. */
 export const NoteSchema = z.string().trim().min(1).max(2000)
 
-/** POST /me/project-requests. The PM defaults to the requester. */
+/**
+ * POST /me/project-requests. The PM defaults to the requester. `idempotency_key`
+ * is optional (older clients send none): a resend with the same key returns the
+ * request already filed (mig 0170).
+ */
 export const ProjectRequestBody = z
   .object({
+    idempotency_key: z.string().uuid().optional(),
     suggested_code: ProjectCodeSchema.optional(),
     display_name: ProjectNameSchema,
     type: ProjectTypeSchema,

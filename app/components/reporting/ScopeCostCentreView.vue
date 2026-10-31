@@ -614,16 +614,16 @@ const copilotPartialMonth = computed(() => props.report?.copilotChargebackPartia
             v-if="isChargeback"
             label="Total chargeback"
             :value="fmtUsd(totalChargeUsd)"
-            :sub="`across ${ccCount} cost ${ccCount === 1 ? 'centre' : 'centres'}`"
-            hint="§B cost-of-record cross-charged to these cost-centres"
+            :sub="`across ${ccCount} ${ccCount === 1 ? BU_LABEL_LOWER : BU_LABEL_LOWER_PLURAL}`"
+            :hint="`Cost-of-record cross-charged to these ${BU_LABEL_LOWER_PLURAL}`"
             data-testid="cc-summary-primary"
           />
           <CcKpiTile
             v-else
             label="Total burn"
             :value="fmtUsd(summary.totalBurnUsd)"
-            :sub="`across ${ccCount} cost ${ccCount === 1 ? 'centre' : 'centres'}`"
-            hint="usage tagged to a cost-centre's budgets"
+            :sub="`across ${ccCount} ${ccCount === 1 ? BU_LABEL_LOWER : BU_LABEL_LOWER_PLURAL}`"
+            :hint="`Usage tagged to a ${BU_LABEL_LOWER}'s budgets`"
             data-testid="cc-summary-primary"
           />
           <CcKpiTile

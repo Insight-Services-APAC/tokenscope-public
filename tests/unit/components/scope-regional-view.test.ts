@@ -464,7 +464,7 @@ describe('ScopeRegionalView — the §A/§B lane re-lens', () => {
     expect(w.find('[data-testid="regional-practice-rank"]').exists()).toBe(false)
     const cbRank = w.find('[data-testid="regional-chargeback-rank"]')
     expect(cbRank.exists()).toBe(true)
-    expect(cbRank.text()).toContain('Chargeback by cost-centre')
+    expect(cbRank.text()).toContain('Chargeback by Business Unit')
 
     /*
      * THE TILE ROW DOES NOT RE-LENS, at this width either. It used to swap three
@@ -478,7 +478,7 @@ describe('ScopeRegionalView — the §A/§B lane re-lens', () => {
     expect(w.find('[data-testid="scope-kpi-active"]').text()).toContain('Active people')
     expect(w.find('[data-testid="scope-kpi-row"]').text()).not.toContain('Billed tokens')
     expect(w.find('[data-testid="scope-chargeback-caveat"]').text()).toBe(
-      'Active people and Median per person are attributed usage (§A) in both lenses.',
+      'Active people and Median per person are attributed usage in both lenses.',
     )
 
     // §A/usage cards RE-LENS to their §B bill-lane analogue (not usage-only

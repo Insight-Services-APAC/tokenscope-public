@@ -213,8 +213,8 @@ const scopeLabel = computed(() => {
 
 <template>
   <UiCard accent="harmony" data-testid="settings-governance-dials">
-    <UiEyebrow>Governance</UiEyebrow>
-    <h2 class="text-lg font-bold text-carbon mt-1 mb-1">Governance dials</h2>
+    <UiEyebrow>Detection thresholds</UiEyebrow>
+    <h2 class="text-lg font-bold text-carbon mt-1 mb-1">Values and overrides</h2>
     <p class="text-xs text-carbon-3 mb-4 leading-relaxed">
       Thresholds for the live detection mechanisms. A region override shadows the platform
       default; saving writes the <span class="font-semibold">{{ scopeLabel }}</span> value.
@@ -226,7 +226,7 @@ const scopeLabel = computed(() => {
       class="mb-4 p-3 rounded-md text-sm font-medium"
       :class="toast.kind === 'ok'
         ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-hunger border border-brand-hunger/30'"
+        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
     >
       {{ toast.message }}
     </div>
@@ -333,7 +333,7 @@ const scopeLabel = computed(() => {
               v-model.number="drafts[row.key]"
               type="number"
               step="any"
-              class="w-32 px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+              class="w-32 px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
               :data-testid="`governance-input-${row.key}`"
             >
             <UiButton

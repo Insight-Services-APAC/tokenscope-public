@@ -166,7 +166,7 @@ export default defineEventHandler(async (event) => {
           title: 'Billing is not settable on a GitHub org once governance is activated',
           status: 409,
           detail:
-            'GitHub bills the enterprise, not the org (ADR-0011 D11). Set billing on the linked provider_enterprise instead.',
+            'GitHub bills the enterprise, not the org. Set billing on the linked provider_enterprise instead.',
         },
       })
     }
@@ -177,7 +177,7 @@ export default defineEventHandler(async (event) => {
     // existence oracle for another region's org ids, and inside the transaction
     // so a denial rolls back — same shape as orgs/[id].delete.ts.
     if (cur.region_id) await requireRegionScopeOrNotFound(event, cur.region_id, notFound())
-    else if (!isPlatformAdmin(caller.role)) platformAdminOnly('An unmapped provider org (no region) is estate-wide; only platform-admin may write it.')
+    else if (!isPlatformAdmin(caller.role)) platformAdminOnly('An unmapped provider org (no region) is estate-wide; only an Admin may write it.')
 
     // Merge supplied fields onto current to validate the resulting row.
     const nextMode: ReconciliationMode = has('reconciliationMode')
@@ -191,10 +191,10 @@ export default defineEventHandler(async (event) => {
       : cur.credential_secret_name
     const nextRegionId: string | null = has('regionId') ? (body.regionId ?? null) : cur.region_id
     if (nextRegionId === null && !isPlatformAdmin(caller.role)) {
-      platformAdminOnly('An unmapped provider org (no region) is estate-wide; only platform-admin may write it.')
+      platformAdminOnly('An unmapped provider org (no region) is estate-wide; only an Admin may write it.')
     }
     if (nextCred !== cur.credential_secret_name && !isPlatformAdmin(caller.role)) {
-      platformAdminOnly('The credential namespace is deployment-wide; only platform-admin may assign credentialSecretName.')
+      platformAdminOnly('The credential namespace is deployment-wide; only an Admin may assign credentialSecretName.')
     }
     // An Anthropic org with no key of its own falls back to its enterprise's key
     // (resolveOrgCredential), so the link is a credential assignment. GitHub's link is the
@@ -205,7 +205,7 @@ export default defineEventHandler(async (event) => {
       (body.providerEnterpriseId ?? null) !== cur.provider_enterprise_id &&
       !isPlatformAdmin(caller.role)
     ) {
-      platformAdminOnly("Linking an Anthropic org to an enterprise can hand it the enterprise's key; only platform-admin may change providerEnterpriseId on an Anthropic org.")
+      platformAdminOnly("Linking an Anthropic org to an enterprise can hand it the enterprise's key; only an Admin may change providerEnterpriseId on an Anthropic org.")
     }
 
     const apiKindErr = validateApiKindForProvider(provider, nextApiKind)
@@ -291,7 +291,7 @@ export default defineEventHandler(async (event) => {
         })
       }
       if (!ou.is_cost_owning_unit) {
-        badRequest('costOwningUnitId must reference a cost-owning org_unit (is_cost_owning_unit = true)')
+        badRequest('costOwningUnitId must reference a Business Unit (an org unit with is_cost_owning_unit = true)')
       }
     }
 
@@ -313,7 +313,7 @@ export default defineEventHandler(async (event) => {
           title: 'Unprocessable',
           status: 422,
           detail:
-            'Moving this org to another region would leave its cost-owning unit in the previous region. Re-point costOwningUnitId in the same request.',
+            'Moving this org to another region would leave its Business Unit in the previous region. Re-point costOwningUnitId in the same request.',
         },
       })
     }

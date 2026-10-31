@@ -152,7 +152,7 @@ function makeReport(): CostCentreReport {
   return {
     meta,
     laneNote:
-      'Per-cost-centre burn is the project cost-owning-unit usage axis. Pooled Copilot usage with no cost-owning unit is excluded here and shown in the finance drill.',
+      'Business Unit burn is usage on the projects each Business Unit leads. Pooled Copilot usage with no Business Unit is excluded here and shown in the finance drill.',
     cards: [
       { id: 'a', code: 'a', displayName: 'Practice A', regionCode: 'ra', burnUsd: 120, chargeUsd: 90, allocationUsd: 100, utilisation: 1.2, exhaustionDate: null, forecast: null, asOfDate: '2026-07-10' },
       { id: 'b', code: 'b', displayName: 'Practice B', regionCode: 'rb', burnUsd: 85, chargeUsd: 60, allocationUsd: 100, utilisation: 0.85, exhaustionDate: null, forecast: null, asOfDate: '2026-07-10' },
@@ -226,7 +226,7 @@ describe('ScopeCostCentreView — the top layer carries the collapse (D8b wiring
 
     // DELETED — the axis paragraph. Rationale is not UI copy.
     expect(w.find('[data-testid="cc-lane-note"]').exists()).toBe(false)
-    expect(text).not.toContain('Per-cost-centre burn is the project cost-owning-unit usage axis')
+    expect(text).not.toContain('Business Unit burn is usage on the projects each Business Unit leads')
     expect(text).not.toContain('shown in the finance drill')
 
     // TOOLTIP + A11Y — the coverage sentence: `title` for pointer users, an

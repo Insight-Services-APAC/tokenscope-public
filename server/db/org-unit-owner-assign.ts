@@ -69,12 +69,12 @@ export async function assignUnitOwner(
   if (!ou.is_cost_owning_unit) {
     throw createError({
       statusCode: 422,
-      statusMessage: 'Not a cost-owning unit',
+      statusMessage: 'Not a Business Unit',
       data: {
         type: 'https://tokenscope.example.com/errors/not-cost-owning',
-        title: 'Not a cost-owning unit',
+        title: 'Not a Business Unit',
         status: 422,
-        detail: 'Owners can only be assigned to cost-owning units. Mark the unit cost-owning first.',
+        detail: 'Owners can only be assigned to Business Units. Mark the unit as a Business Unit first.',
       },
     })
   }
@@ -90,7 +90,7 @@ export async function assignUnitOwner(
         title: 'Cross-region owner',
         status: 422,
         detail:
-          'This teammate belongs to another region. Only platform-admin may assign cross-region cost-centre owners.',
+          'This teammate belongs to another region. Only an Admin may assign cross-region Business Unit owners.',
       },
     })
 

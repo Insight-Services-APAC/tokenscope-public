@@ -93,7 +93,7 @@ async function revoke(g: Grant) {
       class="mb-4 p-3 rounded-md text-sm font-medium"
       :class="message.kind === 'ok'
         ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-hunger border border-brand-hunger/30'"
+        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
       :data-testid="`project-managers-message-${message.kind}`"
     >
       {{ message.text }}
@@ -108,7 +108,7 @@ async function revoke(g: Grant) {
           type="text"
           maxlength="500"
           placeholder="Note (optional), e.g. the account they run"
-          class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+          class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
           data-testid="project-managers-note"
         >
         <UiButton kind="primary" size="sm" :disabled="!picked || adding" data-testid="project-managers-add" @click="add">
@@ -162,6 +162,6 @@ async function revoke(g: Grant) {
     </UiCard>
   </div>
   <div v-else class="max-w-[1200px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/project-managers">
-    <div class="text-lg font-bold text-carbon">Platform admin access required.</div>
+    <div class="text-lg font-bold text-carbon">Admin access required.</div>
   </div>
 </template>

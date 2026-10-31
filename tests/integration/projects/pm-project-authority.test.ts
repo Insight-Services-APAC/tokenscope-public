@@ -292,6 +292,54 @@ describe('project page payload: viewer.can_manage drives the Manage section', ()
   })
 })
 
+describe('project page payload: the budget in effect reaches Manage, baseline or top-ups only (#513)', () => {
+  type Page = {
+    viewer: { budget_allocation_id: string | null; budget_topup_allocation_id: string | null; role: string }
+    budget: { allocation_usd: string }
+  }
+  const page = (code: string) =>
+    call(projectPageGet as Handler, as(PM_DEV), { code }, undefined, 'GET') as Promise<Page>
+  async function mkRow(projectId: string, kind: string, usd: number, range: string, teammateId: string | null = null) {
+    const [evt] = await t.client<{ id: string }[]>`
+      INSERT INTO audit_event (event_type, subject_kind, subject_id, payload)
+      VALUES ('allocation-created', 'project', ${projectId}::uuid, '{}'::jsonb) RETURNING id::text AS id`
+    const [a] = await t.client<{ id: string }[]>`
+      INSERT INTO allocation (scope_type, scope_id, teammate_id, budget_usd, effective, allocation_kind, audit_event_id)
+      VALUES ('project', ${projectId}::uuid, ${teammateId}::uuid, ${usd}, ${range}::tstzrange, ${kind}, ${evt!.id}::uuid)
+      RETURNING id::text AS id`
+    return a!.id
+  }
+
+  it('top-ups only: no baseline id (the editor would treat a top-up as the total), the latest top-up instead', async () => {
+    const id = await mkProject('PMA-TOPONLY')
+    await assign(id, PM_DEV, 'manager')
+    await mkRow(id, 'baseline', 500, '[2026-01-01T00:00:00Z,2026-02-01T00:00:00Z)') // expired
+    const older = await mkRow(id, 'top-up', 1000, '[2026-01-01T00:00:00Z,2099-01-01T00:00:00Z)')
+    const latest = await mkRow(id, 'top-up', 2000, '[2026-03-01T00:00:00Z,2099-01-01T00:00:00Z)')
+    const out = await page('PMA-TOPONLY')
+    expect(out.viewer.role).toBe('manager')
+    expect(out.budget.allocation_usd).toBe('3000.00')
+    expect(out.viewer.budget_allocation_id).toBeNull()
+    expect(out.viewer.budget_topup_allocation_id).toBe(latest)
+    expect(out.viewer.budget_topup_allocation_id).not.toBe(older)
+  })
+
+  it('a baseline in effect wins over a later top-up; a per-developer cap alone is no budget', async () => {
+    const id = await mkProject('PMA-BASE')
+    await assign(id, PM_DEV, 'manager')
+    const base = await mkRow(id, 'baseline', 1000, '[2026-01-01T00:00:00Z,2099-01-01T00:00:00Z)')
+    await mkRow(id, 'top-up', 200, '[2026-06-01T00:00:00Z,2099-01-01T00:00:00Z)')
+    expect((await page('PMA-BASE')).viewer).toMatchObject({ budget_allocation_id: base, budget_topup_allocation_id: null })
+
+    const capOnly = await mkProject('PMA-CAPONLY')
+    await assign(capOnly, PM_DEV, 'manager')
+    await mkRow(capOnly, 'baseline', 300, '[2026-01-01T00:00:00Z,2099-01-01T00:00:00Z)', PM_DEV)
+    const out = await page('PMA-CAPONLY')
+    expect(out.budget.allocation_usd).toBe('0.00')
+    expect(out.viewer).toMatchObject({ budget_allocation_id: null, budget_topup_allocation_id: null })
+  })
+})
+
 describe('PATCH /projects/{id}/timeline: PM of the project or an admin, never an org-role manager (A1)', () => {
   const end = (d: string | null) => ({ end_date: d })
 

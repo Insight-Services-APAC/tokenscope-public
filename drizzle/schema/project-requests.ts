@@ -1,5 +1,5 @@
 /*
- * project_manager_grant + project_request (mig 0164,
+ * project_manager_grant + project_request (migs 0164, 0170,
  * docs/design/project-requests/00-spec.md). CHECKs, the partial unique index and
  * the RLS policies live in the migration — never ship drizzle-kit output for these.
  */
@@ -52,4 +52,6 @@ export const projectRequest = pgTable('project_request', {
   decidedAt: timestamp('decided_at', { withTimezone: true }),
   decisionNote: text('decision_note'),
   createdProjectId: uuid('created_project_id').references(() => project.id, { onDelete: 'set null' }),
+  // mig 0170: client-generated, unique per requester (partial index in the migration).
+  idempotencyKey: uuid('idempotency_key'),
 })

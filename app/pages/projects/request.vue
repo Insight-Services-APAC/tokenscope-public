@@ -98,6 +98,26 @@ watch(displayName, (name) => {
 const submitting = ref(false)
 const submitError = ref<string | null>(null)
 
+/*
+ * One idempotency key per content, for as long as the page is open: a resend of
+ * the same content carries the same key, so a request that landed before its
+ * answer was lost is not filed twice (the server returns the one already filed),
+ * even after an edit that was changed back. Different content is a different
+ * request and gets its own key. Without crypto.randomUUID (a page served over
+ * plain HTTP off localhost) no key is sent, as from an older client.
+ */
+const idempotencyKeys = new Map<string, string>()
+function idempotencyKeyFor(body: object): string | undefined {
+  if (typeof globalThis.crypto?.randomUUID !== 'function') return undefined
+  const content = JSON.stringify(body)
+  let key = idempotencyKeys.get(content)
+  if (!key) {
+    key = globalThis.crypto.randomUUID()
+    idempotencyKeys.set(content, key)
+  }
+  return key
+}
+
 const canSubmit = computed(() => {
   if (submitting.value) return false
   if (!displayName.value.trim() || !justification.value.trim()) return false
@@ -111,35 +131,39 @@ async function submit() {
   if (!canSubmit.value || !pm.value) return
   submitting.value = true
   submitError.value = null
+  const body = {
+    display_name: displayName.value.trim(),
+    type: type.value,
+    region_id: regionId.value,
+    cost_owning_unit_id: couId.value,
+    justification: justification.value.trim(),
+    proposed_pm_teammate_id: pm.value.id,
+    budget: { amount_usd: budgetUsd.value, from: utcMidnight(fromIso.value), to: utcMidnight(toIso.value) },
+    ...(endDate.value ? { end_date: utcMidnight(endDate.value) } : {}),
+    ...(wbsCode.value.trim() ? { wbs_code: wbsCode.value.trim() } : {}),
+    ...(suggestedCode.value.trim() ? { suggested_code: suggestedCode.value.trim() } : {}),
+  }
+  const idempotencyKey = idempotencyKeyFor(body)
   try {
     await $fetch('/api/v1/me/project-requests', {
       method: 'POST',
-      body: {
-        display_name: displayName.value.trim(),
-        type: type.value,
-        region_id: regionId.value,
-        cost_owning_unit_id: couId.value,
-        justification: justification.value.trim(),
-        proposed_pm_teammate_id: pm.value.id,
-        budget: { amount_usd: budgetUsd.value, from: utcMidnight(fromIso.value), to: utcMidnight(toIso.value) },
-        ...(endDate.value ? { end_date: utcMidnight(endDate.value) } : {}),
-        ...(wbsCode.value.trim() ? { wbs_code: wbsCode.value.trim() } : {}),
-        ...(suggestedCode.value.trim() ? { suggested_code: suggestedCode.value.trim() } : {}),
-      },
+      body: { ...body, idempotency_key: idempotencyKey },
     })
     await navigateTo('/projects')
   } catch (err) {
     submitError.value = mutationErrorDetail(
       err,
       'The request could not be sent.',
-      'We could not tell whether your request was sent. Check "Your project requests" on My projects before sending it again, or it may be sent twice.',
+      idempotencyKey
+        ? 'We could not tell whether your request was sent. Send it again without changing anything: if it already arrived, it is not sent twice. Or check "Your project requests" on My projects.'
+        : 'We could not tell whether your request was sent. Check "Your project requests" on My projects before sending it again.',
     )
   } finally {
     submitting.value = false
   }
 }
 
-const inputClass = 'w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none'
+const inputClass = 'w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony'
 const labelClass = 'block text-carbon-3 font-bold uppercase tracking-[1px] mb-1'
 </script>
 

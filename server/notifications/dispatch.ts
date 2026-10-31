@@ -334,7 +334,7 @@ async function resolveOverBudgetRecipients(
    *
    * `cou_owner.revoked_at` IS right here — it ends a GRANT, which is a question
    * about responsibility. `teammate.revoked_at` would not be: that column is a
-   * session/emit anchor, not a deactivation flag.
+   * session anchor, not a deactivation flag (#428).
    * See docs/security-sprint/epic-mdash-remediation.md (W2.4).
    */
   const responsibleRows = await db.execute<{ teammate_id: string }>(sql`

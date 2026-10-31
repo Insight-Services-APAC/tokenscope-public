@@ -34,5 +34,5 @@ export const REPORT_LANE_CAPTIONS: Record<ReportLane, string> = {
    * that every breakdown under this lens was still both providers.
    */
   chargeback:
-    'Cost-of-record — what cross-charges to cost-centres. Copilot bills one pooled invoice per cost centre (pending validation), so per-person and per-model breakdowns are Anthropic’s charge alone.',
+    'Cost-of-record — what cross-charges to Business Units. Copilot bills one pooled invoice per Business Unit (pending validation), so per-person and per-model breakdowns are Anthropic’s charge alone.',
 }

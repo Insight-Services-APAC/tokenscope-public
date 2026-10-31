@@ -220,8 +220,11 @@ Ownership is an explicit assignment, never derived from `LTREE` adjacency.
 `POST /admin/org-units/{id}/owners`, which returns **409** naming the BU the
 teammate already owns, and serialises on the teammate so two concurrent grants
 cannot both succeed. There is no database constraint yet: existing data holds
-violations, and `GET /admin/diagnostics/multi-bu-owners` must report `clean`
-before a partial-unique index can be added. The rule matters beyond tidiness —
+violations, and none may remain before a partial-unique index can be added.
+To check, run `SELECT co.teammate_id, count(*) FROM cou_owner co JOIN org_unit ou
+ON ou.id = co.org_unit_id WHERE co.revoked_at IS NULL AND ou.retired_at IS NULL
+GROUP BY co.teammate_id HAVING count(*) > 1` against the database (no rows means
+clean). The rule matters beyond tidiness —
 the manager-chain placement walk treats an owner of more than one active
 cost-owning unit as ambiguous and places nobody through them.
 
@@ -538,7 +541,7 @@ reads them (reports use the current-placement views, see
 | `ts_recorded` | TIMESTAMPTZ NOT NULL = now() | |
 | `source_run_id` | TEXT | provider-side run id (span/request id; retro claims + Copilot parallel-subagent dedup) |
 | `is_frozen` | BOOL NOT NULL = true | written `true`, read nowhere; no trigger, CHECK or policy enforces it |
-| `activity` | TEXT | orthogonal activity axis (mig 0020), denormalised from `session_assignment` for within-project activity rollups; nullable |
+| `activity` | TEXT | orthogonal activity axis (mig 0020) for within-project activity rollups; nullable. Stamped by the joiner on insert: the session's manual tag (`session_assignment.activity`, read under the tag lock) if set, else the folder default the client emits as `tokenscope.activity` when it names an active standard activity (global or the teammate's region), in the vocabulary's spelling (#475) |
 | `query_source` | TEXT | Claude's per-event `query_source` (mig 0045), stored RAW — Claude's own token (`repl_main_thread`, `agent:custom`, `compact`, …) and **never** the word `main`; classify with `shared/usage/query-source.ts`; NULL = attr absent / pre-0045 (unknown lane, never assumed to be a conversation) |
 | `identity_state` | TEXT | identity provenance (mig 0057) stamped from the emitting instance's `instance_attestation.identity_state` so surfaces can exclude/label provisional usage; display-only, never gates money; NULL = pre-0057 (treat as `confirmed`) |
 | `emitting_email` | TEXT | canonicalised (trim + lower) Claude per-event `user.email` (mig 0119) — which **account** was signed in, as distinct from which device emitted (`instance_id`); the evidence for `billing_lane`; NULL = the emitter did not report one; redacted in place on erasure (`billing_lane` survives, stamped at write) |
@@ -1428,10 +1431,13 @@ request's region (`platform-admin`, or that region's `admin`).
 | `created_at` | TIMESTAMPTZ NOT NULL = now() | |
 | `decided_by` / `decided_at` / `decision_note` | UUID → teammate / TIMESTAMPTZ / TEXT | a withdrawal records the requester here |
 | `created_project_id` | UUID → project `ON DELETE SET NULL` | the project approval created; request history survives a project delete |
+| `idempotency_key` | UUID | mig 0170: the key the client sent with the submit, if any; a resend with it returns this request instead of filing another |
 
 CHECKs: `decided_at` is NULL exactly when `status = 'pending'`; a rejection
 carries a `decision_note`; only an approved request has a `created_project_id`.
-Indexes: `(status, region_id)`, `(requester_teammate_id, created_at DESC)`.
+Indexes: `(status, region_id)`, `(requester_teammate_id, created_at DESC)`, and
+the partial unique `(requester_teammate_id, idempotency_key) WHERE
+idempotency_key IS NOT NULL` (keys are per requester).
 
 Every decision (approve, reject, withdraw) is a conditional `UPDATE … WHERE
 status = 'pending'`, so a second decision, or a withdrawal racing a decision,

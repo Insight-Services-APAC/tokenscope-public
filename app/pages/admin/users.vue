@@ -357,7 +357,8 @@ const columns = [
 
 function fmtTs(v: string | null): string {
   if (!v) return '—'
-  return new Date(v).toLocaleString()
+  // An instant, so the viewer's zone; minutes are enough for a sync time.
+  return new Date(v).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
 // Typed cast for the slot binding — AdminDataTable's row slot is
@@ -405,7 +406,7 @@ function roleOptionsFor(current: string): Role[] {
       class="mb-4 p-3 rounded-md text-sm font-medium"
       :class="toast.kind === 'ok'
         ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-hunger border border-brand-hunger/30'"
+        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
     >
       {{ toast.message }}
     </div>
@@ -426,7 +427,7 @@ function roleOptionsFor(current: string): Role[] {
             v-model="query"
             type="search"
             placeholder="Search by name or email…"
-            class="flex-1 px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none"
+            class="flex-1 px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
             data-testid="admin-users-search"
             @search="refresh()"
           >
@@ -477,8 +478,11 @@ function roleOptionsFor(current: string): Role[] {
           :data-testid="`admin-users-row-${asUserRow(row).id}`"
           class="hover:bg-brand-harmony-sheer/30"
         >
-          <td class="px-5 py-3 text-sm text-carbon font-medium">{{ asUserRow(row).email }}</td>
-          <td class="px-5 py-3 text-sm text-carbon">{{ asUserRow(row).displayName ?? '—' }}</td>
+          <!-- Long emails and names truncate (full text on hover) so the six
+               columns fit the card at 1440 and 1024 wide; the card scrolls
+               sideways only below that. -->
+          <td class="px-5 py-3 text-sm text-carbon font-medium max-w-[240px] truncate" :title="asUserRow(row).email">{{ asUserRow(row).email }}</td>
+          <td class="px-5 py-3 text-sm text-carbon max-w-[180px] truncate" :title="asUserRow(row).displayName ?? undefined">{{ asUserRow(row).displayName ?? '—' }}</td>
           <td class="px-5 py-3 text-sm">
             <div class="flex items-center gap-2">
               <select
@@ -527,9 +531,9 @@ function roleOptionsFor(current: string): Role[] {
               >(can't move)</span>
             </span>
           </td>
-          <td class="px-5 py-3 text-sm text-carbon-3">{{ fmtTs(asUserRow(row).lastSyncAt) }}</td>
+          <td class="px-5 py-3 text-sm text-carbon-3 whitespace-nowrap">{{ fmtTs(asUserRow(row).lastSyncAt) }}</td>
           <td class="px-5 py-3 text-sm">
-            <div class="flex items-center gap-2">
+            <div class="flex flex-wrap items-center gap-2">
             <select
               v-if="isOrgWide && !regionsError"
               :data-testid="`admin-users-region-${asUserRow(row).id}`"

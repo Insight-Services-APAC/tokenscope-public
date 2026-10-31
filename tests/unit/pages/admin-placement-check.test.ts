@@ -345,6 +345,49 @@ describe('placement check page: apply', () => {
     expect(refused).toContain('changed after this page loaded')
     expect(refreshSpy).toHaveBeenCalled()
   })
+
+  async function applyFailing(err: unknown, rows = [row(1, 'move-unit')]) {
+    const w = await mountPage(rows)
+    await w.find('[data-testid="placement-select-all"]').trigger('click')
+    await w.find('[data-testid="placement-apply-open"]').trigger('click')
+    fetchMock.mockRejectedValue(err)
+    await w.find('[data-testid="placement-apply-submit"]').trigger('click')
+    await flushPromises()
+    return w
+  }
+
+  it('a refused apply says nothing was changed, in the server’s words when it gave them', async () => {
+    const w = await applyFailing({ statusCode: 400, data: { statusMessage: 'Too many items.' } })
+    expect(w.find('[data-testid="placement-apply-error"]').text()).toBe('Too many items.')
+    const bare = await applyFailing({ statusCode: 403, data: {} })
+    expect(bare.find('[data-testid="placement-apply-error"]').text()).toBe('Apply failed. Nothing was changed.')
+  })
+
+  it('an apply that failed without an answer says the outcome is unknown, never "Nothing was changed"', async () => {
+    const w = await applyFailing(new TypeError('Failed to fetch'))
+    const text = w.find('[data-testid="placement-apply-error"]').text()
+    expect(text).toContain('We could not tell whether the apply went through')
+    expect(text).not.toContain('Nothing was changed')
+  })
+
+  it('a later batch that failed without an answer does not claim the rest were not changed', async () => {
+    const rows = Array.from({ length: 205 }, (_, i) => row(i + 1, 'move-unit'))
+    const w = await mountPage(rows)
+    await w.find('[data-testid="placement-select-all"]').trigger('click')
+    await w.find('[data-testid="placement-apply-open"]').trigger('click')
+    fetchMock
+      .mockImplementationOnce(async (_url: string, opts: { body: { items: Array<{ teammateId: string }> } }) => ({
+        batchId: id(500),
+        results: opts.body.items.map((i) => ({ teammateId: i.teammateId, outcome: 'moved' })),
+      }))
+      .mockRejectedValueOnce({ statusCode: 504, data: { statusMessage: 'Gateway Timeout' } })
+    await w.find('[data-testid="placement-apply-submit"]').trigger('click')
+    await flushPromises()
+    const text = w.find('[data-testid="placement-apply-partial-error"]').text()
+    expect(text).toContain('Apply stopped after 200')
+    expect(text).toContain('could not tell whether the next batch was applied')
+    expect(text).not.toContain('not changed')
+  })
 })
 
 describe('placement check page: why and managers', () => {

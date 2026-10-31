@@ -438,8 +438,8 @@ export function grantsToScopes(g: ReportScopeGrants): string[] {
   else if (rg.allRegions) out.push('Region (all regions)')
   else if (rg.crossRegion) out.push('Region (every region)')
   else if (rg.ownRegion) out.push('Region (own region)')
-  if (g.costCentre === 'all') out.push('Cost centres (all)')
-  else if (g.costCentre === 'owned-or-subtree') out.push('Cost centres (owned)')
+  if (g.costCentre === 'all') out.push('Business Units (all)')
+  else if (g.costCentre === 'owned-or-subtree') out.push('Business Units (owned)')
   if (g.finance) out.push('Finance (whole company)')
   /*
    * The two DRILL columns (D38). They render from this ONE function so the admin
@@ -470,7 +470,7 @@ export const REPORT_VISIBILITY_PERSONAS = [
   { key: 'developer', label: 'Developer', role: 'developer', ownsCostCentre: false },
   { key: 'manager', label: 'Manager', role: 'manager', ownsCostCentre: false },
   { key: 'admin', label: 'Region admin (retired)', role: 'admin', ownsCostCentre: false },
-  { key: 'cost-centre-owner', label: 'Cost-centre owner', role: 'developer', ownsCostCentre: true },
+  { key: 'cost-centre-owner', label: 'Business Unit owner', role: 'developer', ownsCostCentre: true },
   { key: 'platform-admin', label: 'Admin', role: 'platform-admin', ownsCostCentre: false },
 ] as const satisfies readonly { key: string; label: string; role: Role; ownsCostCentre: boolean }[]
 

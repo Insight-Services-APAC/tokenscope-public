@@ -87,7 +87,7 @@ export default defineEventHandler(async (event) => {
         status: 403,
         detail: isUngrantableRole(body.role)
           ? `${roleLabel(body.role)} can no longer be granted.`
-          : `Role '${caller.role}' cannot grant '${body.role}'. Org-wide roles require platform-admin.`,
+          : `${roleLabel(caller.role)} cannot grant ${roleLabel(body.role)}. Only an Admin can grant that role.`,
       },
     })
   }

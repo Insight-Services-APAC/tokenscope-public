@@ -16,7 +16,7 @@
  *   - buildHelperCommand — the ONE producer of the `otelHeadersHelper` string.
  */
 import { existsSync } from 'node:fs'
-import { join, posix, win32 } from 'node:path'
+import { dirname, join, posix, win32 } from 'node:path'
 import { assertHelperRecord } from './device-store.mjs'
 import { helperScriptName, windowsPowerShellPath, DEFAULT_WINDOWS_POWERSHELL } from './emit-helper-spawn.mjs'
 
@@ -199,9 +199,17 @@ export function parseHelperCommand(value) {
  * Resource-attr string for a REPO tag (repo-local config): the device session id
  * PLUS the project's code_hash. Matches the server's attested-token attrs ordering
  * (sid, project.code_hash, tool) so the join key is identical either side.
+ *
+ * Either part may be absent: a folder with only a default activity (#475) carries
+ * no code_hash, and `activity` (readFolderActivity) is appended percent-encoded,
+ * as OTEL_RESOURCE_ATTRIBUTES values must be (a label may hold a space).
  */
-export function buildRepoResourceAttrs(sessionId, projectCodeHash) {
-  return `tokenscope.instance_id=${sessionId},project.code_hash=${projectCodeHash},tool=claude-code`
+export function buildRepoResourceAttrs(sessionId, projectCodeHash, activity = null) {
+  const parts = [`tokenscope.instance_id=${sessionId}`]
+  if (projectCodeHash) parts.push(`project.code_hash=${projectCodeHash}`)
+  parts.push('tool=claude-code')
+  if (activity) parts.push(`tokenscope.activity=${encodeURIComponent(activity)}`)
+  return parts.join(',')
 }
 
 /**
@@ -269,11 +277,61 @@ function isOurStatusLine(statusLine) {
 }
 
 /** True if `p` is one of OUR plugin's script paths (under a tokenscope plugin dir),
- * so the self-heal only ever repoints paths we own — never a user's custom one. */
+ * so the self-heal only ever repoints paths we own — never a user's custom one.
+ *
+ * A directory-marketplace install (a local checkout) runs the plugin in place, so
+ * setup writes `<checkout>/plugin/scripts/...` (#455). That path is ours too, by
+ * its own file name under the repo's `plugin/scripts/`: it is unversioned, so a
+ * versioned active install moves it forward (isForwardMove), and a session running
+ * from the checkout itself leaves it alone. */
 function isOurPluginPath(p) {
   return (
-    typeof p === 'string' && /[\\/]plugins[\\/](cache|marketplaces)[\\/]tokenscope[\\/]/.test(p)
+    typeof p === 'string' &&
+    (/[\\/]plugins[\\/](cache|marketplaces)[\\/]tokenscope[\\/]/.test(p) ||
+      /[\\/]plugin[\\/]scripts[\\/](otel-headers-helper\.(sh|ps1)|statusline\.mjs)"?$/.test(p))
   )
+}
+
+/**
+ * The SAME install seen from another side of a shared `~/.claude` (#447), or null.
+ *
+ * When one `~/.claude` is shared between a host and its containers, each side
+ * sees the plugin cache under its own home: `/home/u/.claude/plugins/cache/...`
+ * on the host, `/home/claude/.claude/plugins/cache/...` in the container. A path
+ * written by the other side does not exist here, but the part from `plugins/`
+ * on does, under this side's own config folder. Rewriting it to this side's path
+ * only breaks the other side, which rewrites it back at its next session start.
+ *
+ * A home that was simply renamed or restored elsewhere looks the same from here,
+ * and its path SHOULD be repaired. The difference is that the other side is
+ * still running: each side's SessionStart records its config folder in
+ * `tokenscope-sides.json` beside the shared settings (recordClaudeSide, in the
+ * SessionStart hook), and only a prefix in `otherSides` (seen recently, not
+ * ours) counts.
+ *
+ * Returns this side's spelling of `script` when (a) `script` is under a
+ * `plugins/cache|marketplaces/` folder whose prefix differs from the active
+ * install's, (b) that prefix is one of `otherSides`, and (c) that spelling
+ * exists here. `exists` is injectable for tests.
+ */
+export function sharedHomeEquivalent(script, scriptsDir, exists = existsSync, otherSides = []) {
+  const root = /^(.*?)[\\/]plugins[\\/](?:cache|marketplaces)[\\/]/
+  if (typeof script !== 'string' || typeof scriptsDir !== 'string') return null
+  const cur = root.exec(script)
+  const act = root.exec(`${scriptsDir}/`)
+  if (!cur || !act || cur[1] === act[1] || !otherSides.includes(cur[1])) return null
+  const local = act[1] + script.slice(cur[1].length)
+  try {
+    return exists(local) ? local : null
+  } catch {
+    return null
+  }
+}
+
+/** The statusline.mjs path inside one of our status-line commands, or null. */
+function statusLineScript(command) {
+  const m = typeof command === 'string' && /"((?:[^"\\]|\\.)*statusline\.mjs)"\s*$/.exec(command)
+  return m ? m[1].replace(/\\(.)/g, '$1') : null
 }
 
 /** The cache version [maj,min,patch] embedded in a tokenscope plugin path, or null
@@ -357,6 +415,7 @@ export function reconcilePluginPaths(
     recordFor = () => null,
     exists = existsSync,
     defaultStateDir,
+    otherSides = [],
   } = {},
 ) {
   const settings = existing && typeof existing === 'object' ? { ...existing } : {}
@@ -375,7 +434,11 @@ export function reconcilePluginPaths(
     const curVer = pluginPathVersion(sl.command)
     const actVer = pluginPathVersion(statuslinePath)
     const sameVersion = Boolean(curVer && actVer && curVer.join('.') === actVer.join('.'))
+    // #447: a path the other side of a shared ~/.claude wrote is left alone.
+    const curScript = statusLineScript(sl.command)
+    const otherSide = Boolean(curScript && !exists(curScript) && sharedHomeEquivalent(curScript, dirname(statuslinePath), exists, otherSides))
     if (
+      !otherSide &&
       wantCommand &&
       sl.command !== wantCommand &&
       (isForwardMove(sl.command, statuslinePath) ||
@@ -392,6 +455,7 @@ export function reconcilePluginPaths(
     recordFor,
     exists,
     defaultStateDir,
+    otherSides,
   })
   if (want !== null && want !== settings.otelHeadersHelper) {
     settings.otelHeadersHelper = want
@@ -441,7 +505,14 @@ function isHelperSnapshot(parsed, defaultStateDir) {
  */
 export function reconcileHelperCommand(
   current,
-  { scriptsDir, platform = process.platform, recordFor = () => null, exists = existsSync, defaultStateDir } = {},
+  {
+    scriptsDir,
+    platform = process.platform,
+    recordFor = () => null,
+    exists = existsSync,
+    defaultStateDir,
+    otherSides = [],
+  } = {},
 ) {
   const parsed = parseHelperCommand(current)
   if (!parsed || !(isOurPluginPath(parsed.script) || isHelperSnapshot(parsed, defaultStateDir))) return null
@@ -458,6 +529,10 @@ export function reconcileHelperCommand(
   const curVer = pluginPathVersion(parsed.script)
   const actVer = scriptsDir ? pluginPathVersion(join(scriptsDir, file)) : null
   const broken = !exists(parsed.script)
+  // #447: written by the other side of a shared ~/.claude, where it is valid.
+  // Rewriting it here breaks that side, which rewrites it back: leave it, and
+  // the SessionStart hook says how to make it valid on this side too.
+  if (broken && sharedHomeEquivalent(parsed.script, scriptsDir, exists, otherSides)) return null
   let dir = null
   if (has(scriptsDir) && (broken || isForwardMove(parsed.script, join(scriptsDir, file)))) dir = scriptsDir
   else if (!broken && curVer && actVer && curVer.join('.') === actVer.join('.') && has(parsed.scriptDir)) dir = parsed.scriptDir

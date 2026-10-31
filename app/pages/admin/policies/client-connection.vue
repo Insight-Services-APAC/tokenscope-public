@@ -108,7 +108,7 @@ async function save() {
 }
 
 const inputClass =
-  'mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony focus:outline-none'
+  'mt-1 w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony'
 </script>
 
 <template>

@@ -130,6 +130,9 @@ const sessionFor = (id: string, email: string): Session =>
     role: 'developer',
     regionId,
     orgPath: 'do.svc',
+    // Minted now, as a real sign-in would be: the exchange judges a code by the
+    // approving session's mint time (#431), and a session with none fails closed.
+    issuedAt: new Date().toISOString(),
   }) as Session
 
 function ev(opts: {
@@ -438,6 +441,7 @@ describe('auth code: a code minted BEFORE deactivation is not exchangeable AFTER
       scope: 'tokenscope.read',
       codeChallenge: challenge,
       codeChallengeMethod: 'S256',
+      sessionIssuedAt: new Date().toISOString(),
     })
 
     await deactivate(subjectId)
