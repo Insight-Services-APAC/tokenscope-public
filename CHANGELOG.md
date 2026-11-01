@@ -7,7 +7,7 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
-## v1.0.4 — 2026-10-31 (snapshot 463724c9)
+## v1.0.4 — 2026-11-01 (snapshot 41782ff9)
 
 - **Before upgrading:**
   - Region admin can no longer be granted; Admin is the one admin role. People
@@ -49,6 +49,13 @@ the public mirror.)
   a clear error when the group holds more than one Container App. A failed
   first deploy, with no earlier working build, no longer fails a second time
   trying to roll back. The manual steps in `docs/DEPLOY-AZURE.md` match.
+- When an infrastructure apply fails, the example infra workflow now prints
+  each failed resource and Azure's reason for it, not only the name of the
+  module that failed.
+- The example infra workflow applies again, up to twice, when an apply fails
+  only on Azure's side (an `InternalError`, a timeout, a conflict) or Front
+  Door Premium is not yet routing to the app 30 minutes after it deployed. An
+  error that names the template or your parameters still fails at once.
 - A project's Manage and Request more budget are now buttons at the top of its
   page, opening a side panel; Manage shows how many budget requests are
   waiting. A project's managers no longer see Request more budget.

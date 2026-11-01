@@ -87,7 +87,15 @@ case "$STUB_FAIL" in
   list) [ ! -e "$STUB_PUTS.started" ] && fail privateEndpointConnections?api && { echo "az: transient error" >&2; exit 1; } ;;
 esac
 case "$args" in
-  *"deployment group show"*provisioningState*) echo Succeeded ;;
+  *"deployment group show"*provisioningState*) echo "\${STUB_STATE:-Succeeded}" ;;
+  *"deployment group show"*properties.error*) echo '{ "code": "DeploymentFailed" }' ;;
+  # STUB_STATE=Failed: main failed in its front-door module, at one route.
+  *"deployment operation group list"*"-n main "*) echo "WARNING: this command is in preview" >&2; printf 'Microsoft.Resources/deployments\tfront-door\tnull\n' ;;
+  # STUB_FD_ROWS overrides the front-door module's failed operations.
+  *"deployment operation group list"*"-n front-door "*)
+    if [ -n "\${STUB_FD_FILE:-}" ]; then cat "$STUB_FD_FILE"
+    elif [ -n "\${STUB_FD_ROWS:-}" ]; then printf '%b' "$STUB_FD_ROWS"
+    else printf 'Microsoft.Cdn/profiles/afdEndpoints/routes\tfd-ts/ep-ts/route-ts\t{"error":{"code":"BadRequest","message":"The origin group is not ready."}}\n'; fi ;;
   *"deployment group show"*parameters.enableFrontDoor*) echo true ;;
   *"deployment group show"*parameters.frontDoorSku*) echo Premium ;;
   *"deployment group show"*parameters.enablePrivateNetworking*) echo true ;;
@@ -110,7 +118,8 @@ let dir = ''
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'ts-afd-approve-'))
   await writeFile(join(dir, 'az'), AZ_STUB)
-  await writeFile(join(dir, 'curl'), '#!/usr/bin/env bash\nprintf 200\n')
+  // STUB_HTTP: what the Front Door endpoint answers (200 unless set).
+  await writeFile(join(dir, 'curl'), '#!/usr/bin/env bash\nprintf "${STUB_HTTP:-200}"\n')
   await writeFile(join(dir, 'sleep'), '#!/usr/bin/env bash\nexit 0\n')
   for (const f of ['az', 'curl', 'sleep']) await chmod(join(dir, f), 0o755)
   for (const [name, rows] of Object.entries(FIXTURES)) await writeFile(join(dir, name), tsv(rows))
@@ -120,7 +129,12 @@ afterAll(async () => {
   if (dir) await rm(dir, { recursive: true, force: true })
 })
 
-async function run(connections: string, initial = 'empty.tsv', fail = ''): Promise<{ code: number; out: string; puts: string[] }> {
+async function run(
+  connections: string,
+  initial = 'empty.tsv',
+  fail = '',
+  extra: Record<string, string> = {},
+): Promise<{ code: number; out: string; puts: string[] }> {
   const puts = join(dir, `puts-${Date.now()}.log`)
   await writeFile(puts, '')
   let code = 0
@@ -134,6 +148,7 @@ async function run(connections: string, initial = 'empty.tsv', fail = ''): Promi
         STUB_INITIAL: join(dir, initial),
         STUB_PUTS: puts,
         STUB_FAIL: fail,
+        ...extra,
       },
       timeout: 30_000,
     })
@@ -219,5 +234,111 @@ describe('approve-front-door-private-link.sh', () => {
     expect(r.code, r.out).toBe(0)
     expect(r.puts).toContain('pec-afd-approved')
     expect(r.puts).not.toContain('pec-rejected')
+  })
+
+  it('prints the failed resource and Azure\'s message when the deployment fails', async () => {
+    const r = await run('reapply.tsv', 'empty.tsv', '', { STUB_STATE: 'Failed' })
+    expect(r.code).toBe(1)
+    expect(r.out).toContain('Deployment main Failed:')
+    expect(r.out).toContain("Failed operations (resource type, name, Azure's message):")
+    expect(r.out).toContain('Microsoft.Cdn/profiles/afdEndpoints/routes\tfd-ts/ep-ts/route-ts')
+    expect(r.out).toContain('The origin group is not ready.')
+    // az's warning on a successful read is not listed as a failed operation.
+    expect(r.out).not.toContain('WARNING: this command is in preview')
+    // BadRequest names the request: not a platform error, so no retry.
+    expect(r.out).not.toContain('the same apply can be run again')
+  })
+
+  const ORIGIN = 'Microsoft.Cdn/profiles/originGroups/origins\\tfd-ts/og-ts/origin-ts\\t'
+  const row = (code: string) => `${ORIGIN}{"status":"Failed","error":{"code":"${code}","message":"x"}}\\n`
+
+  it('exits 4 when every failed operation carries only Azure platform errors', async () => {
+    const r = await run('reapply.tsv', 'empty.tsv', '', {
+      STUB_STATE: 'Failed',
+      STUB_FD_ROWS: row('InternalError') + row('AnotherOperationInProgress'),
+    })
+    expect(r.code).toBe(4)
+    expect(r.out).toContain('Only Azure platform errors (AnotherOperationInProgress, InternalError): the same apply can be run again.')
+  })
+
+  it('does not retry when any failed operation names the template or its input', async () => {
+    const r = await run('reapply.tsv', 'empty.tsv', '', {
+      STUB_STATE: 'Failed',
+      STUB_FD_ROWS: row('InternalError') + row('InvalidParameter'),
+    })
+    expect(r.code).toBe(1)
+    expect(r.out).not.toContain('the same apply can be run again')
+  })
+
+  it('does not retry a platform error wrapping one that names the input', async () => {
+    const nested = `${ORIGIN}{"error":{"code":"InternalError","details":[{"code":"LinkedInvalidPropertyId","message":"x"}]}}\\n`
+    const r = await run('reapply.tsv', 'empty.tsv', '', { STUB_STATE: 'Failed', STUB_FD_ROWS: nested })
+    expect(r.code).toBe(1)
+  })
+
+  it('exits 4 when the deployment succeeded but Front Door still answers 404 after 30 minutes', async () => {
+    const r = await run('reapply.tsv', 'empty.tsv', '', { STUB_HTTP: '404' })
+    expect(r.code).toBe(4)
+    expect(r.out).toContain('Front Door endpoint: HTTP 404; waiting for it to start routing...')
+    expect(r.out).toContain('Front Door is not serving the app yet. Running the same apply again re-approves the connection')
+  })
+
+  it('does not retry a platform error carrying an input error in an escaped message', async () => {
+    const f = join(dir, 'escaped.tsv')
+    await writeFile(f, 'Microsoft.Cdn/profiles/originGroups/origins\tfd-ts/og-ts/origin-ts\t'
+      + '{"error":{"code":"InternalServerError","message":"{\\"error\\":{\\"code\\":\\"InvalidRequestContent\\"}}"}}\n')
+    const r = await run('reapply.tsv', 'empty.tsv', '', { STUB_STATE: 'Failed', STUB_FD_FILE: f })
+    expect(r.code).toBe(1)
+    expect(r.out).not.toContain('the same apply can be run again')
+  })
+
+  it('on exit 4, records the request Front Door filed, and the retry may approve exactly that one', async () => {
+    const carryFile = join(dir, `carry-${Date.now()}.txt`)
+    const first = await run('first.tsv', 'empty.tsv', '', {
+      STUB_STATE: 'Failed', STUB_FD_ROWS: row('InternalError'), APPROVE_CARRY: carryFile,
+    })
+    expect(first.code).toBe(4)
+    expect((await readFile(carryFile, 'utf8')).trim()).toBe('pec-afd-pending')
+    // The retry: the same request is now Pending from the start.
+    const retry = await run('first.tsv', 'first.tsv', '', { APPROVE_CARRY: carryFile })
+    expect(retry.code, retry.out).toBe(0)
+    expect(retry.out).toContain('Retry: pec-afd-pending was filed by Front Door during the previous attempt')
+    expect(retry.puts).toEqual(['pec-afd-pending'])
+  })
+
+  it('does not retry when a nested code cannot be read (null, or escaped whitespace before it)', async () => {
+    for (const msg of [
+      '{"error":{"code":"InternalError","details":[{"code":null}]}}',
+      '{"error":{"code":"InternalError","message":"{\\"error\\":{\\"code\\":\\n\\"InvalidParameter\\"}}"}}',
+    ]) {
+      const f = join(dir, `nested-${Date.now()}.tsv`)
+      await writeFile(f, `Microsoft.Cdn/profiles/originGroups/origins\tfd-ts/og-ts/origin-ts\t${msg}\n`)
+      const r = await run('reapply.tsv', 'empty.tsv', '', { STUB_STATE: 'Failed', STUB_FD_FILE: f })
+      expect(r.code, msg).toBe(1)
+    }
+  })
+
+  it('keeps the carried request when the retry also exits 4', async () => {
+    const carryFile = join(dir, `carry-keep-${Date.now()}.txt`)
+    await writeFile(carryFile, 'pec-afd-pending\n')
+    // The retry fails on Azure's side again; whatever it approved, the next
+    // attempt still knows which request was Front Door's.
+    const r = await run('first.tsv', 'first.tsv', '', {
+      STUB_STATE: 'Failed', STUB_FD_ROWS: row('InternalError'), APPROVE_CARRY: carryFile,
+    })
+    expect(r.code).toBe(4)
+    expect((await readFile(carryFile, 'utf8')).trim()).toBe('pec-afd-pending')
+  })
+
+  it('a carried name never makes a different pending-before request approvable', async () => {
+    const carryFile = join(dir, `carry-other-${Date.now()}.txt`)
+    await writeFile(carryFile, 'pec-something-else\n')
+    const r = await run('first.tsv', 'first.tsv', '', { APPROVE_CARRY: carryFile })
+    expect(r.puts).toEqual([])
+  })
+
+  it('does not retry a failure with no error code', async () => {
+    const r = await run('reapply.tsv', 'empty.tsv', '', { STUB_STATE: 'Failed', STUB_FD_ROWS: `${ORIGIN}null\\n` })
+    expect(r.code).toBe(1)
   })
 })

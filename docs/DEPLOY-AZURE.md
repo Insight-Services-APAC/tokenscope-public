@@ -181,7 +181,13 @@ infra/scripts/approve-front-door-private-link.sh "$RG"
 The script waits for the deployment and exits non-zero with Azure's error if it
 fails. It exits 3 when the only failure is a new Container App's missing
 image (`MANIFEST_UNKNOWN`), which is how a first apply ends: build the image,
-then apply again. With Front Door Premium on a VNet deployment it also approves Front
+then apply again. It exits 4 when only Azure's platform failed (every failed
+resource reports an error such as `InternalError`, a timeout, `Conflict` or
+`AnotherOperationInProgress`), or when the deployment succeeded but Front Door
+still does not serve the app after 30 minutes: run the same apply again (the
+template is idempotent; the example infra workflow does this up to twice). Any
+other error names the template or your parameters, and applying again would
+fail the same way. With Front Door Premium on a VNet deployment it also approves Front
 Door's Private Link request while the apply runs: Front Door does not finish
 until that request is approved. Front Door files one request per origin, so
 the script approves it only when it is the only one. If another request
@@ -541,7 +547,8 @@ Re-run the apply command only when parameters or infrastructure change.
 | Dashboards stay at $0 while developers are enrolled | `workerBaseUrl` is empty, or points at a host the jobs cannot reach. |
 | VNet with your own WAF: the app FQDN does not resolve | The Container Apps environment's DNS zone is missing or not linked to the querying network. |
 | Front Door Premium apply sits on the origin for many minutes | Its Private Link request is waiting for approval; run the apply with the approval script (§2). |
-| Front Door endpoint answers its own `404` "Page not found" after a successful apply | Front Door is not routing to the Private Link origin yet. The approval script waits for it and re-approves the connection meanwhile; if it persists, run the script again. |
+| Front Door endpoint answers its own `404` "Page not found" after a successful apply | Front Door is not routing to the Private Link origin yet. The approval script waits 30 minutes for it, re-approving the connection meanwhile, then exits 4; run the apply again (the example infra workflow retries it twice). |
+| Apply fails with `InternalError` and "Sorry, it looks like there was an error on our end" | An Azure platform fault. The approval script exits 4; apply again. The example infra workflow retries it twice. |
 | Apply fails with `ServerIsBusy` on a Postgres setting | Two writes reached the server at once. Current templates write them one at a time; apply again. |
 | A self-hosted build runner goes offline mid-build | It ran out of memory; the build needs at least 8 GB of RAM. |
 | Apply fails before creating anything: "Front Door Standard cannot reach a VNet" | Standard cannot reach an internal environment: set `frontDoorSku = 'Premium'`, or use your own WAF. |

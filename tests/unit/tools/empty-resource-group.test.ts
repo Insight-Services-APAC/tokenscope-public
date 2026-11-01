@@ -55,16 +55,33 @@ case "$1 $2" in
       exit 1
     fi ;;
 esac
+# STUB_LIST_FAILS_FROM=<n>: the n-th and later lists fail, as when the Azure
+# sign-in expired mid-teardown (31 Oct).
+[ "$1 $2" = "resource list" ] && echo x >> "$S.lists"
+if [ "$1 $2" = "resource list" ] && [ -n "\${STUB_LIST_FAILS_FROM:-}" ]; then
+  if [ "$(wc -l < "$S.lists")" -ge "$STUB_LIST_FAILS_FROM" ]; then
+    echo "ERROR: AADSTS700024: Client assertion is not within its valid time range." >&2; exit 1
+  fi
+fi
 case "$1 $2" in
   "resource list")
+    [ -z "\${STUB_LIST_WARN:-}" ] || echo "WARNING: a deprecation notice from az" >&2
     if printf '%s' "$*" | grep -q provisioningState; then cat "$S"; else cut -f1 "$S"; fi
     exit 0 ;;
   "resource update")
     awk -F'\\t' -v id="$id" 'BEGIN{OFS="\\t"} $1==id{$2="Succeeded"} {print}' "$S" > "$S.n" && mv "$S.n" "$S"
     exit 0 ;;
   "resource delete")
-    if [ -n "\${STUB_STUCK:-}" ] && [ "$id" = "$STUB_STUCK" ]; then
+    if [ -n "\${STUB_STUCK:-}" ] && [ "$id" = "$STUB_STUCK" ] &&
+       { [ -z "\${STUB_STUCK_UNTIL:-}" ] || [ "$(wc -l < "$S.lists" 2>/dev/null || echo 0)" -lt "$STUB_STUCK_UNTIL" ]; }; then
       echo "ERROR: (SimulatedStuck) $id will not go." >&2; echo "Code: SimulatedStuck" >&2; exit 1
+    fi
+    # How az resource delete reports a failed delete: a generic line, the
+    # reason only with --verbose.
+    if [ -n "\${STUB_GENERIC:-}" ] && [ "$id" = "$STUB_GENERIC" ]; then
+      echo "ERROR: Some resources failed to be deleted (run with \\\`--verbose\\\` for more information):" >&2
+      case "$*" in *--verbose*) echo "INFO: (CannotDeleteResource) Cannot delete $id: operation in progress." >&2 ;; esac
+      exit 1
     fi
     name="\${id##*/}"
     case "$id" in
@@ -179,6 +196,53 @@ describe.skipIf(PUBLIC_SNAPSHOT)('empty-resource-group.sh', () => {
     const r = await run([[pe('kv'), 'Succeeded']], { STUB_OLD_API: '2026-05-01', STUB_STUCK: pe('kv') })
     expect(r.code).toBe(1)
     expect(r.out).toContain('::error::Could not delete Microsoft.Network/privateEndpoints/pe-kv-v: ERROR: (SimulatedStuck)')
+  })
+
+  it('never says empty when it cannot list the group, and fails', async () => {
+    // The first list (pass 1) answers; the second (pass 2) fails.
+    const r = await run([[ACR, 'Succeeded']], { STUB_STUCK: ACR, STUB_LIST_FAILS_FROM: '2' })
+    expect(r.code).toBe(1)
+    expect(r.out).not.toContain('rg-v is empty')
+    expect(r.out).toContain('::error::Cannot list the resources in rg-v, so cannot tell whether it is empty: ERROR: AADSTS700024')
+  })
+
+  it('treats a warning on a successful list as nothing, not a resource', async () => {
+    const r = await run([[ACR, 'Succeeded']], { STUB_LIST_WARN: '1' })
+    expect(r.out).toContain('rg-v is empty')
+    expect(r.code).toBe(0)
+  })
+
+  it('with a budget, hands an expired sign-in to the next round (exit 75)', async () => {
+    const r = await run([[ACR, 'Succeeded']], { STUB_STUCK: ACR, STUB_LIST_FAILS_FROM: '2', EMPTY_RG_BUDGET_MIN: '60' })
+    expect(r.code).toBe(75)
+    expect(r.out).toContain('The Azure sign-in expired: ERROR: AADSTS700024')
+    expect(r.out).not.toContain('rg-v is empty')
+  })
+
+  it('names the reason a delete failed, not az\'s generic line', async () => {
+    const r = await run([[pe('kv'), 'Succeeded']], { STUB_GENERIC: pe('kv') })
+    expect(r.code).toBe(1)
+    expect(r.out).toMatch(/not yet: Microsoft\.Network\/privateEndpoints\/pe-kv-v: INFO: \(CannotDeleteResource\)/)
+    expect(r.out).toContain('::error::Could not delete Microsoft.Network/privateEndpoints/pe-kv-v: INFO: (CannotDeleteResource)')
+  })
+
+  it('with a time budget, stops after it with what is left and exits 75', async () => {
+    const r = await run([[ACR, 'Succeeded'], [POSTGRES, 'Succeeded']], { STUB_STUCK: ACR, EMPTY_RG_BUDGET_MIN: '0' })
+    expect(r.code).toBe(75)
+    expect(r.out).toContain('Pass 1: 2 resources')
+    expect(r.out).not.toContain('Pass 2')
+    expect(r.out).toContain('Stopping after 0 minutes, before the Azure sign-in expires, with 1 left:')
+    expect(r.out).toContain('  Microsoft.ContainerRegistry/registries/crv')
+    expect(r.out).toContain('::error::Could not delete Microsoft.ContainerRegistry/registries/crv: ERROR: (SimulatedStuck)')
+    expect(r.out).not.toContain('rg-v is empty')
+  })
+
+  it('with a time budget, passes on past 10 until the group is empty', async () => {
+    // pe-kv cannot go until the 12th list: more than the 10-pass limit.
+    const r = await run([[pe('kv'), 'Succeeded']], { STUB_STUCK_UNTIL: '12', STUB_STUCK: pe('kv'), EMPTY_RG_BUDGET_MIN: '60' })
+    expect(r.out).toContain('Pass 11: 1 resources')
+    expect(r.out).toContain('rg-v is empty')
+    expect(r.code).toBe(0)
   })
 
   it('refuses a group without the validation tag', async () => {
