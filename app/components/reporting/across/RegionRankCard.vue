@@ -110,12 +110,12 @@ const valueHeading = computed(() => (isChargeback.value ? 'Chargeback' : 'Attrib
     <table class="w-full text-sm">
       <thead>
         <tr class="text-[11px] uppercase tracking-wide text-carbon-3 border-b border-calm-2">
-          <th class="text-left font-semibold py-2">Region</th>
-          <th v-if="!isChargeback" class="text-right font-semibold py-2 w-[90px]">People</th>
-          <th class="text-right font-semibold py-2" data-testid="across-region-value-col">
+          <th scope="col" class="text-left font-semibold py-2">Region</th>
+          <th v-if="!isChargeback" scope="col" class="text-right font-semibold py-2 w-[90px]">People</th>
+          <th scope="col" class="text-right font-semibold py-2" data-testid="across-region-value-col">
             {{ valueHeading }}
           </th>
-          <th class="text-right font-semibold py-2 w-[80px]">Share</th>
+          <th scope="col" class="text-right font-semibold py-2 w-[80px]">Share</th>
         </tr>
       </thead>
       <tbody>

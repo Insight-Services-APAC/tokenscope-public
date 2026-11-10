@@ -120,6 +120,17 @@ export interface CopilotRatePlanRow {
   retiredAt: string | null
 }
 
+/** A plan as the history lists it, with where it stands for the listed month. */
+export interface ListedCopilotRatePlan extends CopilotRatePlanRow {
+  /**
+   * `in-effect` is the plan resolveCopilotRatePlan picks for that month, by
+   * the same test (`effective @>` the 1st, not retired).
+   */
+  status: CopilotRatePlanStatus
+}
+
+export type CopilotRatePlanStatus = 'in-effect' | 'starts-later' | 'ended' | 'never-billed' | 'retired'
+
 interface RawPlanRow extends Record<string, unknown> {
   id: string
   provider_enterprise_id: string
@@ -150,18 +161,56 @@ function toRow(r: RawPlanRow): CopilotRatePlanRow {
 
 /** Full effective-dated history for one enterprise, newest-starting first. Includes
  *  retired rows (labelled via `retiredAt`) so the admin history view is a complete audit
- *  trail, not just the live set. */
-export async function listCopilotRatePlans(db: SqlRunner, providerEnterpriseId: string): Promise<CopilotRatePlanRow[]> {
-  const rows = await db.execute<RawPlanRow>(sql`
+ *  trail, not just the live set.
+ *
+ *  `asOfMonth` ('YYYY-MM', the caller's server clock) sets each row's `status`
+ *  by the test resolveCopilotRatePlan bills with: a plan is in effect for a
+ *  month when it is not retired and its range holds the 1st. Not retired is
+ *  not the same thing: a plan that ended, or starts later, is also not retired.
+ *  Ranges cannot overlap (createCopilotRatePlan refuses it), so at most one
+ *  row is in effect. */
+export async function listCopilotRatePlans(
+  db: SqlRunner,
+  providerEnterpriseId: string,
+  asOfMonth: string,
+): Promise<ListedCopilotRatePlan[]> {
+  const ts = periodMonthTimestamp(asOfMonth)
+  const rows = await db.execute<RawPlanRow & { status: CopilotRatePlanStatus }>(sql`
     SELECT id::text AS id, provider_enterprise_id::text AS provider_enterprise_id,
            lower(effective)::text AS valid_from, upper(effective)::text AS valid_to,
            flat_seat_price_usd::text AS flat_seat_price_usd, included_allowance_usd::text AS included_allowance_usd,
-           notes, created_by::text AS created_by, created_at::text AS created_at, retired_at::text AS retired_at
+           notes, created_by::text AS created_by, created_at::text AS created_at, retired_at::text AS retired_at,
+           CASE
+             WHEN retired_at IS NOT NULL THEN 'retired'
+             WHEN effective @> ${ts}::timestamptz THEN 'in-effect'
+             -- Billing tests the 1st of a month, so a range holding no 1st is never billed
+             -- (two plans starting in one month truncate the earlier to such a range).
+             -- A range is convex, so it holds a 1st if and only if it holds the first 1st at or
+             -- after its start, or (its start excluded and itself a 1st) the 1st after that.
+             -- Tested with @>, so any bound type ([), [], (), (]) is judged as billing judges it.
+             WHEN lower(effective) IS NOT NULL AND upper(effective) IS NOT NULL
+              AND NOT (
+                    effective @> first_first.ts
+                    OR effective @> ((first_first.ts AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC'
+                  )
+             THEN 'never-billed'
+             WHEN lower(effective) > ${ts}::timestamptz THEN 'starts-later'
+             ELSE 'ended'
+           END AS status
     FROM copilot_rate_plan
+    -- The first 1st (UTC midnight) at or after the range's start: the start itself
+    -- when it is a 1st, else the next month's. NULL for an unbounded start.
+    CROSS JOIN LATERAL (
+      SELECT CASE
+               WHEN date_trunc('month', lower(effective) AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' = lower(effective)
+               THEN lower(effective)
+               ELSE (date_trunc('month', lower(effective) AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC'
+             END AS ts
+    ) first_first
     WHERE provider_enterprise_id = ${providerEnterpriseId}::uuid
     ORDER BY lower(effective) DESC NULLS FIRST, created_at DESC
   `)
-  return rows.map(toRow)
+  return rows.map((r) => ({ ...toRow(r), status: r.status }))
 }
 
 export class CopilotRatePlanError extends Error {

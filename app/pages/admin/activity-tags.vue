@@ -20,6 +20,8 @@
  * API calls; the page just hides itself.
  */
 
+import AdminResultToast from '../../components/admin/AdminResultToast.vue'
+import { useResultToast } from '../../composables/useResultToast'
 import { computed, ref, watch } from 'vue'
 import { consola } from 'consola'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
@@ -88,13 +90,7 @@ function canEdit(row: TagRow): boolean {
   return isOrgWide.value || row.scope === 'region'
 }
 
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-function flashToast(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => { toast.value = null }, 3500)
-}
+const { toast, flashToast, dismissToast } = useResultToast()
 
 // ── add a region tag ────────────────────────────────────────────────────────
 const newLabel = ref('')
@@ -238,16 +234,7 @@ function asRow(row: Record<string, unknown>): TagRow {
       </template>
     </UiPageHead>
 
-    <div
-      v-if="toast"
-      :data-testid="`admin-activity-tags-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="admin-activity-tags-toast" @dismiss="dismissToast" />
 
     <!-- Add a region tag -->
     <UiCard class="mb-5">

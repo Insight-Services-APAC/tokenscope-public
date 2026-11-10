@@ -17,6 +17,8 @@
  * 401/403s a non-admin's API calls; the page just hides itself.
  */
 
+import AdminResultToast from '../../components/admin/AdminResultToast.vue'
+import { useResultToast } from '../../composables/useResultToast'
 import { computed, ref, watch } from 'vue'
 import { consola } from 'consola'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
@@ -84,13 +86,7 @@ const { data, error, refresh } = useLazyFetch<{ instances: InstanceRow[]; region
 )
 const skeleton = computed(() => !error.value && data.value == null)
 
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-function flashToast(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => { toast.value = null }, 3500)
-}
+const { toast, flashToast, dismissToast } = useResultToast()
 
 const revoking = ref<Set<string>>(new Set())
 async function revokeInstance(row: InstanceRow) {
@@ -136,16 +132,7 @@ function fmtTs(v: string | null): string {
       sub="Enrolled devices in this region. Spot an emitter that's wrong — or went silent — and revoke it."
     />
 
-    <div
-      v-if="toast"
-      :data-testid="`admin-instances-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="admin-instances-toast" @dismiss="dismissToast" />
 
     <UiFetchErrorBanner v-if="error" :error="error" label="devices" @retry="refresh" />
     <AdminDataTable

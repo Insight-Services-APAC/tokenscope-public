@@ -3,10 +3,10 @@
  * Admin → Users (Wave VI). Table of teammates with an inline role
  * editor.
  *
- * Inline edit flow:
- *   - select-on-blur → PATCH /api/v1/admin/users/:id { role }
- *   - optimistic UI: row's role updates locally; on error roll back +
- *     toast.
+ * Inline edit flow (#543): picking a role or a region opens a confirm
+ * dialog (ConfirmActionDialog); nothing is sent until Confirm.
+ *   - role: PATCH /api/v1/admin/users/:id { role }; optimistic on the row,
+ *     rolled back with a refusal message on error.
  *   - self-row's dropdown is disabled (self-protection is also enforced
  *     server-side via evaluateRoleChange).
  *
@@ -15,15 +15,19 @@
  * region picker lands in a later slice).
  */
 
+import AdminResultToast from '../../components/admin/AdminResultToast.vue'
+import { useResultToast } from '../../composables/useResultToast'
 import { computed, nextTick, ref } from 'vue'
 import { consola } from 'consola'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
 import AddTeammateDialog from '../../components/admin/AddTeammateDialog.vue'
 import PlaceTeammateDialog from '../../components/admin/PlaceTeammateDialog.vue'
+import ConfirmActionDialog from '../../components/admin/ConfirmActionDialog.vue'
+import { focusIfLost } from '../../utils/focus-fallback'
 // `#shared/*` is Nuxt 4's alias for the workspace `shared/` directory.
 // Relative paths from app/pages/* don't resolve at server-bundle time
 // (Rollup runs from `.nuxt/dist/server/_nuxt/`, not the source path).
-import { SELECTABLE_ROLES, roleLabel, type Role } from '#shared/auth/roles'
+import { ROLE_CAPABILITIES, SELECTABLE_ROLES, roleLabel, roleWithArticle, type Role } from '#shared/auth/roles'
 import { BU_LABEL } from '#shared/reports/vocabulary'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
@@ -155,12 +159,87 @@ watch(
   { immediate: true },
 )
 
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-function flashToast(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => { toast.value = null }, 3500)
+const { toast, flashToast, dismissToast } = useResultToast()
+
+/** What to call a person in a sentence: their name, else their email. */
+function who(row: UserRow): string {
+  return row.displayName?.trim() || row.email
+}
+
+/*
+ * Role and region pickers do not apply on `change` (#543). They open a
+ * confirm dialog; Cancel puts the select back. Like the Business Unit picker
+ * below, each select is re-created from the row (its `:key` carries a nonce),
+ * because the browser keeps the user's own choice in a select Vue thinks is
+ * unchanged.
+ */
+const pendingRole = ref<{ row: UserRow; toRole: Role } | null>(null)
+/*
+ * Confirm applies only what the dialog described. If the row changed while it
+ * was open (a refresh after another action brought in someone else's change),
+ * nothing is sent and the admin looks again, as the Business Unit move does.
+ */
+type SinceAsked = { kind: 'unchanged' } | { kind: 'missing' } | { kind: 'changed'; live: UserRow }
+function sinceAsked(row: UserRow, field: 'role' | 'regionId'): SinceAsked {
+  const live = rows.value.find((r) => r.id === row.id)
+  // Gone from the list (moved to another region, or filtered out by a refresh):
+  // the dialog described a state we can no longer see, so it is not applied.
+  if (!live) return { kind: 'missing' }
+  return live[field] !== row[field] ? { kind: 'changed', live } : { kind: 'unchanged' }
+}
+
+/*
+ * After a confirm, the picker that opened it may have been re-created (a
+ * refusal remounts it) or removed (the row left the list), and focus would
+ * fall to the page body. Put it on the row's new picker, else the search box;
+ * focusIfLost leaves it alone if the reader has already moved on.
+ */
+async function recoverFocus(pickerTestid: string) {
+  await nextTick()
+  focusIfLost(`[data-testid="${pickerTestid}"]`)
+  focusIfLost('[data-testid="admin-users-search"]')
+}
+const roleNonce = ref(0)
+const pendingRegion = ref<{ row: UserRow; regionId: string; regionName: string } | null>(null)
+const regionNonce = ref(0)
+
+function askRole(row: UserRow, newRole: Role) {
+  if (!newRole || newRole === row.role) return
+  pendingRole.value = { row, toRole: newRole }
+}
+
+async function restoreFocus(testid: string) {
+  // The remount replaces the element useModalA11y would have restored focus to.
+  await nextTick()
+  document.querySelector<HTMLElement>(`[data-testid="${testid}"]`)?.focus()
+}
+
+async function cancelRole() {
+  const rowId = pendingRole.value?.row.id
+  pendingRole.value = null
+  roleNonce.value++
+  await restoreFocus(`admin-users-role-select-${rowId}`)
+}
+
+async function confirmRole() {
+  const pending = pendingRole.value
+  if (!pending) return
+  pendingRole.value = null
+  try {
+    const since = sinceAsked(pending.row, 'role')
+    if (since.kind === 'changed') {
+      roleNonce.value++
+      flashToast('err', `${who(since.live)} is ${roleWithArticle(since.live.role)} now, changed while that was open. Nothing was applied; check again.`)
+      return
+    }
+    if (since.kind === 'missing') {
+      flashToast('err', `${who(pending.row)} is no longer in this list. Nothing was applied; check again.`)
+      return
+    }
+    await patchRole(pending.row, pending.toRole)
+  } finally {
+    await recoverFocus(`admin-users-role-select-${pending.row.id}`)
+  }
 }
 
 async function patchRole(row: UserRow, newRole: Role) {
@@ -174,29 +253,66 @@ async function patchRole(row: UserRow, newRole: Role) {
       method: 'PATCH',
       body: { role: newRole },
     })
-    flashToast('ok', `Role updated: ${row.email} → ${newRole}`)
-    await refresh()
+    flashToast('ok', `${who(row)} is now ${roleWithArticle(newRole)}.`)
   } catch (err) {
     // Rollback.
     if (idx >= 0) rows.value[idx] = { ...row, role: previousRole }
-    flashToast('err', apiErrorDetail(err, 'Role change refused.'))
+    roleNonce.value++
+    flashToast('err', apiErrorDetail(err, `The role change for ${who(row)} was refused.`))
     consola.warn('role change failed', err)
+    return
   }
+  // Outside the try: a failed re-read after a committed change is not a refusal.
+  await refresh().catch((err) => consola.warn('refresh after role change failed', err))
 }
 
-// Region reassignment (org-wide roles only). New users JIT into APAC on first
-// sign-in; this re-homes them. On success the row leaves the current view
-// (it now belongs to another region), so refresh.
-async function reassignRegion(row: UserRow, newRegionId: string) {
+// Region reassignment (org-wide roles only). New users JIT into the first
+// region on first sign-in; this re-homes them. On success the row leaves the
+// current view (it now belongs to another region), so refresh.
+function askRegion(row: UserRow, newRegionId: string) {
   if (!newRegionId || newRegionId === row.regionId) return
+  const regionName = regionsData.value?.regions.find((r) => r.id === newRegionId)?.display_name
+  if (!regionName) return
+  pendingRegion.value = { row, regionId: newRegionId, regionName }
+}
+
+async function cancelRegion() {
+  const rowId = pendingRegion.value?.row.id
+  pendingRegion.value = null
+  regionNonce.value++
+  await restoreFocus(`admin-users-region-${rowId}`)
+}
+
+async function confirmRegion() {
+  const pending = pendingRegion.value
+  if (!pending) return
+  pendingRegion.value = null
+  const { row, regionId: newRegionId, regionName } = pending
   try {
-    await $fetch(`/api/v1/admin/users/${row.id}/region`, { method: 'PATCH', body: { region_id: newRegionId } })
-    const rname = regionsData.value?.regions.find((r) => r.id === newRegionId)?.display_name ?? 'new region'
-    flashToast('ok', `${row.email} moved to ${rname}`)
-    await refresh()
-  } catch (err) {
-    flashToast('err', apiErrorDetail(err, 'Region change refused.'))
-    consola.warn('region reassign failed', err)
+    const since = sinceAsked(row, 'regionId')
+    if (since.kind !== 'unchanged') {
+      regionNonce.value++
+      flashToast(
+        'err',
+        since.kind === 'missing'
+          ? `${who(row)} is no longer in this list. Nothing was applied; check again.`
+          : `${who(row)} was moved to another region while that was open. Nothing was applied; check again.`,
+      )
+      return
+    }
+    try {
+      await $fetch(`/api/v1/admin/users/${row.id}/region`, { method: 'PATCH', body: { region_id: newRegionId } })
+      flashToast('ok', `${who(row)} moved to ${regionName}.`)
+    } catch (err) {
+      regionNonce.value++
+      flashToast('err', apiErrorDetail(err, `The region move for ${who(row)} was refused.`))
+      consola.warn('region reassign failed', err)
+      return
+    }
+    // The row now belongs to another region and leaves this list, with its picker.
+    await refresh().catch((err) => consola.warn('refresh after region move failed', err))
+  } finally {
+    await recoverFocus(`admin-users-region-${row.id}`)
   }
 }
 
@@ -397,19 +513,10 @@ function roleOptionsFor(current: string): Role[] {
     <UiPageHead
       eyebrow="Administration"
       title="Teammates"
-      sub="Teammates in this region. Change role via the dropdown; the audit trail records every change."
+      sub="Teammates in this region. Role, region and Business Unit changes ask first; the audit trail records every change."
     />
 
-    <div
-      v-if="toast"
-      :data-testid="`admin-users-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="admin-users-toast" @dismiss="dismissToast" />
 
     <UiFetchErrorBanner v-if="error" :error="error" label="teammates" @retry="refresh" />
     <AdminDataTable
@@ -427,6 +534,7 @@ function roleOptionsFor(current: string): Role[] {
             v-model="query"
             type="search"
             placeholder="Search by name or email…"
+            aria-label="Search teammates by name or email"
             class="flex-1 px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
             data-testid="admin-users-search"
             @search="refresh()"
@@ -434,6 +542,7 @@ function roleOptionsFor(current: string): Role[] {
         </form>
         <select
           v-model="roleFilter"
+          aria-label="Show teammates with this role"
           class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white"
           data-testid="admin-users-role-filter"
         >
@@ -443,6 +552,7 @@ function roleOptionsFor(current: string): Role[] {
         <div v-if="isOrgWide">
           <select
             v-model="viewRegionId"
+            aria-label="Region to browse"
             :disabled="!regionsData"
             class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white disabled:bg-calm/40 disabled:cursor-not-allowed"
             data-testid="admin-users-region-view"
@@ -486,12 +596,14 @@ function roleOptionsFor(current: string): Role[] {
           <td class="px-5 py-3 text-sm">
             <div class="flex items-center gap-2">
               <select
+                :key="`${asUserRow(row).id}-role-${roleNonce}`"
                 :value="asUserRow(row).role"
                 :disabled="asUserRow(row).id === callerTeammateId"
                 :data-testid="`admin-users-role-select-${asUserRow(row).id}`"
+                :aria-label="`Role for ${asUserRow(row).displayName?.trim() || asUserRow(row).email}`"
                 class="px-2 py-1 text-sm border border-calm-2 rounded-md bg-white disabled:bg-calm/40 disabled:cursor-not-allowed"
                 :title="asUserRow(row).id === callerTeammateId ? 'You cannot change your own role.' : ''"
-                @change="(e) => patchRole(asUserRow(row), (e.target as HTMLSelectElement).value as Role)"
+                @change="(e) => askRole(asUserRow(row), (e.target as HTMLSelectElement).value as Role)"
               >
                 <option v-for="r in roleOptionsFor(asUserRow(row).role)" :key="r" :value="r">{{ roleLabel(r) }}</option>
               </select>
@@ -502,6 +614,7 @@ function roleOptionsFor(current: string): Role[] {
               v-if="orgUnitOptions.length"
               :key="`${asUserRow(row).id}-${pickerNonce}`"
               :data-testid="`user-orgunit-${asUserRow(row).id}`"
+              :aria-label="`${BU_LABEL} for ${asUserRow(row).displayName?.trim() || asUserRow(row).email}`"
               class="px-2 py-1 text-sm border border-calm-2 rounded-md bg-white max-w-[180px]"
               :title="`Move this teammate to another ${BU_LABEL}`"
               @change="(e) => askOrgUnit(asUserRow(row), (e.target as HTMLSelectElement).value)"
@@ -536,11 +649,13 @@ function roleOptionsFor(current: string): Role[] {
             <div class="flex flex-wrap items-center gap-2">
             <select
               v-if="isOrgWide && !regionsError"
+              :key="`${asUserRow(row).id}-region-${regionNonce}`"
               :data-testid="`admin-users-region-${asUserRow(row).id}`"
+              :aria-label="`Region for ${asUserRow(row).displayName?.trim() || asUserRow(row).email}`"
               :disabled="!regionsData"
               class="px-2 py-1 text-sm border border-calm-2 rounded-md bg-white disabled:bg-calm/40 disabled:cursor-not-allowed"
               title="Move this teammate to another region"
-              @change="(e) => reassignRegion(asUserRow(row), (e.target as HTMLSelectElement).value)"
+              @change="(e) => askRegion(asUserRow(row), (e.target as HTMLSelectElement).value)"
             >
               <option
                 v-for="r in regionsData?.regions"
@@ -582,6 +697,44 @@ function roleOptionsFor(current: string): Role[] {
       </span>
       <UiButton kind="ghost" size="sm" :disabled="offset + LIMIT >= (data?.total ?? 0)" @click="nextPage">Next →</UiButton>
     </div>
+
+    <ConfirmActionDialog
+      :open="!!pendingRole"
+      eyebrow="Confirm role change"
+      :title="pendingRole ? `Make ${who(pendingRole.row)} ${roleWithArticle(pendingRole.toRole)}?` : ''"
+      :confirm-label="pendingRole ? `Make ${roleLabel(pendingRole.toRole)}` : ''"
+      testid="role-change"
+      @cancel="cancelRole"
+      @confirm="confirmRole"
+    >
+      <template v-if="pendingRole">
+        <p>{{ who(pendingRole.row) }} is {{ roleWithArticle(pendingRole.row.role) }} today.</p>
+        <p v-if="ROLE_CAPABILITIES[pendingRole.toRole]">{{ ROLE_CAPABILITIES[pendingRole.toRole] }}</p>
+        <p class="text-carbon-2">
+          They are signed out and sign in again with the new role. The audit trail records this
+          change under your name.
+        </p>
+      </template>
+    </ConfirmActionDialog>
+
+    <ConfirmActionDialog
+      :open="!!pendingRegion"
+      eyebrow="Confirm region move"
+      :title="pendingRegion ? `Move ${who(pendingRegion.row)} to ${pendingRegion.regionName}?` : ''"
+      confirm-label="Move region"
+      testid="region-move"
+      @cancel="cancelRegion"
+      @confirm="confirmRegion"
+    >
+      <template v-if="pendingRegion">
+        <p>
+          {{ who(pendingRegion.row) }} is signed out and signs in again into
+          {{ pendingRegion.regionName }}, unplaced there until you place them in a {{ BU_LABEL }}.
+          Their devices move with them.
+        </p>
+        <p class="text-carbon-2">The audit trail records this change under your name.</p>
+      </template>
+    </ConfirmActionDialog>
 
     <PlaceTeammateDialog
       :open="!!pendingMove"

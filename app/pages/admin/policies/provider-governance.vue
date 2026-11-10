@@ -16,9 +16,14 @@
  * platform-admin ONLY (org-wide access) — mirrors the
  * server-side RBAC on every endpoint this page calls.
  */
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { useAdminAccess } from '../../../composables/useAdminAccess'
 import { apiErrorDetail } from '../../../composables/useApiError'
+import ConfirmActionDialog from '../../../components/admin/ConfirmActionDialog.vue'
+import { cutoverStatusLabel, type CutoverStatusKey } from '#shared/governance/cutover-status'
+import { toolLabel } from '#shared/usage/surface'
+import { unmatchedSourceLabel } from '#shared/governance/unmatched-source'
+import { focusIfLost } from '../../../utils/focus-fallback'
 
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
@@ -30,7 +35,7 @@ const { isOrgWide } = useAdminAccess()
 
 // ── Governance cutover ──────────────────────────────────────────────────
 interface CutoverState {
-  status: 'not_started' | 'preflight_verified' | 'activated' | 'rolled_back'
+  status: CutoverStatusKey
   preflightSnapshot: unknown
   preflightVerifiedAt: string | null
   activatedAt: string | null
@@ -72,6 +77,24 @@ async function runPreflight() {
     cutoverBusy.value = false
   }
 }
+/* Activate and Record this month ask first (#543): Cancel sends nothing. */
+const confirmActivate = ref(false)
+const confirmRecord = ref(false)
+// Both buttons are disabled once their action has run, so focus would fall to
+// the page body: it goes to the card's status line instead.
+async function onConfirmActivate() {
+  confirmActivate.value = false
+  await activate()
+  await nextTick()
+  focusIfLost('[data-testid="cutover-status-line"]')
+}
+async function onConfirmRecord() {
+  confirmRecord.value = false
+  await closePeriod()
+  await nextTick()
+  focusIfLost('[data-testid="period-status-line"]')
+}
+
 async function activate() {
   cutoverBusy.value = true
   cutoverError.value = null
@@ -117,6 +140,16 @@ function lastCompleteMonth(): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`
 }
 const periodMonth = ref(lastCompleteMonth())
+/** "October 2026" for the confirm dialog. A month bucket is a UTC fact: never converted. */
+const periodMonthLabel = computed(() => {
+  const m = /^(\d{4})-(\d{2})$/.exec(periodMonth.value)
+  if (!m) return periodMonth.value
+  return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, 1)).toLocaleString('en-GB', {
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  })
+})
 interface SnapshotDelta {
   // `periodMonth`, `closedAt` and `basis` are TOP-LEVEL on the delta; `snapshot`
   // carries only the three figures. Reading `snapshot.closedAt` rendered
@@ -186,6 +219,13 @@ async function closePeriod() {
     periodBusy.value = false
   }
 }
+
+/* Why a recording cannot be compared, in words (the server sends a key). */
+const INCOMPARABLE_REASON_LABELS: Record<string, string> = {
+  'version-changed': 'recorded by an earlier version of TokenScope',
+  'basis-changed': 'recorded when spend was assigned to Business Units a different way (by person or by project)',
+}
+const incomparableReasonLabel = (r: string) => INCOMPARABLE_REASON_LABELS[r] ?? 'counted a different way'
 
 const money = (n: number) =>
   n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
@@ -283,6 +323,17 @@ interface CopilotRatePlan {
   includedAllowanceUsd: number | null
   notes: string | null
   retiredAt: string | null
+  /** Judged by the server for the current UTC month: the same test billing uses. */
+  status: 'in-effect' | 'starts-later' | 'ended' | 'never-billed' | 'retired'
+}
+const RATE_PLAN_STATUS_LABEL: Record<CopilotRatePlan['status'], string> = {
+  'in-effect': 'In effect this month',
+  // Billing picks the plan that covers the 1st, so a plan starting mid-month is billed from the next month.
+  'starts-later': 'Applies from a later month',
+  ended: 'Ended',
+  // Its dates hold no 1st of a month, so billing never picks it.
+  'never-billed': 'Never billed (no 1st of a month in its dates)',
+  retired: 'Retired',
 }
 /*
  * The rate-plan history owns its data/error/refresh like every other read (D1).
@@ -423,18 +474,25 @@ async function triggerRepull() {
     <UiPageHead
       eyebrow="Policies"
       title="Provider governance"
-      sub="The move from GitHub heuristics to governance data, reporting snapshots, the unresolved backlog, personal subscription declarations and Copilot rate plans."
+      sub="How GitHub spend is judged chargeable, monthly snapshots, spend we could not match, personal subscriptions and Copilot rate plans."
     />
 
     <UiCard data-testid="governance-cutover-card">
       <UiEyebrow>Governance cutover</UiEyebrow>
       <p class="text-sm text-carbon-2 mt-1">
-        Before activation, GitHub chargeability is decided by the legacy name/env heuristic (unchanged, safe
-        rollback). After activation, every money path reads <code class="text-[11px] bg-calm/40 px-1 rounded">billing</code>
-        authoritatively and the heuristic is never consulted again.
+        Before activation, GitHub spend is judged chargeable by its organisation and enterprise
+        names, and all Anthropic spend is chargeable. After activation, both follow the billing
+        setting (billed or tracked) of each registered GitHub enterprise and Anthropic
+        organisation, set on the Reconciliation page, and the name rule is no longer used.
+        Preflight fills those settings from today's rules, and activation re-checks them before
+        it switches. That checks the settings, not every figure: some spend can be judged
+        differently after activation, for example spend we could not match to a registered
+        enterprise or organisation (see Spend we could not match, below), and spend already
+        recorded is re-judged by a background job over the following runs, not at the moment of
+        activation. You can roll back until a month has been recorded under the new rule.
       </p>
       <UiFetchErrorBanner :error="cutoverFetchError" label="the cutover state" class="mt-3" @retry="refreshCutover()" />
-      <div class="mt-3 flex items-center gap-2">
+      <div class="mt-3 flex items-center gap-2 rounded" tabindex="-1" data-testid="cutover-status-line">
         <span class="text-[12px] font-semibold text-carbon">Status:</span>
         <span
           v-if="!cutoverFetchError && cutover == null"
@@ -443,7 +501,7 @@ async function triggerRepull() {
           aria-busy="true"
           data-testid="cutover-status-loading"
         ><span class="sr-only">Loading the cutover state…</span></span>
-        <UiBadge v-else-if="cutover" :kind="cutoverBadgeKind" data-testid="cutover-status-badge">{{ cutover.status }}</UiBadge>
+        <UiBadge v-else-if="cutover" :kind="cutoverBadgeKind" data-testid="cutover-status-badge">{{ cutoverStatusLabel(cutover.status) }}</UiBadge>
       </div>
       <div class="mt-4 flex flex-wrap gap-2">
         <!-- `activated` is the ONLY status the server refuses a preflight in
@@ -465,7 +523,7 @@ async function triggerRepull() {
           size="sm"
           :disabled="cutoverBusy || cutover?.status !== 'preflight_verified'"
           data-testid="activate-governance"
-          @click="activate"
+          @click="confirmActivate = true"
         >
           Activate
         </UiButton>
@@ -474,7 +532,7 @@ async function triggerRepull() {
           class="text-[11px] text-carbon-3 basis-full"
           data-testid="preflight-blocked-note"
         >
-          Preflight cannot run while governance is activated — roll back first.
+          Preflight cannot run while governance data is active. Roll back first.
         </p>
       </div>
       <div v-if="cutover?.status === 'activated'" class="mt-4 pt-4 border-t border-calm-2">
@@ -496,7 +554,7 @@ async function triggerRepull() {
         >
           Roll back
         </UiButton>
-        <p class="text-[11px] text-carbon-3 mt-1">Only allowed before any month has been recorded under the new regime.</p>
+        <p class="text-[11px] text-carbon-3 mt-1">Only allowed before any month has been recorded under the new rule.</p>
       </div>
       <p v-if="cutoverError" class="text-xs text-rag-red mt-2" data-testid="cutover-error">{{ cutoverError }}</p>
     </UiCard>
@@ -504,12 +562,12 @@ async function triggerRepull() {
     <UiCard class="mt-5" data-testid="finance-period-card">
       <UiEyebrow>Reporting snapshots</UiEyebrow>
       <p class="text-sm text-carbon-2 mt-1">
-        Recording a month writes down what it read, and who recorded it. It does
-        <strong>not</strong> lock anything — the provider corrects its rows and the bill
-        lands after we report, so a recorded month still accepts both. What you get back
+        Recording a month writes down what it reads, and who recorded it. It does
+        <strong>not</strong> lock anything: the provider corrects its figures and the bill
+        lands after we report, so a recorded month still takes both. What you get back
         is the movement since.
       </p>
-      <div class="mt-3 flex items-center gap-2">
+      <div class="mt-3 flex items-center gap-2 rounded" tabindex="-1" data-testid="period-status-line">
         <label for="period-month" class="text-[12px] font-semibold text-carbon">Month</label>
         <!-- Locked while a record is in flight: `closePeriod`'s reload re-reads
              this month, so letting it move mid-write would confirm a month the
@@ -530,7 +588,7 @@ async function triggerRepull() {
           data-testid="period-state-loading"
         ><span class="sr-only">Loading the snapshot…</span></span>
         <UiBadge v-else-if="!periodFetchError" :kind="period ? 'rag-green' : 'neutral'" data-testid="period-state-badge">
-          {{ period ? 'recorded' : 'not recorded' }}
+          {{ period ? 'Recorded' : 'Not recorded' }}
         </UiBadge>
         <span v-if="periodPending && periodData != null" class="text-[11px] text-carbon-3 italic" aria-busy="true">refreshing…</span>
       </div>
@@ -541,11 +599,11 @@ async function triggerRepull() {
              no figures. Rendering its zero defaults as "attributed $0.00" would
              be a fabricated number rather than a missing one. -->
         <p v-if="period.snapshotVersion === 0">
-          Recorded {{ new Date(period.closedAt).toLocaleString() }} — figures not
-          recorded (closed before this system captured them).
+          Recorded {{ new Date(period.closedAt).toLocaleString() }}, without figures (recorded
+          before TokenScope kept them).
         </p>
         <p v-else>
-          Recorded {{ new Date(period.closedAt).toLocaleString() }} —
+          Recorded {{ new Date(period.closedAt).toLocaleString() }}:
           attributed {{ money(period.snapshot.attributedUsd) }} ·
           chargeable {{ money(period.snapshot.chargeableUsd) }}
         </p>
@@ -553,15 +611,15 @@ async function triggerRepull() {
              one that has says by how much, and one that cannot be compared says
              why instead of showing a difference that is not movement. -->
         <p v-if="period.incomparableReason" class="mt-1 text-rag-amber">
-          Not comparable ({{ period.incomparableReason }}) — the month now reads
-          {{ money(period.current.chargeableUsd) }} chargeable, but the difference is what
-          changing how we count costs, not money moving.
+          Not comparable ({{ incomparableReasonLabel(period.incomparableReason) }}). The month now reads
+          {{ money(period.current.chargeableUsd) }} chargeable, but because it is counted a
+          different way we cannot tell how much of the difference is money moving.
         </p>
         <p v-else-if="period.chargeableUnchanged && !period.attributedMoved" class="mt-1 text-carbon-3">
           Unchanged since it was recorded.
         </p>
         <p v-else class="mt-1 text-rag-amber">
-          Moved since recording — chargeable {{ money(period.deltaUsd?.chargeable ?? 0) }},
+          Moved since recording: chargeable {{ money(period.deltaUsd?.chargeable ?? 0) }},
           exempt {{ money(period.deltaUsd?.exempt ?? 0) }},
           attributed {{ money(period.deltaUsd?.attributed ?? 0) }}.
         </p>
@@ -573,12 +631,12 @@ async function triggerRepull() {
           size="sm"
           :disabled="periodBusy || !!period || periodData == null"
           data-testid="close-period"
-          @click="closePeriod"
+          @click="confirmRecord = true"
         >
           Record this month
         </UiButton>
         <p v-if="period" class="text-[11px] text-carbon-3">
-          Already recorded. A month is recorded once — re-recording would overwrite
+          Already recorded. A month is recorded once: recording it again would replace
           what was reported.
         </p>
       </div>
@@ -586,30 +644,34 @@ async function triggerRepull() {
     </UiCard>
 
     <UiCard class="mt-5" data-testid="governance-unresolved-card">
-      <UiEyebrow>Governance-unresolved</UiEyebrow>
+      <UiEyebrow>Spend we could not match to a provider account</UiEyebrow>
       <p class="text-sm text-carbon-2 mt-1">
-        Money rows whose provider org/enterprise could not be resolved. Always showback-visible; never chargeable
-        while unresolved. Register or link the missing org, then recheck.
+        Spend TokenScope cannot match to a registered GitHub enterprise or Anthropic
+        organisation, and spend still waiting to be matched. It always shows in usage. Once
+        governance data is active, it is not charged while it stays unmatched (spend recorded
+        earlier, once the background job has re-judged it); before that, it is decided like any
+        other spend (the name rule for GitHub; Anthropic spend is always chargeable).
+        Register or link the account on the Reconciliation page, then recheck.
       </p>
       <AdminPageSkeleton v-if="!unresolvedError && unresolved == null" :rows="2" :toolbar="false" class="mt-3" />
-      <UiFetchErrorBanner v-else-if="unresolvedError" :error="unresolvedError" label="the governance-unresolved counts" class="mt-3" @retry="refreshUnresolved()" />
+      <UiFetchErrorBanner v-else-if="unresolvedError" :error="unresolvedError" label="the unmatched spend counts" class="mt-3" @retry="refreshUnresolved()" />
       <div v-else-if="unresolved?.reachable" class="mt-3 grid grid-cols-3 gap-4 text-sm">
         <div>
           <p class="text-[11px] uppercase text-carbon-3">Provider spend</p>
-          <p class="font-mono">{{ unresolved.actualSpend?.pendingBackfill ?? 0 }} pending / {{ unresolved.actualSpend?.parkedUnresolved ?? 0 }} parked</p>
+          <p class="font-mono">{{ unresolved.actualSpend?.pendingBackfill ?? 0 }} waiting · {{ unresolved.actualSpend?.parkedUnresolved ?? 0 }} set aside</p>
         </div>
         <div>
           <p class="text-[11px] uppercase text-carbon-3">Reconciliation records</p>
-          <p class="font-mono">{{ unresolved.reconciliationRecord?.pendingBackfill ?? 0 }} pending / {{ unresolved.reconciliationRecord?.parkedUnresolved ?? 0 }} parked</p>
+          <p class="font-mono">{{ unresolved.reconciliationRecord?.pendingBackfill ?? 0 }} waiting · {{ unresolved.reconciliationRecord?.parkedUnresolved ?? 0 }} set aside</p>
         </div>
         <div>
-          <p class="text-[11px] uppercase text-carbon-3">Pending placements</p>
-          <p class="font-mono">{{ unresolved.pendingPlacement?.unresolved ?? 0 }} unresolved</p>
+          <p class="text-[11px] uppercase text-carbon-3">Placements</p>
+          <p class="font-mono">{{ unresolved.pendingPlacement?.unresolved ?? 0 }} unmatched</p>
         </div>
       </div>
       <ul v-if="unresolved?.bySource?.length" class="mt-3 divide-y divide-calm-2" data-testid="unresolved-by-source">
         <li v-for="s in unresolved.bySource" :key="s.source" class="py-1.5 flex justify-between text-[12px]">
-          <code class="bg-calm/40 px-1 rounded">{{ s.source }}</code>
+          <span>{{ unmatchedSourceLabel(s.source) }}</span>
           <span>{{ s.count }} rows · ${{ s.costUsd }}</span>
         </li>
       </ul>
@@ -632,7 +694,7 @@ async function triggerRepull() {
           <p class="text-sm text-carbon-2 mt-1">
             Teammate-declared personal subscriptions suppress only the no-bill usage signal. They never alter
             provider-backed chargeback, which remains controlled by provider billing settings. Self-declared and
-            audited — this is where they are reviewable.
+            audited: this is where they are reviewed.
           </p>
         </div>
         <input
@@ -679,13 +741,13 @@ async function triggerRepull() {
         <table v-if="personalSubs.declarations.length" class="w-full mt-3 text-[12px]" data-testid="ps-table">
           <thead>
             <tr class="text-carbon-3 text-left">
-              <th class="py-1 pr-3 font-medium">Teammate</th>
-              <th class="py-1 pr-3 font-medium">Tool</th>
-              <th class="py-1 pr-3 font-medium">Subscription</th>
-              <th class="py-1 pr-3 font-medium text-right">Declared cost</th>
-              <th class="py-1 pr-3 font-medium text-right">Usage</th>
-              <th class="py-1 pr-3 font-medium text-right">Provider spend</th>
-              <th class="py-1 font-medium">State</th>
+              <th scope="col" class="py-1 pr-3 font-medium">Teammate</th>
+              <th scope="col" class="py-1 pr-3 font-medium">Tool</th>
+              <th scope="col" class="py-1 pr-3 font-medium">Subscription</th>
+              <th scope="col" class="py-1 pr-3 font-medium text-right">Declared cost</th>
+              <th scope="col" class="py-1 pr-3 font-medium text-right">Usage</th>
+              <th scope="col" class="py-1 pr-3 font-medium text-right">Provider spend</th>
+              <th scope="col" class="py-1 font-medium">State</th>
             </tr>
           </thead>
           <tbody>
@@ -696,7 +758,7 @@ async function triggerRepull() {
               :class="d.activeAtMonthEnd ? '' : 'text-carbon-3'"
             >
               <td class="py-1 pr-3">{{ d.email }}</td>
-              <td class="py-1 pr-3"><code class="bg-calm/40 px-1 rounded">{{ d.tool }}</code></td>
+              <td class="py-1 pr-3">{{ toolLabel(d.tool) }}</td>
               <td class="py-1 pr-3">{{ d.subscriptionType }}</td>
               <td class="py-1 pr-3 text-right font-mono">{{ psUsd(d.declaredMonthlyCostUsd) }}</td>
               <td class="py-1 pr-3 text-right font-mono">{{ psUsd(d.usageUsd) }}</td>
@@ -707,7 +769,7 @@ async function triggerRepull() {
               </td>
               <td class="py-1">
                 <UiBadge :kind="d.activeAtMonthEnd ? 'rag-green' : 'neutral'">
-                  {{ d.activeAtMonthEnd ? 'active at month end' : 'ended during month' }}
+                  {{ d.activeAtMonthEnd ? 'Active at month end' : 'Ended during the month' }}
                 </UiBadge>
               </td>
             </tr>
@@ -722,11 +784,10 @@ async function triggerRepull() {
     <UiCard class="mt-5" data-testid="copilot-money-model-card">
       <UiEyebrow>Copilot rate plans &amp; overage allocation</UiEyebrow>
       <p class="text-sm text-carbon-2 mt-1">
-        Effective-dated seat price and included allowance, and the pooled-overage
-        allocation policy — <strong>forecast/showback and distribution inputs only</strong>.
-        The reconciled enterprise bill net is always the authoritative cost of record; a rate-plan
-        change never re-costs a closed month, and allocation only redistributes the overage
-        already on the bill.
+        Dated seat prices and included allowances, and how pooled overage is shared out.
+        <strong>These only feed forecasts, what people are shown, and how overage is shared.</strong>
+        The enterprise's reconciled bill is always the cost of record: a new rate plan never
+        re-costs a recorded month, and sharing only spreads the overage already on the bill.
       </p>
 
       <UiFetchErrorBanner :error="enterprisesError" label="the enterprise list" class="mt-3" @retry="refreshEnterprises()" />
@@ -746,33 +807,33 @@ async function triggerRepull() {
           <option v-for="e in githubEnterprises" :key="e.id" :value="e.id">{{ e.displayName }} ({{ e.externalId }})</option>
         </select>
         <p class="text-[11px] text-carbon-3 mt-1">
-          Set the allocation policy itself, and the current scalar forecast figures, from the
-          enterprise's edit dialog on the Reconciliation page — this panel manages effective-dated
-          history and the historical re-pull.
+          Set how overage is shared, and the current forecast figures, in the enterprise's edit
+          dialog on the Reconciliation page. This panel keeps the dated history and re-pulls past
+          bills.
         </p>
       </div>
 
       <div v-if="selectedEnterpriseId" class="mt-4 pt-4 border-t border-calm-2">
-        <p class="text-[12px] font-bold uppercase tracking-[1.2px] text-brand-harmony">Rate-plan history</p>
+        <p class="text-[12px] font-bold uppercase tracking-[1.2px] text-brand-harmony">Rate plan history</p>
         <AdminPageSkeleton v-if="!ratePlansFetchError && ratePlans == null" :rows="3" :toolbar="false" class="mt-2" />
-        <UiFetchErrorBanner v-else-if="ratePlansFetchError" :error="ratePlansFetchError" label="the rate-plan history" class="mt-2" @retry="refreshRatePlans()" />
+        <UiFetchErrorBanner v-else-if="ratePlansFetchError" :error="ratePlansFetchError" label="the rate plan history" class="mt-2" @retry="refreshRatePlans()" />
         <table v-else class="w-full mt-2 text-[12px]" data-testid="rate-plan-history">
           <thead>
             <tr class="text-left text-carbon-3">
-              <th class="font-semibold pb-1">Effective from</th>
-              <th class="font-semibold pb-1">Effective to</th>
-              <th class="font-semibold pb-1">Flat seat</th>
-              <th class="font-semibold pb-1">Allowance</th>
-              <th class="font-semibold pb-1">Status</th>
+              <th scope="col" class="font-semibold pb-1">Effective from</th>
+              <th scope="col" class="font-semibold pb-1">Effective to</th>
+              <th scope="col" class="font-semibold pb-1">Flat seat</th>
+              <th scope="col" class="font-semibold pb-1">Allowance</th>
+              <th scope="col" class="font-semibold pb-1">Status</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="p in ratePlans" :key="p.id" class="border-t border-calm-2">
               <td class="py-1 font-mono">{{ p.validFrom }}</td>
-              <td class="py-1 font-mono">{{ p.validTo ?? 'open-ended' }}</td>
-              <td class="py-1">{{ p.flatSeatPriceUsd != null ? `$${p.flatSeatPriceUsd}` : '—' }}</td>
-              <td class="py-1">{{ p.includedAllowanceUsd != null ? `$${p.includedAllowanceUsd}` : '—' }}</td>
-              <td class="py-1">{{ p.retiredAt ? 'retired' : 'live' }}</td>
+              <td class="py-1 font-mono">{{ p.validTo ?? 'No end date' }}</td>
+              <td class="py-1">{{ p.flatSeatPriceUsd != null ? `$${p.flatSeatPriceUsd}` : 'None' }}</td>
+              <td class="py-1">{{ p.includedAllowanceUsd != null ? `$${p.includedAllowanceUsd}` : 'None' }}</td>
+              <td class="py-1" :data-testid="`rate-plan-status-${p.id}`">{{ RATE_PLAN_STATUS_LABEL[p.status] ?? p.status }}</td>
             </tr>
             <tr v-if="ratePlans?.length === 0"><td colspan="5" class="py-2 text-carbon-3">No rate plan recorded yet.</td></tr>
           </tbody>
@@ -824,13 +885,48 @@ async function triggerRepull() {
           <p v-if="repullError" class="text-xs text-rag-red mt-2" data-testid="repull-error">{{ repullError }}</p>
           <p v-if="repullResult" class="text-[12px] text-carbon-2 mt-2" data-testid="repull-result">
             {{ repullResult.month }}: {{ repullResult.result.orgRowsWritten }} org row(s),
-            {{ repullResult.result.residualRowsWritten }} residual row(s),
+            {{ repullResult.result.residualRowsWritten }} unassigned row(s),
             {{ repullResult.result.overageAllocationsComputed }} allocation(s) recomputed
             ({{ repullResult.result.overageAllocationsUnallocated }} unallocated).
           </p>
         </div>
       </div>
     </UiCard>
+
+    <ConfirmActionDialog
+      :open="confirmActivate"
+      eyebrow="Confirm activation"
+      title="Judge spend by each account's billing setting?"
+      confirm-label="Activate"
+      testid="governance-activate"
+      @cancel="confirmActivate = false"
+      @confirm="onConfirmActivate"
+    >
+      <p>
+        From now on GitHub and Anthropic spend is judged chargeable by the billing setting of its
+        registered enterprise or organisation, and the name rule is no longer used. Spend we
+        cannot match to a registered account is then never charged.
+      </p>
+      <p class="text-carbon-2">You can roll back until a month has been recorded under the new rule.</p>
+    </ConfirmActionDialog>
+
+    <ConfirmActionDialog
+      :open="confirmRecord"
+      eyebrow="Confirm recording"
+      :title="`Record ${periodMonthLabel}?`"
+      confirm-label="Record month"
+      testid="period-record"
+      @cancel="confirmRecord = false"
+      @confirm="onConfirmRecord"
+    >
+      <p>
+        This writes down what {{ periodMonthLabel }} reads now, and that you recorded it. A month
+        is recorded once: it cannot be recorded again or undone.
+      </p>
+      <p class="text-carbon-2">
+        Later corrections and the bill still arrive, and show as movement since the recording.
+      </p>
+    </ConfirmActionDialog>
   </div>
   <div v-else class="max-w-[1600px] mx-auto px-10 py-16 text-center" data-admin-page="/admin/policies/provider-governance">
     <div class="text-lg font-bold text-carbon">Admin access required.</div>

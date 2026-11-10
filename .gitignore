@@ -79,3 +79,6 @@ core.*
 # Security-audit machine outputs: SARIF goes to code scanning, the SBOM is regenerated per run
 docs/security-audit-output/findings.sarif
 docs/security-audit-output/findings.cyclonedx.json
+
+# Scratch diffs from local reviews (#551)
+.review-diff-*.txt

@@ -156,6 +156,7 @@ const footerNote = computed(() => {
         v-model="query"
         type="search"
         :placeholder="`Search ${slug}…`"
+        :aria-label="`Search ${slug}`"
         class="flex-1 min-w-[200px] px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
         :data-testid="`entity-search-${slug}`"
       >
@@ -202,7 +203,7 @@ const footerNote = computed(() => {
       <table class="w-full text-sm">
         <thead>
           <tr class="bg-brand-harmony-sheer/40 border-b border-calm-2">
-            <th v-if="selectable" class="px-5 py-3 w-10">
+            <th v-if="selectable" scope="col" class="px-5 py-3 w-10">
               <input
                 type="checkbox"
                 class="w-4 h-4 accent-brand-harmony align-middle"
@@ -215,6 +216,7 @@ const footerNote = computed(() => {
             <th
               v-for="c in columns"
               :key="String(c.key)"
+              scope="col"
               class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3"
               :class="c.align === 'right' ? 'text-right' : 'text-left'"
               :aria-sort="sort?.key === String(c.key) ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined"
@@ -231,7 +233,7 @@ const footerNote = computed(() => {
               </button>
               <template v-else>{{ c.label }}</template>
             </th>
-            <th v-if="$slots.rowActions" class="px-5 py-3"><span class="sr-only">Actions</span></th>
+            <th v-if="$slots.rowActions" scope="col" class="px-5 py-3"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody class="divide-y divide-calm-2">

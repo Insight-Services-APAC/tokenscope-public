@@ -341,9 +341,9 @@ const hitPct = computed(() => {
             <table class="w-full text-xs">
               <thead>
                 <tr class="text-[10px] uppercase tracking-wide text-carbon-3">
-                  <th class="text-left font-bold py-1.5 pr-3">Model</th>
-                  <th v-for="tt in matrixLanes" :key="tt" class="text-right font-bold py-1.5 px-2 whitespace-nowrap">{{ laneLabel(tt) }}</th>
-                  <th class="text-right font-bold py-1.5 pl-2">{{ pricedPerLane ? 'Total' : 'Cost' }}</th>
+                  <th scope="col" class="text-left font-bold py-1.5 pr-3">Model</th>
+                  <th v-for="tt in matrixLanes" :key="tt" scope="col" class="text-right font-bold py-1.5 px-2 whitespace-nowrap">{{ laneLabel(tt) }}</th>
+                  <th scope="col" class="text-right font-bold py-1.5 pl-2">{{ pricedPerLane ? 'Total' : 'Cost' }}</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-calm-2">

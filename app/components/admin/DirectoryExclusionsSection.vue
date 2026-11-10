@@ -13,7 +13,11 @@
  * Extracted so the render logic is unit-testable with the plain
  * @vue/test-utils harness: rows arrive via props; only the mutations use $fetch.
  */
-import { ref } from 'vue'
+import AdminResultToast from './AdminResultToast.vue'
+import ConfirmActionDialog from './ConfirmActionDialog.vue'
+import { focusIfLost } from '../../utils/focus-fallback'
+import { useResultToast } from '../../composables/useResultToast'
+import { nextTick, ref } from 'vue'
 import UiCard from '../ui/Card.vue'
 import UiEyebrow from '../ui/Eyebrow.vue'
 import UiButton from '../ui/Button.vue'
@@ -37,11 +41,7 @@ const emit = defineEmits<{ changed: [] }>()
 const draftPattern = ref('')
 const draftNote = ref('')
 const busy = ref(false)
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-
-function flash(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-}
+const { toast, flashToast: flash, dismissToast } = useResultToast()
 
 async function add() {
   const pattern = draftPattern.value.trim()
@@ -66,6 +66,23 @@ async function add() {
   } finally {
     busy.value = false
   }
+}
+
+/* Removing a pattern asks first (#543): Cancel sends nothing. */
+const pendingRemove = ref<DirectoryExclusionRow | null>(null)
+
+function askRemove(row: DirectoryExclusionRow) {
+  pendingRemove.value = row
+}
+
+async function confirmRemove() {
+  const row = pendingRemove.value
+  pendingRemove.value = null
+  if (!row) return
+  await remove(row)
+  // The row (and the Remove button that opened the dialog) leaves the list.
+  await nextTick()
+  focusIfLost('[data-testid="exclusion-pattern-input"]')
 }
 
 async function remove(row: DirectoryExclusionRow) {
@@ -96,16 +113,7 @@ async function remove(row: DirectoryExclusionRow) {
       <span class="font-mono">*@yourtenant.onmicrosoft.com</span>.
     </p>
 
-    <div
-      v-if="toast"
-      :data-testid="`settings-exclusions-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="settings-exclusions-toast" @dismiss="dismissToast" />
 
     <ul v-if="rows.length" class="mb-4 border border-calm-2 rounded-md divide-y divide-calm-2" data-testid="exclusions-list">
       <li v-for="row in rows" :key="row.id" class="flex items-center gap-3 px-3 py-2">
@@ -119,7 +127,7 @@ async function remove(row: DirectoryExclusionRow) {
           size="sm"
           :disabled="busy"
           :data-testid="`exclusion-remove-${row.id}`"
-          @click="remove(row)"
+          @click="askRemove(row)"
         >
           Remove
         </UiButton>
@@ -156,5 +164,21 @@ async function remove(row: DirectoryExclusionRow) {
         Add
       </UiButton>
     </div>
+
+    <ConfirmActionDialog
+      :open="!!pendingRemove"
+      eyebrow="Confirm removal"
+      :title="pendingRemove ? `Remove the exclusion ${pendingRemove.pattern}?` : ''"
+      confirm-label="Remove exclusion"
+      testid="exclusion-remove"
+      @cancel="pendingRemove = null"
+      @confirm="confirmRemove"
+    >
+      <p>
+        Accounts whose sign-in name matches it show in people-pickers again and can be made owners
+        or members, unless another exclusion also matches them. You can add the pattern back at
+        any time.
+      </p>
+    </ConfirmActionDialog>
   </UiCard>
 </template>

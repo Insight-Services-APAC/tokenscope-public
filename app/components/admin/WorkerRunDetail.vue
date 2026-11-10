@@ -174,10 +174,10 @@ const hasResult = computed(
       <table class="w-full text-xs border-collapse" data-testid="worker-run-conditions">
         <thead>
           <tr class="text-left text-carbon-3">
-            <th class="font-bold py-1 pr-4">Condition</th>
-            <th class="font-bold py-1 pr-4">Severity</th>
-            <th class="font-bold py-1 pr-4">Reason</th>
-            <th class="font-bold py-1 text-right">Count</th>
+            <th scope="col" class="font-bold py-1 pr-4">Condition</th>
+            <th scope="col" class="font-bold py-1 pr-4">Severity</th>
+            <th scope="col" class="font-bold py-1 pr-4">Reason</th>
+            <th scope="col" class="font-bold py-1 text-right">Count</th>
           </tr>
         </thead>
         <tbody>

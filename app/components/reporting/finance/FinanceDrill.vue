@@ -185,9 +185,9 @@ function othersTitle(b: DominantLane): string {
         <table class="w-full text-sm">
           <thead>
             <tr class="text-[11px] uppercase tracking-wide text-carbon-3 border-b border-calm-2">
-              <th class="text-left font-semibold py-2">Teammate</th>
-              <th class="text-left font-semibold py-2">Surface</th>
-              <th class="text-right font-semibold py-2">Charge</th>
+              <th scope="col" class="text-left font-semibold py-2">Teammate</th>
+              <th scope="col" class="text-left font-semibold py-2">Surface</th>
+              <th scope="col" class="text-right font-semibold py-2">Charge</th>
             </tr>
           </thead>
           <tbody>
@@ -254,11 +254,11 @@ function othersTitle(b: DominantLane): string {
         <table class="w-full text-sm min-w-[560px]">
           <thead>
             <tr class="text-[11px] uppercase tracking-wide text-carbon-3 border-b border-calm-2">
-              <th class="text-left font-semibold py-2">Org</th>
-              <th class="text-right font-semibold py-2">License net</th>
-              <th class="text-right font-semibold py-2">Overage net</th>
-              <th class="text-right font-semibold py-2">Unclassified</th>
-              <th class="text-right font-semibold py-2">Net</th>
+              <th scope="col" class="text-left font-semibold py-2">Org</th>
+              <th scope="col" class="text-right font-semibold py-2">License net</th>
+              <th scope="col" class="text-right font-semibold py-2">Overage net</th>
+              <th scope="col" class="text-right font-semibold py-2">Unclassified</th>
+              <th scope="col" class="text-right font-semibold py-2">Net</th>
             </tr>
           </thead>
           <tbody>

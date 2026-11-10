@@ -352,10 +352,10 @@ const exportParams = computed(() => ({
             <table class="w-full text-sm mt-3">
               <thead>
                 <tr class="text-[11px] uppercase tracking-wide text-carbon-3 border-b border-calm-2">
-                  <th class="text-left font-semibold py-2">Project</th>
-                  <th class="text-right font-semibold py-2">Their contribution</th>
-                  <th class="text-right font-semibold py-2">Share of project</th>
-                  <th class="text-right font-semibold py-2 w-[160px]">Project budget state</th>
+                  <th scope="col" class="text-left font-semibold py-2">Project</th>
+                  <th scope="col" class="text-right font-semibold py-2">Their contribution</th>
+                  <th scope="col" class="text-right font-semibold py-2">Share of project</th>
+                  <th scope="col" class="text-right font-semibold py-2 w-[160px]">Project budget state</th>
                 </tr>
               </thead>
               <tbody>

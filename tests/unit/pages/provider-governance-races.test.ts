@@ -47,6 +47,7 @@ const PLAN_A = {
   includedAllowanceUsd: null,
   notes: null,
   retiredAt: null,
+  status: 'in-effect' as const,
 }
 const PLAN_B = {
   id: '9a1e0000-0000-4000-8000-0000000000b1',
@@ -56,6 +57,7 @@ const PLAN_B = {
   includedAllowanceUsd: null,
   notes: null,
   retiredAt: null,
+  status: 'in-effect' as const,
 }
 const PLAN_NEW = {
   id: '9a1e0000-0000-4000-8000-0000000000a2',
@@ -65,6 +67,7 @@ const PLAN_NEW = {
   includedAllowanceUsd: null,
   notes: null,
   retiredAt: null,
+  status: 'in-effect' as const,
 }
 
 // ── the $fetch queue: every imperative call is deferred and resolved by hand ──
@@ -221,7 +224,16 @@ async function mountPage(cutoverStatus = 'not_started'): Promise<VueWrapper> {
       rolledBackAt: null,
     },
     '/admin/reconciliation/enterprises': ENTERPRISES,
-    '/admin/diagnostics/governance-unresolved': { reachable: true },
+    '/admin/diagnostics/governance-unresolved': {
+      reachable: true,
+      actualSpend: { pendingBackfill: 1, parkedUnresolved: 2 },
+      reconciliationRecord: { pendingBackfill: 0, parkedUnresolved: 0 },
+      pendingPlacement: { unresolved: 0 },
+      bySource: [
+        { source: 'anthropic-analytics-api:org-7', count: 2, costUsd: '1.20' },
+        { source: 'copilot-seat:acme', count: 1, costUsd: '19.00' },
+      ],
+    },
     '/admin/governance/personal-subscriptions': {
       month: '2026-08',
       declarations: [],
@@ -286,6 +298,41 @@ describe('rate-plan history is never shown under the wrong enterprise', () => {
     await flushPromises()
     expect(w.find('[data-testid="rate-plan-history"]').text()).toContain(PLAN_B.validFrom)
     expect(w.text()).not.toContain(PLAN_A.validFrom)
+  })
+
+  /*
+   * "In use" used to mean only "not retired", so a plan that had ended, or
+   * started later, read as the current rate. The status is the server's
+   * (judged for this UTC month by the test billing uses), labelled as is.
+   * REVERT: render `p.retiredAt ? 'Retired' : 'In use'` again.
+   */
+  it('each plan says where it stands this month, as the server judged it', async () => {
+    const w = await mountPage()
+    await selectEnterprise(w, ENT_A)
+    const plans = [
+      { ...PLAN_NEW, status: 'starts-later' as const },
+      { ...PLAN_A, status: 'in-effect' as const },
+      { ...PLAN_B, id: '9a1e0000-0000-4000-8000-0000000000a3', status: 'ended' as const },
+      { ...PLAN_B, id: '9a1e0000-0000-4000-8000-0000000000a4', retiredAt: '2026-01-01T00:00:00Z', status: 'retired' as const },
+      { ...PLAN_B, id: '9a1e0000-0000-4000-8000-0000000000a5', status: 'never-billed' as const },
+    ]
+    take(`/enterprises/${ENT_A}/copilot-rate-plans`).settle({ plans })
+    await flushPromises()
+    const label = (id: string) => w.find(`[data-testid="rate-plan-status-${id}"]`).text()
+    expect(label(PLAN_NEW.id)).toBe('Applies from a later month')
+    expect(label(PLAN_A.id)).toBe('In effect this month')
+    expect(label('9a1e0000-0000-4000-8000-0000000000a3')).toBe('Ended')
+    expect(label('9a1e0000-0000-4000-8000-0000000000a4')).toBe('Retired')
+    expect(label('9a1e0000-0000-4000-8000-0000000000a5')).toBe('Never billed (no 1st of a month in its dates)')
+    expect(w.find('[data-testid="rate-plan-history"]').text()).not.toContain('In use')
+  })
+
+  it('the cutover card does not promise that unmatched spend is unchanged by activation', async () => {
+    const w = await mountPage()
+    const card = w.find('[data-testid="governance-cutover-card"]').text()
+    expect(card).not.toContain('nothing changes on the day')
+    expect(card).toContain('That checks the settings, not every figure')
+    expect(card).toContain('re-judged by a background job')
   })
 
 })
@@ -478,6 +525,7 @@ describe('recording a month locks the month it is recording', () => {
     expect(month().attributes('disabled')).toBeUndefined()
 
     await w.find('[data-testid="close-period"]').trigger('click')
+    await w.find('[data-testid="period-record-confirm"]').trigger('click')
     await flushPromises()
     expect(month().attributes('disabled')).toBeDefined()
 
@@ -515,6 +563,74 @@ describe('Run preflight is offered only where the server accepts it', () => {
 
   it('says why, when it is off', async () => {
     const w = await mountPage('activated')
-    expect(w.find('[data-testid="preflight-blocked-note"]').text()).toContain('roll back first')
+    expect(w.find('[data-testid="preflight-blocked-note"]').text()).toMatch(/roll back first/i)
+  })
+})
+
+// ── one-way actions ask first (#543) ─────────────────────────────────────────
+/*
+ * REVERT: point either button's @click back at activate / closePeriod and the
+ * "Cancel sends nothing" cases go red (the POST is already pending).
+ */
+describe('Activate and Record this month ask first', () => {
+  it('Activate opens a dialog; Cancel sends nothing', async () => {
+    const w = await mountPage('preflight_verified')
+    await w.find('[data-testid="activate-governance"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-testid="governance-activate-dialog"]').text()).toContain('billing setting of its registered enterprise or organisation')
+    expect(has('/governance-cutover/activate', 'POST')).toBe(false)
+    await w.find('[data-testid="governance-activate-cancel"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-testid="governance-activate-dialog"]').exists()).toBe(false)
+    expect(has('/governance-cutover/activate', 'POST')).toBe(false)
+  })
+
+  it('Activate confirmed sends the activation', async () => {
+    const w = await mountPage('preflight_verified')
+    await w.find('[data-testid="activate-governance"]').trigger('click')
+    await w.find('[data-testid="governance-activate-confirm"]').trigger('click')
+    await flushPromises()
+    expect(has('/governance-cutover/activate', 'POST')).toBe(true)
+  })
+
+  it('Record this month names the month; Cancel sends nothing', async () => {
+    const w = await mountPage()
+    await w.find('[data-testid="close-period"]').trigger('click')
+    await flushPromises()
+    // The month in words ("October 2026"), never the raw YYYY-MM.
+    const title = w.find('[data-testid="period-record-dialog"] h2').text()
+    expect(title).toMatch(/^Record [A-Z][a-z]+ \d{4}\?$/)
+    await w.find('[data-testid="period-record-cancel"]').trigger('click')
+    await flushPromises()
+    expect(has('/admin/reporting-snapshots/', 'POST')).toBe(false)
+  })
+})
+
+// ── plain words (#545) ───────────────────────────────────────────────────────
+describe('Provider governance reads in plain words', () => {
+  it.each([
+    ['not_started', 'Not started'],
+    ['preflight_verified', 'Preflight passed'],
+    ['activated', 'Active'],
+    ['rolled_back', 'Rolled back'],
+  ])('status %s shows as %s', async (status, label) => {
+    const w = await mountPage(status)
+    expect(w.find('[data-testid="cutover-status-badge"]').text()).toBe(label)
+  })
+
+  it('shows no snake_case or kebab-case word, no column name and no em dash', async () => {
+    const w = await mountPage()
+    const text = w.text()
+    expect(text).not.toMatch(/\b[a-z]+_[a-z_]+\b/)
+    expect(text).not.toMatch(/\b[a-z]+-[a-z]+-[a-z-]+\b/)
+    expect(text).not.toMatch(/Governance-unresolved|GOVERNANCE-UNRESOLVED/i)
+    // The cutover copy used to print the column name as code.
+    expect(w.find('[data-testid="governance-cutover-card"]').findAll('code')).toHaveLength(0)
+    expect(text).not.toContain('\u2014')
+    expect(text).toContain('Spend we could not match to a provider account')
+    // The source keys carry the account id: the words keep it, the key does not show.
+    expect(text).toContain('Anthropic organisation org-7')
+    expect(text).toContain('GitHub Copilot seats, organisation acme')
+    expect(text).not.toMatch(/anthropic-analytics-api|copilot-seat/)
   })
 })

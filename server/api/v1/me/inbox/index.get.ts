@@ -1,7 +1,8 @@
 /*
  * GET /api/v1/me/inbox — list the authenticated dev's inbox items.
  *
- * Filters: ack_state, category, severity, limit. `ack_state=open`
+ * Filters: ack_state, category, group (one of the six inbox filter groups,
+ * shared/inbox/categories.ts), severity, limit. `ack_state=open`
  * shorthand selects unread + read + acknowledged (the unresolved
  * states); `closed` selects dismissed + resolved.
  *
@@ -15,6 +16,13 @@ import { allocationScopePredicate } from '../../../../auth/allocation-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { InboxListQuery } from '../../../../../shared/schemas/inbox'
 import { isPlatformAdmin } from '../../../../../shared/auth/roles'
+import {
+  INBOX_CATEGORY_GROUPS,
+  KNOWN_INBOX_CATEGORIES,
+  categoriesInGroup,
+  inboxCategoryGroup,
+  type InboxCategoryGroup,
+} from '../../../../../shared/inbox/categories'
 
 interface InboxRow extends Record<string, unknown> {
   id: string
@@ -72,6 +80,14 @@ export default defineEventHandler(async (event) => {
   const categoryFilter = query.category
     ? sql`AND category = ${query.category}`
     : sql``
+  // Other also holds any category this build does not know (a newer producer
+  // mid-deploy): the page badges those as Other, so the filter must find them.
+  const inList = (cats: readonly string[]) => sql.join(cats.map((c) => sql`${c}`), sql`, `)
+  const groupFilter = !query.group
+    ? sql``
+    : query.group === 'other'
+      ? sql`AND (i.category IN (${inList(categoriesInGroup('other'))}) OR i.category NOT IN (${inList(KNOWN_INBOX_CATEGORIES)}))`
+      : sql`AND i.category IN (${inList(categoriesInGroup(query.group))})`
   const severityFilter = query.severity
     ? sql`AND severity = ${query.severity}`
     : sql``
@@ -83,8 +99,8 @@ export default defineEventHandler(async (event) => {
       ? session.regionId
       : null
 
-  const rows = await withRequestRls(event, async (tx) =>
-    tx.execute<InboxRow>(sql`
+  const { rows, counts } = await withRequestRls(event, async (tx) => ({
+    rows: await tx.execute<InboxRow>(sql`
       SELECT
         i.id::text AS id, i.category, i.severity, i.subject, i.body,
         i.related_entity_kind,
@@ -151,11 +167,28 @@ export default defineEventHandler(async (event) => {
       WHERE i.recipient_teammate_id = ${session.teammateId}::uuid
         AND ${ackStateFilter}
         ${categoryFilter}
+        ${groupFilter}
         ${severityFilter}
       ORDER BY i.created_at DESC
       LIMIT ${query.limit}
     `),
-  )
+    /*
+     * Items per filter group under the SAME status and severity, ignoring the
+     * category and group (#546): the counts the Category buttons show, so a
+     * group reads how much is in it before it is chosen.
+     */
+    counts: await tx.execute<{ category: string; n: string }>(sql`
+      SELECT category, count(*)::text AS n
+      FROM inbox_item
+      WHERE recipient_teammate_id = ${session.teammateId}::uuid
+        AND ${ackStateFilter}
+        ${severityFilter}
+      GROUP BY category
+    `),
+  }))
+
+  const groupCounts = Object.fromEntries(INBOX_CATEGORY_GROUPS.map((g) => [g, 0])) as Record<InboxCategoryGroup, number>
+  for (const r of counts) groupCounts[inboxCategoryGroup(r.category)] += Number(r.n)
 
   const items = [...rows]
   // total_matched is the same value on every row (COUNT OVER no-partition);
@@ -163,5 +196,5 @@ export default defineEventHandler(async (event) => {
   const total = items.length === 0 ? 0 : Number(items[0]?.total_matched ?? 0)
   // Strip the helper column from the response shape so callers don't see it.
   const cleanItems = items.map(({ total_matched: _t, ...rest }) => rest)
-  return { items: cleanItems, total }
+  return { items: cleanItems, total, group_counts: groupCounts }
 })

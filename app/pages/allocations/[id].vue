@@ -18,6 +18,7 @@ import DevChipPicker, { type AssignedDev } from '../../components/allocator/DevC
 import TopupLog, { type TopupRow } from '../../components/allocator/TopupLog.vue'
 import ConsumptionCard from '../../components/allocator/ConsumptionCard.vue'
 import type { Crumb } from '../../components/ui/Breadcrumb.vue'
+import { apiErrorDetail, isConfirmedRejection } from '../../composables/useApiError'
 
 interface FocusedAlloc {
   id: string
@@ -81,10 +82,26 @@ if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id.v
   throw createError({ statusCode: 404, statusMessage: 'Allocation not found', fatal: true })
 }
 
-const { data, refresh, pending } = await useFetch<AllocDetail>(
+const { data, refresh, pending, error } = await useFetch<AllocDetail>(
   () => `/api/v1/allocations/${encodeURIComponent(id.value)}`,
   { default: () => null as unknown as AllocDetail },
 )
+
+/*
+ * Not found, refused and failed are three answers (#548), the list page's
+ * pattern (allocations/index.vue). The route answers 404 for an id outside
+ * your scope as well as a missing one (existence parity, [id].get.ts), so
+ * "not found" keeps its "or you don't have permission" line. Any other
+ * refusal says so with its reason; no answer or a 5xx is a failure with Retry.
+ */
+const loadState = computed<'not-found' | 'forbidden' | 'refused' | 'failed' | null>(() => {
+  if (!error.value) return null
+  const status = (error.value as { statusCode?: number }).statusCode
+  if (status === 404) return 'not-found'
+  if (status === 403) return 'forbidden'
+  return isConfirmedRejection(error.value) ? 'refused' : 'failed'
+})
+const refusedDetail = computed(() => apiErrorDetail(error.value, 'none').replace(/\.$/, ''))
 
 // Form state — initialised from the loaded focused row.
 const mode = ref<AllocatorMode>('shared-pool')
@@ -134,7 +151,12 @@ const projectIdForConsumption = computed(() => data.value?.focused?.project_id ?
 // (server/usage/complete-spend.ts). It used to be its own SUM over the raw
 // ledger, so "Manage budget →" walked a PM from one number to a different one
 // at the exact moment they decided whether to extend.
-const { data: consumption } = await useFetch<{
+const {
+  data: consumption,
+  execute: loadConsumption,
+  error: consumptionError,
+  pending: consumptionPending,
+} = await useFetch<{
   total_cost_usd: string
   reconciled_cost_usd: string
 }>(
@@ -147,6 +169,29 @@ const { data: consumption } = await useFetch<{
     immediate: !!projectIdForConsumption.value,
   },
 )
+/*
+ * With no project id at setup (the allocation read failed, #548) this request is
+ * created idle, and Nuxt does not start an idle request when its URL changes.
+ * When a Retry brings the id, start it: otherwise the editor would open on the
+ * $0.00 default and an overspent project would read as green.
+ */
+watch(projectIdForConsumption, (id, before) => {
+  if (id && !before) void loadConsumption()
+})
+/*
+ * The spend figure has its own answers (#548): until it loads, and when it
+ * fails, the card must not show the $0.00 default, which reads as "nothing
+ * used" and turns an overspent project green.
+ */
+const consumptionState = computed<'loading' | 'refused' | 'failed' | 'ready'>(() => {
+  if (!projectIdForConsumption.value) return 'ready'
+  // Pending first: Nuxt keeps the previous error while a Try again runs, and the
+  // reader should see the retry happening, not the old failure.
+  if (consumptionPending.value) return 'loading'
+  if (consumptionError.value) return isConfirmedRejection(consumptionError.value) ? 'refused' : 'failed'
+  return 'ready'
+})
+const consumptionRefusedDetail = computed(() => apiErrorDetail(consumptionError.value, 'none').replace(/\.$/, ''))
 const consumptionUsedUsd = computed(() => Number(consumption.value?.total_cost_usd ?? 0))
 const consumptionReconciledUsd = computed(() =>
   Number(consumption.value?.reconciled_cost_usd ?? 0),
@@ -632,7 +677,35 @@ function humaniseEventType(eventType: string): string {
 
       <!-- RIGHT: context column (sticky) -->
       <div class="space-y-5 lg:sticky lg:top-6 self-start">
+        <UiCard v-if="consumptionState === 'failed'" data-testid="consumption-failed" role="alert">
+          <div class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3">
+            Consumption to date
+          </div>
+          <div class="text-sm font-bold text-carbon mt-2">This project's spend didn't load.</div>
+          <p class="text-xs text-carbon-2 mt-1">
+            We couldn't get an answer from the server, so we can't say how much of this budget is used.
+          </p>
+          <UiButton class="mt-3" kind="secondary" size="sm" data-testid="consumption-retry" @click="loadConsumption()">
+            Try again
+          </UiButton>
+        </UiCard>
+        <UiCard v-else-if="consumptionState === 'refused'" data-testid="consumption-refused" role="alert">
+          <div class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3">
+            Consumption to date
+          </div>
+          <div class="text-sm font-bold text-carbon mt-2">The server refused to show this project's spend.</div>
+          <p class="text-xs text-carbon-2 mt-1">
+            Reason given: {{ consumptionRefusedDetail }}. So we can't say how much of this budget is used.
+          </p>
+        </UiCard>
+        <UiCard v-else-if="consumptionState === 'loading'" data-testid="consumption-loading">
+          <div class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3">
+            Consumption to date
+          </div>
+          <p class="text-sm text-carbon-2 mt-2" role="status">Loading this project's spend…</p>
+        </UiCard>
         <ConsumptionCard
+          v-else
           :used-usd="consumptionUsedUsd"
           :total-usd="consumptionTotalUsd"
           :reconciled-usd="consumptionReconciledUsd"
@@ -688,8 +761,32 @@ function humaniseEventType(eventType: string): string {
       </div>
     </div>
   </div>
-  <div v-else-if="pending" class="max-w-[1440px] mx-auto px-10 py-16 text-center text-carbon-3 text-sm">
+  <div v-else-if="pending" class="max-w-[1440px] mx-auto px-10 py-16 text-center text-carbon-3 text-sm" role="status">
     Loading allocation…
+  </div>
+  <div v-else-if="loadState === 'forbidden' || loadState === 'refused'" class="max-w-[1440px] mx-auto px-10 py-16 text-center" data-testid="alloc-refused" role="alert">
+    <div class="text-lg font-bold text-carbon">
+      {{ loadState === 'forbidden' ? "You don't have access to this budget." : 'The server refused to open this budget.' }}
+    </div>
+    <p class="text-sm text-carbon-2 mt-2">
+      <template v-if="loadState === 'forbidden'">
+        The budget may exist, but your access does not reach it. Ask the project's manager or an admin.
+      </template>
+      <template v-else>Reason given: {{ refusedDetail }}.</template>
+    </p>
+    <NuxtLink to="/allocations" class="inline-block mt-4 text-sm font-bold text-brand-harmony hover:underline">
+      ← Back to allocations
+    </NuxtLink>
+  </div>
+  <div v-else-if="loadState === 'failed'" class="max-w-[1440px] mx-auto px-10 py-16 text-center" data-testid="alloc-failed" role="alert">
+    <div class="text-lg font-bold text-carbon">This budget didn't load.</div>
+    <p class="text-sm text-carbon-2 mt-2">
+      We couldn't get an answer from the server, so we can't show what this budget holds right now. A
+      change you just saved may already have been applied: reload before making it again.
+    </p>
+    <UiButton class="mt-4" kind="secondary" size="sm" data-testid="alloc-retry" @click="refresh()">
+      Try again
+    </UiButton>
   </div>
   <div v-else class="max-w-[1440px] mx-auto px-10 py-16 text-center" data-testid="alloc-not-found">
     <div class="text-lg font-bold text-carbon">Allocation not found.</div>

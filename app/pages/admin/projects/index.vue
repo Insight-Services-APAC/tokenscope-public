@@ -8,6 +8,8 @@
  * region admins are pinned to their own region.
  */
 
+import AdminResultToast from '../../../components/admin/AdminResultToast.vue'
+import { useResultToast } from '../../../composables/useResultToast'
 import { computed, ref } from 'vue'
 import { consola } from 'consola'
 import EntityTable from '../../../components/admin/EntityTable.vue'
@@ -118,13 +120,7 @@ const couOptions = computed<{ id: string; display_name: string }[]>(() => {
   return (owning.length > 0 ? owning : nodes).map((n) => ({ id: n.id, display_name: n.display_name }))
 })
 
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-function flashToast(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => { toast.value = null }, 3500)
-}
+const { toast, flashToast, dismissToast } = useResultToast()
 
 const columns = [
   { key: 'code', label: 'Code' },
@@ -276,16 +272,7 @@ async function remove(row: ProjectRow) {
       </template>
     </UiPageHead>
 
-    <div
-      v-if="toast"
-      :data-testid="`admin-projects-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="admin-projects-toast" @dismiss="dismissToast" />
 
     <UiFetchErrorBanner v-if="error" :error="error" label="projects" @retry="refresh" />
     <AdminPageSkeleton v-else-if="skeleton" :rows="6" />

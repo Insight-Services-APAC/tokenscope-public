@@ -1188,13 +1188,13 @@ const memberIngestOnlyTools = computed(
             <table class="w-full text-sm">
               <thead class="text-[11px] text-carbon-3 uppercase tracking-[1.2px]">
                 <tr>
-                  <th class="text-left font-bold py-2 pr-4">Member</th>
-                  <th class="text-right font-bold py-2 px-4">Cost</th>
-                  <th class="text-right font-bold py-2 px-4">Tokens</th>
-                  <th class="text-right font-bold py-2 px-4">Active days</th>
-                  <th class="text-right font-bold py-2 px-4">$/active day</th>
-                  <th class="text-right font-bold py-2 px-4">Share</th>
-                  <th class="text-right font-bold py-2 pl-4">Last activity</th>
+                  <th scope="col" class="text-left font-bold py-2 pr-4">Member</th>
+                  <th scope="col" class="text-right font-bold py-2 px-4">Cost</th>
+                  <th scope="col" class="text-right font-bold py-2 px-4">Tokens</th>
+                  <th scope="col" class="text-right font-bold py-2 px-4">Active days</th>
+                  <th scope="col" class="text-right font-bold py-2 px-4">$/active day</th>
+                  <th scope="col" class="text-right font-bold py-2 px-4">Share</th>
+                  <th scope="col" class="text-right font-bold py-2 pl-4">Last activity</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-calm-2">

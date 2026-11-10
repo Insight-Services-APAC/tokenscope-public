@@ -31,6 +31,7 @@ import ratePlansGet from '../../../server/api/v1/admin/reconciliation/enterprise
 import ratePlansPost from '../../../server/api/v1/admin/reconciliation/enterprises/[id]/copilot-rate-plans.post'
 import billRepullPost from '../../../server/api/v1/admin/reconciliation/enterprises/[id]/copilot-bill-repull.post'
 import { closeReportingSnapshot } from '../../../server/governance/reporting-snapshot'
+import { resolveServerClock } from '../../../shared/reports/clock'
 import { persistCopilotOverageAllocation } from '../../../server/governance/copilot-overage-allocation'
 
 let t: TestDb
@@ -180,6 +181,23 @@ describe('copilot-rate-plans route', () => {
     }
     expect(list.total).toBe(1)
     expect(list.plans[0]!.flatSeatPriceUsd).toBe(39)
+  })
+
+  it("judges each plan's status for the server clock's UTC month, not the wall clock", async () => {
+    const entId = await mkGithubEnterprise(`rp-clock-${randomUUID().slice(0, 8)}`)
+    await ratePlansPost(
+      ev({ method: 'POST', session: finops(), params: { id: entId }, body: { validFrom: '2026-01-01', flatSeatPriceUsd: 39 } }),
+    )
+    const listAt = async (instant: string) => {
+      const e = ev({ method: 'GET', session: finops(), params: { id: entId } }) as unknown as {
+        context: { serverClock?: unknown }
+      }
+      e.context.serverClock = resolveServerClock(new Date(instant))
+      const list = (await ratePlansGet(e as never)) as { plans: { status: string }[] }
+      return list.plans[0]!.status
+    }
+    expect(await listAt('2026-03-15T12:00:00Z')).toBe('in-effect')
+    expect(await listAt('2025-12-31T23:59:59Z')).toBe('starts-later')
   })
 
   it('rejects a malformed body (Zod) with 400', async () => {

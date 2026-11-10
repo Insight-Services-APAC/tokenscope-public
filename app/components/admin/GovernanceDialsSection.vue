@@ -19,6 +19,8 @@
  * plain @vue/test-utils harness (no Nuxt runtime): data arrives via props,
  * only the PUT uses the global $fetch.
  */
+import AdminResultToast from './AdminResultToast.vue'
+import { useResultToast } from '../../composables/useResultToast'
 import { ref, computed, watch } from 'vue'
 import UiCard from '../ui/Card.vue'
 import UiEyebrow from '../ui/Eyebrow.vue'
@@ -161,13 +163,7 @@ watch(
   { immediate: true },
 )
 
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-function flashToast(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => { toast.value = null }, 3500)
-}
+const { toast, flashToast, dismissToast } = useResultToast()
 
 const savingKey = ref<string | null>(null)
 
@@ -220,16 +216,7 @@ const scopeLabel = computed(() => {
       default; saving writes the <span class="font-semibold">{{ scopeLabel }}</span> value.
     </p>
 
-    <div
-      v-if="toast"
-      :data-testid="`settings-governance-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="settings-governance-toast" @dismiss="dismissToast" />
 
     <div v-if="orgWide" class="mb-4">
       <label for="governance-scope" class="text-[12px] font-semibold text-carbon block mb-1">

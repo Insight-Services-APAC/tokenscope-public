@@ -302,23 +302,10 @@ const navLinks = computed(() => {
         </svg>
       </button>
 
-      <!-- Icon buttons. Dark toggle is an explicit placeholder per
-           design-notes §0 (no-op icon for v1). Search is deferred until
-           a real cross-resource search lands — hidden rather than dead.
-           Inbox bell links to /inbox with unread badge. -->
-      <button
-        type="button"
-        title="Toggle theme (placeholder for v1)"
-        aria-label="Toggle theme (placeholder for v1)"
-        disabled
-        data-testid="dark-toggle"
-        class="hidden sm:inline-flex w-9 h-9 items-center justify-center rounded-lg text-carbon-3 cursor-not-allowed opacity-60"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-        </svg>
-      </button>
-
+      <!-- Icon buttons. Search is deferred until a real cross-resource
+           search lands: hidden rather than dead. The disabled theme toggle
+           was removed (#542; REMAINING E: dark mode only if asked). Inbox
+           bell links to /inbox with unread badge. -->
       <NuxtLink
         to="/inbox"
         title="Open inbox"

@@ -1,34 +1,29 @@
 <script setup lang="ts">
 /*
- * InboxFilterBar — three segmented controls for Category /
- * Severity / Status. Per design-notes §Screen 7: lives in its own
- * card above the list, separates filter state from results.
+ * InboxFilterBar: Category / Severity / Status, in its own card above the
+ * list (design-notes §Screen 7).
  *
- * Category options map to `inbox_item.category`; we collapse the four
- * pilot-relevant categories (`over-budget`, `velocity-warning`,
- * `sync-conflict`, `untagged-backlog`) into the four labelled buttons
- * shown in the hi-fi. Status uses the `open/closed` semantics from
- * the inbox API.
+ * Category is one of six groups people recognise (#546), not a category key:
+ * every category the server writes sits in exactly one group
+ * (shared/inbox/categories.ts), so nothing is unfilterable. Status opens on
+ * Open (unread, read, acknowledged); Closed is resolved and dismissed, the
+ * list route's `open` / `closed` shorthands.
+ *
+ * Each row of buttons is a labelled group and every button carries
+ * aria-pressed, like the app's other toggles (WindowToggle, RegionSelector).
  */
-
 import UiCard from '../ui/Card.vue'
-import type { INBOX_CATEGORIES } from '#shared/schemas/inbox'
+import { INBOX_CATEGORY_GROUPS, INBOX_GROUP_LABELS, type InboxCategoryGroup } from '#shared/inbox/categories'
 
-// From the list endpoint's own enum: a filter it would reject cannot compile.
-export type InboxCategoryFilter = 'all' | (typeof INBOX_CATEGORIES)[number]
+export type InboxCategoryFilter = 'all' | InboxCategoryGroup
 
 export type InboxSeverityFilter = 'all' | 'info' | 'attention' | 'urgent'
 
-export type InboxStatusFilter = 'all' | 'unread' | 'read'
+export type InboxStatusFilter = 'open' | 'unread' | 'closed' | 'all'
 
 const CATEGORY_OPTIONS: Array<{ key: InboxCategoryFilter; label: string }> = [
   { key: 'all', label: 'All' },
-  { key: 'over-budget', label: 'Over budget' },
-  { key: 'velocity-warning', label: 'Velocity' },
-  { key: 'sync-conflict', label: 'Sync conflicts' },
-  { key: 'untagged-backlog', label: 'Untagged' },
-  { key: 'personal-subscription-prompt', label: 'Personal subscription' },
-  { key: 'over-emission-escalated', label: 'Over-emission' },
+  ...INBOX_CATEGORY_GROUPS.map((g) => ({ key: g, label: INBOX_GROUP_LABELS[g] })),
 ]
 
 const SEVERITY_OPTIONS: Array<{ key: InboxSeverityFilter; label: string }> = [
@@ -39,15 +34,18 @@ const SEVERITY_OPTIONS: Array<{ key: InboxSeverityFilter; label: string }> = [
 ]
 
 const STATUS_OPTIONS: Array<{ key: InboxStatusFilter; label: string }> = [
-  { key: 'all', label: 'All' },
+  { key: 'open', label: 'Open' },
   { key: 'unread', label: 'Unread' },
-  { key: 'read', label: 'Read' },
+  { key: 'closed', label: 'Closed' },
+  { key: 'all', label: 'All' },
 ]
 
 defineProps<{
   category: InboxCategoryFilter
   severity: InboxSeverityFilter
   status: InboxStatusFilter
+  /** Items per group under the current status and severity; absent until loaded. */
+  groupCounts?: Partial<Record<InboxCategoryGroup, number>> | null
 }>()
 
 const emit = defineEmits<{
@@ -55,48 +53,49 @@ const emit = defineEmits<{
   (e: 'update:severity', value: InboxSeverityFilter): void
   (e: 'update:status', value: InboxStatusFilter): void
 }>()
+
+const BUTTON = 'px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap'
+const ON = 'bg-white text-brand-harmony shadow-sm'
+const OFF = 'text-carbon-2 hover:text-brand-harmony'
 </script>
 
 <template>
   <UiCard class="mb-5" data-testid="inbox-filter-bar">
     <div class="flex flex-wrap items-start gap-x-10 gap-y-4">
       <div>
-        <div class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">
+        <div id="inbox-filter-category-label" class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">
           Category
         </div>
-        <div class="inline-flex p-0.5 bg-calm-2 rounded-lg gap-0.5">
+        <div role="group" aria-labelledby="inbox-filter-category-label" class="inline-flex flex-wrap p-0.5 bg-calm-2 rounded-lg gap-0.5">
           <button
             v-for="opt in CATEGORY_OPTIONS"
             :key="opt.key"
             type="button"
-            class="px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap"
-            :class="
-              category === opt.key
-                ? 'bg-white text-brand-harmony shadow-sm'
-                : 'text-carbon-2 hover:text-brand-harmony'
-            "
+            :class="[BUTTON, category === opt.key ? ON : OFF]"
+            :aria-pressed="category === opt.key"
             :data-testid="`filter-category-${opt.key}`"
             @click="emit('update:category', opt.key)"
           >
             {{ opt.label }}
+            <span
+              v-if="opt.key !== 'all' && groupCounts && groupCounts[opt.key]"
+              class="ml-1 tabular-nums text-carbon-3"
+              :data-testid="`filter-category-count-${opt.key}`"
+            >{{ groupCounts[opt.key] }}</span>
           </button>
         </div>
       </div>
       <div>
-        <div class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">
+        <div id="inbox-filter-severity-label" class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">
           Severity
         </div>
-        <div class="inline-flex p-0.5 bg-calm-2 rounded-lg gap-0.5">
+        <div role="group" aria-labelledby="inbox-filter-severity-label" class="inline-flex p-0.5 bg-calm-2 rounded-lg gap-0.5">
           <button
             v-for="opt in SEVERITY_OPTIONS"
             :key="opt.key"
             type="button"
-            class="px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap"
-            :class="
-              severity === opt.key
-                ? 'bg-white text-brand-harmony shadow-sm'
-                : 'text-carbon-2 hover:text-brand-harmony'
-            "
+            :class="[BUTTON, severity === opt.key ? ON : OFF]"
+            :aria-pressed="severity === opt.key"
             :data-testid="`filter-severity-${opt.key}`"
             @click="emit('update:severity', opt.key)"
           >
@@ -105,20 +104,16 @@ const emit = defineEmits<{
         </div>
       </div>
       <div>
-        <div class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">
+        <div id="inbox-filter-status-label" class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">
           Status
         </div>
-        <div class="inline-flex p-0.5 bg-calm-2 rounded-lg gap-0.5">
+        <div role="group" aria-labelledby="inbox-filter-status-label" class="inline-flex p-0.5 bg-calm-2 rounded-lg gap-0.5">
           <button
             v-for="opt in STATUS_OPTIONS"
             :key="opt.key"
             type="button"
-            class="px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap"
-            :class="
-              status === opt.key
-                ? 'bg-white text-brand-harmony shadow-sm'
-                : 'text-carbon-2 hover:text-brand-harmony'
-            "
+            :class="[BUTTON, status === opt.key ? ON : OFF]"
+            :aria-pressed="status === opt.key"
             :data-testid="`filter-status-${opt.key}`"
             @click="emit('update:status', opt.key)"
           >

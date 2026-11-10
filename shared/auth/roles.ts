@@ -123,6 +123,25 @@ export const ROLE_LABELS: Record<Role, string> = {
   'platform-admin': 'Admin',
 }
 
+/**
+ * What a role lets someone do, in one sentence, for the dialog that confirms a
+ * role change (#543). Only the roles that can be granted: a retired role is
+ * never a target. Worded from SPEC §3 and WHO_SEES_WHAT_BASELINE
+ * (shared/auth/report-visibility.ts).
+ */
+export const ROLE_CAPABILITIES: Partial<Record<Role, string>> = {
+  developer: "A Developer sees their own usage, their projects and their region's report.",
+  manager: 'A Manager also sees reports on the people and teams in their part of the organisation.',
+  'platform-admin':
+    "An Admin can change anyone's role and placement and every policy, in every region, and sees every report.",
+}
+
+/** "a Developer", "an Admin": a role label with its article, for sentences. */
+export function roleWithArticle(role: string | null | undefined): string {
+  const label = roleLabel(role)
+  return /^[AEIOU]/i.test(label) ? `an ${label}` : `a ${label}`
+}
+
 /** Display label for a role value; falls back to the raw value if unknown. */
 export function roleLabel(role: string | null | undefined): string {
   if (!role) return '—'

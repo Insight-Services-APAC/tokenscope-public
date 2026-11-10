@@ -345,24 +345,33 @@ async function revokePersonalSubscription(tool: string) {
     <UiCard>
       <UiEyebrow>Link an identity</UiEyebrow>
       <div class="flex flex-wrap items-end gap-2 mt-3">
-        <select v-model="newSystem" class="text-sm border border-calm-2 rounded-md px-2 py-2 bg-white" data-testid="new-system">
-          <option value="claude-code">Claude Code</option>
-          <option value="github">GitHub</option>
-          <option value="copilot-cli">Copilot</option>
-          <option value="other">Other</option>
-        </select>
-        <select v-model="newKind" class="text-sm border border-calm-2 rounded-md px-2 py-2 bg-white">
-          <option value="email">Email</option>
-          <option value="username">Username</option>
-        </select>
-        <input
-          v-model="newIdentifier"
-          type="text"
-          placeholder="name@example.com"
-          class="flex-1 min-w-[220px] px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
-          data-testid="new-identifier"
-          @keyup.enter="addIdentity"
-        >
+        <label>
+          <span class="block text-xs text-carbon-3 font-bold uppercase tracking-[1px] mb-1">System</span>
+          <select v-model="newSystem" class="text-sm border border-calm-2 rounded-md px-2 py-2 bg-white" data-testid="new-system">
+            <option value="claude-code">Claude Code</option>
+            <option value="github">GitHub</option>
+            <option value="copilot-cli">Copilot</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <label>
+          <span class="block text-xs text-carbon-3 font-bold uppercase tracking-[1px] mb-1">Identifier type</span>
+          <select v-model="newKind" class="text-sm border border-calm-2 rounded-md px-2 py-2 bg-white" data-testid="new-kind">
+            <option value="email">Email</option>
+            <option value="username">Username</option>
+          </select>
+        </label>
+        <label class="flex-1 min-w-[220px]">
+          <span class="block text-xs text-carbon-3 font-bold uppercase tracking-[1px] mb-1">Identifier</span>
+          <input
+            v-model="newIdentifier"
+            type="text"
+            placeholder="name@example.com"
+            class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
+            data-testid="new-identifier"
+            @keyup.enter="addIdentity"
+          >
+        </label>
         <UiButton kind="primary" size="sm" :disabled="busy || !newIdentifier.trim()" data-testid="link-identity" @click="addIdentity">
           Link
         </UiButton>
@@ -665,25 +674,34 @@ async function revokePersonalSubscription(tool: string) {
       </ul>
 
       <div class="mt-3 flex flex-wrap items-end gap-2">
-        <select v-model="newSubTool" class="text-sm border border-calm-2 rounded-md px-2 py-2 bg-white" data-testid="new-sub-tool">
-          <option v-for="t in PERSONAL_SUB_TOOLS" :key="t.value" :value="t.value">{{ t.label }}</option>
-        </select>
-        <input
-          v-model="newSubType"
-          type="text"
-          placeholder="e.g. Claude Max"
-          class="flex-1 min-w-[10rem] border border-calm-2 rounded-md px-2 py-2 text-sm"
-          data-testid="new-sub-type"
-        >
-        <input
-          v-model.number="newSubCost"
-          type="number"
-          min="0"
-          step="0.01"
-          placeholder="Monthly cost ($)"
-          class="w-40 border border-calm-2 rounded-md px-2 py-2 text-sm"
-          data-testid="new-sub-cost"
-        >
+        <label>
+          <span class="block text-xs text-carbon-3 font-bold uppercase tracking-[1px] mb-1">Tool</span>
+          <select v-model="newSubTool" class="text-sm border border-calm-2 rounded-md px-2 py-2 bg-white" data-testid="new-sub-tool">
+            <option v-for="t in PERSONAL_SUB_TOOLS" :key="t.value" :value="t.value">{{ t.label }}</option>
+          </select>
+        </label>
+        <label class="flex-1 min-w-[10rem]">
+          <span class="block text-xs text-carbon-3 font-bold uppercase tracking-[1px] mb-1">Plan name</span>
+          <input
+            v-model="newSubType"
+            type="text"
+            placeholder="e.g. Claude Max"
+            class="w-full border border-calm-2 rounded-md px-2 py-2 text-sm"
+            data-testid="new-sub-type"
+          >
+        </label>
+        <label>
+          <span class="block text-xs text-carbon-3 font-bold uppercase tracking-[1px] mb-1">Monthly cost (USD)</span>
+          <input
+            v-model.number="newSubCost"
+            type="number"
+            min="0"
+            step="0.01"
+            placeholder="e.g. 100"
+            class="w-40 border border-calm-2 rounded-md px-2 py-2 text-sm"
+            data-testid="new-sub-cost"
+          >
+        </label>
         <UiButton
           kind="primary"
           size="sm"

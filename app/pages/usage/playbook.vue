@@ -8,6 +8,11 @@
  *
  * Evidence badges: a lever shows "observed in your usage" when one of the
  * caller's CURRENT insights names it — evidence before advice.
+ *
+ * The check has three answers (#547): while it runs, one status line says so;
+ * if it fails, an error line with Retry, and no badge at all (a failed check
+ * is not "nothing observed"); when it lands, the badges. The levers always
+ * show: they are education, not findings.
  */
 import { computed } from 'vue'
 import type { Finding } from '#shared/schemas/usage'
@@ -127,12 +132,18 @@ const LEVERS: Lever[] = [
 const { session, ensure } = useSession()
 await ensure()
 
-const { data } = await useFetch<{ insights: Finding[] }>(
+const { data, pending, error, refresh } = await useFetch<{ insights: Finding[] }>(
   '/api/v1/me/usage',
   { query: { window: 30 }, lazy: true },
 )
+// Pending wins: on Retry Nuxt keeps the old error until the new answer lands,
+// and the reader should see the check running, not the last failure.
+const checking = computed(() => pending.value)
+const checkFailed = computed(() => !pending.value && !!error.value)
 const observedLevers = computed(() => {
   const set = new Set<string>()
+  // Badges only from an answer that landed: never from a failed or unfinished check.
+  if (checkFailed.value || checking.value) return set
   for (const f of data.value?.insights ?? []) for (const l of f.related_levers) set.add(l)
   return set
 })
@@ -145,6 +156,24 @@ const observedLevers = computed(() => {
       sub="Eight levers that change outcome-per-dollar. All optional — your call which fit how you work."
       :crumbs="['My usage', 'Playbook']"
     />
+
+    <p
+      v-if="checking"
+      class="mb-4 text-[13px] text-carbon-2"
+      role="status"
+      data-testid="playbook-checking"
+    >
+      Checking your last 30 days for these levers.
+    </p>
+    <div
+      v-if="checkFailed"
+      role="alert"
+      class="mb-4 px-4 py-3 rounded-md bg-brand-hunger-sheer border border-brand-hunger/40 text-sm text-brand-heart flex items-center justify-between gap-4"
+      data-testid="playbook-check-error"
+    >
+      <span>We couldn't check your last 30 days, so no lever is marked as observed. The levers below still apply.</span>
+      <UiButton kind="secondary" size="sm" data-testid="playbook-check-retry" @click="refresh()">Retry</UiButton>
+    </div>
 
     <nav class="mb-6 flex flex-wrap gap-2" aria-label="Levers">
       <a

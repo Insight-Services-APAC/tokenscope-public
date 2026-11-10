@@ -72,7 +72,7 @@ function stubFetch(answer: { data?: unknown; error?: unknown }) {
 
 async function mountPage(page: unknown) {
   const Parent = defineComponent({ components: { Page: page as never }, template: '<Suspense><Page /></Suspense>' })
-  const w = mount(Parent, { global: { stubs: STUBS, mocks: { fmtUsd: (v: string) => `$${v}` } } })
+  const w = mount(Parent, { global: { stubs: STUBS, mocks: { fmtUsd: (v: string) => `$${v}`, fmtTimeAgo: () => 'just now' } } })
   await flushPromises()
   return w
 }
@@ -156,7 +156,7 @@ describe('/inbox: empty, refused and failed are three answers', () => {
     const refused = w.find('[data-testid="inbox-refused"]')
     expect(refused.text()).toContain('The server refused to list your inbox.')
     expect(refused.text()).toContain('Reason given: The window is not a real month.')
-    expect(w.text()).not.toContain('Nothing to see here.')
+    expect(w.text()).not.toMatch(/Nothing to see here\.|Nothing open\./)
   })
 
   it.each([
@@ -169,16 +169,58 @@ describe('/inbox: empty, refused and failed are three answers', () => {
     const failed = w.find('[data-testid="inbox-failed"]')
     expect(failed.text()).toContain("Your inbox didn't load.")
     expect(failed.text()).toContain("can't tell whether anything is waiting for you")
-    expect(w.text()).not.toContain('Nothing to see here.')
+    expect(w.text()).not.toMatch(/Nothing to see here\.|Nothing open\./)
     await w.find('[data-testid="inbox-retry"]').trigger('click')
     expect(refresh).toHaveBeenCalled()
+  })
+
+  it('opens on Open: the first read asks for open items only (#546)', async () => {
+    stubInboxGlobals()
+    let firstUrl = ''
+    vi.stubGlobal('useFetch', (url: unknown, opts?: { default?: () => unknown }) => {
+      const u = typeof url === 'string' ? url : (url as { value: string }).value
+      if (u !== '/api/v1/reports/meta' && !firstUrl) firstUrl = u
+      return { data: ref(opts?.default ? opts.default() : null), error: ref(null), pending: ref(false), refresh: vi.fn() }
+    })
+    await mountPage(InboxPage)
+    expect(firstUrl).toBe('/api/v1/me/inbox?ack_state=open')
+  })
+
+  it('says when more items match than the page shows, and stays quiet when all are shown', async () => {
+    stubInboxGlobals()
+    const item = (n: number): InboxItem => ({
+      id: `9a1e0000-0000-4000-8000-${String(n).padStart(12, '0')}`,
+      category: 'velocity-warning',
+      severity: 'attention',
+      subject: `Item ${n}`,
+      body: {},
+      related_entity_kind: null,
+      related_entity_id: null,
+      ack_state: 'unread',
+      ack_at: null,
+      created_at: '2026-11-10T00:00:00Z',
+      target_allocation_id: null,
+      target_project_code: null,
+    } as InboxItem)
+    stubFetch({ data: { items: [item(1), item(2)], total: 73 } })
+    const w = await mountPage(InboxPage)
+    expect(w.find('[data-testid="inbox-truncated"]').text()).toBe(
+      'Showing the newest 2 of 73 matching items. Narrow the Category or Severity filter to see older ones.',
+    )
+
+    stubFetch({ data: { items: [item(1), item(2)], total: 2 } })
+    const all = await mountPage(InboxPage)
+    expect(all.find('[data-testid="inbox-list"]').exists()).toBe(true)
+    expect(all.find('[data-testid="inbox-truncated"]').exists()).toBe(false)
   })
 
   it('an answered empty inbox is empty, and promises no Teams or email (issue 486)', async () => {
     stubInboxGlobals()
     stubFetch({ data: { items: [], total: 0 } })
     const w = await mountPage(InboxPage)
-    expect(w.find('[data-testid="inbox-empty"]').text()).toContain('Nothing to see here.')
+    // #546: the inbox opens on Open, so empty says nothing is OPEN and where closed items are.
+    expect(w.find('[data-testid="inbox-empty"]').text()).toContain('Nothing open.')
+    expect(w.find('[data-testid="inbox-empty"]').text()).toContain('under Closed')
     expect(w.find('[data-testid="inbox-empty"]').text()).not.toMatch(NO_TEAMS_OR_EMAIL)
     // The subtitle says the opposite of the old promise, in plain words.
     const sub = w.find('[data-testid="page-sub"]').text()

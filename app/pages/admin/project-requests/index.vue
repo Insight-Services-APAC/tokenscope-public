@@ -97,12 +97,12 @@ const fmtUsd = (v: string) => `$${Number(v).toLocaleString('en-US', { maximumFra
       <table class="w-full text-sm" data-testid="project-requests-table">
         <thead>
           <tr class="text-left text-[11px] uppercase tracking-[1px] text-carbon-3">
-            <th class="py-2 pr-4">Project</th>
-            <th class="py-2 pr-4">Requested by</th>
-            <th class="py-2 pr-4">{{ BU_LABEL }}</th>
-            <th class="py-2 pr-4 text-right">Budget</th>
-            <th class="py-2 pr-4">Sent</th>
-            <th class="py-2">Status</th>
+            <th scope="col" class="py-2 pr-4">Project</th>
+            <th scope="col" class="py-2 pr-4">Requested by</th>
+            <th scope="col" class="py-2 pr-4">{{ BU_LABEL }}</th>
+            <th scope="col" class="py-2 pr-4 text-right">Budget</th>
+            <th scope="col" class="py-2 pr-4">Sent</th>
+            <th scope="col" class="py-2">Status</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-calm-2">

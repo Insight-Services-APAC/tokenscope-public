@@ -16,6 +16,7 @@
  * into an infinite Entra loop.
  */
 import { computed, ref } from 'vue'
+import { entraLoginHref, isPageToReturnTo, safeReturnPath, withBrowserHash } from '../utils/return-path'
 
 definePageMeta({ layout: false })
 
@@ -28,6 +29,17 @@ const isDevMode = computed(() => Boolean(config.public.authDevMode))
 // pilot-prod surface. localOnly is the single source of truth for that decision.
 const { localOnly } = useDemoFeatures()
 const error = ref<string | null>(null)
+// The page the visitor asked for before the auth middleware sent them here
+// (#541). Null unless it is a same-site path: see utils/return-path.ts.
+const returnPath = computed(() => {
+  const next = route.query.next
+  return safeReturnPath(Array.isArray(next) ? next[0] : next)
+})
+const showReturnNote = computed(() => isPageToReturnTo(returnPath.value))
+// Read at click time, in the browser: see withBrowserHash.
+function returnTarget(): string | null {
+  return withBrowserHash(returnPath.value, typeof window === 'undefined' ? '' : window.location.hash)
+}
 const busy = ref<string | null>(null)
 
 // Bootstrap-error cookie set by server/plugins/oidc-jit-teammate.ts when
@@ -53,8 +65,7 @@ async function signIn(persona: string) {
   error.value = null
   try {
     const result = await devLogin(persona)
-    const next = (route.query.next as string | undefined) ?? result?.landing ?? '/'
-    await navigateTo(next)
+    await navigateTo(returnTarget() ?? result?.landing ?? '/')
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Sign-in failed'
   } finally {
@@ -70,10 +81,11 @@ function signInWithEntra() {
   // The button is disabled in dev anyway; in sandbox/prod this route is
   // the module's login handler (mirrors the /auth/entra/logout path used
   // by useSession().logout).
+  // The page asked for rides along as the module's callbackRedirectUrl (#541).
   if (isDevMode.value || !import.meta.client) return
   busy.value = 'entra'
   error.value = null
-  window.location.href = '/auth/entra/login'
+  window.location.href = entraLoginHref(returnTarget())
 }
 </script>
 
@@ -91,12 +103,12 @@ function signInWithEntra() {
       "
     >
       <div>
-        <UiEyebrow class="text-white/80">TokenScope · Pilot</UiEyebrow>
+        <UiEyebrow class="text-white/80">TokenScope</UiEyebrow>
         <h1 class="mt-4 text-5xl font-bold tracking-tight leading-[1.05] max-w-lg">
           Track every token.<br>Trust the developer.
         </h1>
         <p class="font-slab italic text-lg mt-5 text-white/85 max-w-md leading-snug">
-          The budget does the teaching — TokenScope tracks the work and lets
+          The budget does the teaching. TokenScope tracks the work and lets
           you steer it.
         </p>
       </div>
@@ -144,6 +156,13 @@ function signInWithEntra() {
           <span v-if="isDevMode" class="font-mono text-xs mr-2">[Local dev]</span>
           Sign in with Microsoft
         </UiButton>
+        <p
+          v-if="showReturnNote"
+          data-testid="signin-return-note"
+          class="mt-2 text-xs text-carbon-2 text-center"
+        >
+          You'll go straight back to the page you opened.
+        </p>
 
         <!-- Demo personas: ONLY shown in local-dev mode. In sandbox/prod
              real Entra is the sole entry point; clicking a persona before

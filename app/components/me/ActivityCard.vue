@@ -308,14 +308,14 @@ function retag(r: ActivityRow) {
       <table class="w-full text-sm">
         <thead class="text-[11px] text-carbon-3 uppercase tracking-[1.2px]">
           <tr class="bg-brand-harmony-sheer/40">
-            <th class="text-left font-bold px-6 py-3">Record</th>
-            <th class="text-left font-bold px-6 py-3">Device</th>
-            <th class="text-left font-bold px-6 py-3">Project</th>
-            <th class="text-left font-bold px-6 py-3">Tool</th>
-            <th class="text-left font-bold px-6 py-3">When</th>
-            <th class="text-right font-bold px-6 py-3">Tokens</th>
-            <th class="text-right font-bold px-6 py-3">Cost</th>
-            <th class="px-6 py-3"><span class="sr-only">Actions</span></th>
+            <th scope="col" class="text-left font-bold px-6 py-3">Record</th>
+            <th scope="col" class="text-left font-bold px-6 py-3">Device</th>
+            <th scope="col" class="text-left font-bold px-6 py-3">Project</th>
+            <th scope="col" class="text-left font-bold px-6 py-3">Tool</th>
+            <th scope="col" class="text-left font-bold px-6 py-3">When</th>
+            <th scope="col" class="text-right font-bold px-6 py-3">Tokens</th>
+            <th scope="col" class="text-right font-bold px-6 py-3">Cost</th>
+            <th scope="col" class="px-6 py-3"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody class="divide-y divide-calm-2">

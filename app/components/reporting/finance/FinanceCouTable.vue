@@ -169,11 +169,11 @@ const legendLanes = computed<LaneSeg[]>(() => {
         <table class="w-full text-sm min-w-[680px]">
           <thead>
             <tr class="text-[11px] uppercase tracking-wide text-carbon-3 border-b border-calm-2">
-              <th class="text-left font-semibold py-2">Business Unit</th>
-              <th class="text-left font-semibold py-2 pl-4 min-w-[180px]">Surface mix</th>
-              <th class="text-right font-semibold py-2">Anthropic</th>
-              <th class="text-right font-semibold py-2">Copilot</th>
-              <th class="text-right font-semibold py-2">Chargeable</th>
+              <th scope="col" class="text-left font-semibold py-2">Business Unit</th>
+              <th scope="col" class="text-left font-semibold py-2 pl-4 min-w-[180px]">Surface mix</th>
+              <th scope="col" class="text-right font-semibold py-2">Anthropic</th>
+              <th scope="col" class="text-right font-semibold py-2">Copilot</th>
+              <th scope="col" class="text-right font-semibold py-2">Chargeable</th>
             </tr>
           </thead>
           <tbody>

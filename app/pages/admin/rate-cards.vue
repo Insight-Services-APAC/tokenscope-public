@@ -17,6 +17,8 @@
  * non-admin's API calls; the page just hides itself.
  */
 
+import AdminResultToast from '../../components/admin/AdminResultToast.vue'
+import { useResultToast } from '../../composables/useResultToast'
 import { computed, ref, watch, type Ref } from 'vue'
 import { consola } from 'consola'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
@@ -112,13 +114,7 @@ function fmtDay(iso: string | null): string {
   return iso ? iso.slice(0, 10) : '—'
 }
 
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-function flashToast(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => { toast.value = null }, 3500)
-}
+const { toast, flashToast, dismissToast } = useResultToast()
 
 const columns = [
   { key: 'scope', label: 'Scope' },
@@ -302,16 +298,7 @@ async function createCard() {
       </template>
     </UiPageHead>
 
-    <div
-      v-if="toast"
-      :data-testid="`admin-rate-cards-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="admin-rate-cards-toast" @dismiss="dismissToast" />
 
     <UiFetchErrorBanner v-if="error" :error="error" label="rate cards" @retry="refresh" />
     <AdminPageSkeleton v-else-if="skeleton" :rows="6" :toolbar="false" />

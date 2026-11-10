@@ -78,11 +78,11 @@ const scopeNote = computed(() => {
       <table class="w-full text-sm">
         <thead>
           <tr class="bg-brand-harmony-sheer border-b border-calm-2">
-            <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">Project</th>
-            <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">Kind</th>
-            <th class="text-right text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">Budget</th>
-            <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">Effective</th>
-            <th class="px-5 py-3"/>
+            <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">Project</th>
+            <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">Kind</th>
+            <th scope="col" class="text-right text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">Budget</th>
+            <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">Effective</th>
+            <th scope="col" class="px-5 py-3"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>

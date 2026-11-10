@@ -17,6 +17,8 @@
  * non-admin's API calls; the page just hides itself.
  */
 
+import AdminResultToast from '../../components/admin/AdminResultToast.vue'
+import { useResultToast } from '../../composables/useResultToast'
 import { computed, ref, watch } from 'vue'
 import { consola } from 'consola'
 import AdminPageSkeleton from '../../components/admin/AdminPageSkeleton.vue'
@@ -123,13 +125,7 @@ function selectTeammate(t: Teammate) {
   selected.value = t
 }
 
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-function flashToast(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => { toast.value = null }, 3500)
-}
+const { toast, flashToast, dismissToast } = useResultToast()
 
 const revoking = ref<Set<string>>(new Set())
 async function revokeGrant(g: GrantRow) {
@@ -179,16 +175,7 @@ function fmtTs(v: string | null): string {
       sub="Authorized connections (OAuth/MCP grants) per teammate. Revoke a connection to log a client out — emit grants also stop the device emitting."
     />
 
-    <div
-      v-if="toast"
-      :data-testid="`admin-grants-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="admin-grants-toast" @dismiss="dismissToast" />
 
     <div class="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
       <!-- Teammate picker -->

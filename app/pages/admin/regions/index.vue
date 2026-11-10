@@ -133,13 +133,13 @@ async function createRegion() {
         <table class="w-full text-sm">
           <thead>
             <tr class="bg-brand-harmony-sheer/40 border-b border-calm-2">
-              <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">
+              <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">
                 Code
               </th>
-              <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">
+              <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-5 py-3">
                 Name
               </th>
-              <th class="px-5 py-3"><span class="sr-only">Actions</span></th>
+              <th scope="col" class="px-5 py-3"><span class="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody class="divide-y divide-calm-2">

@@ -8,6 +8,8 @@
  * is. GLOBAL roles only. Unit rules and a Business Unit owner or Region leader in a person's
  * manager chain outrank these rules.
  */
+import AdminResultToast from '../../components/admin/AdminResultToast.vue'
+import { useResultToast } from '../../composables/useResultToast'
 import { computed, ref } from 'vue'
 import { consola } from 'consola'
 import { useAdminAccess } from '../../composables/useAdminAccess'
@@ -74,13 +76,7 @@ const rulesByAttribute = computed(() => {
   )
 })
 
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-function flashToast(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => (toast.value = null), 3500)
-}
+const { toast, flashToast, dismissToast } = useResultToast()
 
 // ── Add-rule form ──────────────────────────────────────────────────────────
 const formAttribute = ref<string>('companyName')
@@ -192,14 +188,7 @@ async function discover() {
       Not sure which attribute? <strong>Discover</strong> samples your directory below.
     </p>
 
-    <div
-      v-if="toast"
-      :data-testid="`region-rules-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok' ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30' : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="region-rules-toast" @dismiss="dismissToast" />
 
     <!-- Discover panel -->
     <UiCard accent="vision" class="mb-8" data-testid="region-rules-discover">

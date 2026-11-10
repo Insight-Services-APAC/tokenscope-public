@@ -26,7 +26,7 @@ import DrawerBodyPersonalSubscription from './DrawerBodyPersonalSubscription.vue
 import DrawerBodyOverEmission from './DrawerBodyOverEmission.vue'
 import DrawerBodyProjectRequest from './DrawerBodyProjectRequest.vue'
 import DrawerBodyBudgetRequest from './DrawerBodyBudgetRequest.vue'
-import { categoryLabel, variantForCategory, type InboxItem } from './types'
+import { categoryBadge, variantForCategory, type InboxItem } from './types'
 
 const props = defineProps<{
   item: InboxItem
@@ -83,7 +83,7 @@ const severityBadgeKind = computed<
     <header class="px-6 py-5 border-b border-calm-2">
       <div class="flex items-start justify-between gap-3">
         <div class="flex items-center gap-2 flex-wrap">
-          <UiBadge kind="neutral">{{ categoryLabel(item.category) }}</UiBadge>
+          <UiBadge kind="neutral">{{ categoryBadge(item.category) }}</UiBadge>
           <UiBadge :kind="severityBadgeKind">{{ item.severity }}</UiBadge>
         </div>
         <button

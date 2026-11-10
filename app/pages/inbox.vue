@@ -17,11 +17,13 @@ import InboxFilterBar, {
 } from '../components/inbox/InboxFilterBar.vue'
 import InboxDrawer from '../components/inbox/InboxDrawer.vue'
 import { apiErrorDetail, isConfirmedRejection } from '../composables/useApiError'
-import { categoryLabel, type InboxItem } from '../components/inbox/types'
+import { categoryBadge, type InboxItem } from '../components/inbox/types'
+import { inboxAckStateLabel, inboxEntityLabel, type InboxCategoryGroup } from '#shared/inbox/categories'
 
 const category = ref<InboxCategoryFilter>('all')
 const severity = ref<InboxSeverityFilter>('all')
-const status = ref<InboxStatusFilter>('all')
+// Opens on Open: resolved and dismissed items wait under Closed (#546).
+const status = ref<InboxStatusFilter>('open')
 const drawerId = ref<string | null>(null)
 
 const fetchUrl = computed(() => {
@@ -30,7 +32,7 @@ const fetchUrl = computed(() => {
     params.set('ack_state', status.value)
   }
   if (category.value !== 'all') {
-    params.set('category', category.value)
+    params.set('group', category.value)
   }
   if (severity.value !== 'all') {
     params.set('severity', severity.value)
@@ -39,7 +41,11 @@ const fetchUrl = computed(() => {
   return `/api/v1/me/inbox${qs ? `?${qs}` : ''}`
 })
 
-const { data, refresh, pending, error } = useFetch<{ items: InboxItem[]; total: number }>(fetchUrl, {
+const { data, refresh, pending, error } = useFetch<{
+  items: InboxItem[]
+  total: number
+  group_counts?: Partial<Record<InboxCategoryGroup, number>>
+}>(fetchUrl, {
   default: () => ({ items: [], total: 0 }),
 })
 
@@ -58,6 +64,45 @@ const loadState = computed<'refused' | 'failed' | null>(() => {
 const refusedDetail = computed(() =>
   apiErrorDetail(error.value, 'none').replace(/\.$/, ''),
 )
+
+/*
+ * The inbox opens on Open, so an empty list is not "an empty inbox": it can be
+ * holding closed items, or the filters can be hiding the rest.
+ */
+const emptyCopy = computed(() => {
+  if (category.value !== 'all' || severity.value !== 'all') {
+    return { headline: 'Nothing matches these filters.', sub: 'Choose All in Category or Severity to see the rest.' }
+  }
+  if (status.value === 'open') {
+    return {
+      headline: 'Nothing open.',
+      sub: 'Resolved and dismissed items are under Closed. Alerts, conflicts and requests routed to you appear in this inbox, and only here.',
+    }
+  }
+  if (status.value === 'unread') {
+    return { headline: 'Nothing unread.', sub: 'Items you have opened stay under Open until they are resolved or dismissed.' }
+  }
+  if (status.value === 'closed') {
+    return { headline: 'Nothing closed yet.', sub: 'Items you resolve or dismiss move here.' }
+  }
+  return {
+    headline: 'Nothing to see here.',
+    sub: 'Alerts, conflicts and requests routed to you appear in this inbox, and only here. Check back when you want to see them.',
+  }
+})
+
+/*
+ * The list is the newest page the server returns (50 by default), with the
+ * full match count in `total`. Group filters are wide (Budgets holds every
+ * budget alert), so when more match than are shown the page must say so:
+ * an older item past the cut is otherwise silently missing.
+ */
+const truncationNote = computed(() => {
+  const shown = data.value?.items.length ?? 0
+  const total = data.value?.total ?? 0
+  if (total <= shown) return null
+  return `Showing the newest ${shown} of ${total} matching items. Narrow the Category or Severity filter to see older ones.`
+})
 
 const drawerItem = computed<InboxItem | null>(() => {
   if (!drawerId.value || !data.value) return null
@@ -191,6 +236,7 @@ function severityIconColor(sev: string): string {
       :category="category"
       :severity="severity"
       :status="status"
+      :group-counts="error ? null : (data?.group_counts ?? null)"
       @update:category="(v) => (category = v)"
       @update:severity="(v) => (severity = v)"
       @update:status="(v) => (status = v)"
@@ -219,10 +265,7 @@ function severityIconColor(sev: string): string {
     </UiCard>
 
     <UiCard v-else-if="!data || data.items.length === 0" flush data-testid="inbox-empty">
-      <UiEmptyState
-        headline="Nothing to see here."
-        sub="Alerts, conflicts and requests routed to you appear in this inbox, and only here. Check back when you want to see them."
-      />
+      <UiEmptyState :headline="emptyCopy.headline" :sub="emptyCopy.sub" />
     </UiCard>
 
     <UiCard v-else flush>
@@ -235,7 +278,7 @@ function severityIconColor(sev: string): string {
           <button
             type="button"
             class="w-full grid grid-cols-[28px_1fr_auto_auto_16px] items-center gap-4 px-5 py-4 hover:bg-brand-harmony-sheer transition-colors text-left cursor-pointer"
-            :aria-label="`Open ${item.subject}`"
+            :aria-label="`Open ${item.subject}. ${categoryBadge(item.category)}. ${inboxAckStateLabel(item.ack_state)}`"
             @click="(ev) => openDrawer(item, ev.currentTarget as HTMLElement)"
           >
             <span class="flex items-center gap-1.5">
@@ -263,10 +306,10 @@ function severityIconColor(sev: string): string {
                 {{ item.subject }}
               </div>
               <div class="text-[11px] text-carbon-3 mt-1">
-                {{ item.related_entity_kind ?? '—' }} · {{ item.ack_state }}
+                <template v-if="inboxEntityLabel(item.related_entity_kind)">{{ inboxEntityLabel(item.related_entity_kind) }} · </template>{{ inboxAckStateLabel(item.ack_state) }}
               </div>
             </div>
-            <UiBadge kind="neutral">{{ categoryLabel(item.category) }}</UiBadge>
+            <UiBadge kind="neutral">{{ categoryBadge(item.category) }}</UiBadge>
             <span class="text-[11px] text-carbon-3 whitespace-nowrap">
               {{ fmtTimeAgo(item.created_at) }}
             </span>
@@ -283,6 +326,13 @@ function severityIconColor(sev: string): string {
           </button>
         </li>
       </ul>
+      <p
+        v-if="truncationNote"
+        class="px-5 py-3 text-xs text-carbon-3 border-t border-calm-2"
+        data-testid="inbox-truncated"
+      >
+        {{ truncationNote }}
+      </p>
     </UiCard>
 
     <Transition

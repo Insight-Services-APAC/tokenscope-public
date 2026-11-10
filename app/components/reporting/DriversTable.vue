@@ -520,13 +520,13 @@ const sumbackSpan = computed(
     <table class="w-full text-sm">
       <thead>
         <tr class="text-[11px] uppercase tracking-wide text-carbon-3 border-b border-calm-2">
-          <th class="text-left font-semibold py-2" data-testid="drivers-col-label">{{ labelHeading }}</th>
-          <th v-if="hasSurfaceMix" class="text-left font-semibold py-2 pl-4 min-w-[140px]">Surface mix</th>
-          <th v-if="hasTierMix" class="text-left font-semibold py-2 pl-4 min-w-[140px]">Model tier</th>
-          <th class="text-left font-semibold py-2 pl-4 min-w-[120px]" data-testid="drivers-col-bar">Share of spend</th>
-          <th class="text-right font-semibold py-2" data-testid="drivers-col-value">{{ valueColumnLabel }}</th>
-          <th v-if="hasBudget" class="text-right font-semibold py-2 w-[150px]">Against budget</th>
-          <th v-else class="text-right font-semibold py-2 w-[80px]">%</th>
+          <th scope="col" class="text-left font-semibold py-2" data-testid="drivers-col-label">{{ labelHeading }}</th>
+          <th v-if="hasSurfaceMix" scope="col" class="text-left font-semibold py-2 pl-4 min-w-[140px]">Surface mix</th>
+          <th v-if="hasTierMix" scope="col" class="text-left font-semibold py-2 pl-4 min-w-[140px]">Model tier</th>
+          <th scope="col" class="text-left font-semibold py-2 pl-4 min-w-[120px]" data-testid="drivers-col-bar">Share of spend</th>
+          <th scope="col" class="text-right font-semibold py-2" data-testid="drivers-col-value">{{ valueColumnLabel }}</th>
+          <th v-if="hasBudget" scope="col" class="text-right font-semibold py-2 w-[150px]">Against budget</th>
+          <th v-else scope="col" class="text-right font-semibold py-2 w-[80px]">%</th>
         </tr>
       </thead>
       <tbody>

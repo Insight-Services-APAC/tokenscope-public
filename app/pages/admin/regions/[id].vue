@@ -18,6 +18,8 @@
  * coming-soon rather than hiding it.
  */
 
+import AdminResultToast from '../../../components/admin/AdminResultToast.vue'
+import { useResultToast } from '../../../composables/useResultToast'
 import { computed, ref, watch, type ComponentPublicInstance } from 'vue'
 import { consola } from 'consola'
 import AdminTabs, { type AdminTab } from '../../../components/admin/AdminTabs.vue'
@@ -265,13 +267,7 @@ const headline = computed(() => `${region.value?.region.display_name ?? '—'} r
 const headsUpVisible = computed(() => region.value?.connector?.status === 'none')
 
 // ── Toast (users.vue pattern) ─────────────────────────────────────────────
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-function flashToast(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => { toast.value = null }, 3500)
-}
+const { toast, flashToast, dismissToast } = useResultToast()
 
 // ── Business Unit dialog ────────────────────────────────────────────────────
 const dialog = ref<{ mode: 'create' | 'edit'; node: OrgNode | null } | null>(null)
@@ -709,16 +705,7 @@ async function refreshAfterPlacement() {
     </UiPageHead>
 
     <!-- Toast -->
-    <div
-      v-if="toast"
-      :data-testid="`region-detail-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="region-detail-toast" @dismiss="dismissToast" />
 
     <!-- KPI row -->
     <div class="grid grid-cols-1 md:grid-cols-4 gap-5 mb-8" data-testid="admin-kpi-row">

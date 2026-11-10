@@ -25,6 +25,8 @@
  * teammate search is org-wide (B2) so it hits its own endpoint rather than
  * the region-scoped /admin/users list.
  */
+import AdminResultToast from './AdminResultToast.vue'
+import { useResultToast } from '../../composables/useResultToast'
 import { ref, computed } from 'vue'
 import UiCard from '../ui/Card.vue'
 import UiEyebrow from '../ui/Eyebrow.vue'
@@ -99,15 +101,7 @@ function fmtExpiry(v: string | null): string {
   return v ? fmtTs(v) : '—'
 }
 
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-function flashToast(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => {
-    toast.value = null
-  }, 3500)
-}
+const { toast, flashToast, dismissToast } = useResultToast()
 
 // ── Grant flow: search → pick → permission → optional expiry → confirm ──────
 const query = ref('')
@@ -232,16 +226,7 @@ function cancelRevoke() {
       change and never touches their platform role.
     </p>
 
-    <div
-      v-if="toast"
-      :data-testid="`report-access-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="report-access-toast" @dismiss="dismissToast" />
 
     <!-- ── Grant flow ─────────────────────────────────────────────────────── -->
     <div class="mb-6 p-4 rounded-lg border border-calm-2">

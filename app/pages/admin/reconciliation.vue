@@ -11,6 +11,8 @@
  * See docs/design/reconciliation-admin.md.
  */
 
+import AdminResultToast from '../../components/admin/AdminResultToast.vue'
+import { useResultToast } from '../../composables/useResultToast'
 import { computed, ref, watch, onBeforeUnmount, type Ref } from 'vue'
 import { consola } from 'consola'
 import ProviderOrgDialog, {
@@ -560,13 +562,7 @@ const showPageSkeleton = computed(() => {
 })
 
 // ---- toast (mirrors grants.vue / rate-cards.vue) ----
-const toast = ref<{ kind: 'ok' | 'err'; message: string } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-function flashToast(kind: 'ok' | 'err', message: string) {
-  toast.value = { kind, message }
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => { toast.value = null }, 3500)
-}
+const { toast, flashToast, dismissToast } = useResultToast()
 
 // ---- enterprise dialog (create + edit) ----
 const entDialogOpen = ref(false)
@@ -1045,7 +1041,7 @@ async function postMap(
       logins: unresolvedResult.value.logins.filter((l) => l.login !== login.login),
     }
     resetMapPicker()
-    flashToast('ok', `Mapped ${login.login} → ${label}.`)
+    flashToast('ok', `Mapped ${login.login} to ${label}.`)
   } catch (err) {
     flashToast('err', apiErrorDetail(err, 'Mapping failed.'))
     consola.warn('map login failed', err)
@@ -1194,16 +1190,7 @@ function onBackfillSaved() {
       </template>
     </UiPageHead>
 
-    <div
-      v-if="toast"
-      :data-testid="`admin-recon-toast-${toast.kind}`"
-      class="mb-4 p-3 rounded-md text-sm font-medium"
-      :class="toast.kind === 'ok'
-        ? 'bg-brand-harmony-sheer text-brand-harmony border border-brand-harmony/30'
-        : 'bg-brand-hunger/10 text-brand-heart border border-brand-hunger/30'"
-    >
-      {{ toast.message }}
-    </div>
+    <AdminResultToast :toast="toast" testid="admin-recon-toast" @dismiss="dismissToast" />
 
     <!-- Tabs -->
     <div class="flex gap-1 border-b border-calm-2 mb-5">
@@ -1358,14 +1345,14 @@ function onBackfillSaved() {
           <table class="w-full text-sm">
             <thead>
               <tr class="text-[11px] uppercase tracking-wide text-carbon-3 text-left border-b border-calm-2">
-                <th class="py-2 pr-3 font-bold">Period</th>
-                <th class="py-2 pr-3 font-bold">Subject</th>
-                <th class="py-2 pr-3 font-bold">Category</th>
-                <th class="py-2 pr-3 font-bold">Disposition</th>
-                <th class="py-2 pr-3 font-bold">Class</th>
-                <th class="py-2 pr-3 font-bold text-right">Actual</th>
-                <th class="py-2 pr-3 font-bold text-right">OTel</th>
-                <th class="py-2 pr-3 font-bold text-right">Delta</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Period</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Subject</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Category</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Disposition</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Class</th>
+                <th scope="col" class="py-2 pr-3 font-bold text-right">Actual</th>
+                <th scope="col" class="py-2 pr-3 font-bold text-right">OTel</th>
+                <th scope="col" class="py-2 pr-3 font-bold text-right">Delta</th>
               </tr>
             </thead>
             <tbody>
@@ -1476,15 +1463,15 @@ function onBackfillSaved() {
           <table class="w-full text-sm">
             <thead>
               <tr class="text-[11px] uppercase tracking-wide text-carbon-3 text-left border-b border-calm-2">
-                <th class="py-2 pr-3 font-bold">Provider</th>
-                <th class="py-2 pr-3 font-bold">Name</th>
-                <th class="py-2 pr-3 font-bold">External id</th>
-                <th class="py-2 pr-3 font-bold">Credential</th>
-                <th class="py-2 pr-3 font-bold">Mode</th>
-                <th class="py-2 pr-3 font-bold">Key</th>
-                <th class="py-2 pr-3 font-bold">Orgs</th>
-                <th v-if="isPlatformAdmin" class="py-2 pr-3 font-bold">Coverage</th>
-                <th class="py-2 pr-3 font-bold text-right">Actions</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Provider</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Name</th>
+                <th scope="col" class="py-2 pr-3 font-bold">External id</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Credential</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Mode</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Key</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Orgs</th>
+                <th v-if="isPlatformAdmin" scope="col" class="py-2 pr-3 font-bold">Coverage</th>
+                <th scope="col" class="py-2 pr-3 font-bold text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -1638,17 +1625,17 @@ function onBackfillSaved() {
           <table class="w-full text-sm">
             <thead>
               <tr class="text-[11px] uppercase tracking-wide text-carbon-3 text-left border-b border-calm-2">
-                <th class="py-2 pr-3 font-bold">Provider</th>
-                <th class="py-2 pr-3 font-bold">Name</th>
-                <th class="py-2 pr-3 font-bold">Variant</th>
-                <th class="py-2 pr-3 font-bold">Enterprise</th>
-                <th class="py-2 pr-3 font-bold">Credential</th>
-                <th class="py-2 pr-3 font-bold">Region</th>
-                <th class="py-2 pr-3 font-bold">Mode</th>
-                <th class="py-2 pr-3 font-bold">Key</th>
-                <th class="py-2 pr-3 font-bold">Health</th>
-                <th v-if="isPlatformAdmin" class="py-2 pr-3 font-bold">Coverage</th>
-                <th class="py-2 pr-3 font-bold text-right">Actions</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Provider</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Name</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Variant</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Enterprise</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Credential</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Region</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Mode</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Key</th>
+                <th scope="col" class="py-2 pr-3 font-bold">Health</th>
+                <th v-if="isPlatformAdmin" scope="col" class="py-2 pr-3 font-bold">Coverage</th>
+                <th scope="col" class="py-2 pr-3 font-bold text-right">Actions</th>
               </tr>
             </thead>
             <tbody>

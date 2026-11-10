@@ -7,6 +7,35 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## v1.0.7 — 2026-11-10 (snapshot 02bbfe51)
+
+- Sign-in takes you back to the page you opened, not the home page. The sign-in
+  page no longer says "Pilot", and the theme button that did nothing is gone.
+- Admin actions that are hard to undo now ask first: changing a teammate's
+  role, moving them to another region, activating governance, recording a
+  month and removing a directory exclusion. Cancel leaves everything as it
+  was. Results are written in plain words and announced to screen readers.
+- The Provider governance page explains in plain words what activation,
+  monthly snapshots and rate plans do, including that activation re-checks
+  the billing settings and can change reported charges: some spend (such as
+  spend we could not match to an account) may be counted differently, and a
+  background job re-checks spend already recorded. Each rate plan says
+  whether it is in effect this month, starts in a later month, has ended, is
+  retired, or is never billed because its dates hold no 1st of a month.
+- The inbox opens on Open items. It filters by six groups (Budgets, Requests,
+  Projects, Data health, Copilot billing, Other) with counts. Every item has a
+  readable label, and a line tells you when more items match than the 50
+  shown.
+- The Optimisation playbook and the project budget page say when something
+  failed to load and offer Retry, instead of an empty answer or $0.00. A
+  budget page tells "not found", "no access" and "didn't load" apart, and its
+  spend card says when the figure is loading or was refused (with the
+  server's reason).
+- Accessibility: every table header tells screen readers its column, the
+  Account and Teammates fields have names, and the inbox filter buttons say
+  which one is selected.
+- Housekeeping: two scratch files are removed from the published tree.
+
 ## v1.0.6 — 2026-11-10 (snapshot 4543ad09)
 
 - Security: `@azure/identity` is updated to 4.14.1, which brings

@@ -2391,13 +2391,13 @@ function pretty(obj: unknown): string {
             <table class="w-full text-sm">
               <thead>
                 <tr class="bg-brand-harmony-sheer/40 border-b border-calm-2">
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Service</th>
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Host</th>
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Resolved IP(s)</th>
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">DNS</th>
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Reachable</th>
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Expected zone</th>
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Verdict</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Service</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Host</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Resolved IP(s)</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">DNS</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Reachable</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Expected zone</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Verdict</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-calm-2">
@@ -2546,6 +2546,7 @@ function pretty(obj: unknown): string {
                           <th
                             v-for="c in q.columns"
                             :key="c"
+                            scope="col"
                             class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2"
                           >
                             {{ c }}
@@ -2707,12 +2708,12 @@ function pretty(obj: unknown): string {
             <table class="w-full text-sm">
               <thead>
                 <tr class="bg-brand-harmony-sheer/40 border-b border-calm-2">
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Table</th>
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">RLS</th>
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">FORCE</th>
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Policies</th>
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Executes here</th>
-                  <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Owner</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Table</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">RLS</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">FORCE</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Policies</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Executes here</th>
+                  <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Owner</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-calm-2">
@@ -2826,9 +2827,9 @@ function pretty(obj: unknown): string {
             <table class="w-full text-xs mb-3">
               <thead>
                 <tr class="text-carbon-3 text-left">
-                  <th class="py-1 pr-3 font-medium">Term</th>
-                  <th class="py-1 pr-3 font-medium text-right">Amount</th>
-                  <th class="py-1 font-medium">What it is</th>
+                  <th scope="col" class="py-1 pr-3 font-medium">Term</th>
+                  <th scope="col" class="py-1 pr-3 font-medium text-right">Amount</th>
+                  <th scope="col" class="py-1 font-medium">What it is</th>
                 </tr>
               </thead>
               <tbody>
@@ -3041,10 +3042,10 @@ function pretty(obj: unknown): string {
                   <table class="w-full text-xs mb-2">
                     <thead>
                       <tr class="text-carbon-3 text-left">
-                        <th class="py-1 pr-3 font-medium">Cause</th>
-                        <th class="py-1 pr-3 font-medium text-right">Amount</th>
-                        <th class="py-1 pr-3 font-medium">Behind it</th>
-                        <th class="py-1 font-medium">What it is · who fixes it</th>
+                        <th scope="col" class="py-1 pr-3 font-medium">Cause</th>
+                        <th scope="col" class="py-1 pr-3 font-medium text-right">Amount</th>
+                        <th scope="col" class="py-1 pr-3 font-medium">Behind it</th>
+                        <th scope="col" class="py-1 font-medium">What it is · who fixes it</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -3434,12 +3435,12 @@ function pretty(obj: unknown): string {
             <table class="w-full text-xs">
               <thead>
                 <tr class="text-carbon-3 text-left">
-                  <th class="py-1 pr-3 font-medium">Teammate</th>
-                  <th class="py-1 pr-3 font-medium">Device</th>
-                  <th class="py-1 pr-3 font-medium">Last emitted</th>
-                  <th class="py-1 pr-3 font-medium">Last attributed</th>
-                  <th class="py-1 pr-3 font-medium">Behind by</th>
-                  <th class="py-1 font-medium">Client vs server</th>
+                  <th scope="col" class="py-1 pr-3 font-medium">Teammate</th>
+                  <th scope="col" class="py-1 pr-3 font-medium">Device</th>
+                  <th scope="col" class="py-1 pr-3 font-medium">Last emitted</th>
+                  <th scope="col" class="py-1 pr-3 font-medium">Last attributed</th>
+                  <th scope="col" class="py-1 pr-3 font-medium">Behind by</th>
+                  <th scope="col" class="py-1 font-medium">Client vs server</th>
                 </tr>
               </thead>
               <tbody>
@@ -3584,12 +3585,12 @@ function pretty(obj: unknown): string {
                 <table class="w-full text-[11px]">
                   <thead>
                     <tr class="text-carbon-3 text-left">
-                      <th class="py-1 pr-3 font-medium">Requested</th>
-                      <th class="py-1 pr-3 font-medium">Window</th>
-                      <th class="py-1 pr-3 font-medium">Status</th>
-                      <th class="py-1 pr-3 font-medium">Progress</th>
-                      <th class="py-1 pr-3 font-medium">Rows written</th>
-                      <th class="py-1 font-medium">Errors</th>
+                      <th scope="col" class="py-1 pr-3 font-medium">Requested</th>
+                      <th scope="col" class="py-1 pr-3 font-medium">Window</th>
+                      <th scope="col" class="py-1 pr-3 font-medium">Status</th>
+                      <th scope="col" class="py-1 pr-3 font-medium">Progress</th>
+                      <th scope="col" class="py-1 pr-3 font-medium">Rows written</th>
+                      <th scope="col" class="py-1 font-medium">Errors</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3908,11 +3909,11 @@ function pretty(obj: unknown): string {
                     <table class="w-full text-sm">
                       <thead>
                         <tr class="bg-brand-vision-sheer/40 border-b border-calm-2">
-                          <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Key path</th>
-                          <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Types</th>
-                          <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Present</th>
-                          <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Null</th>
-                          <th class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Distinct values</th>
+                          <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Key path</th>
+                          <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Types</th>
+                          <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Present</th>
+                          <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Null</th>
+                          <th scope="col" class="text-left text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 px-3 py-2">Distinct values</th>
                         </tr>
                       </thead>
                       <tbody class="divide-y divide-calm-2">

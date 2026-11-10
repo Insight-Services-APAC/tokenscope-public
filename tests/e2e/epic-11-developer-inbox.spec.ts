@@ -84,13 +84,13 @@ test.describe('Inbox drawer', () => {
     await page.goto(`${baseUrl}/inbox`)
     await page.waitForLoadState('networkidle')
 
-    // Filter to velocity.
+    // Filter to Budgets (velocity warnings sit there since #546's groups).
     const respVel = page.waitForResponse(
-      (r) => r.url().includes('category=velocity-warning') && r.request().method() === 'GET',
+      (r) => r.url().includes('group=budgets') && r.request().method() === 'GET',
     )
-    await page.click('[data-testid="filter-category-velocity-warning"]')
+    await page.click('[data-testid="filter-category-budgets"]')
     await respVel
-    const rowVel = page.locator('[data-testid^="inbox-row-"]').first()
+    const rowVel = page.locator('[data-testid^="inbox-row-"]', { hasText: 'Spending fast' }).first()
     await rowVel.locator('button').first().click()
     await expect(page.locator('[data-testid="inbox-drawer"]')).toHaveAttribute(
       'data-variant',
@@ -99,13 +99,13 @@ test.describe('Inbox drawer', () => {
     await page.locator('[data-testid="drawer-close"]').click()
     await expect(page.locator('[data-testid="inbox-drawer"]')).toHaveCount(0)
 
-    // Filter to untagged.
+    // Filter to Data health (usage not recorded sits there).
     const respUnt = page.waitForResponse(
-      (r) => r.url().includes('category=untagged-backlog') && r.request().method() === 'GET',
+      (r) => r.url().includes('group=data-health') && r.request().method() === 'GET',
     )
-    await page.click('[data-testid="filter-category-untagged-backlog"]')
+    await page.click('[data-testid="filter-category-data-health"]')
     await respUnt
-    const rowUnt = page.locator('[data-testid^="inbox-row-"]').first()
+    const rowUnt = page.locator('[data-testid^="inbox-row-"]', { hasText: 'Usage not recorded' }).first()
     await rowUnt.locator('button').first().click()
     await expect(page.locator('[data-testid="inbox-drawer"]')).toHaveAttribute(
       'data-variant',

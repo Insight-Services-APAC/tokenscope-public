@@ -48,7 +48,8 @@ describe('variantForCategory', () => {
     expect(categoryLabel('quota-request')).toBe('Budget request')
     expect(categoryLabel('quota-request-decided')).toBe('Budget decision')
     expect(categoryLabel('over-budget')).toBe('Over budget')
-    expect(categoryLabel('something-new')).toBe('something-new')
+    // #546: an unknown category never prints its key.
+    expect(categoryLabel('something-new')).toBe('Notice')
   })
 
   it('falls back to generic for unknown categories', () => {

@@ -66,32 +66,5 @@ export function variantForCategory(category: string): DrawerBodyVariant {
   }
 }
 
-/** The words a person reads for a category; an unlisted one shows its raw key. */
-export function categoryLabel(category: string): string {
-  switch (category) {
-    case 'over-budget':
-      return 'Over budget'
-    case 'velocity-warning':
-      return 'Velocity'
-    case 'sync-conflict':
-      return 'Sync conflict'
-    case 'untagged-backlog':
-      return 'Untagged'
-    case 'structural-conflict':
-      return 'Structural'
-    case 'connector-health':
-      return 'Connector'
-    case 'over-emission-escalated':
-      return 'Over-emission'
-    case 'project-request':
-      return 'Project request'
-    case 'project-request-decided':
-      return 'Project decision'
-    case 'quota-request':
-      return 'Budget request'
-    case 'quota-request-decided':
-      return 'Budget decision'
-    default:
-      return category
-  }
-}
+/** The words a person reads for a category: shared/inbox/categories.ts (#546). */
+export { inboxCategoryLabel as categoryLabel, inboxCategoryBadge as categoryBadge } from '#shared/inbox/categories'

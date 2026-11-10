@@ -329,10 +329,10 @@ const webSearches = computed(() => detail.value?.web_search_requests ?? 0)
             <table class="w-full text-xs">
               <thead>
                 <tr class="text-[10px] uppercase tracking-wide text-carbon-3">
-                  <th class="text-left font-bold py-1.5 pr-3">Model</th>
-                  <th class="text-right font-bold py-1.5 px-2">Tokens</th>
-                  <th class="text-right font-bold py-1.5 px-2">Requests</th>
-                  <th class="text-right font-bold py-1.5 pl-2">Cost</th>
+                  <th scope="col" class="text-left font-bold py-1.5 pr-3">Model</th>
+                  <th scope="col" class="text-right font-bold py-1.5 px-2">Tokens</th>
+                  <th scope="col" class="text-right font-bold py-1.5 px-2">Requests</th>
+                  <th scope="col" class="text-right font-bold py-1.5 pl-2">Cost</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-calm-2">
