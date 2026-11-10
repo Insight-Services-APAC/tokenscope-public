@@ -54,7 +54,7 @@
     "check:upstream-backlinks": "node scripts/check-no-upstream-backlinks.mjs --commits origin/main..HEAD"
   },
   "dependencies": {
-    "@azure/identity": "^4.14.0",
+    "@azure/identity": "^4.14.1",
     "@azure/monitor-query": "^1.3.3",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@nuxt/ui": "^4.12.0",
