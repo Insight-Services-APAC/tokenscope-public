@@ -7,6 +7,15 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## v1.0.6 — 2026-11-10 (snapshot 4543ad09)
+
+- Security: `@azure/identity` is updated to 4.14.1, which brings
+  `@azure/msal-node` 7.1.2, outside the affected range of
+  GHSA-xcx6-jx8p-x3h5 (high). The advisory is in MSAL's authorization code
+  flow, which TokenScope does not use: it reaches Azure only through managed
+  identity and the default Azure credential. Nothing changes in how you deploy
+  or use TokenScope.
+
 ## v1.0.5 — 2026-11-03 (snapshot b497e515)
 
 - Security: node-forge is updated to 1.4.1, which is outside the affected

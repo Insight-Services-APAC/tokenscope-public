@@ -582,8 +582,10 @@ describe('usage-rollup — identity-state restate (R5b)', () => {
     const shadowOid = `provisional:${randomUUID()}`
     // ONE anchor day for every insert and assertion — repeated now() reads
     // straddling UTC midnight would query a different day than was inserted.
-    // Cells are read for THIS test's teammates only: the anchor moves with the
-    // clock and lands on days other tests in this file seed (2026-08-01..12).
+    // Cells are read for THIS test's own OTel cell only (teammates AND
+    // provenance): the anchor moves with the clock and lands on days other
+    // fixtures in this file seed for tmA (2026-09-06 and 2026-09-07, API and
+    // analytics rows), which made the count 3 when CI ran on 5 Nov.
     const [{ anchor }] = await t.client<{ anchor: string }[]>`
       SELECT ((now() AT TIME ZONE 'UTC')::date - 60)::text AS anchor`
     await t.client`INSERT INTO teammate (entra_oid, email, display_name, region_id, org_unit_id, provisional)
@@ -609,7 +611,8 @@ describe('usage-rollup — identity-state restate (R5b)', () => {
     await runUsageRollup(t.db)
     const before = await t.client<{ identity_state: string | null; teammate_id: string }[]>`
       SELECT identity_state, teammate_id::text AS teammate_id FROM usage_rollup_daily
-      WHERE day = ${anchor}::date AND teammate_id IN (${shadowId}::uuid, ${tmA}::uuid)`
+      WHERE day = ${anchor}::date AND teammate_id IN (${shadowId}::uuid, ${tmA}::uuid)
+        AND usage_provenance = 'otel-emitted'`
     expect(before.length).toBe(1)
     expect(before[0]!.identity_state).toBe('provisional')
     expect(before[0]!.teammate_id).toBe(shadowId)
@@ -625,7 +628,8 @@ describe('usage-rollup — identity-state restate (R5b)', () => {
     await runUsageRollup(t.db)
     const unreachable = await t.client<{ identity_state: string | null }[]>`
       SELECT identity_state FROM usage_rollup_daily
-      WHERE day = ${anchor}::date AND teammate_id IN (${shadowId}::uuid, ${tmA}::uuid)`
+      WHERE day = ${anchor}::date AND teammate_id IN (${shadowId}::uuid, ${tmA}::uuid)
+        AND usage_provenance = 'otel-emitted'`
     expect(unreachable.length).toBe(1)
     expect(unreachable[0]!.identity_state).toBe('provisional') // out of every window + signal
 
@@ -643,7 +647,8 @@ describe('usage-rollup — identity-state restate (R5b)', () => {
     await runUsageRollup(t.db)
     const after = await t.client<{ identity_state: string | null; teammate_id: string }[]>`
       SELECT identity_state, teammate_id::text AS teammate_id FROM usage_rollup_daily
-      WHERE day = ${anchor}::date AND teammate_id IN (${shadowId}::uuid, ${tmA}::uuid)`
+      WHERE day = ${anchor}::date AND teammate_id IN (${shadowId}::uuid, ${tmA}::uuid)
+        AND usage_provenance = 'otel-emitted'`
     expect(after.length).toBe(1)
     expect(after[0]!.identity_state).toBe('confirmed')
     expect(after[0]!.teammate_id).toBe(tmA)
