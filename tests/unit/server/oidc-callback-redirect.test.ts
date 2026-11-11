@@ -14,12 +14,14 @@
  * `\`, TAB, LF and CR rather than by parsing, which passes every case
  * below — that equivalence is exactly what this file exists to keep proving.
  *
- * This test imports the INSTALLED module via the same deep-import style as
- * server/utils/auth.ts:36 — deliberately, so a future version that weakens
- * the sanitiser fails THIS test, not just a manual code read.
+ * This test imports the INSTALLED module deliberately, so a future version
+ * that weakens the sanitiser fails THIS test, not just a manual code read.
+ * Since 1.0.0-beta.13 the package's exports map no longer lists redirect.js
+ * (only utils/session.js), so the import goes by its path on disk. A version
+ * that moves or renames the file fails here at import, which is the point.
  */
 import { describe, it, expect } from 'vitest'
-import { sanitizeCallbackRedirectUrl } from 'nuxt-oidc-auth/runtime/server/utils/redirect.js'
+import { sanitizeCallbackRedirectUrl } from '../../../node_modules/nuxt-oidc-auth/dist/runtime/server/utils/redirect.js'
 
 describe('sanitizeCallbackRedirectUrl (patched: parses, does not pattern-match)', () => {
   it.each([

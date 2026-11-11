@@ -27,14 +27,17 @@ import { requireAuth } from '../../../../auth/rbac'
 import { withRequestRls } from '../../../../db/request-rls'
 import { csvEscape } from '../../../../utils/csv-escape'
 import { fetchActivityForExport } from '../../../../usage/activity-list'
+import { requestClock } from '../../../../utils/request-clock'
 import { ACTIVITY_CSV_COLUMNS, ActivityExportQuery } from '#shared/schemas/activity'
 
 export default defineEventHandler(async (event) => {
   const session = await requireAuth(event)
   const { limit, ...filters } = await getValidatedQuery(event, (d) => ActivityExportQuery.parse(d))
 
-  const rows = await withRequestRls(event, (tx) =>
-    fetchActivityForExport(tx, session.teammateId, filters, limit),
+  const rows = await withRequestRls(
+    event,
+    (tx) => fetchActivityForExport(tx, session.teammateId, filters, limit, requestClock(event).today),
+    { isolationLevel: 'repeatable read' },
   )
 
   const lines = [

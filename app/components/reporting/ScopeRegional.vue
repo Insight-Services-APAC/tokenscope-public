@@ -51,7 +51,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import ScopeRegionalView from './ScopeRegionalView.vue'
 import { useReportState } from '../../composables/useReportState'
 import { rollingTrendWindow } from './trend-window'
-import { useDrillGrants, useDrillWindow } from '../../composables/useDrillContract'
+import { useDrillGrants, useDrillWindow, useHasFinanceScope } from '../../composables/useDrillContract'
 import { useAdminAccess } from '../../composables/useAdminAccess'
 import { buildConcentration } from './regional/build-concentration'
 import {
@@ -77,7 +77,10 @@ const rs = useReportState()
 const drillGrants = useDrillGrants()
 const drillWindow = useDrillWindow()
 // "Fix org homing →" opens /admin, which bounces non-admins: show it to admins only.
-const { isAdmin: canFixHoming } = useAdminAccess()
+const { isAdmin: canFixHoming, isOrgWide, regionId: sessionRegionId } = useAdminAccess()
+// The Finance sentence on the chargeback card is only true for a reader with a
+// Finance tab (#585).
+const canSeeFinance = useHasFinanceScope()
 
 // The drivers-table axis is table-local (not URL state). Reset on entering/leaving
 // a drill so a stale "practice" axis can't survive it.
@@ -282,6 +285,19 @@ const {
  * payload is measured against: the region actually being named beside it.
  */
 const headingRegionId = computed(() => report.value?.region?.id ?? null)
+
+/*
+ * Where an admin places the region's unplaced teammates (#585): the region's
+ * Teammates tab filtered to unplaced. Only for an admin who can open THAT
+ * region's admin page (an org-wide admin, or the region's own admin);
+ * everyone else gets plain words, never a door that bounces.
+ */
+const placementHref = computed<string | null>(() => {
+  const rid = headingRegionId.value
+  if (!rid || !canFixHoming.value) return null
+  if (!isOrgWide.value && sessionRegionId.value !== rid) return null
+  return `/admin/regions/${rid}?tab=teammates&placement=unplaced`
+})
 const drivers = computed(() =>
   driversForAxis(axis.value, headingRegionId.value, axisDrivers.value, teammateDrivers.value),
 )
@@ -439,6 +455,8 @@ function onRegion(regionId: string) {
     :drill-grants="drillGrants"
     :drill-window="drillWindow"
     :can-fix-homing="canFixHoming"
+    :can-see-finance="canSeeFinance"
+    :placement-href="placementHref"
     @update:region="onRegion"
     @update:drivers-axis="axis = $event"
     @drill="rs.patch({ ou: $event })"

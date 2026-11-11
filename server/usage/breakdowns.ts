@@ -86,6 +86,14 @@ export async function fetchBreakdownCells(
   tx: Tx,
   teammateId: string,
   conversationIds: string[],
+  /**
+   * The subset of `conversationIds` that are legacy instance-keyed conversations,
+   * when the caller already knows it. An empty list drops the legacy arm: an OR
+   * whose other arm casts instance_id cannot use the session index, so the arm
+   * costs a walk of all the teammate's rows even when no row can match (#593).
+   * Omit it and both arms run as before.
+   */
+  legacyConversationIds?: string[],
 ): Promise<BreakdownCell[]> {
   if (conversationIds.length === 0) return []
   // Explicit IN list: drizzle's sql template can't bind a JS array as a PG
@@ -95,6 +103,13 @@ export async function fetchBreakdownCells(
     conversationIds.map((id) => sql`${id}`),
     sql`, `,
   )
+  const legacyIds = legacyConversationIds ?? conversationIds
+  const legacyArm = legacyIds.length
+    ? sql`OR (ar.claude_session_id IS NULL AND ar.instance_id::text IN (${sql.join(
+        legacyIds.map((id) => sql`${id}`),
+        sql`, `,
+      )}))`
+    : sql``
   const rows = await tx.execute<CellRow>(sql`
     SELECT
       ${conversationKeyExpr('ar')} AS conversation_id,
@@ -123,7 +138,7 @@ export async function fetchBreakdownCells(
       -- claude_session_id IS NULL and its instance id does — the same rows
       -- the COALESCE key selects.
       AND (ar.claude_session_id IN (${inList})
-           OR (ar.claude_session_id IS NULL AND ar.instance_id::text IN (${inList})))
+           ${legacyArm})
     GROUP BY ${conversationKeyExpr('ar')}, ar.model, ar.token_type
   `)
   return [...rows].map((r) => ({

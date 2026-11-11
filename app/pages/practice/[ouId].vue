@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { mergeByModelLabel } from '../../composables/useModelDisplay'
+import { fmtUtcDay } from '../../composables/useFormat'
 /*
  * Practice detail (AEUF "Practice · MPO"). The dual-lane single-practice view: the reconciled
  * bill alongside the usage signal, vendor split, per-surface bill lanes (#142 — chat / Cowork /
@@ -104,11 +106,12 @@ const billLaneLegend = computed(() =>
 )
 
 const trendMax = computed(() => Math.max(1, ...(data.value?.trend ?? []).map((w) => w.claudeUsd + w.copilotUsd)))
-const modelMax = computed(() => Math.max(1, ...(data.value?.topModels ?? []).map((m) => m.usageUsd)))
+const topModels = computed(() => mergeByModelLabel(data.value?.topModels ?? [], (m) => m.model, (m) => m.usageUsd))
+const modelMax = computed(() => Math.max(1, ...topModels.value.map((m) => m.value)))
 const compMax = computed(() => Math.max(1, ...(data.value?.comparison ?? []).map((c) => c.usageUsd)))
 const pct = (n: number | null) => (n === null ? '—' : `${Math.round(n * 100)}%`)
 const signedPct = (n: number | null) => (n === null ? '—' : `${n >= 0 ? '+' : ''}${Math.round(n * 100)}%`)
-const fmtWeek = (d: string) => d.slice(5) // MM-DD
+const fmtWeek = (d: string) => fmtUtcDay(d)
 </script>
 
 <template>
@@ -267,11 +270,11 @@ v-for="w in data.trend" :key="w.weekStart" class="flex-1 flex flex-col justify-e
         <!-- Top models -->
         <UiCard>
           <div class="text-sm font-semibold mb-3">Top models <span class="text-[11px] text-carbon-3 font-normal">· scaled to this practice</span></div>
-          <div v-if="data.topModels.length" class="space-y-2">
-            <div v-for="m in data.topModels" :key="m.model" class="flex items-center gap-3">
-              <div class="w-[140px] text-[12px] truncate text-carbon-2">{{ m.model }}</div>
-              <div class="flex-1 h-3 rounded bg-calm-1 overflow-hidden"><div class="h-full bg-brand-harmony" :style="{ width: `${(m.usageUsd / modelMax) * 100}%` }" /></div>
-              <div class="w-[64px] text-right text-[12px] tabular-nums">{{ fmtUsd(m.usageUsd) }}</div>
+          <div v-if="topModels.length" class="space-y-2">
+            <div v-for="m in topModels" :key="m.label" class="flex items-center gap-3">
+              <div class="w-[140px] text-[12px] truncate text-carbon-2" :title="m.rawIds.join(', ')">{{ m.label }}</div>
+              <div class="flex-1 h-3 rounded bg-calm-1 overflow-hidden"><div class="h-full bg-brand-harmony" :style="{ width: `${(m.value / modelMax) * 100}%` }" /></div>
+              <div class="w-[64px] text-right text-[12px] tabular-nums">{{ fmtUsd(m.value) }}</div>
             </div>
           </div>
           <div v-else class="p-8 text-center text-carbon-3 text-sm">No model data.</div>

@@ -131,7 +131,7 @@ describe('runSoftPurge', () => {
          project_code_hash,
          raw_project_code, tool, session_token_hash, ts_start, ts_expected_end,
          ts_actual_end, ts_purged, region_id, org_unit_id, cost_owning_unit_id,
-         notes)
+         display_name, notes)
       VALUES
         ('00000000-0000-4000-8000-00000000000e', 'oid-e', 'e@i.com', 'claimed-e@i.com',
          (SELECT id FROM teammate LIMIT 1), 'h', 'PRJ-E',
@@ -139,6 +139,7 @@ describe('runSoftPurge', () => {
          (SELECT id FROM region LIMIT 1),
          (SELECT id FROM org_unit LIMIT 1),
          (SELECT id FROM org_unit LIMIT 1),
+         'Work laptop',
          '{"launcher_version":"1.0"}'::jsonb)
     `)
 
@@ -149,10 +150,11 @@ describe('runSoftPurge', () => {
       principal_email: string | null
       claimed_email: string | null
       raw_project_code: string | null
+      display_name: string | null
       notes: unknown
       ts_purged: string | null
     }[]>`
-      SELECT principal_email, claimed_email, raw_project_code, notes, ts_purged::text AS ts_purged
+      SELECT principal_email, claimed_email, raw_project_code, display_name, notes, ts_purged::text AS ts_purged
       FROM instance_attestation
       WHERE instance_id = '00000000-0000-4000-8000-00000000000e'
     `
@@ -162,6 +164,9 @@ describe('runSoftPurge', () => {
     // UPDATE could be reverted and this test would stay green.
     expect(row!.claimed_email).toBeNull()
     expect(row!.raw_project_code).toBeNull()
+    // The owner's device name (#576, mig 0171) is personal too; seeded above so
+    // dropping it from the UPDATE turns this red.
+    expect(row!.display_name).toBeNull()
     expect(row!.notes).toBeNull()
     expect(row!.ts_purged).not.toBeNull()
   })

@@ -13,11 +13,12 @@
 import { computed } from 'vue'
 import UiBadge from '../ui/Badge.vue'
 import { vendorLabel, type SettlingState } from '#shared/reports/types'
+import { settlingDay, settlingPill } from '#shared/reports/settling-words'
 
 const props = withDefaults(
   defineProps<{
     state: SettlingState
-    /** ISO date the vendor's numbers settle at (settling → "provisional until"). */
+    /** ISO day or UTC-midnight instant the vendor's numbers settle at; shown as "1 Dec 2026". */
     horizonDate?: string
     /** Vendor code — prefixes the chip when set (e.g. "Anthropic"). */
     vendor?: string
@@ -25,25 +26,18 @@ const props = withDefaults(
   { horizonDate: undefined, vendor: undefined },
 )
 
-// Short pill word + long human descriptor. NEVER "finalised" anywhere.
-const pill = computed(() => {
-  switch (props.state) {
-    case 'estimated':
-      return 'Estimated'
-    case 'settling':
-      return 'Settling'
-    case 'settled':
-      return 'Provisional'
-  }
-  return 'Provisional'
-})
+// Short pill word (shared with the printed header, #583) + long human
+// descriptor. NEVER "finalised" anywhere.
+const pill = computed(() => settlingPill(props.state))
 
 const descriptor = computed(() => {
   switch (props.state) {
     case 'estimated':
       return 'month in progress'
-    case 'settling':
-      return props.horizonDate ? `provisional until ${props.horizonDate}` : 'provisional'
+    case 'settling': {
+      const until = props.horizonDate ? settlingDay(props.horizonDate) : ''
+      return until ? `provisional until ${until}` : 'provisional'
+    }
     case 'settled':
       // Exact required copy — a clock state, not a close run.
       return 'past settling horizon — provisional (no close run)'

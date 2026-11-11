@@ -22,6 +22,7 @@ import { useReportState } from './useReportState'
 
 interface DrillMetaResp {
   drill?: { teammate: DrillGrants['teammate']; project: DrillGrants['project'] }
+  scopes?: string[]
 }
 
 /**
@@ -44,6 +45,20 @@ export function useDrillGrants(): ComputedRef<DrillGrants> {
     const d = data.value?.drill
     return d ? { teammate: d.teammate, project: d.project } : NO_DRILL_GRANTS
   })
+}
+
+/**
+ * Whether the caller holds the Finance report scope (`/reports/meta` `scopes`),
+ * so a card only points at the Finance tab when the reader has one (#585).
+ * Same key and the same FAIL-CLOSED rule as `useDrillGrants`: false until the
+ * server has said so.
+ */
+export function useHasFinanceScope(): ComputedRef<boolean> {
+  const { data } = useFetch<DrillMetaResp>('/api/v1/reports/meta', {
+    key: 'reports-meta',
+    retry: false,
+  })
+  return computed(() => Array.isArray(data.value?.scopes) && data.value.scopes.includes('finance'))
 }
 
 /**

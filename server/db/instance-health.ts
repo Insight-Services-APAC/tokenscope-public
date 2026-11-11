@@ -12,12 +12,26 @@
  * currently failing. A successful /bearer mint resolves it (the credential works
  * again). One open row per instance per failure episode.
  */
-import { sql } from 'drizzle-orm'
+import { sql, type SQL } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 
 type AnyDb = PostgresJsDatabase<Record<string, unknown>>
 
 export const BEARER_AUTH_FAILED = 'bearer-auth-failed'
+
+/**
+ * THE ONE DEFINITION of "the server is rejecting this device's credential": an
+ * open `bearer-auth-failed` row. The went-silent worker raises the inbox alert
+ * on it and the device projection shows Cannot send on it, so the bell and the
+ * badge cannot disagree. `instanceIdExpr` is the column to correlate on.
+ */
+export function openBearerFailureExists(instanceIdExpr: SQL): SQL {
+  return sql`EXISTS (
+    SELECT 1 FROM instance_attestation_health h
+     WHERE h.instance_id = ${instanceIdExpr}
+       AND h.status = ${BEARER_AUTH_FAILED}
+       AND h.resolved_at IS NULL)`
+}
 
 /**
  * Record that this instance's emit credential was rejected at /bearer. Idempotent

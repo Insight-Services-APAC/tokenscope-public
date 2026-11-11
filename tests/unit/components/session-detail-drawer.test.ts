@@ -21,6 +21,7 @@ import type { SessionDetail } from '../../../shared/schemas/usage'
 const DETAIL: SessionDetail = {
   session_id: 'conv-abc-123',
   instance_id: 'inst-1',
+  device_name: null,
   tool: 'claude-code',
   project_id: 'proj-1',
   project_code: 'ACME-1',
@@ -210,5 +211,20 @@ describe('SessionDetailDrawer', () => {
     await flushPromises()
     await wrapper.find('[data-testid="session-detail-close"]').trigger('click')
     expect(wrapper.emitted('close')).toBeTruthy()
+  })
+})
+
+/* #576: the session drawer names the device the conversation ran on. */
+describe('SessionDetailDrawer: the device (#576)', () => {
+  it('shows the device name when it has one, else the tool and short id', async () => {
+    vi.stubGlobal('$fetch', vi.fn().mockResolvedValue({ ...DETAIL, instance_id: '9a1e0000-0000-4000-8000-000000000001', device_name: 'Work laptop' }))
+    const named = mount(SessionDetailDrawer, { props: { sessionId: 'conv-abc-123' }, global })
+    await flushPromises()
+    expect(named.find('[data-testid="session-detail-device"]').text()).toBe('Work laptop')
+
+    vi.stubGlobal('$fetch', vi.fn().mockResolvedValue({ ...DETAIL, instance_id: '9e8d7c6b-0000-4000-8000-000000000002', device_name: null }))
+    const plain = mount(SessionDetailDrawer, { props: { sessionId: 'conv-abc-123' }, global })
+    await flushPromises()
+    expect(plain.find('[data-testid="session-detail-device"]').text()).toBe('Claude Code · 9e8d7c6b')
   })
 })

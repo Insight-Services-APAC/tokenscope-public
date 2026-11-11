@@ -17,7 +17,7 @@ defineProps<{
 
 <template>
   <div
-    class="bg-white rounded-xl shadow-[var(--shadow-card)] border border-brand-harmony/[0.04]"
+    class="bg-white rounded-xl shadow-[var(--shadow-card)] border border-brand-harmony/[0.04] print:shadow-none print:break-inside-avoid"
     :class="[
       flush ? 'p-0' : 'p-6',
       hover &&

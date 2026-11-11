@@ -96,6 +96,8 @@ function stubGlobals(fetchState: { data: Ref<unknown>; pending: Ref<boolean> }) 
   vi.stubGlobal('useRefreshOnVisible', () => {})
   stubServerClock()
   vi.stubGlobal('usePersonalLens', () => ref<'usage' | 'chargeback'>('usage'))
+  // ActivityCard's own lazy read of your projects (#578).
+  vi.stubGlobal('useLazyFetch', () => ({ data: ref({ projects: [] }), pending: ref(false), error: ref(null), refresh: vi.fn() }))
   vi.stubGlobal('useFetch', (_url: string, _opts?: { query?: { value?: Record<string, unknown> } }) => {
     // Touch the reactive query the /usage page passes, like the real useFetch.
     void computed(() => _opts?.query?.value ?? {}).value

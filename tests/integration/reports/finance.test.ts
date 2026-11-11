@@ -203,6 +203,8 @@ interface IndexResp {
   cous: CouRow[]
   copilot: { mode: string; pending: boolean; unclassifiedWarning: boolean }
   exemptGap: { indicativeUsageUsd: number; chargebackUsd: number; gapUsd: number; copilotChargebackUsd: number }
+  region: string | null
+  regionName: string | null
   homingNote: string
 }
 interface DrillResp {
@@ -315,6 +317,9 @@ describe('GET /reports/finance — per-CoU chargeback + chargeback-mode vs pool-
   it('the region filter narrows the CoU table (convenience only — never a gate relaxation)', async () => {
     const r = (await indexHandler(ev(gfo(), `month=2026-05&region=${regionA}`))) as unknown as IndexResp
     expect(r.cous.map((c) => c.code).sort()).toEqual(['a']) // region B's ccB excluded from the table
+    // The printed header names the region (#583): a print has no selector on it.
+    expect(r.region).toBe(regionA)
+    expect(r.regionName).toBe('Region A')
     // The Σ=bill reconciliation stays whole-company regardless of the region view.
     expect(r.billCheck.chargebackUsd).toBeCloseTo(360, 6)
   })

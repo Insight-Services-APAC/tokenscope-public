@@ -3,22 +3,14 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type * as schema from '../../drizzle/schema'
 import { dispatchInbox } from '../notifications/dispatch'
 import type { CoverageState } from './coverage'
+// The title and the drawer body share one wording (#587).
+import { coverageOrgGapSubject } from '../../shared/inbox/coverage-states'
 import type { PersistedEnterpriseCoverage } from './coverage-store'
 import type { CoverageEnterpriseRow, EnterpriseCoverageResult } from './github-coverage'
 
 type Db = PostgresJsDatabase<typeof schema>
 
 const CATEGORY = 'github-coverage-gap' as const
-
-const STATE_LABEL: Record<CoverageState, string> = {
-  mislinked: 'linked to a different enterprise in TokenScope',
-  'coverage-unknown': 'unclassifiable (permission lost, or another App installed)',
-  stale: 'no longer a member of this enterprise per GitHub, but still configured here',
-  'not-installed': 'a current enterprise member with no reconciliation App installation',
-  suspended: 'installed but SUSPENDED',
-  'not-onboarded': 'installed but missing a cost-owning-unit home',
-  connected: 'connected',
-}
 
 export interface CoverageTransitionResult {
   nonConnectedOrgs: number
@@ -64,7 +56,7 @@ async function dispatchOrgGapAlert(
   const dispatched = await dispatchInbox(db, {
     category: CATEGORY,
     severity: 'attention',
-    subject: `GitHub org '${org}' (${ent.externalId}) is ${STATE_LABEL[state]}`,
+    subject: coverageOrgGapSubject(org, ent.externalId, state),
     body: {
       kind: 'org-gap',
       enterpriseId: ent.enterpriseId,
@@ -72,7 +64,7 @@ async function dispatchOrgGapAlert(
       org,
       state,
       detectedAt: now.toISOString(),
-      hint: 'Open the Coverage column on the admin Reconciliation -> Providers tab for a remediation action (Edit / Discover / Delete / Recheck).',
+      hint: 'Admin, Reconciliation, Providers, Coverage column: edit, discover, delete or recheck the organisation there.',
     },
     relatedEntityKind: 'provider-enterprise',
     relatedEntityId: ent.enterpriseId,
@@ -96,7 +88,7 @@ async function dispatchCapabilityLossAlert(
       enterpriseExternalId: ent.externalId,
       reason: result.census.reason,
       detectedAt: now.toISOString(),
-      hint: 'Grant the reconciliation App "Enterprise organization installations: read", or check its App key, then Recheck from the admin Reconciliation -> Providers tab.',
+      hint: 'Grant the reconciliation App "Enterprise organization installations: read", or check its App key, then Recheck from Admin, Reconciliation, Providers.',
     },
     relatedEntityKind: 'provider-enterprise',
     relatedEntityId: ent.enterpriseId,

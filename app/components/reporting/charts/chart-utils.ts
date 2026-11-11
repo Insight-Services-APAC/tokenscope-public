@@ -7,6 +7,7 @@
  * escaped (dataviz interaction.md: labels are untrusted data). Numeric values
  * come from our own formatters and are safe.
  */
+import { fmtUtcDay } from '../../../composables/useFormat'
 
 export function escapeHtml(s: string): string {
   return String(s)
@@ -25,10 +26,10 @@ export function categoryUnion(seriesData: ReadonlyArray<ReadonlyArray<{ x: strin
   return [...set].sort()
 }
 
-/** Trim a leading `YYYY-` from an ISO day so axis ticks read `MM-DD`; anything
- *  that isn't a `YYYY-MM-DD` string is returned unchanged. */
+/** An ISO day as the axis and "Peak day" read it, "26 Oct" (#599); anything that
+ *  isn't a `YYYY-MM-DD` string is returned unchanged. */
 export function shortDay(x: string): string {
-  return /^\d{4}-\d{2}-\d{2}$/.test(x) ? x.slice(5) : x
+  return /^\d{4}-\d{2}-\d{2}$/.test(x) ? fmtUtcDay(x) : x
 }
 
 /**

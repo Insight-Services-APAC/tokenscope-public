@@ -11,9 +11,14 @@
  * now, not the one stamped on the device at enrolment
  * (docs/design/current-org-lens/00-design.md).
  *
- * Per instance: the same fields as /me/instances (revoked/silent/
+ * Per instance: the same fields as /me/instances (revoked/state/
  * last_emission/spend_usd_mtd) PLUS the owning teammate (email,
- * display_name). Admin revoke already exists — DELETE
+ * display_name). Server search and filters (#582): `q` matches the owning
+ * teammate's name or email, `status` keeps one device state (the same rule the
+ * row's badge uses: instanceStatePredicate), `tool` keeps one tool. They
+ * apply to the rows AND the COUNT inside the region predicate. `tools` lists
+ * the tools present in the region, so the filter offers only real values.
+ * Admin revoke already exists — DELETE
  * /api/v1/instances/{id} (admin + region-scoped); this is read-only.
  */
 import { defineEventHandler } from 'h3'
@@ -22,17 +27,25 @@ import { sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { requireRole, requireRegionScope } from '../../../auth/rbac'
 import { withRequestRls } from '../../../db/request-rls'
+import { requestClock } from '../../../utils/request-clock'
+import { LIKE_ESCAPE, escapeLikeLiteral } from '../../../utils/sql-like'
 import {
   instanceMetricColumns,
   instanceProjectionWindow,
+  instanceStatePredicate,
+  INSTANCE_STATES,
   projectInstanceRow,
   type InstanceMetricRow,
 } from '../../../utils/instance-projection'
+import { ADMIN_LIST_SEARCH_MAX } from '../../../../shared/schemas/admin-list-search'
 
 const Query = z.object({
   region: z.string().uuid().optional(),
   limit: z.coerce.number().int().positive().max(500).default(100),
   offset: z.coerce.number().int().nonnegative().default(0),
+  q: z.string().trim().max(ADMIN_LIST_SEARCH_MAX).optional(),
+  status: z.enum(INSTANCE_STATES).optional(),
+  tool: z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/).optional(),
 })
 
 // The admin variant carries the owning-teammate identity on top of the shared
@@ -51,15 +64,29 @@ export default defineEventHandler(async (event) => {
   const region = query.region ?? session.regionId
   await requireRegionScope(event, region)
 
-  const { monthStartIso, silentCutoffMs } = instanceProjectionWindow(new Date())
+  const window = instanceProjectionWindow(new Date(requestClock(event).now))
+
+  // The filters, ANDed onto the region predicate (never instead of it).
+  const like = query.q ? `%${escapeLikeLiteral(query.q)}%` : null
+  const filters = sql.join(
+    [
+      like
+        ? sql`AND (t.display_name ILIKE ${like} ESCAPE ${LIKE_ESCAPE} OR t.email ILIKE ${like} ESCAPE ${LIKE_ESCAPE})`
+        : sql``,
+      query.status ? sql`AND ${instanceStatePredicate(query.status, window)}` : sql``,
+      query.tool ? sql`AND ia.tool = ${query.tool}` : sql``,
+    ],
+    sql` `,
+  )
 
   // Bounded + paginated (API-17 — the list was unbounded) with a real
   // COUNT(*) in the same RLS tx like the other admin lists.
-  const { rows, total } = await withRequestRls(event, async (tx) => {
+  const { rows, total, tools } = await withRequestRls(event, async (tx) => {
     const dataRows = await tx.execute<AdminInstanceRow>(sql`
       SELECT
         ia.instance_id::text                                        AS instance_id,
         ia.tool                                                     AS tool,
+        ia.display_name                                             AS display_name,
         ia.raw_project_code                                         AS raw_project_code,
         ia.ts_start::text                                           AS ts_start,
         ia.ts_actual_end::text                                      AS ts_actual_end,
@@ -73,11 +100,12 @@ export default defineEventHandler(async (event) => {
         ia.teammate_id::text                                        AS teammate_id,
         t.email                                                     AS teammate_email,
         t.display_name                                              AS teammate_display_name,
-        ${instanceMetricColumns(monthStartIso)}
+        ${instanceMetricColumns(window.monthStartIso)}
       FROM instance_attestation ia
       JOIN teammate t ON t.id = ia.teammate_id
       WHERE t.region_id = ${region}::uuid
-      ORDER BY ia.ts_start DESC
+        ${filters}
+      ORDER BY ia.ts_start DESC, ia.instance_id
       LIMIT ${query.limit} OFFSET ${query.offset}
     `)
     const totalRows = await tx.execute<{ total: string }>(sql`
@@ -85,19 +113,32 @@ export default defineEventHandler(async (event) => {
       FROM instance_attestation ia
       JOIN teammate t ON t.id = ia.teammate_id
       WHERE t.region_id = ${region}::uuid
+        ${filters}
     `)
-    return { rows: [...dataRows], total: Number([...totalRows][0]?.total ?? 0) }
+    const toolRows = await tx.execute<{ tool: string }>(sql`
+      SELECT DISTINCT ia.tool
+      FROM instance_attestation ia
+      JOIN teammate t ON t.id = ia.teammate_id
+      WHERE t.region_id = ${region}::uuid
+      ORDER BY ia.tool
+    `)
+    return {
+      rows: [...dataRows],
+      total: Number([...totalRows][0]?.total ?? 0),
+      tools: [...toolRows].map((r) => r.tool),
+    }
   })
 
   return {
     region,
     instances: rows.map((r) => ({
-      ...projectInstanceRow(r, silentCutoffMs),
+      ...projectInstanceRow(r, window),
       teammate_id: r.teammate_id,
       teammate_email: r.teammate_email,
       teammate_display_name: r.teammate_display_name,
     })),
     total,
+    tools,
     limit: query.limit,
     offset: query.offset,
   }

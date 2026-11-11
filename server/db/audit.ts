@@ -113,3 +113,52 @@ export async function recordAuditEvent(
   }
   return { id: row.id }
 }
+
+/**
+ * Several audit rows, same contract as `recordAuditEvent` (the same columns,
+ * the same RLS-bearing handle rule). For a bulk action that audits each
+ * subject it changed (POST /api/v1/me/inbox/bulk, #574). Rows go in batches of
+ * AUDIT_INSERT_BATCH on the caller's handle, so they stay inside its
+ * transaction: a batch per statement keeps every insert under Postgres's
+ * 65,535 bind-parameter limit (9 parameters a row), however many rows a
+ * "Mark all read" changes. An empty list writes nothing.
+ */
+export const AUDIT_INSERT_BATCH = 1000
+
+export async function recordAuditEvents(
+  tx: PostgresJsDatabase<Record<string, unknown>>,
+  inputs: readonly AuditEventInput[],
+): Promise<number> {
+  if (inputs.length === 0) return 0
+  let written = 0
+  for (let i = 0; i < inputs.length; i += AUDIT_INSERT_BATCH) {
+    written += await insertAuditBatch(tx, inputs.slice(i, i + AUDIT_INSERT_BATCH))
+  }
+  if (written !== inputs.length) {
+    throw new Error(`recordAuditEvents: wrote ${written} of ${inputs.length} rows`)
+  }
+  return written
+}
+
+async function insertAuditBatch(
+  tx: PostgresJsDatabase<Record<string, unknown>>,
+  inputs: readonly AuditEventInput[],
+): Promise<number> {
+  const rows = await tx
+    .insert(auditEvent)
+    .values(
+      inputs.map((input) => ({
+        eventType: input.eventType,
+        actorTeammateId: input.actorTeammateId ?? null,
+        actorSystem: input.actorSystem ?? null,
+        subjectKind: input.subjectKind ?? null,
+        subjectId: input.subjectId ?? null,
+        payload: input.payload,
+        ipAddress: normalizeInet(input.ipAddress),
+        userAgent: input.userAgent ?? null,
+        impersonatorOid: IMPERSONATOR_FROM_TX,
+      })),
+    )
+    .returning({ id: auditEvent.id })
+  return rows.length
+}

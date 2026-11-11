@@ -20,7 +20,7 @@ function switchLane() {
 <template>
   <button
     type="button"
-    class="mt-2 text-[11px] font-semibold text-brand-harmony hover:underline"
+    class="mt-2 text-[11px] font-semibold text-brand-harmony hover:underline print:hidden"
     data-testid="lane-switch-link"
     @click="switchLane"
   >

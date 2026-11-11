@@ -26,7 +26,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
 import type * as schema from '../../drizzle/schema'
 import { dispatchInbox, type InboxCategory } from '../notifications/dispatch'
-import { BEARER_AUTH_FAILED } from '../db/instance-health'
+import { BEARER_AUTH_FAILED, openBearerFailureExists } from '../db/instance-health'
 
 export interface WentSilentResult {
   instancesFailing: number
@@ -63,12 +63,7 @@ export async function runWentSilent(
      WHERE ii.category = ${WENT_SILENT_CATEGORY}
        AND ii.related_entity_kind = 'instance'
        AND ii.ack_state IN ('unread', 'read', 'acknowledged')
-       AND NOT EXISTS (
-         SELECT 1 FROM instance_attestation_health h
-          WHERE h.instance_id = ii.related_entity_id
-            AND h.status = ${BEARER_AUTH_FAILED}
-            AND h.resolved_at IS NULL
-       )
+       AND NOT ${openBearerFailureExists(sql`ii.related_entity_id`)}
     RETURNING ii.id::text AS id
   `)
   const autoResolved = [...resolved].length

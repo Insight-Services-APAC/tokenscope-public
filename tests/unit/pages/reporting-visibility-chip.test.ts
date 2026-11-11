@@ -15,6 +15,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { defineComponent, ref } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
+import { stubServerClock } from '../../helpers/server-clock'
 import ReportingIndex from '../../../app/pages/reporting/index.vue'
 
 interface Meta {
@@ -45,6 +46,8 @@ const SCOPE_STUBS = {
 
 async function mountShell(meta: Meta) {
   vi.stubGlobal('useFetch', () => ({ data: ref(meta), error: ref(null) }))
+  // The page reads the server clock for its printed header (#583).
+  stubServerClock()
   vi.stubGlobal('useReportState', (init: { scope?: string } = {}) => ({
     scope: ref(init.scope ?? 'region'),
     month: ref<string | null>(null),

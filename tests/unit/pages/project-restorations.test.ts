@@ -182,9 +182,9 @@ describe('T27 — the advisory-spend disclosure returns (D27)', () => {
     const el = w.find('[data-testid="burn-advisory"]')
     expect(el.exists()).toBe(true)
     expect(el.text()).toContain('$318.90')
-    expect(el.text()).toContain('advisory (telemetry-only) spend')
+    expect(el.text()).toContain('is indicative')
     // The window is NAMED, and it is the CHART's window (30d), not the page's.
-    expect(el.text()).toContain('of the last 30d')
+    expect(el.text()).toContain('of the last 30 days')
   })
 
   it('is a CHART FOOTER, not a hero-tile sub-line', async () => {

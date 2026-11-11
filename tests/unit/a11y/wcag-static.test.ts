@@ -243,6 +243,12 @@ describe('1.3.1 every table header cell has a scope and a name', () => {
     expect(headers.length).toBeGreaterThan(100)
   })
 
+  it('covers the charts\' day table (#584): column headers and a row header per day', () => {
+    const dayTable = headers.filter((h) => h.file === 'app/components/charts/DayTable.vue')
+    expect(dayTable.length).toBeGreaterThanOrEqual(4)
+    expect(dayTable.some((h) => /\sscope="row"/.test(h.attrs))).toBe(true)
+  })
+
   it('no <th> under app/ lacks scope (col, row, colgroup or rowgroup)', () => {
     const ok = (a: string) => /\sscope="(col|row|colgroup|rowgroup)"/.test(a) || /\s:scope="/.test(a)
     expect(headers.filter((h) => !ok(h.attrs)).map(show)).toEqual([])

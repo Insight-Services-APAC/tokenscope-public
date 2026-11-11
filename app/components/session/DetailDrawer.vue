@@ -30,10 +30,12 @@ import { ref, computed, watch } from 'vue'
 import UiButton from '../ui/Button.vue'
 import { fmtUsd, fmtTokens, fmtTimeAgo, clientMeta } from '../../composables/useFormat'
 import { modelDisplay } from '../../composables/useModelDisplay'
+import { ADVISORY_INFO } from '#shared/usage/advisory-copy'
 import { apiErrorDetail } from '../../composables/useApiError'
 import { useModalA11y } from '../../composables/useModalA11y'
 import { TOKEN_TYPES, type SessionDetail } from '#shared/schemas/usage'
 import { querySourceLabel } from '#shared/usage/query-source'
+import { deviceLabel } from '#shared/schemas/device-name'
 
 const props = defineProps<{
   /** Claude session id (conversation) to load; null = drawer closed. */
@@ -287,12 +289,18 @@ const hitPct = computed(() => {
           >{{ detail.project_code }}<span class="text-carbon-3 font-normal">· {{ detail.project_display_name }}</span></span>
           <span v-else class="px-2 py-0.5 rounded bg-calm/60 text-carbon-3 font-semibold">Unallocated</span>
           <span v-if="detail.activity" class="px-2 py-0.5 rounded bg-brand-zeal-lite/60 text-carbon-2 font-medium">{{ detail.activity }}</span>
+          <span
+            v-if="detail.instance_id"
+            class="text-carbon-2"
+            :title="detail.instance_id"
+            data-testid="session-detail-device"
+          >{{ deviceLabel({ instance_id: detail.instance_id, tool: detail.tool, display_name: detail.device_name }) }}</span>
           <span class="text-carbon-3">Last active {{ fmtTimeAgo(detail.ts_last) }}</span>
           <span
             v-if="advisoryUsd > 0"
             class="px-2 py-0.5 rounded bg-rag-amber/10 text-rag-amber font-semibold"
-            title="Advisory (tier-2) spend is telemetry-only — not corroborated by a provider bill."
-          >incl. {{ fmtUsd(detail.fidelity.tier2_cost_usd) }} advisory</span>
+            :title="ADVISORY_INFO"
+          >incl. {{ fmtUsd(detail.fidelity.tier2_cost_usd) }} indicative</span>
         </div>
 
         <!-- Model mix -->

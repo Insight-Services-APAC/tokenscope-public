@@ -67,7 +67,7 @@ function select(lane: ReportLane) {
 </script>
 
 <template>
-  <div class="inline-flex flex-col gap-1.5" data-testid="lane-toggle">
+  <div class="inline-flex flex-col gap-1.5 print:hidden" data-testid="lane-toggle">
     <div
       class="inline-flex p-0.5 bg-calm-2 rounded-lg gap-0.5 w-fit"
       role="group"

@@ -441,13 +441,19 @@ const sumbackSpan = computed(
 <template>
   <div data-testid="drivers-table">
     <div class="flex items-center justify-between gap-4 mb-3 flex-wrap">
-      <div class="text-[11px] text-carbon-3">share of {{ denominatorLabel }}</div>
+      <div class="text-[11px] text-carbon-3">
+        share of {{ denominatorLabel }}<span
+          v-if="axisOptions.length && labelHeading"
+          class="hidden print:inline"
+          data-testid="drivers-axis-print"
+        > · by {{ labelHeading }}</span>
+      </div>
       <!-- PIVOT CHIPS, not a dropdown: every axis a reader may ask for is on
            screen, so choosing one is a click rather than open-read-choose-close.
            `aria-pressed` carries the selection (a toggle group, not navigation). -->
       <div
         v-if="axisOptions.length"
-        class="flex flex-wrap gap-1.5"
+        class="flex flex-wrap gap-1.5 print:hidden"
         role="group"
         aria-label="Break down drivers by"
         data-testid="drivers-axis"

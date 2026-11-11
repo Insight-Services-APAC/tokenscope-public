@@ -22,16 +22,20 @@
  * Prose lives behind (i) (D12); the freshness paragraph retired for the
  * CcHeaderNotes chip row fed by the payload's real operands (D14).
  */
-import { computed, nextTick, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
+import { computed, nextTick, onMounted, ref, watch, watchEffect, type ComponentPublicInstance } from 'vue'
 import { provideReportStateKeys, WINDOW_STATE_KEYS } from '../../composables/useReportState'
 import { modelDisplay } from '../../composables/useModelDisplay'
 import ReportSkeleton from '../../components/reporting/ReportSkeleton.vue'
 import InfoDot from '../../components/ui/InfoDot.vue'
+import { ADVISORY_INFO, advisorySentence } from '#shared/usage/advisory-copy'
 import ScopeKpiTile from '../../components/reporting/ScopeKpiTile.vue'
 import DateRangeControl from '../../components/reporting/DateRangeControl.vue'
 import CcHeaderNotes from '../../components/reporting/cost-centre/CcHeaderNotes.vue'
 import ModelSplitPanel from '../../components/reporting/ModelSplitPanel.vue'
 import ExportCsvButton from '../../components/reporting/ExportCsvButton.vue'
+import PrintButton from '../../components/reporting/PrintButton.vue'
+import ReportPrintHeader from '../../components/reporting/ReportPrintHeader.vue'
+import { providePrintFacts } from '../../components/reporting/print-facts'
 import LaneToggle from '../../components/reporting/LaneToggle.vue'
 import ProjectChargebackView from '../../components/projects/ChargebackView.vue'
 import DrillName from '../../components/reporting/DrillName.vue'
@@ -532,6 +536,64 @@ const reportsPace = computed(() => {
  * reads the server's clock (F1/D3). Null until it lands — see useServerClock.
  */
 const { clock: serverClock } = useServerClock()
+
+// The printed header (#583): this page is its own report, so it states its own
+// facts from the payload the screen is showing, under whichever lens.
+const printFacts = providePrintFacts()
+watchEffect(() => {
+  // A reports-grant reader (not a member) gets the reports-depth payload.
+  const rp = reportsPayload.value
+  if (!payload.value && rp) {
+    const rscope = `Project ${rp.project.code}${rp.project.display_name ? `, ${rp.project.display_name}` : ''}`
+    const rcb = reportsCb.value
+    const rd = reportsData.value
+    printFacts.value = rcb
+      ? {
+          scope: rscope,
+          from: rcb.window.from,
+          to: rcb.window.to,
+          lens: 'chargeback',
+          settling: [{ vendor: rcb.chargeback.settling.vendor, state: rcb.chargeback.settling.state }],
+        }
+      : rd
+        ? {
+            scope: rscope,
+            from: rd.window.from,
+            to: rd.window.to,
+            lens: 'usage',
+            settling: rd.meta.providerStates.map((ps) => ({ vendor: ps.vendor, state: ps.state })),
+          }
+        : null
+    return
+  }
+  const p = payload.value
+  if (!p) {
+    printFacts.value = null
+    return
+  }
+  const scope = `Project ${p.project.code}${p.project.display_name ? `, ${p.project.display_name}` : ''}`
+  if (cbData.value) {
+    const cb = cbData.value
+    printFacts.value = {
+      scope,
+      from: cb.window.from,
+      to: cb.window.to,
+      lens: 'chargeback',
+      settling: [{ vendor: cb.chargeback.settling.vendor, state: cb.chargeback.settling.state }],
+    }
+  } else if (data.value) {
+    const d = data.value
+    printFacts.value = {
+      scope,
+      from: d.window.from,
+      to: d.window.to,
+      lens: 'usage',
+      settling: d.providerStates.map((ps) => ({ vendor: ps.vendor, state: ps.state })),
+    }
+  } else {
+    printFacts.value = null
+  }
+})
 const todayIso = computed<string | null>(() => serverClock.value?.today ?? null)
 function monthWordOf(month: string): string {
   return new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(
@@ -896,7 +958,7 @@ const memberIngestOnlyTools = computed(
       >
         <template #actions>
           <!-- id="manage": the inbox link's hash lands on the button its drawer returns focus to. -->
-          <div id="manage" class="flex items-center gap-3 flex-wrap">
+          <div id="manage" class="flex items-center gap-3 flex-wrap print:[&_button]:hidden print:[&_a]:hidden">
             <UiBadge v-if="data?.velocity.is_flagged" kind="rag-amber" data-testid="velocity-flag">
               velocity {{ Math.round((data.velocity.delta_pct ?? 0) * 100) }}% above 4-week mean
             </UiBadge>
@@ -927,12 +989,16 @@ const memberIngestOnlyTools = computed(
           </div>
         </template>
       </UiPageHead>
+      <ReportPrintHeader :facts="printFacts" :as-of="serverClock?.now ?? null" />
 
       <div class="space-y-5">
-        <!-- Window presets (D16) — the page's ONE window control — and the lens. -->
-        <div class="flex items-start gap-3 flex-wrap">
+        <!-- Window presets (D16) — the page's ONE window control — and the lens.
+             Print sits here (#583), not beside the team export: that export is
+             for members only, and every reader of this page may print it. -->
+        <div class="flex items-start gap-3 flex-wrap print:hidden">
           <DateRangeControl />
           <LaneToggle v-model="shownLane" :captions="PROJECT_LENS_CAPTIONS" />
+          <div class="ml-auto"><PrintButton /></div>
         </div>
 
         <!-- The lens once with (i) (fix 6) + the chip row (D14) instead of freshness prose. -->
@@ -1098,6 +1164,7 @@ const memberIngestOnlyTools = computed(
             :partial-day="partialDay"
             :remainder-keys="burnRemainderKeys"
             :height="150"
+            offer-table
           />
           <p
             v-if="burnAdvisoryUsd != null && burnAdvisoryUsd > 0"
@@ -1106,14 +1173,14 @@ const memberIngestOnlyTools = computed(
             :title="burnAdvisoryNote ?? undefined"
           >
             <template v-if="burnAdvisoryUncoveredDays > 0">
-              {{ fmtUsd(burnAdvisoryUsd) }} of advisory (telemetry-only) spend counted — NOT the
-              last {{ stackWindowDays }}d: the rollup has no row for
+              {{ fmtUsd(burnAdvisoryUsd) }} counted as indicative, but not across the whole of the
+              last {{ stackWindowDays }} days: the rollup has no row for
               {{ burnAdvisoryUncoveredDays }} spending
               {{ burnAdvisoryUncoveredDays === 1 ? 'day' : 'days' }} in this window
             </template>
             <template v-else>
-              {{ fmtUsd(burnAdvisoryUsd) }} of the last {{ stackWindowDays }}d is advisory
-              (telemetry-only) spend
+              {{ advisorySentence(fmtUsd(burnAdvisoryUsd), `the last ${stackWindowDays} days`) }}
+              <InfoDot label="About indicative usage">{{ ADVISORY_INFO }}</InfoDot>
             </template>
           </p>
           <!-- NOT MEASURED ≠ MEASURED ZERO. A missing rollup used to render as
@@ -1350,11 +1417,13 @@ const memberIngestOnlyTools = computed(
         :title="reportsPayload.project.display_name ?? reportsPayload.project.code"
         :sub="`${reportsPayload.project.code} · reports depth — you are not a member; admitted by your reports grant`"
       />
+      <ReportPrintHeader :facts="printFacts" :as-of="serverClock?.now ?? null" />
 
       <div class="space-y-5">
-        <div class="flex items-start gap-3 flex-wrap">
+        <div class="flex items-start gap-3 flex-wrap print:hidden">
           <DateRangeControl />
           <LaneToggle v-model="shownLane" :captions="PROJECT_LENS_CAPTIONS" />
+          <div class="ml-auto"><PrintButton /></div>
         </div>
         <div v-if="reportsCb" class="flex items-center gap-2 flex-wrap">
           <UiBadge kind="neutral" data-testid="proj-reports-lane-pill">Chargeback</UiBadge>

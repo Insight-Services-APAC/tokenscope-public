@@ -515,7 +515,8 @@ export async function runReadPathHealth(
   const dispatched = await dispatchInbox(db, {
     category: 'read-path-stale',
     severity: 'urgent',
-    subject: 'TokenScope OTel read path has stalled — spend is not attributing',
+    // #587: plain words, no em dash.
+    subject: 'TokenScope has stopped reading the usage devices send',
     body: {
       reason,
       // Present for a stall: which coverage basis fired it (D1). Lets an

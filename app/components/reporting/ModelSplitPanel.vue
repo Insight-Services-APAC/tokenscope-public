@@ -43,6 +43,7 @@
  */
 import { computed } from 'vue'
 import ChartRankedBar from './charts/ChartRankedBar.client.vue'
+import { mergeByModelLabel } from '../../composables/useModelDisplay'
 import { fmtUsd, fmtPct } from '../../composables/useFormat'
 import { modelBucketKind, modelBucketNote } from '#shared/reports/model-attribution'
 import type { BilledLaneMeta, DriverRow, MeasureLane } from '#shared/reports/types'
@@ -81,7 +82,16 @@ const split = computed(() => {
 })
 
 const known = computed(() => split.value.model)
-const knownBars = computed(() => known.value.map((r) => ({ label: r.label, value: r.usd })))
+// Model rows by their human name (#598). Bucket rows never reach this list.
+// The raw ids ride along for the hover list; every CSV keeps the raw id.
+const knownBars = computed(() =>
+  mergeByModelLabel(known.value, (r) => r.key, (r) => r.usd).map((m) => ({
+    label: m.label,
+    value: m.value,
+    meta: m.rawIds,
+  })),
+)
+const knownRawIds = computed(() => knownBars.value.flatMap((b) => b.meta).join(', '))
 
 /*
  * The coverage footer's segments (D6). Reason folding:
@@ -152,7 +162,9 @@ const emptyCopy = computed(() => {
     <p v-if="rows === null" class="text-xs text-carbon-3 italic py-8 text-center">Loading models…</p>
 
     <template v-else-if="known.length">
-      <ChartRankedBar :rows="knownBars" :top-n="topN" :value-format="(v: number) => fmtUsd(v)" />
+      <div :title="knownRawIds" data-testid="model-split-raw-ids">
+        <ChartRankedBar :rows="knownBars" :top-n="topN" :value-format="(v: number) => fmtUsd(v)" />
+      </div>
     </template>
 
     <p v-else class="text-xs text-carbon-3 italic py-8 text-center" data-testid="model-split-empty">

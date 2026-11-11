@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fmtUsd } from '../../composables/useFormat'
 const props = defineProps<{
   body: Record<string, unknown>
 }>()
@@ -28,7 +29,7 @@ const actionHref = text('actionHref') ?? '/account#personal-subscription'
       </div>
       <p class="text-sm text-carbon-2 leading-relaxed">
         TokenScope saw
-        <strong v-if="usageUsd !== null">${{ usageUsd.toFixed(2) }}</strong>
+        <strong v-if="usageUsd !== null">{{ fmtUsd(usageUsd) }}</strong>
         <span v-else>material usage</span>
         from <code v-if="tool" class="bg-calm/40 px-1 rounded">{{ tool }}</code>
         <span v-if="signalMonth"> during {{ signalMonth }}</span>

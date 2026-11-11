@@ -9,7 +9,7 @@ const WINDOWS = [30, 90] as const
 </script>
 
 <template>
-  <div class="flex items-center gap-2">
+  <div class="flex items-center gap-2 print:hidden">
     <slot />
     <button
       v-for="w in WINDOWS"

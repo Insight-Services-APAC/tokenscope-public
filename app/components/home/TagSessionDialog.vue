@@ -12,7 +12,9 @@
  */
 import { ref, computed, type Ref } from 'vue'
 import UiButton from '../ui/Button.vue'
-import { fmtUsd, fmtTokens, fmtTimeAgo, clientMeta } from '../../composables/useFormat'
+import { fmtUsd, fmtTokens, fmtTimeAgo, fmtSessionSpan, fmtSpanDuration, clientMeta } from '../../composables/useFormat'
+import { useViewerZone } from '../../composables/useViewerZone'
+import { deviceLabel } from '#shared/schemas/device-name'
 import { apiErrorDetail } from '../../composables/useApiError'
 import { useModalA11y } from '../../composables/useModalA11y'
 // The product's word for the object the wire keys as `'project'`. This dialog is
@@ -34,6 +36,14 @@ export interface TagTarget {
    */
   tokens: number | null
   last_event: string
+  /*
+   * When the session started (#577). With `last_event` it gives the "When" row
+   * ("Mon 9 Nov, 14:05 to 16:40"); absent, the dialog says only how long ago it
+   * last ran. Sessions only: a provider-recorded day has no instant.
+   */
+  first_event?: string
+  /** The owner's name for the session's device (#576); absent or null = unnamed. */
+  device_name?: string | null
   project_id: string | null
   activity: string | null
   // Model mix (cost-share desc) — renders the dominant-model chip in the
@@ -111,6 +121,22 @@ const bulkBreakdown = computed(() => {
   if (b.unaccounted.length) parts.push(`${b.unaccounted.length} provider-recorded day${b.unaccounted.length === 1 ? '' : 's'}`)
   return parts.join(' · ')
 })
+// When and where the session ran (#577), in the viewer's zone once mounted.
+const { timeZone, isLocal } = useViewerZone()
+const sessionWhen = computed(() => {
+  const t = props.target
+  if (!t?.first_event) return null
+  return fmtSessionSpan(t.first_event, t.last_event, timeZone.value, { utcLabel: !isLocal.value })
+})
+const sessionDuration = computed(() =>
+  props.target?.first_event ? fmtSpanDuration(props.target.first_event, props.target.last_event) : null,
+)
+const sessionDevice = computed(() => {
+  const t = props.target
+  if (!t?.instance_id) return null
+  return deviceLabel({ instance_id: t.instance_id, tool: t.tool, display_name: t.device_name })
+})
+
 const emit = defineEmits<{ close: []; saved: [] }>()
 
 const projectId = ref('')
@@ -226,33 +252,41 @@ async function save() {
             <dt class="text-carbon-3">Usage</dt>
             <dd class="text-carbon" data-testid="tag-day-usage">
               {{ fmtUsd(target.cost_usd) }} ·
-              <span v-if="target.tokens == null" class="italic text-carbon-3" title="This provider reports no token quantity for a recorded day — the cost is real, the token count was never measured.">tokens not reported</span>
-              <template v-else>{{ fmtTokens(target.tokens) }}</template>
+              <span v-if="target.tokens == null" class="italic text-carbon-3" title="This provider reports no token quantity for a recorded day: the cost is real, the token count was never measured.">tokens not reported</span>
+              <template v-else>{{ fmtTokens(target.tokens) }} tokens</template>
             </dd>
           </template>
           <template v-else>
-            <dt class="text-carbon-3">Session</dt>
-            <dd class="font-mono text-carbon truncate" :title="target.session_id">{{ target.session_id }}</dd>
+            <dt class="text-carbon-3">When</dt>
+            <dd class="text-carbon" data-testid="tag-session-when">
+              <template v-if="sessionWhen">
+                <span class="font-semibold">{{ sessionWhen }}</span> · {{ sessionDuration }}
+              </template>
+              <template v-else>last activity {{ fmtTimeAgo(target.last_event) }}</template>
+            </dd>
             <dt class="text-carbon-3">Device</dt>
-            <dd class="font-mono text-carbon-2 truncate" :title="target.instance_id ?? ''">{{ target.instance_id ?? '—' }}</dd>
+            <dd class="text-carbon-2 truncate" :title="target.instance_id ?? ''" data-testid="tag-session-device">
+              <span :class="target.device_name ? 'font-semibold text-carbon' : ''">{{ sessionDevice ?? '—' }}</span>
+            </dd>
             <dt class="text-carbon-3">Spend</dt>
-            <dd class="text-carbon">
+            <dd class="text-carbon" data-testid="tag-session-spend">
               {{ fmtUsd(target.cost_usd) }} ·
               <span v-if="target.tokens == null" class="italic text-carbon-3">tokens not reported</span>
-              <template v-else>{{ fmtTokens(target.tokens) }}</template>
-              · {{ fmtTimeAgo(target.last_event) }}
+              <template v-else>{{ fmtTokens(target.tokens) }} tokens</template>
             </dd>
+            <dt class="text-carbon-3">Session</dt>
+            <dd class="font-mono text-[11px] text-carbon-3 truncate" :title="target.session_id">{{ target.session_id }}</dd>
           </template>
         </dl>
         <p v-if="target.bulk" class="text-[12px] text-carbon-2 mb-3">
           One save for every selected item. Pick a <strong>budget</strong> and/or an
-          <strong>activity</strong> — it applies to all of them, or to none if any item fails.
+          <strong>activity</strong> : it applies to all of them, or to none if any item fails.
         </p>
         <p v-else-if="target.subject_kind === 'day'" class="text-[12px] text-carbon-2 mb-3">
           This day's usage was counted by the provider but never captured by OTel (e.g. an un-enrolled container). Assign a <strong>budget</strong> and/or an <strong>activity</strong>, same as a session.
         </p>
         <p v-else class="text-[12px] text-carbon-2 mb-3">
-          Assign a <strong>budget</strong> and/or an <strong>activity</strong>. Budgets are billable, pursuit or internal — choose “No budget” to leave it unallocated; clear the activity to untag it.
+          Assign a <strong>budget</strong> and/or an <strong>activity</strong>. Budgets are billable, pursuit or internal. Choose “No budget” to leave it unallocated; clear the activity to untag it.
         </p>
 
         <label for="tag-budget" class="text-[12px] font-semibold text-carbon">{{ BUDGET_LABEL }}</label>
@@ -263,9 +297,9 @@ async function save() {
           class="mt-1 mb-3 w-full px-3 py-2 text-sm border border-calm-2 rounded-md bg-white focus:border-brand-harmony"
           data-testid="tag-project"
         >
-          <option value="">No budget — unallocated</option>
+          <option value="">No budget (unallocated)</option>
           <optgroup v-for="g in budgetGroups" :key="g.key" :label="g.label">
-            <option v-for="p in g.projects" :key="p.id" :value="p.id">{{ p.code }} — {{ p.display_name }}</option>
+            <option v-for="p in g.projects" :key="p.id" :value="p.id">{{ p.code }}: {{ p.display_name }}</option>
           </optgroup>
         </select>
 

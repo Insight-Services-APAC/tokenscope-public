@@ -11,7 +11,12 @@
  *   - meanUsd      : number    (rolling 4w mean)
  *   - currentUsd   : number    (this week's spend)
  *   - deltaPct     : number    (e.g. 0.38 for +38%)
+ *
+ * #587: the same What happened / What it means / What to do layout as every
+ * other kind. The bell counts UNREAD items (#574), so opening this alert is
+ * what clears it; the copy no longer claims Acknowledge does.
  */
+import { fmtUsd } from '../../composables/useFormat'
 
 const props = defineProps<{
   body: Record<string, unknown>
@@ -46,6 +51,7 @@ const spark =
         .join(' ')
 
 const currentUsd = num('currentUsd')
+const meanUsd = num('meanUsd')
 const deltaPct = num('deltaPct')
 // Stroke colour follows severity — Hunger only when the trend actually
 // crosses the velocity-worker's 25% threshold; Vision otherwise.
@@ -71,7 +77,7 @@ const strokeColor =
       </svg>
       <div class="text-xs text-carbon-2 mt-2 flex justify-between">
         <span v-if="currentUsd !== null" style="font-variant-numeric: tabular-nums">
-          ${{ currentUsd.toFixed(2) }} this week
+          {{ fmtUsd(currentUsd) }} this week
         </span>
         <span
           v-if="deltaPct !== null"
@@ -82,17 +88,27 @@ const strokeColor =
         </span>
       </div>
     </div>
-    <div v-else class="text-xs text-carbon-3 italic">
-      Trend data not included in this alert; check the rollup view for the underlying series.
+    <div>
+      <h3 class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">What happened</h3>
+      <p class="text-sm text-carbon-2 leading-relaxed" data-testid="velocity-happened">
+        <template v-if="currentUsd !== null && deltaPct !== null">
+          You spent {{ fmtUsd(currentUsd) }} this week, {{ Math.round(Math.abs(deltaPct) * 100) }}%
+          {{ deltaPct >= 0 ? 'more' : 'less' }} than a typical week<template v-if="meanUsd !== null"> ({{ fmtUsd(meanUsd) }})</template>.
+        </template>
+        <template v-else>Your spend this week is well above a typical week for you.</template>
+      </p>
     </div>
     <div>
-      <div class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">
-        Suggested action
-      </div>
+      <h3 class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">What it means</h3>
       <p class="text-sm text-carbon-2 leading-relaxed">
-        Take a look at what changed this week. Often a new long-running task or a
-        switch to a heavier model explains it; if it's expected, acknowledge to
-        clear the bell.
+        This is a heads-up, not a limit. Nothing is blocked and no budget changes.
+      </p>
+    </div>
+    <div>
+      <h3 class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">What to do</h3>
+      <p class="text-sm text-carbon-2 leading-relaxed" data-testid="velocity-todo">
+        Look at what changed this week in My usage. A new long-running task or a switch to a
+        heavier model often explains it. If the spend is expected, resolve this alert.
       </p>
     </div>
   </section>

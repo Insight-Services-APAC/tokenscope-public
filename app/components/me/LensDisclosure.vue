@@ -255,7 +255,7 @@ function whyText(b: BillingState): string {
      * classifies it commercially. NFR is one reason a org is tracked-only; it
      * is not the only one, and this row cannot tell them apart.
      */
-    return `your ${b.label} usage is on a provider agreement that is not charged on — real usage, no money. That is a property of the agreement, not of ${b.label}.`
+    return `your ${b.label} usage is on a provider agreement that is not charged on: real usage, no money. That is a property of the agreement, not of ${b.label}.`
   }
   return costCentre.value
     ? `invoiced by Anthropic and charged to ${costCentre.value}.`
@@ -307,7 +307,7 @@ const popoverOpen = ref(false)
             {{ fmtUsd(b.usd) }}
           </dt>
           <dd class="m-0">
-            <span class="font-bold text-carbon">{{ b.label }}</span> — {{ whyText(b) }}
+            <span class="font-bold text-carbon">{{ b.label }}</span> : {{ whyText(b) }}
           </dd>
         </template>
       </dl>

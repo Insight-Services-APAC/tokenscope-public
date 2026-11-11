@@ -66,7 +66,7 @@ export function fmtDurationMs(ms: number | string | null | undefined): string {
 
 export function fmtTimeAgo(iso: string | null | undefined): string {
   if (!iso) return EM_DASH
-  const t = new Date(iso).getTime()
+  const t = parseInstantMs(iso)
   if (!Number.isFinite(t)) return EM_DASH
   const ms = Date.now() - t
   const m = Math.round(ms / 60_000)
@@ -76,6 +76,101 @@ export function fmtTimeAgo(iso: string | null | undefined): string {
   if (h < 24) return `${h}h ago`
   const d = Math.round(h / 24)
   return `${d}d ago`
+}
+
+/**
+ * Epoch ms of an instant the API sent, or NaN. Postgres `::text` timestamps
+ * ("2026-11-09 04:05:00.12+00") are not ISO 8601; not every browser parses
+ * them, so they are normalised (a T, a full offset) before parsing.
+ */
+export function parseInstantMs(raw: string | null | undefined): number {
+  if (!raw) return NaN
+  const iso = /^\d{4}-\d{2}-\d{2} /.test(raw)
+    ? raw.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00')
+    : raw
+  return new Date(iso).getTime()
+}
+
+/**
+ * An INSTANT as the product writes one: "10 Nov 2026, 08:10" (#587), in
+ * `timeZone` when given, else the browser's own zone. Only for a real moment;
+ * a UTC day bucket is a date and never goes through here.
+ */
+export function fmtInstant(iso: string | null | undefined, timeZone?: string): string {
+  if (!iso) return EM_DASH
+  const t = parseInstantMs(iso)
+  if (!Number.isFinite(t)) return EM_DASH
+  return new Intl.DateTimeFormat('en-GB', {
+    day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    ...(timeZone ? { timeZone } : {}),
+  }).format(t)
+}
+
+/*
+ * A SESSION'S SPAN (#577): when it ran, so a person can recognise it.
+ * "Mon 9 Nov, 14:05 to 16:40", and both dates when it crosses midnight:
+ * "Fri 6 Nov, 23:10 to Sat 7 Nov, 00:25". A session is an instant pair, so
+ * it renders in `timeZone` (useViewerZone: 'UTC' until mounted, then the
+ * viewer's). When `utcLabel` is set the zone is UTC and the text says so.
+ * Never used for a provider-recorded day: that is a bare UTC date with no time.
+ */
+function zoneParts(t: number, timeZone: string) {
+  const day = new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone }).format(t)
+  const time = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone }).format(t)
+  const key = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone }).format(t)
+  return { day: day.replace(',', ''), time, key }
+}
+
+export function fmtSessionSpan(
+  firstIso: string | null | undefined,
+  lastIso: string | null | undefined,
+  timeZone: string,
+  opts: { utcLabel?: boolean } = {},
+): string {
+  const a = parseInstantMs(firstIso)
+  const b = parseInstantMs(lastIso)
+  if (!Number.isFinite(b)) return EM_DASH
+  const start = zoneParts(Number.isFinite(a) ? a : b, timeZone)
+  const end = zoneParts(b, timeZone)
+  const suffix = opts.utcLabel ? ' UTC' : ''
+  if (start.key === end.key) {
+    return start.time === end.time
+      ? `${start.day}, ${start.time}${suffix}`
+      : `${start.day}, ${start.time} to ${end.time}${suffix}`
+  }
+  return `${start.day}, ${start.time} to ${end.day}, ${end.time}${suffix}`
+}
+
+/**
+ * A UTC day as words: "26 Oct", or "26 Oct 2026" with `year` (#599). A day is a
+ * provider fact, so it is formatted in UTC and never converted to the viewer's
+ * zone (CLAUDE.md "The clock"). Anything that is not a day comes back unchanged.
+ */
+export function fmtUtcDay(day: string | null | undefined, opts: { year?: boolean } = {}): string {
+  if (!day) return EM_DASH
+  const iso = day.slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return day
+  const ms = Date.parse(`${iso}T00:00:00Z`)
+  if (!Number.isFinite(ms)) return day
+  return new Intl.DateTimeFormat('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    ...(opts.year ? { year: 'numeric' as const } : {}),
+    timeZone: 'UTC',
+  }).format(ms)
+}
+
+/** How long a session ran, rounded to the minute: "2 h 35 min", "35 min". */
+export function fmtSpanDuration(firstIso: string | null | undefined, lastIso: string | null | undefined): string {
+  const a = parseInstantMs(firstIso)
+  const b = parseInstantMs(lastIso)
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return EM_DASH
+  const m = Math.round((b - a) / 60_000)
+  if (m < 1) return 'under a minute'
+  if (m < 60) return `${m} min`
+  const h = Math.floor(m / 60)
+  const rest = m % 60
+  return rest ? `${h} h ${rest} min` : `${h} h`
 }
 
 export interface FmtPctOptions {

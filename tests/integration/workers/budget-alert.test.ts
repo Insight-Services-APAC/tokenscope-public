@@ -719,5 +719,110 @@ describe('runBudgetAlert', () => {
        WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
     expect(Number(rows[0]!.c)).toBe(0)
   })
+
+  /*
+   * ── "Budget nearly used" (#575) ────────────────────────────────────────────
+   * One item per project per month at 80% of the budget in force, to the same
+   * recipients as over-budget, and never after over-budget.
+   */
+  const nearlyRows = (projectId: string) => t.client<{
+    recipient_teammate_id: string
+    subject: string
+    severity: string
+    body: { project: string; usedUsd: number; capUsd: number; usedPct: number; dayOfMonth: number; daysInMonth: number; month: string }
+  }[]>`
+    SELECT recipient_teammate_id::text AS recipient_teammate_id, subject, severity, body::jsonb AS body
+      FROM inbox_item
+     WHERE category = 'budget-nearly-used' AND related_entity_id = ${projectId}::uuid`
+
+  it('NEARLY USED: a project at 82% gets exactly one item, and a second run adds none', async () => {
+    const projectId = await createProject('BA-NEAR')
+    await createBaselineAllocation(projectId, '100.00')
+    await recordSpend(projectId, '82.00', new Date('2026-05-10T10:00:00Z'))
+
+    const first = await runBudgetAlert(t.db, { now: NOW })
+    expect(first.nearlyUsedDispatched).toBeGreaterThanOrEqual(1)
+    const rows = await nearlyRows(projectId)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.recipient_teammate_id).toBe(priyaId)
+    expect(rows[0]!.severity).toBe('info')
+    expect(rows[0]!.subject).toBe('Project BA-NEAR has used 82% of its May budget')
+    expect(rows[0]!.body).toMatchObject({
+      project: 'BA-NEAR',
+      usedUsd: 82,
+      capUsd: 100,
+      dayOfMonth: 15,
+      daysInMonth: 31,
+      month: '2026-05',
+    })
+    expect(rows[0]!.body.usedPct).toBeCloseTo(0.82, 6)
+    // No over-budget item: it is not over.
+    const [over] = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    expect(Number(over!.c)).toBe(0)
+
+    const second = await runBudgetAlert(t.db, { now: NOW })
+    expect(await nearlyRows(projectId)).toHaveLength(1)
+    expect(second.nearlyUsedSkippedExisting).toBeGreaterThanOrEqual(1)
+  })
+
+  it('NEARLY USED: a dismissed item still suppresses the rest of the month', async () => {
+    const projectId = await createProject('BA-NEAR-DISMISSED')
+    await createBaselineAllocation(projectId, '100.00')
+    await recordSpend(projectId, '85.00', new Date('2026-05-10T10:00:00Z'))
+    await runBudgetAlert(t.db, { now: NOW })
+    await t.client`UPDATE inbox_item SET ack_state = 'dismissed'
+      WHERE category = 'budget-nearly-used' AND related_entity_id = ${projectId}::uuid`
+    await runBudgetAlert(t.db, { now: new Date('2026-05-20T12:00:00Z') })
+    expect(await nearlyRows(projectId)).toHaveLength(1)
+  })
+
+  it('NEARLY USED: under 80% gets nothing', async () => {
+    const projectId = await createProject('BA-NEAR-UNDER')
+    await createBaselineAllocation(projectId, '100.00')
+    await recordSpend(projectId, '79.00', new Date('2026-05-10T10:00:00Z'))
+    await runBudgetAlert(t.db, { now: NOW })
+    expect(await nearlyRows(projectId)).toHaveLength(0)
+  })
+
+  it('NEARLY USED: a project that jumps from 70% to 105% between runs gets the over-budget alert only', async () => {
+    const projectId = await createProject('BA-NEAR-JUMP')
+    await createBaselineAllocation(projectId, '100.00')
+    await recordSpend(projectId, '70.00', new Date('2026-05-10T10:00:00Z'))
+    await runBudgetAlert(t.db, { now: NOW })
+    expect(await nearlyRows(projectId)).toHaveLength(0)
+
+    await recordSpend(projectId, '35.00', new Date('2026-05-16T10:00:00Z'))
+    await runBudgetAlert(t.db, { now: new Date('2026-05-17T12:00:00Z') })
+    expect(await nearlyRows(projectId)).toHaveLength(0)
+    const [over] = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    expect(Number(over!.c)).toBeGreaterThanOrEqual(1)
+  })
+
+  it('NEARLY USED: never after the over-budget alert, even when spend falls back under the cap', async () => {
+    const projectId = await createProject('BA-NEAR-AFTER')
+    await createBaselineAllocation(projectId, '100.00')
+    await recordSpend(projectId, '120.00', new Date('2026-05-10T10:00:00Z'))
+    await runBudgetAlert(t.db, { now: NOW })
+    // A $40 top-up brings the budget in force to $140: spend is 86% of it.
+    await t.db.insert(schema.allocation).values({
+      scopeType: 'project',
+      scopeId: projectId,
+      budgetUsd: '40.00',
+      effective: '[2026-05-15T00:00:00+00,2026-06-01T00:00:00+00)',
+      allocationKind: 'top-up',
+      auditEventId: await newAuditId(),
+    })
+    await runBudgetAlert(t.db, { now: new Date('2026-05-16T12:00:00Z') })
+    expect(await nearlyRows(projectId)).toHaveLength(0)
+  })
+
+  it('NEARLY USED: a project with no budget gets nothing', async () => {
+    const projectId = await createProject('BA-NEAR-NOBUDGET')
+    await recordSpend(projectId, '82.00', new Date('2026-05-10T10:00:00Z'))
+    await runBudgetAlert(t.db, { now: NOW })
+    expect(await nearlyRows(projectId)).toHaveLength(0)
+  })
 })
 

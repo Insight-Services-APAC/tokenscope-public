@@ -655,11 +655,56 @@ interface SummaryPayload {
   projects: Array<{
     code: string
     mtd_cost_usd: string
+    allocation_usd: string
     mine_mtd_usd: string
     spark: Array<{ day: string; cost_usd: string }>
   }>
   untagged_usd: string
 }
+
+describe('/me/projects/summary?period=last (#595)', () => {
+  const last = (who: string, clockAt: string) =>
+    summaryHandler(ev(who, '/x?period=last', {}, clockAt) as unknown as Parameters<typeof summaryHandler>[0]) as unknown as Promise<
+      SummaryPayload & { untagged_usd: string | null; period: { month: string; last_day: string; days_in_month: number } }
+    >
+
+  it('shows the whole previous month, equal to the project page set to that month', async () => {
+    const s = await last(devId, '2026-07-10T12:00:00Z')
+    expect(s.period).toEqual({ kind: 'last', month: '2026-06', last_day: '2026-06-30', days_in_month: 30 })
+    const page = await getProject('/x?month=2026-06')
+    expect(s.projects[0]!.mtd_cost_usd).toBe(page.budget.window_cost_usd)
+    expect(s.projects[0]!.mtd_cost_usd).toBe('12.00')
+  })
+
+  it('has no worklist pull-through, because that is a fact about this month', async () => {
+    const s = await last(devId, '2026-07-10T12:00:00Z')
+    expect(s.untagged_usd).toBeNull()
+  })
+
+  it('reads the budget at the month\'s last instant, including a top-up that has since expired', async () => {
+    const [audit] = await t.db
+      .insert(schema.auditEvent)
+      .values({ eventType: 'allocation-created', actorSystem: 'test', payload: {} })
+      .returning()
+    await t.db.insert(schema.allocation).values({
+      scopeType: 'project',
+      scopeId: projectId,
+      teammateId: null,
+      budgetUsd: '75.00',
+      effective: '[2026-06-01T00:00:00Z,2026-07-01T00:00:00Z)',
+      allocationKind: 'top-up',
+      auditEventId: audit!.id,
+    })
+    const s = await last(devId, '2026-07-10T12:00:00Z')
+    expect(Number(s.projects[0]!.allocation_usd)).toBe(75)
+  })
+
+  it('refuses a period it does not serve', async () => {
+    await expect(
+      summaryHandler(ev(devId, '/x?period=q3') as unknown as Parameters<typeof summaryHandler>[0]),
+    ).rejects.toMatchObject({ statusCode: 400, data: { detail: expect.stringContaining('period') } })
+  })
+})
 
 describe('/me/projects/summary — the list-band operands (T20)', () => {
   it('cards carry mine_mtd_usd + spark on the card’s own lane, and the caller’s untagged_usd', async () => {

@@ -20,6 +20,7 @@ import type { RunRate } from '#shared/schemas/usage'
 import type { SpendLens } from '#shared/usage/lens'
 import type { LensDisclosureData } from '../components/me/LensDisclosure.vue'
 import ActivityCard from '../components/me/ActivityCard.vue'
+import HomeToolStatusStrip from '../components/home/ToolStatusStrip.vue'
 import type { TagTarget as DialogTagTarget } from '../components/home/TagSessionDialog.vue'
 import { budgetPace, budgetPaceKind, budgetPaceLabel, projectedMonthEnd, type BudgetPace } from '../composables/useRagState'
 import { useConnectConfig } from '../composables/useConnectConfig'
@@ -401,10 +402,13 @@ function openTagSession(s: WorklistSession) {
   openTag({
     session_id: s.session_id,
     instance_id: s.instance_id,
+    device_name: s.device_name,
     tool: s.tool,
     cost_usd: s.cost_usd,
     tokens: s.tokens,
-    last_event: s.last_event,
+    // When the whole conversation ran (#577), not only its untagged slice.
+    first_event: s.session_first,
+    last_event: s.session_last,
     project_id: null,
     activity: s.activity,
     by_model: s.by_model,
@@ -703,44 +707,18 @@ const softCapTickPct = computed(() =>
       :sub="`Here's your token spend for ${monthLabel}.`"
     >
       <template #actions>
-        <div class="flex flex-col items-end gap-3">
-          <!-- Connect tools — compact, brand-marked, top-right page action.
-               Both Claude Code and Copilot CLI are live; each opens a small
-               pop-up with the same per-client setup instructions shown on
-               /account (shared ConnectClientGuide → no drift). -->
-          <div class="flex flex-wrap items-center gap-2 justify-end" data-testid="home-connect-tools">
-            <button
-              v-if="isClientEnabled('claude-code')"
-              type="button"
-              class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#D97757]/40 bg-[#D97757]/5 hover:bg-[#D97757]/12 transition-colors text-sm font-semibold text-carbon cursor-pointer"
-              data-testid="connect-desktop"
-              @click="connectGuide = 'claude-desktop'"
-            >
-              <Icon name="logos:claude-icon" class="text-base" aria-hidden="true" />
-              Connect Claude Desktop
-            </button>
-            <button
-              v-if="isClientEnabled('claude-code')"
-              type="button"
-              class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#D97757]/40 bg-[#D97757]/5 hover:bg-[#D97757]/12 transition-colors text-sm font-semibold text-carbon cursor-pointer"
-              data-testid="connect-claude"
-              @click="connectGuide = 'claude-cli'"
-            >
-              <Icon name="logos:claude-icon" class="text-base" aria-hidden="true" />
-              Connect Claude Code CLI
-            </button>
-            <button
-              v-if="isClientEnabled('copilot-cli')"
-              type="button"
-              class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-carbon/15 bg-carbon/5 hover:bg-carbon/10 transition-colors text-sm font-semibold text-carbon cursor-pointer"
-              data-testid="connect-copilot"
-              @click="connectGuide = 'copilot-cli'"
-            >
-              <Icon name="logos:github-copilot" class="text-base" aria-hidden="true" />
-              Connect Copilot
-            </button>
-          </div>
-        </div>
+        <!-- #580: whether each enabled tool has recent usage, is silent or is not
+             connected; Connect opens the same guide dialog as before, only where
+             needed. Shown to a brand-new account too (beside its Get started
+             card): a connected device whose first usage is failing must still
+             show as silent with Fix. -->
+        <HomeToolStatusStrip
+          :clients="[
+            { tool: 'claude-code', enabled: isClientEnabled('claude-code') },
+            { tool: 'copilot-cli', enabled: isClientEnabled('copilot-cli') },
+          ]"
+          @connect="(k) => (connectGuide = k)"
+        />
       </template>
     </UiPageHead>
 
@@ -767,19 +745,19 @@ const softCapTickPct = computed(() =>
             class="text-xl font-bold text-carbon mt-1"
             data-testid="onboarding-headline-provider-only"
           >
-            We can see your spend from your provider — but nothing is being emitted from your machine yet.
+            We can see your spend from your provider, but nothing is being emitted from your machine yet.
           </h2>
           <h2 v-else class="text-xl font-bold text-carbon mt-1" data-testid="onboarding-headline-new">
-            No usage yet — connect a tool to start tracking.
+            No usage yet. Connect a tool to start tracking.
           </h2>
           <p v-if="seenViaProviderOnly" class="text-sm text-carbon-2 mt-1.5">
             Your provider reports {{ fmtUsd(usage?.total_cost_usd ?? 0) }} this period, so your spend is already
-            counted. What is missing is the session detail — which project, which model, which conversation —
+            counted. What is missing is the session detail (which project, which model, which conversation),
             and that only arrives once you connect a client on this machine. Full step-by-step guides live on
             your <NuxtLink to="/account" class="text-brand-harmony font-semibold hover:underline">account page</NuxtLink>.
           </p>
           <p v-else class="text-sm text-carbon-2 mt-1.5">
-            Connect Claude Code or GitHub Copilot CLI once per machine and your token spend lands here automatically —
+            Connect Claude Code or GitHub Copilot CLI once per machine and your token spend lands here automatically,
             usually within a few minutes of your next session. Full step-by-step guides live on your
             <NuxtLink to="/account" class="text-brand-harmony font-semibold hover:underline">account page</NuxtLink>.
           </p>
@@ -957,7 +935,7 @@ const softCapTickPct = computed(() =>
                 v-if="untaggableTotal > 0"
                 class="text-carbon-3"
                 data-testid="hero-untaggable"
-                title="Usage the providers reported with no session behind it — Claude Chat, the Copilot coding agent, and the other non-Code surfaces. It counts toward your unallocated total and your soft cap like every other dollar; there is just no session on it to tag, so it is not in the tagging list below."
+                title="Usage the providers reported with no session behind it: Claude Chat, the Copilot coding agent, and the other non-Code surfaces. It counts toward your unallocated total and your soft cap like every other dollar; there is just no session on it to tag, so it is not in the tagging list below."
               >no session {{ fmtUsd(untaggableTotal) }}</span>
             </div>
             <div class="text-[11px] text-carbon-3 mt-1" style="font-variant-numeric: tabular-nums" data-testid="hero-unallocated-state">
@@ -1122,7 +1100,7 @@ const softCapTickPct = computed(() =>
               type="button"
               class="w-full px-6 py-3.5 flex items-center justify-between gap-3 text-left hover:bg-brand-harmony-sheer/40 transition-colors"
               :data-testid="`tagged-${row.activity}`"
-              :title="`See how ${row.activity} broke down — models, lanes, sessions`"
+              :title="`See how ${row.activity} broke down: models, lanes, sessions`"
               @click="openActivityDetail(row.activity)"
             >
               <div class="min-w-0">
@@ -1143,7 +1121,7 @@ const softCapTickPct = computed(() =>
           </li>
         </ul>
         <div v-else class="px-6 py-10 text-center text-xs text-carbon-2">
-          Nothing tagged off-budget — your categorised spend is all on a budget.
+          Nothing tagged off-budget: your categorised spend is all on a budget.
         </div>
       </UiCard>
     </div>
@@ -1244,7 +1222,7 @@ const softCapTickPct = computed(() =>
             </li>
           </ul>
           <p v-else class="text-[11px] text-carbon-3 mt-2">
-            No sessions on record for this day — accept or escalate to resolve.
+            No sessions on record for this day. Accept or escalate to resolve.
           </p>
         </div>
       </div>

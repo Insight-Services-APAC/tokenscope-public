@@ -121,7 +121,8 @@ export async function runReconciliationGap(
     const dispatched = await dispatchInbox(db, {
       category: RECONCILIATION_GAP_CATEGORY,
       severity: 'attention',
-      subject: `Reconciliation gap: $${gapUsd.toFixed(2)} (${(gapPct * 100).toFixed(0)}%) of your actual Claude spend isn't attributed`,
+      // #587: plain words and money with thousands separators.
+      subject: `${gapUsd.toLocaleString('en-US', { style: 'currency', currency: 'USD' })} (${(gapPct * 100).toFixed(0)}%) of the Claude spend Anthropic reports for you has no recorded session`,
       body: {
         anthropic_actual_usd: actual,
         otel_attributed_usd: otel,

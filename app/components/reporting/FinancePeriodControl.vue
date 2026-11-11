@@ -98,7 +98,7 @@ function onChange(e: Event) {
 </script>
 
 <template>
-  <label class="inline-flex items-center gap-2" data-testid="finance-period-control">
+  <label class="inline-flex items-center gap-2 print:hidden" data-testid="finance-period-control">
     <span class="text-[11px] font-semibold uppercase tracking-wide text-carbon-3">Billing period</span>
     <select
       :value="selected"

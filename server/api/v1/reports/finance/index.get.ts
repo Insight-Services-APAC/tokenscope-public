@@ -99,6 +99,12 @@ export default defineEventHandler(async (event) => {
     const billCheck = await fetchFinanceBillCheck(tx, win)
     const cous = await fetchFinanceCous(tx, win, { copilotChargeback, region })
     const exemptGap = await fetchFinanceExemptGap(tx, win, { region })
+    // The region's own name for the printed header (#583): a print has no
+    // selector on it, so "the selected region" alone would not say which.
+    const [regionRow] = region
+      ? [...(await tx.execute<{ display_name: string }>(sql`
+          SELECT display_name FROM region WHERE id = ${region}::uuid`))]
+      : []
 
     // asOf provenance — the usage lane's freshness for the window (a stamp, not a figure).
     const [asOf] = [
@@ -138,6 +144,7 @@ export default defineEventHandler(async (event) => {
       },
       exemptGap,
       region,
+      regionName: regionRow?.display_name ?? null,
       homingNote: HOMING_NOTE,
     }
     }),

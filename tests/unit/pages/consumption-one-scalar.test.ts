@@ -358,7 +358,7 @@ describe('/usage — quota state is a state, in the right tense (defect 3)', () 
         headline: usageHeadline({ quotaState: { state: 'projected', date: '2026-07-28' } }),
       }),
     )
-    expect(w.find('[data-testid="quota-exhaustion"]').text()).toContain('2026-07-28')
+    expect(w.find('[data-testid="quota-exhaustion"]').text()).toContain('28 Jul')
     expect(w.find('[data-testid="quota-exhausted"]').exists()).toBe(false)
   })
 

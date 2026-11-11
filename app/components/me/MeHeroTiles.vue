@@ -27,7 +27,7 @@
  */
 import { computed } from 'vue'
 import ScopeKpiTile from '../reporting/ScopeKpiTile.vue'
-import { fmtUsd, fmtPct } from '../../composables/useFormat'
+import { fmtUsd, fmtPct, fmtUtcDay } from '../../composables/useFormat'
 import type { RunRate } from '#shared/schemas/usage'
 import type { SpendLens } from '#shared/usage/lens'
 import { BU_LABEL_LOWER } from '#shared/reports/vocabulary'
@@ -110,7 +110,7 @@ interface TileView {
   spark?: number[]
 }
 
-const chargebackSuffix = computed(() => (props.lane === 'chargeback' ? ' — attributed usage in both lenses' : ''))
+const chargebackSuffix = computed(() => (props.lane === 'chargeback' ? ': attributed usage in both lenses' : ''))
 
 /**
  * The spark's frame: the whole month, from the SERVER's window echo (F2/D7,
@@ -143,19 +143,19 @@ const quotaView = computed<TileView & { warn?: { kind: 'exhausted' | 'projected'
       ...base,
       label: 'Quota',
       deltaEmpty:
-        'your quota — allowance + allocations — measures attributed usage, so it is not shown in the chargeback lens. Switch to Usage to see it.',
+        'your quota (allowance + allocations) measures attributed usage, so it is not shown in the chargeback lens. Switch to Usage to see it.',
     }
   }
   if (wire?.quota_basis === 'custom-range') {
     return {
       ...base,
-      deltaEmpty: 'your quota is a calendar-month measure — shown under a month window, not a custom range',
+      deltaEmpty: 'your quota is a calendar-month measure, shown under a month window, not a custom range',
     }
   }
   if (wire?.quota_basis === 'not-current-month') {
     return {
       ...base,
-      deltaEmpty: 'your quota measures the current month — switch to This month to see it',
+      deltaEmpty: 'your quota measures the current month: switch to This month to see it',
     }
   }
   const q = props.quota
@@ -165,17 +165,17 @@ const quotaView = computed<TileView & { warn?: { kind: 'exhausted' | 'projected'
     ? `~${fmtUsd(rr.projected_month_end_usd)}`
     : `${fmtUsd(props.mtdUsd ?? '0')}`
   const sub = rr.is_projection
-    ? `of your ${fmtUsd(q.total_usd)} quota — ${fmtUsd(q.base_allowance_usd)} allowance + ${fmtUsd(q.allocation_usd)} project allocations · linear run-rate, day ${rr.days_elapsed} of ${rr.days_in_month}`
-    : `so far, of your ${fmtUsd(q.total_usd)} quota — ${fmtUsd(q.base_allowance_usd)} allowance + ${fmtUsd(q.allocation_usd)} project allocations · day ${rr.days_elapsed} of ${rr.days_in_month}`
+    ? `of your ${fmtUsd(q.total_usd)} quota: ${fmtUsd(q.base_allowance_usd)} allowance + ${fmtUsd(q.allocation_usd)} project allocations · linear run-rate, day ${rr.days_elapsed} of ${rr.days_in_month}`
+    : `so far, of your ${fmtUsd(q.total_usd)} quota: ${fmtUsd(q.base_allowance_usd)} allowance + ${fmtUsd(q.allocation_usd)} project allocations · day ${rr.days_elapsed} of ${rr.days_in_month}`
   const p = q.projection
   const warn =
     p.state === 'exhausted'
       ? {
           kind: 'exhausted' as const,
-          text: `⚠ your quota is exhausted — ${fmtUsd(p.over_usd)} over ${fmtUsd(q.total_usd)}.`,
+          text: `⚠ your quota is exhausted: ${fmtUsd(p.over_usd)} over ${fmtUsd(q.total_usd)}.`,
         }
       : p.state === 'projected'
-        ? { kind: 'projected' as const, text: `⚠ on pace to exhaust your quota ~${p.date}` }
+        ? { kind: 'projected' as const, text: `⚠ on pace to use up your quota around ${fmtUtcDay(p.date)}` }
         : undefined
   return { ...base, value, sub, warn, noDelta: true }
 })

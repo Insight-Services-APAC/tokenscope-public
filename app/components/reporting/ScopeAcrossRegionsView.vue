@@ -62,6 +62,7 @@ import ChargebackSplitCard from './ChargebackSplitCard.vue'
 import ChargebackTrendCard from './ChargebackTrendCard.vue'
 import ReportHeaderNotes from './ReportHeaderNotes.vue'
 import ExportCsvButton from './ExportCsvButton.vue'
+import PrintButton from './PrintButton.vue'
 import LaneLegend from './LaneLegend.vue'
 import ScopeHero from './ScopeHero.vue'
 import ConcentrationCohortCard from './across/ConcentrationCohortCard.vue'
@@ -80,6 +81,7 @@ import {
 import TopModelsCard from './across/TopModelsCard.vue'
 import { buildAcrossTrend } from './across/build-trend'
 import { periodBandWindow, rollingBandNote } from './band-labels'
+import { publishPrintFacts, windowFromMeta } from './print-facts'
 import { buildSurfaceHero } from './build-surface-hero'
 import {
   buildChargebackLaneTrend,
@@ -146,6 +148,18 @@ const props = withDefaults(
 // both money figures render in both lenses and the two cohort tiles are §A in
 // both — so no tile is greyed or relabelled to something it did not measure.
 const isChargeback = computed(() => props.lane === 'chargeback')
+
+// The printed header (#583).
+publishPrintFacts(() => {
+  const r = props.report
+  if (!r) return null
+  return {
+    scope: 'All regions',
+    ...windowFromMeta(r.meta),
+    lens: props.lane === 'chargeback' ? 'chargeback' : 'usage',
+    settling: r.meta.providerStates.map((p) => ({ vendor: p.vendor, state: p.state })),
+  }
+})
 
 const emit = defineEmits<{
   'update:driversAxis': [axis: string]
@@ -551,7 +565,8 @@ const chargebackLaneMode = computed(() => chargebackLegend.value.length >= 2)
         -->
       </ReportBand>
 
-      <div class="flex justify-end pt-2">
+      <div class="flex justify-end gap-2 pt-2 print:hidden">
+        <PrintButton />
         <ExportCsvButton
           endpoint="/api/v1/reports/export"
           :params="exportParams"

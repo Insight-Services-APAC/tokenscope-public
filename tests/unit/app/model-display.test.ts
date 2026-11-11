@@ -25,7 +25,7 @@ describe('modelDisplay', () => {
   it('handles legacy claude-<version>-<family> ordering (claude-3-5-sonnet-20241022)', () => {
     const d = modelDisplay('claude-3-5-sonnet-20241022')
     expect(d.family).toBe('sonnet')
-    expect(d.label).toBe('Sonnet') // version precedes the family word — label stays family-only
+    expect(d.label).toBe('Sonnet 3.5') // the version precedes the family word; it must still show, or two older models merge under one bar (#598)
   })
 
   it('strips Bedrock-style prefixes (us.anthropic.claude-sonnet-4-6)', () => {

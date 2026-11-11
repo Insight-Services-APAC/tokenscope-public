@@ -2,6 +2,8 @@
 
 **[Home](Home.md)**
 
+- [Using TokenScope](Using-TokenScope.md)
+
 ## Engineering wiki (built spec)
 
 - [Architecture](Architecture.md)

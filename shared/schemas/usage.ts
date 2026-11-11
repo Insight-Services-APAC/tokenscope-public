@@ -205,6 +205,11 @@ export const ProjectCard = z.object({
   mine_mtd_usd: z.string(),
   /** Same-window per-day series for the card sparkline (D26). */
   spark: z.array(ProjectSparkDay),
+  /**
+   * Set by /me/projects/summary: the project had ended before the period shown
+   * started, so My projects folds it (#594, #595). Absent on other card readers.
+   */
+  ended_before_period: z.boolean().optional(),
 })
 export type ProjectCard = z.infer<typeof ProjectCard>
 
@@ -249,6 +254,8 @@ export type ActivitySlice = z.infer<typeof ActivitySlice>
 export const SessionDetail = z.object({
   session_id: z.string(),
   instance_id: z.string().nullable(),
+  /** The owner's name for that device (#576), display only; NULL = unnamed. */
+  device_name: z.string().nullable(),
   tool: z.string(),
   project_id: z.string().nullable(),
   project_code: z.string().nullable(),

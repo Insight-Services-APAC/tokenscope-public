@@ -9,8 +9,9 @@
  * the gap (dataviz marks-and-anatomy). Identity also lives in the HTML legend
  * beside the ring, so it is never colour-alone.
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useChartTheme } from './useChartTheme'
+import { useChartPrintFit, type PrintFitChart } from './useChartPrintFit'
 import { escapeHtml } from './chart-utils'
 
 export interface DonutSlice {
@@ -142,6 +143,9 @@ const option = computed<ECOption>(() => {
     ],
   }
 })
+
+const chartRef = ref<PrintFitChart | null>(null)
+useChartPrintFit(chartRef)
 </script>
 
 <template>
@@ -149,6 +153,7 @@ const option = computed<ECOption>(() => {
     <ClientOnly>
       <VChart
         v-if="hasData"
+        ref="chartRef"
         :option="option"
         :style="{ width: `${height}px`, height: `${height}px`, flex: '0 0 auto' }"
         autoresize

@@ -121,7 +121,11 @@ function compactUsd(v: number): string {
           <template v-if="showWeekly">Weekly Anthropic chargeback by surface · billed</template>
           <template v-else-if="laneMode">Daily Anthropic chargeback by surface · billed</template>
           <template v-else>Daily Anthropic chargeback</template>
-          <template v-if="windowLabel"> · {{ windowLabel }}</template>
+          <template v-if="windowLabel"> · {{ windowLabel }}</template><span
+            v-if="showWeekly && unit === 'share'"
+            class="hidden print:inline"
+            data-testid="chargeback-trend-unit-print"
+          > · share % of each week</span>
         </div>
         <p
           v-if="laneMode && deltaText"
@@ -132,7 +136,7 @@ function compactUsd(v: number): string {
         </p>
       </div>
 
-      <div v-if="laneMode && hasWeekly" class="flex items-center gap-2 shrink-0">
+      <div v-if="laneMode && hasWeekly" class="flex items-center gap-2 shrink-0 print:hidden">
         <!-- Grain: weekly (default — absorbs single-day outliers at true scale) ⇄ daily. -->
         <div class="inline-flex p-0.5 bg-calm-2 rounded-lg gap-0.5" role="group" aria-label="Trend grain">
           <button

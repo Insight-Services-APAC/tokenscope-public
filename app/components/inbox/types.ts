@@ -3,6 +3,7 @@
  * inbox UI. Extracted out of InboxDrawer.vue so the routing logic is
  * unit-testable without mounting the component.
  */
+import { coverageOrgGapSubject } from '#shared/inbox/coverage-states'
 
 export interface InboxItem {
   id: string
@@ -24,6 +25,11 @@ export interface InboxItem {
    * only when this recipient can open /projects/{code}. Null otherwise.
    */
   target_project_code: string | null
+  /*
+   * The name the recipient gave the alert's device (#576), read live by the
+   * server; only for the recipient's own device. Null when unnamed.
+   */
+  target_device_name?: string | null
   ack_state: 'unread' | 'read' | 'acknowledged' | 'dismissed' | 'resolved'
   ack_at: string | null
   created_at: string
@@ -31,26 +37,35 @@ export interface InboxItem {
 
 export type DrawerBodyVariant =
   | 'over-budget'
+  | 'nearly-used'
   | 'velocity'
   | 'sync-conflict'
-  | 'untagged'
   | 'personal-subscription'
   | 'over-emission'
   | 'project-request'
   | 'budget-request'
-  | 'generic'
+  /* #573: what happened / what it means / what to do, from drawer-copy.ts. */
+  | 'sections'
+  /* A category this build does not know (a newer server mid-deploy). */
+  | 'unknown'
 
+/*
+ * Every kind the server writes has a body (#573): a bespoke one below, or the
+ * sections table in drawer-copy.ts. Only a category this build does not know
+ * falls to 'unknown', which says so; the old placeholder fallback that described
+ * no alert at all is gone. tests/unit/components/inbox-drawer-copy.test.ts holds the line.
+ */
 export function variantForCategory(category: string): DrawerBodyVariant {
   switch (category) {
     case 'over-budget':
       return 'over-budget'
+    case 'budget-nearly-used':
+      return 'nearly-used'
     case 'velocity-warning':
       return 'velocity'
     case 'sync-conflict':
     case 'structural-conflict':
       return 'sync-conflict'
-    case 'untagged-backlog':
-      return 'untagged'
     case 'personal-subscription-prompt':
       return 'personal-subscription'
     case 'over-emission-escalated':
@@ -61,9 +76,40 @@ export function variantForCategory(category: string): DrawerBodyVariant {
     case 'quota-request':
     case 'quota-request-decided':
       return 'budget-request'
+    case 'project-ending-soon':
+    case 'project-ended-retag':
+    case 'untagged-backlog':
+    case 'reconciliation-gap':
+    case 'went-silent':
+    case 'over-attribution':
+    case 'connector-health':
+    case 'read-path-stale':
+    case 'joiner-selection-cap':
+    case 'attribution-gap':
+    case 'ops-alert':
+    case 'github-coverage-gap':
+    case 'copilot-bill-unsettled':
+    case 'copilot-bill-unclassified':
+      return 'sections'
     default:
-      return 'generic'
+      return 'unknown'
   }
+}
+
+/**
+ * The title a person reads for an item. Most items show the subject the server
+ * stored; an organisation's GitHub coverage alert is rebuilt from its own facts
+ * with the shared wording, so one stored before a wording change (#587) reads
+ * the current words, not "cost-owning-unit home" (#591).
+ */
+export function itemSubject(item: Pick<InboxItem, 'category' | 'subject' | 'body'>): string {
+  if (item.category === 'github-coverage-gap' && item.body?.kind === 'org-gap') {
+    const { org, enterpriseExternalId, state } = item.body
+    if (typeof org === 'string' && typeof enterpriseExternalId === 'string' && typeof state === 'string') {
+      return coverageOrgGapSubject(org, enterpriseExternalId, state)
+    }
+  }
+  return item.subject
 }
 
 /** The words a person reads for a category: shared/inbox/categories.ts (#546). */

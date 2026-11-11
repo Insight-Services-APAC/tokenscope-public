@@ -26,6 +26,7 @@ import UiFetchErrorBanner from '../ui/FetchErrorBanner.vue'
 import ReportSkeleton from './ReportSkeleton.vue'
 import ReportEmpty from './ReportEmpty.vue'
 import ExportCsvButton from './ExportCsvButton.vue'
+import PrintButton from './PrintButton.vue'
 import FinanceBillCheck from './finance/FinanceBillCheck.vue'
 import FinanceBillCompare from './finance/FinanceBillCompare.vue'
 import FinanceExemptGap from './finance/FinanceExemptGap.vue'
@@ -37,6 +38,7 @@ import {
   type DrillGrants,
 } from './drill-contract'
 import type { FinanceReport, FinanceDrill as FinanceDrillData } from './finance-report-types'
+import { billMonthsWindow, publishPrintFacts } from './print-facts'
 
 const props = withDefaults(
   defineProps<{
@@ -68,6 +70,27 @@ const props = withDefaults(
     canFixHoming: false,
   },
 )
+
+// The printed header (#583). Finance reads the bill: always the chargeback lens.
+// The bill is MONTH-grained: a custom range sums every whole month it touches
+// (finance/index.get.ts), so the printed period is those months, not the dates
+// typed in.
+publishPrintFacts(() => {
+  const m = (props.isDrill ? props.drill?.meta : props.report?.meta) ?? null
+  if (!m) return null
+  const span = billMonthsWindow(m)
+  const scope = props.isDrill && props.drill
+    ? `Finance: ${props.drill.cou.displayName}`
+    : props.report?.region
+      ? `Finance, Business Units in ${props.report.regionName ?? 'the selected region'} (the bill check is whole-company)`
+      : 'Finance, all Business Units'
+  return {
+    scope,
+    ...span,
+    lens: 'chargeback',
+    settling: m.providerStates.map((p) => ({ vendor: p.vendor, state: p.state })),
+  }
+})
 
 const emit = defineEmits<{
   drill: [couId: string]
@@ -146,13 +169,17 @@ const unclassifiedWarning = computed(() => props.report?.copilot.unclassifiedWar
         headline="No chargeback rows for this Business Unit and month yet."
         sub="As the month's bills land and reconcile, the per-teammate and pooled charges fill in."
       />
-      <FinanceDrill
-        v-else-if="drillData && drill"
-        :drill="drill"
-        :drill-grants="drillGrants"
-        :drill-window="drillWindow"
-        @clear-drill="emit('clearDrill')"
-      />
+      <template v-else-if="drillData && drill">
+        <div class="flex justify-end print:hidden">
+          <PrintButton />
+        </div>
+        <FinanceDrill
+          :drill="drill"
+          :drill-grants="drillGrants"
+          :drill-window="drillWindow"
+          @clear-drill="emit('clearDrill')"
+        />
+      </template>
     </template>
 
     <!-- ═══════════════════ INDEX (no `cc`) ═══════════════════ -->
@@ -197,7 +224,8 @@ const unclassifiedWarning = computed(() => props.report?.copilot.unclassifiedWar
           @drill="emit('drill', $event)"
         />
 
-        <div class="flex justify-end pt-2">
+        <div class="flex justify-end items-center gap-2 pt-2 print:hidden">
+          <PrintButton />
           <span
             v-if="ledgerMonthOnly"
             class="text-[11px] text-carbon-3 italic"

@@ -11,10 +11,15 @@
  * fact ("Over") vs forecast ("On pace to exceed") split intact. The page-local
  * utilisation/exhaustion copy retired with it (D41).
  *
- * The list stays MTD — custom windows here are a recorded open owner decision
- * (brief :102-104), so there is deliberately NO window control on this page.
+ * THIS MONTH OR LAST MONTH (#595, REMAINING B12 decided): a two-way switch in
+ * the address, `?period=last`. A finished month has facts only, so Last month
+ * has no pace sentence, no "too early" and no velocity line.
+ *
+ * ENDED PROJECTS FOLD AWAY (#594). Live projects keep their cards. Ended ones
+ * become one closed fold under the grid, except an ended project that still took
+ * spend in the month shown, which stays listed because it needs someone.
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import ReportSkeleton from '../../components/reporting/ReportSkeleton.vue'
 import InfoDot from '../../components/ui/InfoDot.vue'
 import MonthSpark from '../../components/charts/MonthSpark.vue'
@@ -32,6 +37,7 @@ import {
 // with UNRESOLVED_IMPORT. CI does not run `npm run build`, so this only ever
 // surfaces at deploy. `useChartScale.ts` imports this module's sibling the same way.
 import { utcDayOfMonth, utcDaysInMonth, utcMonthEnd } from '#shared/reports/clock'
+import { fmtUtcDay } from '../../composables/useFormat'
 import { denseDays } from '#shared/reports/day-axis'
 import type { ProjectCard } from '#shared/schemas/usage'
 
@@ -52,8 +58,10 @@ const createdCode = computed(() => {
 interface ProjectsSummary {
   projects: ProjectCard[]
   total: number
-  /** The caller's own taggable-but-untagged MTD spend (D25 pull-through). */
-  untagged_usd: string
+  /** The month shown, resolved on the server (#595). */
+  period?: { kind: 'current' | 'last'; month: string; last_day: string; days_in_month: number }
+  /** The caller's own taggable-but-untagged MTD spend (D25); null for last month. */
+  untagged_usd: string | null
   page_freshness: {
     /** The STALEST project's rollup age, not the freshest. */
     aggregate_minutes_ago: number | null
@@ -63,9 +71,10 @@ interface ProjectsSummary {
   }
 }
 
+const isLastMonth = computed(() => route.query.period === 'last')
 const { data, pending, error } = await useFetch<ProjectsSummary>(
   '/api/v1/me/projects/summary',
-  { lazy: true },
+  { lazy: true, query: computed(() => (isLastMonth.value ? { period: 'last' } : {})) },
 )
 
 /*
@@ -89,20 +98,16 @@ const todayUtc = computed<string | null>(() => serverClock.value?.today ?? null)
 const settledUtc = computed<string | null>(() => serverClock.value?.settledThrough ?? null)
 const dayOfMonth = computed(() => (todayUtc.value ? utcDayOfMonth(todayUtc.value) : 0))
 const daysInMonth = computed(() => (todayUtc.value ? utcDaysInMonth(todayUtc.value) : 0))
-const monthWord = computed(() =>
-  todayUtc.value
+const lastMonthPeriod = computed(() => (isLastMonth.value ? data.value?.period ?? null : null))
+const monthWord = computed(() => {
+  const day = lastMonthPeriod.value ? `${lastMonthPeriod.value.month}-01` : todayUtc.value
+  return day
     ? new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(
-        new Date(Date.parse(`${todayUtc.value}T00:00:00Z`)),
+        new Date(Date.parse(`${day}T00:00:00Z`)),
       )
-    : '',
-)
-const monthEndLabel = computed(() =>
-  todayUtc.value
-    ? new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(
-        new Date(Date.parse(`${utcMonthEnd(todayUtc.value)}T00:00:00Z`)),
-      )
-    : '',
-)
+    : ''
+})
+const monthEndLabel = computed(() => (todayUtc.value ? fmtUtcDay(utcMonthEnd(todayUtc.value)) : ''))
 
 // ── ONE pace vocabulary per card (D15/D26) ──────────────────────────────────
 function paceOf(p: ProjectCard): BudgetPace {
@@ -119,6 +124,7 @@ function spendLine(p: ProjectCard): string {
   const alloc = Number(p.allocation_usd)
   if (!(alloc > 0)) return `${fmtUsd(p.mtd_cost_usd)} · no budget set`
   const used = Math.round((spend / alloc) * 100)
+  if (isLastMonth.value) return `${fmtUsd(p.mtd_cost_usd)} of ${fmtUsd(alloc)} · ${used}% used`
   const day = dayOfMonth.value
   const projected = projectedMonthEnd(spend, day, daysInMonth.value)
   const paceLeg =
@@ -144,11 +150,40 @@ const PACE_RANK: Record<BudgetPace, number> = {
   'not-started': 5,
   'no-budget': 6,
 }
-const orderedProjects = computed(() =>
-  [...(data.value?.projects ?? [])].sort(
-    (a, b) => PACE_RANK[paceOf(a)] - PACE_RANK[paceOf(b)] || a.code.localeCompare(b.code),
-  ),
+// A finished month has facts only: the three words and their severity order.
+type FactPace = 'over' | 'within' | 'none'
+function factOf(p: ProjectCard): FactPace {
+  const alloc = Number(p.allocation_usd)
+  if (!(alloc > 0)) return 'none'
+  return Number(p.mtd_cost_usd) > alloc ? 'over' : 'within'
+}
+const FACT_RANK: Record<FactPace, number> = { over: 0, within: 1, none: 2 }
+const FACT_LABEL: Record<FactPace, string> = { over: 'Over', within: 'Within budget', none: 'No budget' }
+const FACT_KIND: Record<FactPace, 'rag-red' | 'rag-green' | 'neutral'> = { over: 'rag-red', within: 'rag-green', none: 'neutral' }
+const pillLabel = (p: ProjectCard) => (isLastMonth.value ? FACT_LABEL[factOf(p)] : budgetPaceLabel(paceOf(p)))
+const pillKind = (p: ProjectCard) => (isLastMonth.value ? FACT_KIND[factOf(p)] : budgetPaceKind(paceOf(p)))
+
+// ── Live projects keep cards; ended ones fold (#594). ────────────────────────
+const isFolded = (p: ProjectCard) => p.ended_before_period ?? p.ended
+const liveProjects = computed(() =>
+  (data.value?.projects ?? [])
+    .filter((p) => !isFolded(p))
+    .sort((a, b) =>
+      isLastMonth.value
+        ? FACT_RANK[factOf(a)] - FACT_RANK[factOf(b)] || a.code.localeCompare(b.code)
+        : PACE_RANK[paceOf(a)] - PACE_RANK[paceOf(b)] || a.code.localeCompare(b.code),
+    ),
 )
+const endedProjects = computed(() => (data.value?.projects ?? []).filter(isFolded))
+/** Ended, with spend in the month shown: listed beside the live ones, not folded. */
+const endedWithSpend = computed(() => endedProjects.value.filter((p) => Number(p.mtd_cost_usd) > 0))
+const endedQuiet = computed(() =>
+  endedProjects.value.filter((p) => !(Number(p.mtd_cost_usd) > 0)).sort((a, b) => a.code.localeCompare(b.code)),
+)
+const endedOpen = ref(false)
+const periodWord = computed(() => (isLastMonth.value ? 'last month' : 'this month'))
+const endedOn = (p: ProjectCard) => (p.end_date ? `ended ${fmtUtcDay(p.end_date, { year: true })}` : 'ended')
+const endedContributes = computed(() => endedProjects.value.some((p) => Number(p.mine_mtd_usd) > 0))
 
 // ── The headline band (D25) ─────────────────────────────────────────────────
 // Σ of the caller's own contribution — summed FROM the cards' `mine` values,
@@ -157,7 +192,7 @@ const orderedProjects = computed(() =>
 const mineTotal = computed(() =>
   (data.value?.projects ?? []).reduce((a, p) => a + Number(p.mine_mtd_usd), 0),
 )
-const untaggedUsd = computed(() => Number(data.value?.untagged_usd ?? 0))
+const untaggedUsd = computed(() => (isLastMonth.value ? 0 : Number(data.value?.untagged_usd ?? 0)))
 
 // ── Per-card derivations ────────────────────────────────────────────────────
 /*
@@ -177,6 +212,12 @@ const untaggedUsd = computed(() => Number(data.value?.untagged_usd ?? 0))
  * never drawn on a settled day.
  */
 function sparkOf(p: ProjectCard): { data: number[]; partial: boolean } {
+  const last = lastMonthPeriod.value
+  if (last) {
+    // A finished month: every day is settled, none is partial.
+    const byDay = new Map(p.spark.map((d) => [d.day, Number(d.cost_usd)]))
+    return { data: denseDays(last.last_day, last.days_in_month).map((day) => byDay.get(day) ?? 0), partial: false }
+  }
   const t = todayUtc.value
   const settled = settledUtc.value
   if (!t || !settled) return { data: [], partial: false }
@@ -209,7 +250,7 @@ function minePct(p: ProjectCard): number | null {
 
 function endState(p: ProjectCard): string | null {
   if (p.ended) return 'ended'
-  if (p.end_date) return `ends ${p.end_date.slice(0, 10)}`
+  if (p.end_date) return `ends ${fmtUtcDay(p.end_date, { year: true })}`
   return null
 }
 // Velocity stays real and as-built (D26): the 4-week-mean note whenever a
@@ -238,7 +279,7 @@ const neverRolledUp = computed(() => data.value?.page_freshness?.projects_never_
     <UiPageHead
       eyebrow="My projects"
       title="My projects"
-      sub="Every project you're on — the same view your whole team sees."
+      sub="Every project you're on: the same view your whole team sees."
       :crumbs="['My projects']"
     />
 
@@ -256,17 +297,36 @@ const neverRolledUp = computed(() => data.value?.page_freshness?.projects_never_
 
     <!-- §A once, with the prose behind (i) (fix 6 / D12) — no lane toggle. -->
     <div class="flex items-center gap-2 mb-3">
-      <UiBadge kind="neutral" data-testid="projects-lane-pill">Attributed usage · month to date</UiBadge>
+      <UiBadge kind="neutral" data-testid="projects-lane-pill">Attributed usage · {{ isLastMonth ? monthWord : 'month to date' }}</UiBadge>
       <InfoDot label="About these figures">
         Indicative attributed usage, the lens budgets read, so there is no lane toggle
-        here; each project's own page has a Chargeback lens. Month-to-date burn and your contribution are
+        here; each project's own page has a Chargeback lens.
+        <template v-if="isLastMonth">Each figure is the month's attributed usage, against the budget in force at its end.</template>
+        <template v-else>Month-to-date burn and your contribution are
         live off attributed usage; the velocity flag comes from the
         rollup<template v-if="aggregateAge">, last refreshed {{ aggregateAge }} ago for the least
           recently updated project</template>.<template v-if="neverRolledUp > 0">
           {{ neverRolledUp }} project<template v-if="neverRolledUp > 1">s have</template><template v-else> has</template>
-          no rollup yet, so the velocity flag there is unknown rather than quiet.</template>
-        The list stays month-to-date; custom windows here are a recorded open owner decision.
+          no rollup yet, so the velocity flag there is unknown rather than quiet.</template></template>
+        The list shows this month or last month. Membership is who is on a project now, so a project you
+        have left is not listed for either month.
       </InfoDot>
+      <div class="ml-auto inline-flex rounded-md border border-calm-2 overflow-hidden text-[12px] font-semibold" data-testid="projects-period">
+        <NuxtLink
+          :to="{ query: { ...route.query, period: undefined } }"
+          class="px-3 py-1"
+          :class="!isLastMonth ? 'bg-brand-harmony-sheer text-brand-harmony' : 'text-carbon-2 hover:bg-calm/40'"
+          :aria-current="!isLastMonth ? 'true' : undefined"
+          data-testid="projects-period-current"
+        >This month</NuxtLink>
+        <NuxtLink
+          :to="{ query: { ...route.query, period: 'last' } }"
+          class="px-3 py-1 border-l border-calm-2"
+          :class="isLastMonth ? 'bg-brand-harmony-sheer text-brand-harmony' : 'text-carbon-2 hover:bg-calm/40'"
+          :aria-current="isLastMonth ? 'true' : undefined"
+          data-testid="projects-period-last"
+        >Last month</NuxtLink>
+      </div>
     </div>
 
     <!-- The headline band (D25): your Σ · N projects · day X of Y · untagged pull-through. -->
@@ -282,8 +342,8 @@ const neverRolledUp = computed(() => data.value?.page_freshness?.projects_never_
         data-testid="projects-band-total"
       >{{ fmtUsd(mineTotal) }}</span>
       <span class="text-[12.5px] text-carbon-2">
-        your contribution · {{ data.projects.length }}
-        project{{ data.projects.length === 1 ? '' : 's' }} · day {{ dayOfMonth }} of {{ daysInMonth }}
+        your contribution<template v-if="endedContributes"> across live and ended</template> · {{ liveProjects.length }}
+        project{{ liveProjects.length === 1 ? '' : 's' }}<template v-if="endedProjects.length"> · {{ endedProjects.length }} ended</template><template v-if="!isLastMonth"> · day {{ dayOfMonth }} of {{ daysInMonth }}</template>
       </span>
       <NuxtLink
         v-if="untaggedUsd > 0"
@@ -293,9 +353,9 @@ const neverRolledUp = computed(() => data.value?.page_freshness?.projects_never_
       >{{ fmtUsd(untaggedUsd) }} untagged → worklist</NuxtLink>
     </section>
 
-    <div v-if="data?.projects?.length" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+    <div v-if="liveProjects.length" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
       <NuxtLink
-        v-for="p in orderedProjects"
+        v-for="p in liveProjects"
         :key="p.id"
         :to="`/projects/${encodeURIComponent(p.code)}`"
         class="block group"
@@ -314,10 +374,10 @@ const neverRolledUp = computed(() => data.value?.page_freshness?.projects_never_
             </div>
             <div class="flex flex-col items-end gap-1 shrink-0">
               <!-- ONE pace vocabulary (fix 4): budgetPace's word, fact vs forecast intact. -->
-              <UiBadge :kind="budgetPaceKind(paceOf(p))" :data-testid="`pace-${p.code}`">
-                {{ budgetPaceLabel(paceOf(p)) }}
+              <UiBadge :kind="pillKind(p)" :data-testid="`pace-${p.code}`">
+                {{ pillLabel(p) }}
               </UiBadge>
-              <UiBadge v-if="p.velocity.is_flagged" kind="rag-amber" data-testid="velocity-flag">
+              <UiBadge v-if="!isLastMonth && p.velocity.is_flagged" kind="rag-amber" data-testid="velocity-flag">
                 velocity ↑
               </UiBadge>
               <UiBadge v-if="endState(p)" :kind="p.ended ? 'neutral' : 'outline'">
@@ -330,7 +390,7 @@ const neverRolledUp = computed(() => data.value?.page_freshness?.projects_never_
                one — and the WHOLE month, elapsed days as a line, the rest as
                baseline dots (F2/D7). -->
           <div class="mt-3">
-            <MonthSpark v-bind="sparkOf(p)" :span="daysInMonth" :height="34" />
+            <MonthSpark v-bind="sparkOf(p)" :span="lastMonthPeriod?.days_in_month ?? daysInMonth" :height="34" />
           </div>
 
           <div class="mt-3">
@@ -370,7 +430,7 @@ const neverRolledUp = computed(() => data.value?.page_freshness?.projects_never_
 
             <!-- Velocity, real and as-built — with day-1 honesty (D26). -->
             <p
-              v-if="velocityNote(p)"
+              v-if="!isLastMonth && velocityNote(p)"
               class="text-[11px] text-carbon-3 mt-1"
               :class="p.velocity.is_flagged ? 'text-rag-amber font-semibold' : ''"
               :data-testid="`velocity-note-${p.code}`"
@@ -378,11 +438,11 @@ const neverRolledUp = computed(() => data.value?.page_freshness?.projects_never_
               {{ velocityNote(p) }}
             </p>
             <p
-              v-else
+              v-else-if="!isLastMonth"
               class="text-[11px] text-carbon-3 mt-1 italic"
               :data-testid="`velocity-baseline-${p.code}`"
             >
-              velocity needs a baseline — unknown, not quiet
+              velocity needs a baseline: unknown, not quiet
             </p>
           </div>
         </UiCard>
@@ -403,5 +463,47 @@ const neverRolledUp = computed(() => data.value?.page_freshness?.projects_never_
          same settle() signal parity-shots keys on (skeleton gone + rendered money).
          No KPI band on the card list; the rows sketch the project cards. -->
     <ReportSkeleton v-else :kpis="0" :rows="8" />
+
+    <!-- An ended project with spend in the month shown. Re-tagging does not move rows
+         already on an ended project (tag-session.ts), so this states the fact only. -->
+    <ul v-if="endedWithSpend.length" class="mt-5 divide-y divide-calm-2 border-y border-calm-2" data-testid="projects-ended-spend">
+      <li v-for="p in endedWithSpend" :key="p.id">
+        <NuxtLink
+          :to="`/projects/${encodeURIComponent(p.code)}`"
+          class="flex flex-wrap items-center gap-x-3 gap-y-1 py-2.5 text-sm hover:bg-calm/30"
+          :data-testid="`project-ended-spend-${p.code}`"
+        >
+          <span class="font-semibold text-carbon">{{ p.display_name }}</span>
+          <span class="text-[11px] text-carbon-3 font-mono">{{ p.code }}</span>
+          <span class="text-carbon-2 text-[12.5px]">ended, {{ fmtUsd(p.mtd_cost_usd) }} {{ periodWord }}</span>
+          <span class="ml-auto text-[12px] font-semibold text-brand-harmony">Open</span>
+        </NuxtLink>
+      </li>
+    </ul>
+
+    <!-- The fold (#594): closed by default, and the choice is not remembered. -->
+    <section v-if="endedQuiet.length" class="mt-5" data-testid="projects-ended-fold">
+      <button
+        type="button"
+        class="text-sm font-semibold text-brand-harmony hover:underline underline-offset-2"
+        :aria-expanded="endedOpen"
+        data-testid="projects-ended-toggle"
+        @click="endedOpen = !endedOpen"
+      >{{ endedOpen ? '▾' : '▸' }} Ended projects ({{ endedQuiet.length }})</button>
+      <ul v-if="endedOpen" class="mt-2 divide-y divide-calm-2 border-y border-calm-2">
+        <li v-for="p in endedQuiet" :key="p.id">
+          <NuxtLink
+            :to="`/projects/${encodeURIComponent(p.code)}`"
+            class="flex flex-wrap items-center gap-x-3 gap-y-1 py-2.5 text-sm hover:bg-calm/30"
+            :data-testid="`project-ended-${p.code}`"
+          >
+            <span class="font-semibold text-carbon">{{ p.display_name }}</span>
+            <span class="text-[11px] text-carbon-3 font-mono">{{ p.code }}</span>
+            <span class="text-[12.5px] text-carbon-2">{{ endedOn(p) }}</span>
+            <span class="ml-auto text-[12px] font-semibold text-brand-harmony">Open</span>
+          </NuxtLink>
+        </li>
+      </ul>
+    </section>
   </div>
 </template>

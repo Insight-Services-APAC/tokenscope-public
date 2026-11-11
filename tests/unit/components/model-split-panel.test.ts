@@ -32,6 +32,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { mergeByModelLabel } from '../../../app/composables/useModelDisplay'
 import ModelSplitPanel from '../../../app/components/reporting/ModelSplitPanel.vue'
 import TopModelsCard from '../../../app/components/reporting/across/TopModelsCard.vue'
 import RegionalTopModels from '../../../app/components/reporting/regional/RegionalTopModels.vue'
@@ -112,7 +113,7 @@ describe('a remainder is never a bar in the ranking', () => {
       ],
       denominatorUsd: 1000,
     })
-    expect(rankedLabels(w)).toEqual(['claude-opus-5', 'claude-sonnet-5'])
+    expect(rankedLabels(w)).toEqual(['Opus 5', 'Sonnet 5'])
     expect(rankedLabels(w)).not.toContain(BILLED_NO_MODEL_LABEL)
     // Not dropped from the page: the money is priced in the FOOTER now.
     expect(w.find('[data-testid="model-split-footer"]').text()).toContain('900')
@@ -129,7 +130,7 @@ describe('a remainder is never a bar in the ranking', () => {
       denominatorUsd: 1000,
       lane: 'attributed',
     })
-    expect(rankedLabels(w)).toEqual(['claude-opus-5'])
+    expect(rankedLabels(w)).toEqual(['Opus 5'])
     expectZeroCategoryRows(w)
   })
 })
@@ -326,5 +327,31 @@ describe('an empty panel says WHY it is empty', () => {
     expect(w.find('[data-testid="model-split-empty"]').exists()).toBe(false)
     expect(w.find('[data-testid="model-split-footer"]').exists()).toBe(false)
     expect(w.find('[data-testid="model-split-lane-note"]').exists()).toBe(false)
+  })
+})
+
+describe('ModelSplitPanel: one name per model (#598)', () => {
+  it('merges a dated and an undated id of one model, summing the dollars', () => {
+    const merged = mergeByModelLabel(
+      [{ id: 'claude-haiku-4-5-20251001', usd: 2 }, { id: 'claude-haiku-4-5', usd: 3 }],
+      (r) => r.id,
+      (r) => r.usd,
+    )
+    expect(merged).toEqual([{ label: 'Haiku 4.5', value: 5, rawIds: ['claude-haiku-4-5-20251001', 'claude-haiku-4-5'] }])
+  })
+
+  it('an unknown id still renders as itself', () => {
+    expect(mergeByModelLabel([{ id: 'mystery-1', usd: 1 }], (r) => r.id, (r) => r.usd)[0]!.label).toBe('mystery-1')
+  })
+})
+
+describe('older model ids keep their version (#598)', () => {
+  it('two different older models do not merge under one name', () => {
+    const merged = mergeByModelLabel(
+      [{ id: 'claude-3-5-sonnet-20241022', usd: 1 }, { id: 'claude-3-7-sonnet-20250219', usd: 2 }],
+      (r) => r.id,
+      (r) => r.usd,
+    )
+    expect(merged.map((m) => m.label)).toEqual(['Sonnet 3.7', 'Sonnet 3.5'])
   })
 })

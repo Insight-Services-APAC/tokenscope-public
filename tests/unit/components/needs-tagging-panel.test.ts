@@ -9,10 +9,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import NeedsTaggingPanel from '../../../app/components/home/NeedsTaggingPanel.vue'
 import type { WorklistDay, WorklistSession } from '../../../shared/schemas/worklist'
+import { stubServerClock } from '../../helpers/server-clock'
 
 const session = (id: string, cost: string): WorklistSession => ({
   session_id: id,
   instance_id: null,
+  device_name: null,
+  session_first: '2026-07-20T09:00:00.000Z',
+  session_last: '2026-07-20T10:00:00.000Z',
   first_event: '2026-07-20T09:00:00.000Z',
   last_event: '2026-07-20T10:00:00.000Z',
   tokens: 25_000,
@@ -63,6 +67,8 @@ function mountPanel(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   vi.restoreAllMocks()
   vi.stubGlobal('$fetch', vi.fn().mockResolvedValue({ action: 'dismiss', total: 1 }))
+  // The fixtures' items are all in this month unless a test says otherwise.
+  stubServerClock('2026-07-25T12:00:00Z')
 })
 
 describe('NeedsTaggingPanel — where the money actually is', () => {
@@ -260,7 +266,7 @@ describe('NeedsTaggingPanel — dismissed drawer', () => {
     expect(toggle.text()).toContain('$1.52')
 
     await toggle.trigger('click')
-    expect(w.find('[data-testid="dismissed-section"]').text()).toContain('still unallocated')
+    expect(w.find('[data-testid="dismissed-section"]').text()).toContain('stays unallocated on your Business Unit')
     expect(w.find('[data-testid="dismissed-conv-old"]').exists()).toBe(true)
   })
 
@@ -327,5 +333,139 @@ describe('NeedsTaggingPanel — the queue is shown, not described', () => {
     const w = mountPanel()
     expect(w.text()).not.toContain('Tag to a budget or an activity')
     expect(w.text()).not.toContain('dismissed spend stays unallocated')
+  })
+})
+
+/*
+ * #577: a session row says WHEN it ran and on WHICH device, in the viewer's
+ * zone, and keeps the session id only as a tooltip. Provider-recorded days stay
+ * bare UTC dates.
+ */
+describe('HomeNeedsTaggingPanel — when and where a session ran (#577)', () => {
+  const BNE = 'Australia/Brisbane'
+  function inZone(zone: string) {
+    const real = Intl.DateTimeFormat.prototype.resolvedOptions
+    vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockImplementation(function (this: Intl.DateTimeFormat) {
+      return { ...real.call(this), timeZone: zone }
+    })
+  }
+  const named: WorklistSession = {
+    ...session('conv-named', '18.40'),
+    instance_id: '9a1e0000-0000-4000-8000-000000000001',
+    device_name: 'Work laptop',
+    // The whole conversation; the untagged slice started later (tagged at first).
+    session_first: '2026-11-09T04:05:00.000Z',
+    session_last: '2026-11-09T06:40:00.000Z',
+    first_event: '2026-11-09T05:30:00.000Z',
+    last_event: '2026-11-09T06:40:00.000Z',
+  }
+  const overnight: WorklistSession = {
+    ...session('conv-night', '13.10'),
+    instance_id: '9e8d7c6b-0000-4000-8000-000000000002',
+    session_first: '2026-11-06 13:10:00+00',
+    session_last: '2026-11-06 14:25:00+00',
+    first_event: '2026-11-06 13:10:00+00',
+    last_event: '2026-11-06 14:25:00+00',
+  }
+
+  it('shows weekday, date, start and end of the WHOLE session in the browser zone, and the device name', async () => {
+    inZone(BNE)
+    const w = mountPanel({ sessions: [named] })
+    await flushPromises()
+    expect(w.find('[data-testid="untagged-when-conv-named"]').text()).toBe('Mon 9 Nov, 14:05 to 16:40')
+    expect(w.find('[data-testid="untagged-device-conv-named"]').text()).toContain('Work laptop')
+    // The id is demoted to a tooltip, not printed in the row.
+    expect(w.find('[data-testid="untagged-conv-named"]').text()).not.toContain('conv-named')
+    expect(w.find('[data-testid="untagged-conv-named"] [title="Session conv-named"]').exists()).toBe(true)
+  })
+
+  it('a session that crosses midnight shows both dates (from the API\'s Postgres text timestamps); an unnamed device reads as tool and short id', async () => {
+    inZone(BNE)
+    const w = mountPanel({ sessions: [overnight] })
+    await flushPromises()
+    expect(w.find('[data-testid="untagged-when-conv-night"]').text()).toBe('Fri 6 Nov, 23:10 to Sat 7 Nov, 00:25')
+    expect(w.find('[data-testid="untagged-device-conv-night"]').text()).toContain('Claude Code · 9e8d7c6b')
+  })
+
+  it('a provider-recorded day row is unchanged: a UTC date, never a time', async () => {
+    inZone(BNE)
+    const w = mountPanel({ sessions: [named] })
+    await flushPromises()
+    const text = w.find('[data-testid="select-day-day-1"]').element.parentElement!.textContent ?? ''
+    expect(text).toContain('2026-07-24')
+    expect(text).not.toMatch(/2026-07-24[^\n]*\d{2}:\d{2}/)
+  })
+})
+
+describe('NeedsTaggingPanel: earlier months fold away (#596)', () => {
+  const older = (id: string, last: string, cost: string): WorklistSession => ({
+    ...session(id, cost),
+    session_first: last,
+    session_last: last,
+  })
+  const fixtures = {
+    sessions: [
+      session('now-1', '1.00'),
+      older('old-jun', '2026-06-10T10:00:00.000Z', '2.00'),
+      older('old-may', '2026-05-10T10:00:00.000Z', '3.00'),
+    ],
+    unaccounted: [day('d1', '2026-07-02', '4.00'), day('d2', '2026-06-02', '5.00')],
+  }
+
+  it('this month stays open; each group folds its earlier items with count and sum', () => {
+    const w = mountPanel(fixtures)
+    expect(w.find('[data-testid="untagged-now-1"]').exists()).toBe(true)
+    expect(w.find('[data-testid="untagged-old-jun"]').exists()).toBe(false)
+    const toggle = w.find('[data-testid="sessions-earlier-toggle"]')
+    expect(toggle.text()).toContain('Earlier months · 2 items · $5.00')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(w.find('[data-testid="days-earlier-toggle"]').text()).toContain('Earlier months · 1 item · $5.00')
+  })
+
+  it('opening the fold groups by month', async () => {
+    const w = mountPanel(fixtures)
+    await w.find('[data-testid="sessions-earlier-toggle"]').trigger('click')
+    expect(w.find('[data-testid="untagged-old-jun"]').exists()).toBe(true)
+    expect(w.findAll('[data-testid="sessions-earlier-month"]').map((m) => m.text())).toEqual(['June 2026', 'May 2026'])
+  })
+
+  it('the shortcut builds a selection of exactly the earlier items, and decides nothing', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ action: 'dismiss', total: 3 })
+    vi.stubGlobal('$fetch', fetchMock)
+    const w = mountPanel(fixtures)
+    const shortcut = w.find('[data-testid="worklist-select-earlier"]')
+    expect(shortcut.text()).toBe('Select the 3 from earlier months')
+    await shortcut.trigger('click')
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(w.find('[data-testid="worklist-action-bar"]').text()).toContain('3 selected')
+    expect(w.find('[data-testid="worklist-action-bar"]').text()).toContain('$10.00')
+    await w.find('[data-testid="worklist-dismiss-selected"]').trigger('click')
+    await flushPromises()
+    const body = fetchMock.mock.calls[0]![1].body
+    expect(body.sessions.sort()).toEqual(['old-jun', 'old-may'])
+    expect(body.unaccounted).toEqual(['d2'])
+  })
+
+  it('a session is placed by the UTC month of its last event, whatever zone it was in', () => {
+    stubServerClock('2026-07-01T00:30:00Z')
+    const w = mountPanel({
+      sessions: [older('edge', '2026-06-30T23:59:00.000Z', '1.00')],
+      unaccounted: [],
+    })
+    expect(w.find('[data-testid="sessions-earlier-toggle"]').exists()).toBe(true)
+    expect(w.find('[data-testid="untagged-edge"]').exists()).toBe(false)
+  })
+
+  it('says "of those shown" when a list is at its read cap', () => {
+    const many = Array.from({ length: 100 }, (_, i) => older(`s${i}`, '2026-06-10T10:00:00.000Z', '1.00'))
+    const w = mountPanel({ sessions: many, unaccounted: [] })
+    expect(w.find('[data-testid="sessions-earlier-toggle"]').text()).toContain('of those shown')
+  })
+
+  it('before the clock lands nothing is folded, and no month is guessed', () => {
+    stubServerClock(null)
+    const w = mountPanel(fixtures)
+    expect(w.find('[data-testid="sessions-earlier-toggle"]').exists()).toBe(false)
+    expect(w.find('[data-testid="untagged-old-may"]').exists()).toBe(true)
   })
 })

@@ -5,7 +5,7 @@
  * Per data-model.md §instance_attestation Retention (R1 F6 / R2 F2):
  *   - 12-month active retention.
  *   - At month 13, clear principal_email, claimed_email, raw_project_code,
- *     notes; set
+ *     display_name (the owner's device name, mig 0171), notes; set
  *     ts_purged = NOW().
  *   - Keep session_id, principal_oid, region_id, org_unit_id,
  *     cost_owning_unit_id, attestation_state so attribution_record's FK
@@ -57,6 +57,8 @@ export async function runSoftPurge(
           -- the same purge set (epic-mdash-remediation.md, W2.3).
           claimed_email = NULL,
           raw_project_code = NULL,
+          -- The owner's device name (mig 0171) is a personal field too (#576).
+          display_name = NULL,
           notes = NULL,
           ts_purged = ${nowIso}::timestamptz
       WHERE instance_id = ${row.instance_id}::uuid AND ts_purged IS NULL

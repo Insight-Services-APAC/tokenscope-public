@@ -252,7 +252,7 @@ describe('ChartsStackedBars — height is CSS pixels, not a viewBox ratio (T12)'
     expect(w.find('svg').html()).not.toContain('<text')
     const labels = w.find('[data-testid="stacked-bars-x-labels"]')
     expect(labels.exists()).toBe(true)
-    expect(labels.text()).toContain('08-01')
+    expect(labels.text()).toContain('1 Aug')
   })
 })
 

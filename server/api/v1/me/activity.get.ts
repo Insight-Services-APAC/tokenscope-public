@@ -17,6 +17,7 @@ import { createError, defineEventHandler, getValidatedQuery } from 'h3'
 import { requireAuth } from '../../../auth/rbac'
 import { withRequestRls } from '../../../db/request-rls'
 import { fetchActivityPage } from '../../../usage/activity-list'
+import { requestClock } from '../../../utils/request-clock'
 import { ActivityListQuery, type ActivityListResponse } from '#shared/schemas/activity'
 
 export default defineEventHandler(async (event): Promise<ActivityListResponse> => {
@@ -26,12 +27,19 @@ export default defineEventHandler(async (event): Promise<ActivityListResponse> =
   )
 
   try {
-    const page = await withRequestRls(event, (tx) =>
-      fetchActivityPage(tx, session.teammateId, filters, {
-        limit,
-        cursor,
-        withBreakdowns: true,
-      }),
+    // Repeatable read: the page ranks its keys, then reads them, in two
+    // statements, and both must see one moment (#593).
+    const page = await withRequestRls(
+      event,
+      (tx) =>
+        fetchActivityPage(tx, session.teammateId, filters, {
+          limit,
+          cursor,
+          withBreakdowns: true,
+          withDeviceNames: true,
+          today: requestClock(event).today,
+        }),
+      { isolationLevel: 'repeatable read' },
     )
     return {
       rows: page.rows,

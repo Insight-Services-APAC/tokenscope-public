@@ -375,7 +375,7 @@ describe('T-C2 — a PARTIALLY materialised rollup is not a window total', () =>
 
   it('a COVERED window still says what period the figure is of', async () => {
     const el = (await mountPage(withAdvisory('318.90', 0))).find('[data-testid="burn-advisory"]')
-    expect(el.text()).toContain('of the last 30d')
+    expect(el.text()).toContain('of the last 30 days')
   })
 
   it('an INCOMPLETE window drops the period claim and names the gap', async () => {

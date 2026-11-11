@@ -139,3 +139,60 @@ body {
     text-decoration: underline;
   }
 }
+
+/*
+ * PRINT (#583). Reports go to meetings on paper. The controls and the app's
+ * chrome carry `print:hidden` where they are defined (AppHeader, tabs, lens and
+ * date controls, Export and Print, the chart switch, the (i) dots); this block
+ * covers what a utility cannot: page margins, scroll containers that would clip
+ * a table to its on-screen height, sticky positioning, and the reporting charts
+ * (ECharts draws a canvas at the screen's width, so it is scaled to the page
+ * rather than cut at its edge). Cards do not split across pages
+ * (`print:break-inside-avoid` on UiCard); a long table repeats its header.
+ */
+@media print {
+  @page {
+    margin: 12mm;
+  }
+  html,
+  body {
+    background: #fff !important;
+  }
+  .overflow-x-auto,
+  .overflow-y-auto,
+  .overflow-auto {
+    overflow: visible !important;
+    max-height: none !important;
+  }
+  .sticky {
+    position: static !important;
+  }
+  thead {
+    display: table-header-group;
+  }
+  tr {
+    break-inside: avoid;
+  }
+  canvas,
+  svg {
+    max-width: 100% !important;
+  }
+  canvas {
+    height: auto !important;
+  }
+  /* ECharts pins its screen width inline on its wrappers, so a max-width on the
+     SVG alone had nothing narrower to measure against (#605). The SVG also needs
+     the viewBox useChartPrintFit gives it, or it clips instead of scaling. */
+  [_echarts_instance_],
+  [_echarts_instance_] > div {
+    max-width: 100% !important;
+  }
+  [_echarts_instance_] svg {
+    height: auto !important;
+  }
+  select,
+  input,
+  textarea {
+    display: none !important;
+  }
+}

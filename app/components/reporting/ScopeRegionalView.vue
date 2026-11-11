@@ -46,6 +46,7 @@ import ChargebackSplitCard from './ChargebackSplitCard.vue'
 import ChargebackTrendCard from './ChargebackTrendCard.vue'
 import ReportHeaderNotes from './ReportHeaderNotes.vue'
 import ExportCsvButton from './ExportCsvButton.vue'
+import PrintButton from './PrintButton.vue'
 import DriversTable, { type AxisOption } from './DriversTable.vue'
 import {
   projectDrillTarget,
@@ -73,6 +74,7 @@ import { buildRegionalTrend } from './regional/build-regional-trend'
 import { buildSurfaceHero } from './build-surface-hero'
 import { monthLabel } from './window-labels'
 import { periodBandWindow, rollingBandNote } from './band-labels'
+import { publishPrintFacts, windowFromMeta } from './print-facts'
 import { BUDGET_LABEL } from '#shared/reports/vocabulary'
 import {
   buildChargebackLaneTrend,
@@ -126,6 +128,10 @@ const props = withDefaults(
     drillWindow?: Omit<DrillFrame, 'src'>
     /** Admin-only "Fix org homing →" — from the container's session; fail-closed. */
     canFixHoming?: boolean
+    /** The reader holds the Finance report scope (#585); fail-closed. */
+    canSeeFinance?: boolean
+    /** Admin-only link to this region's unplaced teammates (#585); null = plain words. */
+    placementHref?: string | null
   }>(),
   {
     error: undefined,
@@ -135,6 +141,8 @@ const props = withDefaults(
     drillGrants: () => NO_DRILL_GRANTS,
     drillWindow: () => ({}),
     canFixHoming: false,
+    canSeeFinance: false,
+    placementHref: null,
   },
 )
 
@@ -294,6 +302,20 @@ const windowLabel = computed(() => {
  * by comparing the two windows — it is an OPERAND here, not a rendered string.
  */
 const periodWindow = computed(() => (props.report ? periodBandWindow(props.report.meta) : ''))
+
+// The printed header (#583). The scope follows the server's clamp label first,
+// as the coverage note does: a subtree-scoped reader's figures are one unit's,
+// though the payload still names the region.
+publishPrintFacts(() => {
+  const r = props.report
+  if (!r) return null
+  return {
+    scope: r.budgetCoverage?.scopeLabel ?? r.drill?.displayName ?? r.region?.displayName ?? 'Region',
+    ...windowFromMeta(r.meta),
+    lens: props.lane === 'chargeback' ? 'chargeback' : 'usage',
+    settling: r.meta.providerStates.map((p) => ({ vendor: p.vendor, state: p.state })),
+  }
+})
 /*
  * The rolling band falls back to the period's own label when no trend window was
  * supplied, so the two headers can genuinely be the same string. Everything this
@@ -531,12 +553,14 @@ function driversDrillable(row: DriverRow): DrillTarget | null {
           <RegionalPracticeRank
             v-if="!isChargeback && report.practices.length"
             :practices="report.practices"
+            :placement-href="props.placementHref"
             @select="emit('drill', $event)"
           />
           <RegionalChargebackRank
             v-else-if="isChargeback"
             :rows="report.chargebackByCostCentre"
             :can-fix-homing="props.canFixHoming"
+            :can-see-finance="props.canSeeFinance"
           />
         </template>
 
@@ -676,7 +700,8 @@ function driversDrillable(row: DriverRow): DrillTarget | null {
       </ReportBand>
 
       <!-- Export -->
-      <div class="flex justify-end pt-2">
+      <div class="flex justify-end gap-2 pt-2 print:hidden">
+        <PrintButton />
         <ExportCsvButton
           endpoint="/api/v1/reports/export"
           :params="exportParams"

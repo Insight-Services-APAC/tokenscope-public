@@ -11,7 +11,9 @@
  *
  * Cheap where it can be: it keys on the CODE trees only (CODE_PATHS), so a
  * docs, copy or test-only push needs nothing, and a pure history rewrite (same
- * trees) passes. A recorded review covers that exact code state.
+ * trees) passes. A recorded review covers that exact code state. Code a branch
+ * took from origin/main (updating from main) is not new: only a code file that
+ * differs from both the upstream and origin/main needs the review (newCodeFiles).
  *
  *   node scripts/check-external-review.mjs --hook            (the gate)
  *   node scripts/check-external-review.mjs --record <file>   (after the review
@@ -110,6 +112,49 @@ export function reviewedFingerprints(text) {
   )
 }
 
+/**
+ * Code files HEAD changes that are on neither `base` nor origin/main: what a
+ * push would publish that no merged PR already carried. Updating a branch from
+ * main brings main's merged (and reviewed) code into it; compared with the
+ * branch's upstream alone, that code reads as new and the gate would ask for a
+ * review of other PRs' code (five times on 2026-11-10). A changed file is let
+ * through only when it CAME FROM MAIN: main changed it since the branch last
+ * took main (their merge base), and HEAD's copy is main's copy. Everything else
+ * that differs from the upstream still needs the review: the branch's own
+ * changes, a hand-resolved conflict, and a branch change reverted back to
+ * main's copy (main did not change that file, so the revert is the branch's
+ * own work). Returns null when it cannot tell (no origin/main, no merge base,
+ * a git error), and the caller then judges by the whole code fingerprint.
+ *
+ * Its limit is the gate's: it trusts the local origin/main ref. A ref moved by
+ * hand to dodge the gate is deliberate evasion, which CI, the PR review and the
+ * merge card still meet; a stale ref only makes the exemption smaller.
+ */
+export function newCodeFiles(base, git = gitDefault) {
+  try {
+    // ':(top)' anchors each path at the repository root, whatever folder the hook runs in;
+    // -z keeps file names exact (no quoting, no trimmed spaces).
+    const pathspecs = CODE_PATHS.map((p) => `:(top)${p}`)
+    const changed = (from, to) =>
+      new Set(
+        // --no-relative: a diff.relative=true config would otherwise still limit the
+        // output to the current folder, whatever the pathspecs say.
+        git(['diff', '--name-only', '-z', '--no-renames', '--no-relative', from, to, '--', ...pathspecs])
+          .split('\0')
+          .filter(Boolean),
+      )
+    const vsBase = changed(base, 'HEAD')
+    if (base === 'origin/main') return [...vsBase]
+    const forkPoint = git(['merge-base', base, 'origin/main'])
+    if (!forkPoint) return null
+    const mainChanged = changed(forkPoint, 'origin/main')
+    const vsMain = changed('origin/main', 'HEAD')
+    return [...vsBase].filter((f) => vsMain.has(f) || !mainChanged.has(f))
+  } catch {
+    return null
+  }
+}
+
 /** The ref a push is compared against: the branch's upstream, else origin/main. */
 function pushBase(git = gitDefault) {
   try {
@@ -122,7 +167,7 @@ function pushBase(git = gitDefault) {
 /**
  * Pure decision. `allow` with a reason, or `deny` with what to do.
  */
-export function decide({ command, head, base, reviewed, branch = null, pushRedirected = false }) {
+export function decide({ command, head, base, reviewed, branch = null, pushRedirected = false, newCode = null }) {
   if (!isPush(command)) return { allow: true, reason: 'not a push' }
   if (pushSkipsReview(command)) return { allow: true, reason: 'skipped explicitly' }
   // HEAD and the base are read in this directory: a push of another checkout
@@ -130,8 +175,29 @@ export function decide({ command, head, base, reviewed, branch = null, pushRedir
   const unmodelled = unmodelledForm(command, branch, pushRedirected)
   if (unmodelled) return { allow: false, unmodelled }
   if (head === base) return { allow: true, reason: 'no code change' }
+  if (Array.isArray(newCode) && newCode.length === 0) return { allow: true, reason: 'only code already on origin/main' }
   if (reviewed.has(head)) return { allow: true, reason: 'reviewed' }
   return { allow: false }
+}
+
+/** The hook's and --status's one judgement, read from git in this directory. */
+function judge(command, extra = {}) {
+  const base = pushBase()
+  const ledger = ledgerPath()
+  const newCode = newCodeFiles(base)
+  const d = decide({
+    command,
+    head: codeFingerprint('HEAD'),
+    base: codeFingerprint(base),
+    reviewed: reviewedFingerprints(existsSync(ledger) ? readFileSync(ledger, 'utf8') : ''),
+    newCode,
+    ...extra,
+  })
+  return { d, base, newCode }
+}
+
+function listed(files) {
+  return files.length > 5 ? `${files.slice(0, 5).join(', ')} and ${files.length - 5} more` : files.join(', ')
 }
 
 function deny(reason) {
@@ -150,13 +216,7 @@ function main(argv) {
     }
     if (!isPush(command)) return 0
     try {
-      const base = pushBase()
-      const ledger = ledgerPath()
-      const d = decide({
-        command,
-        head: codeFingerprint('HEAD'),
-        base: codeFingerprint(base),
-        reviewed: reviewedFingerprints(existsSync(ledger) ? readFileSync(ledger, 'utf8') : ''),
+      const { d, base, newCode } = judge(command, {
         branch: currentBranch(gitDefault),
         pushRedirected: pushConfigRedirects(gitDefault),
       })
@@ -164,7 +224,8 @@ function main(argv) {
         deny(`External-review gate: cannot check this push: ${d.unmodelled}.`)
       } else if (!d.allow) {
         deny(
-          `External-review gate: this push changes code (${CODE_PATHS.join(', ')}) against ${base} and no external review is recorded for it. ` +
+          `External-review gate: this push changes code (${CODE_PATHS.join(', ')}) against ${base} and no external review is recorded for it` +
+            (newCode?.length ? ` (new here, not on origin/main: ${listed(newCode)}). ` : '. ') +
             `Run an external review of \`git diff ${base}...HEAD\` (CLAUDE.md "Review shapes": copilot or another non-Claude executor), ` +
             'do ONE fix pass, then `node scripts/check-external-review.mjs --record <review-output-file>` and push again. ' +
             'Emergency only: prefix the push with SKIP_EXTERNAL_REVIEW=1.',
@@ -187,15 +248,19 @@ function main(argv) {
     return 0
   }
   if (argv[0] === '--status') {
-    const base = pushBase()
-    const ledger = ledgerPath()
-    const d = decide({
-      command: 'git push',
-      head: codeFingerprint('HEAD'),
-      base: codeFingerprint(base),
-      reviewed: reviewedFingerprints(existsSync(ledger) ? readFileSync(ledger, 'utf8') : ''),
+    // The same judgement the hook makes, with the same branch and push config, for a
+    // plain push of the current branch.
+    const { d, base, newCode } = judge('git push', {
+      branch: currentBranch(gitDefault),
+      pushRedirected: pushConfigRedirects(gitDefault),
     })
-    console.log(d.allow ? `push allowed (${d.reason}, against ${base})` : `push needs an external review (code changed against ${base})`)
+    console.log(
+      d.unmodelled
+        ? `push refused whatever the review: ${d.unmodelled}`
+        : d.allow
+          ? `push allowed (${d.reason}, against ${base})`
+          : `push needs an external review (code changed against ${base}${newCode?.length ? `; new here, not on origin/main: ${listed(newCode)}` : ''})`,
+    )
     return 0
   }
   console.error('usage: --hook | --record <review-output-file> | --status')

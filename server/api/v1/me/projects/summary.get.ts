@@ -5,6 +5,11 @@
  * state. Ended projects with a current assignment stay visible (post-mortem
  * view) — unlike the tag-picker (/me/projects), which excludes them.
  *
+ * `period=last` (#595) swaps the month-to-date window for the whole previous
+ * calendar month and reads each budget as it stood at that month's last
+ * instant. Membership stays "assigned now": a project left last month is not
+ * listed. The worklist pull-through is this month's fact, so it is null then.
+ *
  * MTD burn is `completeProjectSpend` (server/usage/complete-spend.ts) — THE
  * project-spend definition, in ONE batched call for every card, so a card and
  * the project page it opens can never show different money. The velocity flag
@@ -13,11 +18,16 @@
  */
 import { defineEventHandler } from 'h3'
 import { sql } from 'drizzle-orm'
+import { z } from 'zod'
 import { requireAuth } from '../../../../auth/rbac'
 import { withRequestRls } from '../../../../db/request-rls'
 import { activeProjectPredicate } from '../../../../db/project-predicates'
 import type { ProjectCard } from '../../../../../shared/schemas/usage'
-import { fetchProjectAllocation, fetchProjectVelocity } from '../../../../usage/consumption'
+import {
+  fetchProjectAllocation,
+  fetchProjectAllocations,
+  fetchProjectVelocity,
+} from '../../../../usage/consumption'
 import {
   completeProjectDailySpend,
   completeProjectSpend,
@@ -26,8 +36,10 @@ import {
 import { getUnallocatedSummary } from '../../../../utils/me-queries'
 import { baseAllowanceUsd } from '../../../../utils/base-allowance'
 import { aggregateSetFreshness, worstFreshness } from '../../../../usage/freshness'
-import { monthToDateWindow } from '../../../../utils/period'
+import { calendarMonthWindow, monthToDateWindow } from '../../../../utils/period'
 import { requestClock } from '../../../../utils/request-clock'
+import { getValidated } from '../../../../utils/validated-body'
+import { utcDaysInMonth, utcMonthEnd } from '../../../../../shared/reports/clock'
 import { exhaustionDate } from '../../../../usage/projections'
 import {
   GOV_VELOCITY_SPIKE_THRESHOLD,
@@ -46,8 +58,31 @@ interface MembershipRow extends Record<string, unknown> {
   region_id: string
 }
 
+const Query = z.object({ period: z.enum(['current', 'last']).default('current') })
+
 export default defineEventHandler(async (event) => {
   const session = await requireAuth(event)
+  const { period } = await getValidated(event, Query)
+
+  /*
+   * The REQUEST's clock (F1/D1), not a fresh wall-clock read: the window every
+   * card on this list decomposes must be the same month the browser's own
+   * `/api/v1/clock` says it is. It is also what lets the parity capture pin a
+   * real day 1 here (D29).
+   */
+  const now = new Date(requestClock(event).now)
+  const isLast = period === 'last'
+  const monthWindow = isLast
+    ? calendarMonthWindow(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15)))
+    : monthToDateWindow(now)
+  const firstDay = monthWindow.startIso.slice(0, 10)
+  // The month the page names, resolved here so the browser computes none.
+  const periodInfo = {
+    kind: period,
+    month: firstDay.slice(0, 7),
+    last_day: utcMonthEnd(firstDay),
+    days_in_month: utcDaysInMonth(firstDay),
+  }
 
   return await withRequestRls(event, async (tx) => {
     const memberships = await tx.execute<MembershipRow>(sql`
@@ -69,7 +104,8 @@ export default defineEventHandler(async (event) => {
       return {
         projects: [],
         total: 0,
-        untagged_usd: '0.00',
+        period: periodInfo,
+        untagged_usd: isLast ? null : '0.00',
         page_freshness: {
           aggregate_minutes_ago: null,
           projects_never_rolled_up: 0,
@@ -83,14 +119,6 @@ export default defineEventHandler(async (event) => {
     // bar, never the viewer's; memberships can be cross-region).
     const thresholdFor = await loadGovernanceSettingResolver(tx, GOV_VELOCITY_SPIKE_THRESHOLD)
 
-    /*
-     * The REQUEST's clock (F1/D1), not a fresh wall-clock read: the MTD window
-     * every card on this list decomposes must be the same month the browser's
-     * own `/api/v1/clock` says it is. It is also what lets the parity capture
-     * pin a real day 1 here (D29).
-     */
-    const now = new Date(requestClock(event).now)
-    const monthWindow = monthToDateWindow(now)
     // ONE lane read for EVERY card (not one per card): the same call the project
     // page makes, batched by project id. The W3 additions (D25/D26) ride the
     // SAME window and provisional option: the caller's own per-project slice
@@ -111,15 +139,22 @@ export default defineEventHandler(async (event) => {
        * activity-tagged spend and explicitly DISMISSED spend into a figure
        * labelled "→ worklist" — money nobody owes work on, presented as work.
        */
-      getUnallocatedSummary(
-        tx,
-        session.teammateId,
-        monthWindow.startIso,
-        baseAllowanceUsd(),
-        monthWindow.endIso,
-      ),
+      isLast
+        ? null
+        : getUnallocatedSummary(
+            tx,
+            session.teammateId,
+            monthWindow.startIso,
+            baseAllowanceUsd(),
+            monthWindow.endIso,
+          ),
     ])
-    const untaggedUsd = Number(unallocated.unallocated.untagged_cost_usd)
+    const untaggedUsd = unallocated ? Number(unallocated.unallocated.untagged_cost_usd) : null
+
+    // Last month's budgets, as they stood at that month's last instant.
+    const lastMonthBudgets = isLast
+      ? await fetchProjectAllocations(tx, projectIds, new Date(Date.parse(monthWindow.endIso) - 1).toISOString())
+      : null
 
     /*
      * The aggregate's own lag, for the velocity flag it still feeds — reported
@@ -141,7 +176,7 @@ export default defineEventHandler(async (event) => {
       memberProjects.map(async (m) => {
         const mtd = spendByProject.get(m.id)?.costUsd ?? 0
         const [allocation, velocity] = await Promise.all([
-          fetchProjectAllocation(tx, m.id),
+          lastMonthBudgets ? Promise.resolve(lastMonthBudgets.get(m.id) ?? 0) : fetchProjectAllocation(tx, m.id),
           fetchProjectVelocity(tx, m.id, thresholdFor(m.region_id)),
         ])
         return {
@@ -152,11 +187,12 @@ export default defineEventHandler(async (event) => {
           wbs_code: m.wbs_code,
           end_date: m.end_date,
           ended: m.ended,
+          ended_before_period: m.ended && (!isLast || m.end_date === null || m.end_date.slice(0, 10) < firstDay),
           member_count: Number(m.member_count),
           mtd_cost_usd: mtd.toFixed(2),
           allocation_usd: allocation.toFixed(2),
           utilisation: allocation > 0 ? Number((mtd / allocation).toFixed(4)) : null,
-          projected_exhaustion_date: exhaustionDate(mtd, allocation, now),
+          projected_exhaustion_date: isLast ? null : exhaustionDate(mtd, allocation, now),
           velocity,
           // W3 D25/D26: the caller's slice of the card figure (same lane,
           // window and provisional option as `mtd_cost_usd`) + the same-window
@@ -173,9 +209,10 @@ export default defineEventHandler(async (event) => {
     return {
       projects: cards,
       total: cards.length,
+      period: periodInfo,
       // W3 D25: the band's "$X untagged → worklist" pull-through — the
       // caller's own taggable-but-untagged spend this month (self figure).
-      untagged_usd: untaggedUsd.toFixed(2),
+      untagged_usd: untaggedUsd === null ? null : untaggedUsd.toFixed(2),
       /*
        * The month figure on every card is LIVE off the lane; the velocity flag
        * is not. Disclosed rather than left for a viewer to discover — and

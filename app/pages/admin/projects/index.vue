@@ -6,11 +6,17 @@
  * Region scope mirrors Admin → Users: the org-wide role (
  * platform-admin) get a region-view picker (defaults to their own region);
  * region admins are pinned to their own region.
+ *
+ * Search, filters and paging run ON THE SERVER (#582): the list used to stop at
+ * the first 50 projects by code with nothing to reach the rest. The pattern is
+ * Admin → Teammates': limit=50 offset=N, and any filter change restarts at
+ * page 1 (a page-2 offset against a smaller result set renders a false empty).
  */
 
 import AdminResultToast from '../../../components/admin/AdminResultToast.vue'
 import { useResultToast } from '../../../composables/useResultToast'
 import { computed, ref } from 'vue'
+import { ADMIN_LIST_SEARCH_MAX } from '#shared/schemas/admin-list-search'
 import { consola } from 'consola'
 import EntityTable from '../../../components/admin/EntityTable.vue'
 import AdminPageSkeleton from '../../../components/admin/AdminPageSkeleton.vue'
@@ -80,12 +86,35 @@ const effectiveRegion = computed(() =>
   isOrgWide.value ? (viewRegionId.value || regionId.value) : regionId.value,
 )
 
-const projectsUrl = computed(() =>
-  effectiveRegion.value ? `/api/v1/admin/projects?region=${effectiveRegion.value}&limit=50` : '',
-)
+const query = ref('')
+const statusFilter = ref<'' | 'active' | 'ended'>('')
+const noBudgetOnly = ref(false)
+const offset = ref(0)
+const LIMIT = 50
+watch([query, statusFilter, noBudgetOnly, effectiveRegion], () => {
+  offset.value = 0
+})
+const filtering = computed(() => query.value.trim() !== '' || statusFilter.value !== '' || noBudgetOnly.value)
+
+const projectsUrl = computed(() => {
+  if (!effectiveRegion.value) return ''
+  const parts = [`region=${effectiveRegion.value}`, `limit=${LIMIT}`, `offset=${offset.value}`]
+  const q = query.value.trim()
+  if (q) parts.push(`q=${encodeURIComponent(q)}`)
+  if (statusFilter.value) parts.push(`status=${statusFilter.value}`)
+  if (noBudgetOnly.value) parts.push('budget=none')
+  return `/api/v1/admin/projects?${parts.join('&')}`
+})
+
+function nextPage() {
+  if (offset.value + LIMIT < (data.value?.total ?? 0)) offset.value += LIMIT
+}
+function prevPage() {
+  offset.value = Math.max(0, offset.value - LIMIT)
+}
 
 // Explicit keys below because these getters can be '' (D1); the watch carries the refetch.
-const { data, error, refresh } = useLazyFetch<{ projects: ProjectRow[]; total: number } | null>(
+const { data, error, refresh } = useLazyFetch<{ projects: ProjectRow[]; total: number; offset: number } | null>(
   () => projectsUrl.value,
   {
     key: 'admin-projects-list',
@@ -96,6 +125,17 @@ const { data, error, refresh } = useLazyFetch<{ projects: ProjectRow[]; total: n
   },
 )
 const skeleton = computed(() => !error.value && data.value == null)
+
+// A page can empty under the reader: ending, deleting or revoking the last row on
+// the final page shrinks the total behind them. Step back to the last page that
+// exists rather than strand them on an empty one with no pager to leave by.
+watch(
+  () => data.value?.total,
+  (total) => {
+    if (total == null || offset.value === 0 || offset.value < total) return
+    offset.value = total === 0 ? 0 : Math.floor((total - 1) / LIMIT) * LIMIT
+  },
+)
 
 const {
   data: orgUnitsData,
@@ -282,10 +322,46 @@ async function remove(row: ProjectRow) {
       :rows="data?.projects ?? []"
       :columns="columns"
       :total="data?.total"
+      :server-offset="data?.offset ?? offset"
+      wrap-actions
       add-to="/projects/new"
+      :empty-headline="filtering ? 'No matching projects' : undefined"
+      :empty-sub="filtering ? 'No projects in this region match the search and filters.' : undefined"
     >
+      <template #toolbar>
+        <form class="flex items-center gap-2 flex-1 min-w-[200px]" role="search" @submit.prevent="refresh()">
+          <input
+            v-model="query"
+            type="search"
+            :maxlength="ADMIN_LIST_SEARCH_MAX"
+            placeholder="Search by code or name…"
+            aria-label="Search projects by code or name"
+            class="flex-1 px-3 py-2 text-sm border border-calm-2 rounded-md focus:border-brand-harmony"
+            data-testid="admin-projects-search"
+          >
+        </form>
+        <select
+          v-model="statusFilter"
+          aria-label="Show projects by status"
+          class="px-3 py-2 text-sm border border-calm-2 rounded-md bg-white"
+          data-testid="admin-projects-status-filter"
+        >
+          <option value="">Active and ended</option>
+          <option value="active">Active</option>
+          <option value="ended">Ended</option>
+        </select>
+        <label class="inline-flex items-center gap-2 text-sm text-carbon-2">
+          <input
+            v-model="noBudgetOnly"
+            type="checkbox"
+            class="w-4 h-4 accent-brand-harmony"
+            data-testid="admin-projects-no-budget-filter"
+          >
+          No budget
+        </label>
+      </template>
       <template #rowActions="{ row }">
-        <div class="flex items-center justify-end gap-2">
+        <div class="flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
           <UiButton
             kind="ghost"
             size="sm"
@@ -372,6 +448,11 @@ async function remove(row: ProjectRow) {
         </div>
       </template>
     </EntityTable>
+
+    <div v-if="!error && !skeleton && ((data?.total ?? 0) > LIMIT || offset > 0)" class="mt-4 flex items-center justify-end gap-3" data-testid="admin-projects-pager">
+      <UiButton kind="ghost" size="sm" :disabled="offset === 0" data-testid="admin-projects-prev" @click="prevPage">← Previous</UiButton>
+      <UiButton kind="ghost" size="sm" :disabled="offset + LIMIT >= (data?.total ?? 0)" data-testid="admin-projects-next" @click="nextPage">Next →</UiButton>
+    </div>
 
     <ProjectEditDialog
       :project="editTarget"

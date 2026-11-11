@@ -21,8 +21,9 @@
  * (accessible: the same figures are ALSO in the caller's data table, never
  * colour-alone).
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useChartTheme } from './useChartTheme'
+import { useChartPrintFit, type PrintFitChart } from './useChartPrintFit'
 import { escapeHtml } from './chart-utils'
 
 export interface RankedRowSegment {
@@ -250,12 +251,16 @@ function onClick(params: unknown) {
   const row = displayRows.value[p.dataIndex ?? -1]
   if (row) emit('select', row)
 }
+
+const chartRef = ref<PrintFitChart | null>(null)
+useChartPrintFit(chartRef)
 </script>
 
 <template>
   <ClientOnly>
     <VChart
       v-if="hasData"
+      ref="chartRef"
       :option="option"
       :style="{ height: `${resolvedHeight}px`, width: '100%' }"
       autoresize

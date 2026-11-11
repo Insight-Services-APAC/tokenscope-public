@@ -49,7 +49,7 @@ const hasSpend = computed(() => Number(data.value?.total_cost_usd ?? 0) > 0)
     <div class="flex items-center justify-between gap-4 mb-3">
       <div>
         <UiEyebrow>Recent spend</UiEyebrow>
-        <p class="text-xs text-carbon-3 mt-0.5">Your rolling-window spend velocity — separate from this month's budget.</p>
+        <p class="text-xs text-carbon-3 mt-0.5">Your rolling-window spend velocity, separate from this month's budget.</p>
       </div>
       <UiPeriodSwitch v-model="windowKey" :options="WINDOW_OPTIONS" />
     </div>
@@ -92,7 +92,8 @@ const hasSpend = computed(() => Number(data.value?.total_cost_usd ?? 0) > 0)
           :end-day="settledThrough"
           :partial-day="today"
           :height="120"
-          empty-label="No telemetry-observed spend in this window — provider-recorded days are not charted here."
+          offer-table
+          empty-label="No telemetry-observed spend in this window: provider-recorded days are not charted here."
         />
         <div v-if="topModels.length" class="flex flex-wrap items-center gap-1.5 mt-2" data-testid="recent-spend-models">
           <span class="text-[11px] text-carbon-3">Top models:</span>
@@ -114,7 +115,7 @@ const hasSpend = computed(() => Number(data.value?.total_cost_usd ?? 0) > 0)
         person whose every dollar arrived as a provider-recorded day and will
         never have a session behind it.
       -->
-      No telemetry-observed spend in the last {{ windowDays }} days — provider-recorded days
+      No telemetry-observed spend in the last {{ windowDays }} days: provider-recorded days
       are counted in your totals above, but are not charted here.
     </p>
   </UiCard>

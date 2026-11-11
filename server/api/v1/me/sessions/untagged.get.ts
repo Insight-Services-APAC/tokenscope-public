@@ -23,6 +23,7 @@ import { withRequestRls } from '../../../../db/request-rls'
 import { breakdownFields, fetchBreakdownCells, groupCells } from '../../../../usage/breakdowns'
 import { conversationKeyExpr } from '../../../../db/conversation-key'
 import { WORKLIST_LIST_LIMIT } from '#shared/schemas/worklist'
+import { ownDeviceNames } from '../../../../utils/device-names'
 
 interface Row extends Record<string, unknown> {
   session_id: string
@@ -106,9 +107,12 @@ function unaccountedQuery(teammateId: string, opts: { dismissed: boolean }): SQL
   `
 }
 
-const toSession = (r: Row) => ({
+const toSession = (r: Row, names: Map<string, string>, spans: Map<string, { first: string; last: string }>) => ({
   session_id: r.session_id,
   instance_id: r.instance_id,
+  device_name: r.instance_id ? (names.get(r.instance_id) ?? null) : null,
+  session_first: spans.get(r.session_id)?.first ?? r.first_event,
+  session_last: spans.get(r.session_id)?.last ?? r.last_event,
   first_event: r.first_event,
   last_event: r.last_event,
   tokens: Number(r.tokens),
@@ -128,7 +132,7 @@ const toUnaccounted = (u: UnaccountedRow) => ({
 export default defineEventHandler(async (event) => {
   const session = await requireAuth(event)
 
-  const { rows, cellsByConv, unaccounted, dismissedRows, dismissedUnaccounted } = await withRequestRls(
+  const { rows, cellsByConv, unaccounted, dismissedRows, dismissedUnaccounted, names, spans } = await withRequestRls(
     event,
     async (tx) => {
       // Concurrent issuance on ONE tx connection: postgres-js pipelines and
@@ -152,7 +156,36 @@ export default defineEventHandler(async (event) => {
         session.teammateId,
         [...convRows].map((r) => r.session_id),
       )
+      // The caller's own device names (#576), one read for both session lists.
+      const names = await ownDeviceNames(tx, session.teammateId, [
+        ...[...convRows].map((r) => r.instance_id),
+        ...[...dismissedConvRows].map((r) => r.instance_id),
+      ])
+      /*
+       * #577: when each listed conversation ran, across its WHOLE ledger (tagged
+       * rows too). One grouped read over the listed keys only, matched on the
+       * same COALESCE key the lists group by.
+       */
+      const keys = [...new Set([...[...convRows], ...[...dismissedConvRows]].map((r) => r.session_id))]
+      const inList = sql.join(keys.map((k) => sql`${k}`), sql`, `)
+      const spanRows = keys.length
+        ? await tx.execute<{ k: string; first: string; last: string } & Record<string, unknown>>(sql`
+            SELECT ${conversationKeyExpr('ar')} AS k,
+                   MIN(ar.ts_event)::text AS first, MAX(ar.ts_event)::text AS last
+              FROM attribution_record ar
+             WHERE ar.teammate_id = ${session.teammateId}::uuid
+               -- The two arms of the COALESCE key, so the claude_session_id arm
+               -- is index-servable (as fetchBreakdownCells does); the legacy
+               -- instance arm matches pre-0016 rows only.
+               AND (ar.claude_session_id IN (${inList})
+                    OR (ar.claude_session_id IS NULL AND ar.instance_id::text IN (${inList})))
+             GROUP BY ${conversationKeyExpr('ar')}
+          `)
+        : []
+      const spans = new Map([...spanRows].map((r) => [r.k, { first: r.first, last: r.last }]))
       return {
+        names,
+        spans,
         rows: convRows,
         cellsByConv: groupCells(cells),
         unaccounted: unaccountedRows,
@@ -164,7 +197,7 @@ export default defineEventHandler(async (event) => {
 
   return {
     sessions: [...rows].map((r) => ({
-      ...toSession(r),
+      ...toSession(r, names, spans),
       // models was hardcoded [] pre-0045; now real (cost-share desc, §3.3).
       ...breakdownFields(cellsByConv.get(r.session_id) ?? []),
     })),
@@ -173,7 +206,7 @@ export default defineEventHandler(async (event) => {
     unaccounted: [...unaccounted].map(toUnaccounted),
     // Decided-and-left-unallocated. Out of the queue, still restorable, spend unchanged.
     dismissed: {
-      sessions: [...dismissedRows].map(toSession),
+      sessions: [...dismissedRows].map((r) => toSession(r, names, spans)),
       unaccounted: [...dismissedUnaccounted].map(toUnaccounted),
     },
   }

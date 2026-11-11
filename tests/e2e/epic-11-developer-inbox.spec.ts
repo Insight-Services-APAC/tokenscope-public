@@ -107,9 +107,11 @@ test.describe('Inbox drawer', () => {
     await respUnt
     const rowUnt = page.locator('[data-testid^="inbox-row-"]', { hasText: 'Usage not recorded' }).first()
     await rowUnt.locator('button').first().click()
+    // #573: drawn from the sections table, and it points at the device check.
     await expect(page.locator('[data-testid="inbox-drawer"]')).toHaveAttribute(
       'data-variant',
-      'untagged',
+      'sections',
     )
+    await expect(page.locator('[data-testid="drawer-action-primary"]')).toContainText('Open my devices')
   })
 })

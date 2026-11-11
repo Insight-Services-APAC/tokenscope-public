@@ -51,10 +51,16 @@ const source = str('source', 'sync source')
       <div class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">
         What to do
       </div>
+      <!-- #573: the old copy said Resolve "marks the manual value as the
+           canonical" and Dismiss hides it "for 24 hours". Neither is true:
+           closing the item changes no value, and the connector-health worker
+           raises it again on its next run while the conflict is pending. -->
       <p class="text-sm text-carbon-2 leading-relaxed">
-        Pick one or escalate. Resolve marks the manual value as the
-        canonical and stops the daily reminder; Dismiss keeps the
-        conflict tracked but hides it from the inbox for 24 hours.
+        Decide which value is right with the owner of the connected system, and
+        correct it there. TokenScope has no screen that settles a sync conflict,
+        and correcting the value does not mark the conflict settled either.
+        Resolving or dismissing this item changes neither value; while the
+        conflict is pending, the next check raises a new item.
       </p>
     </div>
   </section>

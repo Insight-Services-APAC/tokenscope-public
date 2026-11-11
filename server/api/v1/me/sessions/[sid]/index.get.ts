@@ -17,6 +17,7 @@ import { requireAuth } from '../../../../../auth/rbac'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { conversationKeyExpr } from '../../../../../db/conversation-key'
 import type { SessionDetail } from '../../../../../../shared/schemas/usage'
+import { ownDeviceNames } from '../../../../../utils/device-names'
 import {
   fetchBreakdownCells,
   fetchQuerySourceSplit,
@@ -90,10 +91,12 @@ export default defineEventHandler(async (event): Promise<SessionDetail> => {
     // a carrier convention, not a set of prices, so it ships as NULL rather than
     // as fabricated zeros — the session's money is stated once, in cost_usd.
     const lanes = sessionLaneView(cells)
+    const names = await ownDeviceNames(tx, session.teammateId, [header.instance_id])
 
     return {
       session_id: conversationId,
       instance_id: header.instance_id,
+      device_name: header.instance_id ? (names.get(header.instance_id) ?? null) : null,
       tool: header.tool,
       project_id: header.project_id,
       project_code: header.project_code,

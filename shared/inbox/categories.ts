@@ -32,6 +32,7 @@ export const INBOX_GROUP_LABELS: Record<InboxCategoryGroup, string> = {
 /** Category key → what a person reads, and the group it filters under. */
 export const INBOX_CATEGORY_INFO = {
   'over-budget': { label: 'Over budget', group: 'budgets' },
+  'budget-nearly-used': { label: 'Budget nearly used', group: 'budgets' },
   'velocity-warning': { label: 'Spending fast', group: 'budgets' },
   'project-request': { label: 'Project request', group: 'requests' },
   'project-request-decided': { label: 'Project decision', group: 'requests' },

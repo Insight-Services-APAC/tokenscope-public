@@ -37,6 +37,7 @@ function download() {
   <UiButton
     kind="secondary"
     size="sm"
+    class="print:hidden"
     data-testid="export-csv-button"
     :title="`Download ${filename}`"
     @click="download"

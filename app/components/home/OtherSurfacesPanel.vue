@@ -132,8 +132,8 @@ const stackedDays = computed<StackedDay[]>(() => {
 })
 
 function stackTitle(d: StackedDay): string {
-  if (d.totalUsd <= 0) return `${d.day} — ${fmtUsd(0)}`
-  return `${d.day} — ${fmtUsd(d.totalUsd)} · ${d.segments.map((s) => `${s.label} ${fmtUsd(s.usd)}`).join(' · ')}`
+  if (d.totalUsd <= 0) return `${d.day}: ${fmtUsd(0)}`
+  return `${d.day}: ${fmtUsd(d.totalUsd)} · ${d.segments.map((s) => `${s.label} ${fmtUsd(s.usd)}`).join(' · ')}`
 }
 </script>
 
@@ -143,7 +143,7 @@ function stackTitle(d: StackedDay): string {
       <div>
         <div class="text-lg font-bold text-carbon">Other Claude surfaces</div>
         <div class="text-xs text-carbon-3 mt-1">
-          Billed to your Business Unit · not project-taggable
+          counts under your Business Unit; cannot be tagged to a project
         </div>
       </div>
       <span
@@ -231,7 +231,7 @@ function stackTitle(d: StackedDay): string {
               height: b.usd > 0 ? `${Math.max(8, b.h * 100)}%` : '2px',
               background: b.usd > 0 ? laneColor(s.tool) : 'var(--calm)',
             }"
-            :title="`${b.day} — ${fmtUsd(b.usd)}`"
+            :title="`${b.day}: ${fmtUsd(b.usd)}`"
           />
         </div>
         <span
@@ -243,7 +243,7 @@ function stackTitle(d: StackedDay): string {
     </ul>
 
     <div class="px-6 py-3 border-t border-calm-2 text-[11px] text-carbon-3 italic">
-      Informational — these surfaces don't emit sessions, so there's nothing to tag. Spend is
+      Informational: these surfaces don't emit sessions, so there's nothing to tag. Spend is
       charged back to your Business Unit from the provider bill.
     </div>
   </UiCard>

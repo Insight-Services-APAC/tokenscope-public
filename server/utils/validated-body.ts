@@ -17,7 +17,7 @@ import { z, type ZodType } from 'zod'
 
 const VALIDATION_TYPE = 'https://tokenscope.example.com/errors/validation'
 
-function failValidation(error: z.ZodError): never {
+export function failValidation(error: z.ZodError): never {
   const issue = error.issues[0]
   const path = issue?.path.filter((p) => p !== '').join('.') ?? ''
   const detail = issue ? `${path ? `${path}: ` : ''}${issue.message}` : 'invalid request'

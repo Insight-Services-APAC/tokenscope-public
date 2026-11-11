@@ -37,6 +37,11 @@ function versionAfter(segments: string[], familyIdx: number): string {
   return nums.join('.')
 }
 
+/** Older ids put the version before the family: claude-3-5-sonnet → 3.5 (#598). */
+function versionBefore(segments: string[], familyIdx: number): string {
+  return segments.slice(1, familyIdx).filter((s) => /^\d+$/.test(s) && s.length < 8).join('.')
+}
+
 export function modelDisplay(modelId: string): ModelDisplay {
   const id = (modelId || '').toLowerCase().trim()
   if (!id) return { label: '—', family: 'other' }
@@ -49,7 +54,7 @@ export function modelDisplay(modelId: string): ModelDisplay {
     for (const fam of CLAUDE_FAMILIES) {
       const idx = segments.indexOf(fam.key)
       if (idx >= 0) {
-        const v = versionAfter(segments, idx)
+        const v = versionAfter(segments, idx) || versionBefore(segments, idx)
         return { label: v ? `${fam.name} ${v}` : fam.name, family: fam.key }
       }
     }
@@ -64,6 +69,29 @@ export function modelDisplay(modelId: string): ModelDisplay {
   }
 
   return { label: modelId, family: 'other' }
+}
+
+/**
+ * Rows under one human name each (#598): two raw ids can map to one label (a
+ * dated and an undated id of the same model), and two bars with the same name
+ * would each understate it. Their dollars are summed; the raw ids stay on the
+ * merged row for its tooltip. An unknown id keeps its own name.
+ */
+export function mergeByModelLabel<T>(
+  rows: readonly T[],
+  id: (r: T) => string,
+  usd: (r: T) => number,
+): { label: string; value: number; rawIds: string[] }[] {
+  const byLabel = new Map<string, { label: string; value: number; rawIds: string[] }>()
+  for (const r of rows) {
+    const label = modelDisplay(id(r)).label
+    const hit = byLabel.get(label)
+    if (hit) {
+      hit.value += usd(r)
+      if (!hit.rawIds.includes(id(r))) hit.rawIds.push(id(r))
+    } else byLabel.set(label, { label, value: usd(r), rawIds: [id(r)] })
+  }
+  return [...byLabel.values()].sort((a, b) => b.value - a.value)
 }
 
 export interface ModelSlice {

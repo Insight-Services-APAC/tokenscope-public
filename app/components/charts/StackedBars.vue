@@ -17,8 +17,16 @@
  * inside the viewBox would be stretched with it. The three day labels render as
  * HTML positioned by percentage — the same positions, in ink that cannot
  * distort. Nothing else in this chart is text.
+ *
+ * `offerTable` adds a Chart / Table switch (#584): the table lists the SAME axis
+ * days (the still-filling day labelled in words), one column per band in the
+ * stacking order, and each day's total, for readers who cannot reach a hover
+ * title.
  */
-import { computed } from 'vue'
+import { fmtUtcDay } from '../../composables/useFormat'
+import { computed, ref } from 'vue'
+import ChartsDayTable from './DayTable.vue'
+import ChartsViewSwitch from './ViewSwitch.vue'
 import { niceMax, seriesColor } from '../../composables/useChartScale'
 import { dayAxis } from '#shared/reports/day-axis'
 
@@ -74,8 +82,11 @@ const props = withDefaults(
      * panel already uses, with its swatch, so the band is still identifiable.
      */
     remainderKeys?: string[]
+    /** Offer a Chart / Table switch (#584). */
+    offerTable?: boolean
   }>(),
   {
+    offerTable: false,
     height: 160,
     keyOrder: undefined,
     labelFor: undefined,
@@ -177,7 +188,7 @@ const xLabels = computed(() => {
   if (!d.length) return []
   return [0, Math.floor(d.length / 2), d.length - 1].map((i) => ({
     leftPct: ((PAD.left + i * slot.value + slot.value / 2) / W) * 100,
-    label: d[i]!.day.slice(5),
+    label: fmtUtcDay(d[i]!.day),
   }))
 })
 
@@ -204,41 +215,62 @@ const display = (k: string) => (props.labelFor ? props.labelFor(k) : k)
 // axis — re-deriving it is how a key ends up claiming a treatment the chart did
 // not apply.
 const partialOnAxis = computed(() => axis.value.partialDay != null)
+
+const view = ref<'chart' | 'table'>('chart')
+// Only the bands the window actually carries become columns: a key with no
+// value on any drawn day is not a band on this chart.
+const tableColumns = computed(() =>
+  keys.value
+    .filter((k) => dense.value.some((d) => (d.m.get(k) ?? 0) > 0))
+    .map((k) => ({ key: k, label: display(k) })),
+)
+const tableValue = (day: string, key: string) => byDay.value.get(day)?.get(key) ?? 0
 </script>
 
 <template>
   <div data-testid="stacked-bars">
-    <svg
-      v-if="hasData"
-      :viewBox="`0 0 ${W} ${height}`"
-      preserveAspectRatio="none"
-      :style="{ height: `${height}px` }"
-      class="block w-full"
-      role="img"
-      aria-label="Stacked daily breakdown"
-    >
-      <rect
-        v-for="(s, i) in segments"
-        :key="i"
-        :x="s.x" :y="s.y" :width="barW" :height="s.h"
-        :fill="s.color" rx="1"
-        :fill-opacity="s.day === partialDay ? 0.45 : undefined"
-        :data-partial="s.day === partialDay ? 'true' : undefined"
+    <ChartsViewSwitch v-if="offerTable && hasData" v-model="view" label="Show the daily breakdown as" />
+    <template v-if="hasData && view === 'chart'">
+      <svg
+        :viewBox="`0 0 ${W} ${height}`"
+        preserveAspectRatio="none"
+        :style="{ height: `${height}px` }"
+        class="block w-full"
+        role="img"
+        aria-label="Stacked daily breakdown"
       >
-        <title>{{ s.day }} · {{ display(s.key) }} — {{ fmtVal(s.value) }}</title>
-      </rect>
-    </svg>
-    <!-- The day labels, in HTML: see the header note on the stretch. -->
-    <div v-if="hasData" class="relative h-3.5" data-testid="stacked-bars-x-labels">
-      <span
-        v-for="l in xLabels"
-        :key="l.label"
-        class="absolute -translate-x-1/2 text-[9px] text-carbon-3 whitespace-nowrap"
-        :style="{ left: `${l.leftPct.toFixed(2)}%` }"
-      >{{ l.label }}</span>
-    </div>
+        <rect
+          v-for="(s, i) in segments"
+          :key="i"
+          :x="s.x" :y="s.y" :width="barW" :height="s.h"
+          :fill="s.color" rx="1"
+          :fill-opacity="s.day === partialDay ? 0.45 : undefined"
+          :data-partial="s.day === partialDay ? 'true' : undefined"
+        >
+          <title>{{ s.day }} · {{ display(s.key) }}: {{ fmtVal(s.value) }}</title>
+        </rect>
+      </svg>
+      <!-- The day labels, in HTML: see the header note on the stretch. -->
+      <div class="relative h-3.5" data-testid="stacked-bars-x-labels">
+        <span
+          v-for="l in xLabels"
+          :key="l.label"
+          class="absolute -translate-x-1/2 text-[9px] text-carbon-3 whitespace-nowrap"
+          :style="{ left: `${l.leftPct.toFixed(2)}%` }"
+        >{{ l.label }}</span>
+      </div>
+    </template>
+    <ChartsDayTable
+      v-else-if="hasData"
+      :days="axis.days"
+      :columns="tableColumns"
+      :value="tableValue"
+      :partial-day="axis.partialDay"
+      :format="fmtVal"
+      caption="Daily breakdown, one row per UTC day"
+    />
     <p v-else class="text-xs text-carbon-3 italic py-8 text-center">No data in this window yet.</p>
-    <div v-if="hasData" class="flex flex-wrap gap-x-4 gap-y-1 mt-1 px-1">
+    <div v-if="hasData && view === 'chart'" class="flex flex-wrap gap-x-4 gap-y-1 mt-1 px-1">
       <span
         v-for="e in legendEntries"
         :key="e.key"

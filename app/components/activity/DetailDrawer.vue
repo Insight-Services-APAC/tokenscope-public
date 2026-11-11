@@ -14,6 +14,8 @@ import { ref, computed, watch } from 'vue'
 import UiButton from '../ui/Button.vue'
 import { fmtUsd, fmtTokens, fmtTimeAgo } from '../../composables/useFormat'
 import { modelDisplay } from '../../composables/useModelDisplay'
+import InfoDot from '../ui/InfoDot.vue'
+import { ADVISORY_INFO, advisorySentence } from '#shared/usage/advisory-copy'
 import { apiErrorDetail } from '../../composables/useApiError'
 import { useModalA11y } from '../../composables/useModalA11y'
 import type { PeriodOption } from '../ui/PeriodSwitch.vue'
@@ -84,7 +86,7 @@ const modelSlices = computed(() =>
   (detail.value?.by_model ?? []).map((m) => ({
     label: modelDisplay(m.model).label,
     value: Number(m.cost_usd),
-    title: `${modelDisplay(m.model).label} — ${fmtUsd(m.cost_usd)} · ${fmtTokens(m.tokens)}`,
+    title: `${modelDisplay(m.model).label}: ${fmtUsd(m.cost_usd)} · ${fmtTokens(m.tokens)}`,
   })),
 )
 const LANE_LABELS: Record<string, string> = {
@@ -158,7 +160,8 @@ const advisoryUsd = computed(() => Number(detail.value?.fidelity.tier2_cost_usd 
           </div>
         </div>
         <p v-if="advisoryUsd > 0" class="text-[11px] text-rag-amber -mt-3">
-          incl. {{ fmtUsd(detail.fidelity.tier2_cost_usd) }} advisory (telemetry-only) spend
+          {{ advisorySentence(fmtUsd(detail.fidelity.tier2_cost_usd), `the last ${windowDays} days`) }}
+          <InfoDot label="About indicative usage">{{ ADVISORY_INFO }}</InfoDot>
         </p>
 
         <!-- Model mix -->

@@ -1,6 +1,12 @@
 /*
  * GET /api/v1/admin/projects?region={regionId} — region-scoped
  * projects list for the admin Projects tab (design-notes §Screen 5).
+ *
+ * Server search and filters (#582): `q` matches code or display name,
+ * `status` keeps active or ended projects, `budget=none` keeps projects with no
+ * budget. Every filter is applied to the rows AND the COUNT, inside the same
+ * region predicate, so the footer's "1 to 50 of N" counts what the filters
+ * match in this region and nothing else.
  */
 import { defineEventHandler } from 'h3'
 import { getValidated } from '../../../utils/validated-body'
@@ -8,12 +14,17 @@ import { sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { requireRole, requireRegionScope } from '../../../auth/rbac'
 import { withRequestRls } from '../../../db/request-rls'
-import { endedProjectExpr } from '../../../db/project-predicates'
+import { activeProjectPredicate, endedProjectExpr } from '../../../db/project-predicates'
+import { LIKE_ESCAPE, escapeLikeLiteral } from '../../../utils/sql-like'
+import { ADMIN_LIST_SEARCH_MAX } from '../../../../shared/schemas/admin-list-search'
 
 const Query = z.object({
   region: z.string().uuid(),
   limit: z.coerce.number().int().positive().max(200).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
+  q: z.string().trim().max(ADMIN_LIST_SEARCH_MAX).optional(),
+  status: z.enum(['active', 'ended']).optional(),
+  budget: z.enum(['none']).optional(),
 })
 
 interface Row extends Record<string, unknown> {
@@ -39,6 +50,22 @@ export default defineEventHandler(async (event) => {
   await requireRole(event, 'admin')
   const query = await getValidated(event, Query)
   await requireRegionScope(event, query.region)
+
+  // The filters, ANDed onto the region predicate (never instead of it).
+  const like = query.q ? `%${escapeLikeLiteral(query.q)}%` : null
+  const filters = sql.join(
+    [
+      like
+        ? sql`AND (p.code ILIKE ${like} ESCAPE ${LIKE_ESCAPE} OR p.display_name ILIKE ${like} ESCAPE ${LIKE_ESCAPE})`
+        : sql``,
+      query.status === 'active' ? sql`AND ${activeProjectPredicate('p')}` : sql``,
+      query.status === 'ended' ? sql`AND ${endedProjectExpr('p')}` : sql``,
+      query.budget === 'none'
+        ? sql`AND NOT EXISTS (SELECT 1 FROM allocation WHERE scope_type = 'project' AND scope_id = p.id)`
+        : sql``,
+    ],
+    sql` `,
+  )
 
   // Rows + COUNT in ONE RLS transaction (API-13, per the admin/audit
   // house pattern "R2 F1") so the page and its total cannot disagree.
@@ -75,11 +102,15 @@ export default defineEventHandler(async (event) => {
       FROM project p
       JOIN org_unit ou ON ou.id = p.cost_owning_unit_id
       WHERE p.region_id = ${query.region}::uuid
+        ${filters}
       ORDER BY p.code
       LIMIT ${query.limit} OFFSET ${query.offset}
     `)
     const totalRows = await tx.execute<{ total: string }>(sql`
-      SELECT COUNT(*)::text AS total FROM project WHERE region_id = ${query.region}::uuid
+      SELECT COUNT(*)::text AS total
+      FROM project p
+      WHERE p.region_id = ${query.region}::uuid
+        ${filters}
     `)
     return { rows: [...dataRows], total: Number([...totalRows][0]?.total ?? 0) }
   })

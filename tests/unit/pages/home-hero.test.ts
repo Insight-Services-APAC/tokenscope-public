@@ -194,6 +194,7 @@ const STUBS = {
   // §F4: Activity owns its own keyset fetch; its behaviour is pinned in
   // tests/unit/components/activity-card.test.ts. Here only the MOUNT matters.
   ActivityCard: { template: '<div data-testid="activity-card-stub" />' },
+  HomeToolStatusStrip: { template: '<div data-testid="tool-status-stub" />' },
   ConnectClientDialog: true,
   MeLensDisclosure: LensDisclosure,
 }
@@ -805,11 +806,12 @@ describe('dashboard — the parts this change did not touch', () => {
     expect(w.text()).toContain('token spend')
   })
 
-  it('keeps the connect buttons, the tagged card and the Activity table', async () => {
+  // #580: the three always-on Connect buttons became the tools status strip
+  // (tests/unit/components/tool-status-strip.test.ts covers its states).
+  it('shows the tools status strip, the tagged card and the Activity table', async () => {
     const w = await mountPage()
-    expect(w.find('[data-testid="connect-claude"]').exists()).toBe(true)
-    expect(w.find('[data-testid="connect-desktop"]').exists()).toBe(true)
-    expect(w.find('[data-testid="connect-copilot"]').exists()).toBe(true)
+    expect(w.find('[data-testid="tool-status-stub"]').exists()).toBe(true)
+    expect(w.find('[data-testid="connect-claude"]').exists()).toBe(false)
     expect(w.find('[data-testid="activity-card-stub"]').exists()).toBe(true)
     expect(w.find('[data-testid="spill-card"]').exists()).toBe(true)
   })

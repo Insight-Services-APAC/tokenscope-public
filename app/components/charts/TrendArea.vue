@@ -3,8 +3,15 @@
  * ChartsTrendArea — daily spend area chart (SVG, no chart dependency,
  * brief §6.6). Sparse day series in; dense padded run rendered. Native
  * title tooltips per day point. Empty window → quiet empty state.
+ *
+ * `offerTable` adds a Chart / Table switch (#584): the table lists the SAME
+ * days this chart draws (the settled run, then the still-filling day labelled
+ * in words) with the same values, for readers who cannot reach a hover title.
  */
-import { computed } from 'vue'
+import { fmtUtcDay } from '../../composables/useFormat'
+import { computed, ref } from 'vue'
+import ChartsDayTable from './DayTable.vue'
+import ChartsViewSwitch from './ViewSwitch.vue'
 import { niceMax, padDays } from '../../composables/useChartScale'
 import { dayAxis } from '#shared/reports/day-axis'
 
@@ -40,9 +47,13 @@ const props = withDefaults(
      * which lane is empty instead of denying spend the page is showing.
      */
     emptyLabel?: string
+    /** Offer a Chart / Table switch (#584). */
+    offerTable?: boolean
   }>(),
-  { height: 160, format: undefined, partialDay: null, emptyLabel: undefined },
+  { height: 160, format: undefined, partialDay: null, emptyLabel: undefined, offerTable: false },
 )
+
+const view = ref<'chart' | 'table'>('chart')
 
 // Defaults reproduce the pre-existing output byte-for-byte per render site.
 const fmtAxis = (v: number) =>
@@ -112,19 +123,29 @@ const areaPath = computed(
     `${linePath.value} L${x(dense.value.length - 1).toFixed(1)},${(PAD.top + innerH.value).toFixed(1)} L${PAD.left},${(PAD.top + innerH.value).toFixed(1)} Z`,
 )
 const gridLines = computed(() => [0.25, 0.5, 0.75, 1].map((f) => ({ f, yv: y(max.value * f) })))
+// The table reads the chart's own run: the settled days, then the admitted
+// partial day. A value map, not a re-derivation, so the two cannot disagree.
+const tableDays = computed(() => [...dense.value.map((d) => d.day), ...(partial.value ? [partial.value.day] : [])])
+const tableValue = computed(() => {
+  const m = new Map(dense.value.map((d) => [d.day, d.value]))
+  if (partial.value) m.set(partial.value.day, partial.value.value)
+  return (day: string) => m.get(day) ?? 0
+})
+
 // First-of-window, mid, last labels keep the axis readable at 30 or 90 days
 // (deduped — a 1–2 day window must not stack identical labels).
 const xLabels = computed(() => {
   const d = dense.value
   if (!d.length) return []
   const idx = [...new Set([0, Math.floor(d.length / 2), d.length - 1])]
-  return idx.map((i) => ({ i, label: d[i]!.day.slice(5) }))
+  return idx.map((i) => ({ i, label: fmtUtcDay(d[i]!.day) }))
 })
 </script>
 
 <template>
   <div data-testid="trend-area">
-    <svg v-if="hasData" :viewBox="`0 0 ${W} ${height}`" class="w-full" role="img" aria-label="Daily spend trend">
+    <ChartsViewSwitch v-if="offerTable && hasData" v-model="view" label="Show daily spend as" />
+    <svg v-if="hasData && view === 'chart'" :viewBox="`0 0 ${W} ${height}`" class="w-full" role="img" aria-label="Daily spend trend">
       <line
         v-for="g in gridLines"
         :key="g.f"
@@ -141,7 +162,7 @@ const xLabels = computed(() => {
       <path :d="linePath" fill="none" stroke="var(--brand-harmony)" stroke-width="2" />
       <g v-for="(d, i) in dense" :key="d.day">
         <circle v-if="d.value > 0" :cx="x(i)" :cy="y(d.value)" r="2.5" fill="var(--brand-harmony)">
-          <title>{{ d.day }} — {{ fmtPoint(d.value) }}</title>
+          <title>{{ d.day }}: {{ fmtPoint(d.value) }}</title>
         </circle>
       </g>
       <!-- The still-filling day: hollow, faded, OFF the line (D4). It is not
@@ -164,7 +185,7 @@ const xLabels = computed(() => {
           stroke="var(--brand-harmony)" stroke-width="1.5" stroke-opacity="0.55"
           stroke-linecap="round"
         />
-        <title>{{ partial.day }} — {{ fmtPoint(partial.value) }} · still accruing</title>
+        <title>{{ partial.day }}: {{ fmtPoint(partial.value) }} · still accruing</title>
       </g>
       <text
         v-for="l in xLabels"
@@ -173,6 +194,15 @@ const xLabels = computed(() => {
         text-anchor="middle" class="fill-carbon-3" font-size="9"
       >{{ l.label }}</text>
     </svg>
+    <ChartsDayTable
+      v-else-if="hasData"
+      :days="tableDays"
+      :columns="[{ key: '', label: 'Spend' }]"
+      :value="tableValue"
+      :partial-day="partial?.day ?? null"
+      :format="fmtPoint"
+      caption="Daily spend, one row per UTC day"
+    />
     <!--
       The default no longer promises SESSIONS. This chart draws OTel-observed
       spend, which is one lane; a person whose spend arrived as provider-recorded
@@ -188,6 +218,6 @@ const xLabels = computed(() => {
       v-if="hasData && partial"
       class="text-[10px] text-carbon-3 italic mt-1 text-right"
       data-testid="trend-area-partial-note"
-    >today partial — still accruing</p>
+    >today partial, still accruing</p>
   </div>
 </template>

@@ -17,6 +17,7 @@
  */
 
 import UiPbar from '../ui/Pbar.vue'
+import { fmtUsd } from '../../composables/useFormat'
 
 const props = defineProps<{
   body: Record<string, unknown>
@@ -41,8 +42,8 @@ const pct = usedUsd !== null && capUsd !== null && capUsd > 0 ? usedUsd / capUsd
 const otelPct = num('otelPct')
 const anthroPct = num('anthroPct')
 
-// Round-to-nearest-10 of overBy gives a suggested top-up; floor at $50.
-const suggestedTopupUsd = overBy !== null ? Math.max(50, Math.round(overBy / 10) * 10) : null
+// The overrun rounded UP to the next $10 (so it covers it, #587); floor at $50.
+const suggestedTopupUsd = overBy !== null ? Math.max(50, Math.ceil(overBy / 10) * 10) : null
 </script>
 
 <template>
@@ -55,7 +56,7 @@ const suggestedTopupUsd = overBy !== null ? Math.max(50, Math.round(overBy / 10)
       <div class="text-xs text-carbon-2 mt-2 flex justify-between">
         <span>{{ Math.round(pct * 100) }}% used</span>
         <span style="font-variant-numeric: tabular-nums">
-          ${{ usedUsd.toFixed(2) }} of ${{ capUsd.toFixed(2) }}
+          {{ fmtUsd(usedUsd) }} of {{ fmtUsd(capUsd) }}
         </span>
       </div>
     </div>
@@ -67,8 +68,9 @@ const suggestedTopupUsd = overBy !== null ? Math.max(50, Math.round(overBy / 10)
         Suggested action
       </div>
       <p v-if="suggestedTopupUsd !== null && pct !== null" class="text-sm text-carbon-2 leading-relaxed">
-        Add a ${{ suggestedTopupUsd.toFixed(0) }} top-up to cover the remaining
-        {{ Math.max(0, Math.round((pct - 1) * 100)) }}%, or open the project to
+        <!-- #587: over 100%, nothing "remains": the top-up covers the overrun. -->
+        Add a {{ fmtUsd(suggestedTopupUsd, { whole: true }) }} top-up to cover the
+        {{ Math.max(1, Math.round((pct - 1) * 100)) }}% over, or open the project to
         discuss with the team. TokenScope won't block sessions.
       </p>
       <p v-else class="text-sm text-carbon-2 leading-relaxed">

@@ -950,4 +950,7 @@ it", not "was it within budget".
 month-to-date complete spend (Claude and Copilot) with the project's budget,
 read by the project page's own reader at the run's instant. A project with no
 budget is never over. A project over its budget gets one `over-budget` inbox
-item per month ([Background Workers](Background-Workers.md)).
+item per month ([Background Workers](Background-Workers.md)). Before that, a
+project whose spend reaches 80% of its budget gets one `budget-nearly-used`
+item per month, to the same people; never after an `over-budget` item that
+month, and nothing is blocked at either.

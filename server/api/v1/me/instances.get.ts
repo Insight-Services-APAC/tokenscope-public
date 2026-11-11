@@ -14,15 +14,15 @@
  *   - last_emission — MAX(attribution_record.ts_event) for this instance
  *   - spend_usd_mtd — SUM(cost_usd) this calendar month for this instance
  *   - project     — raw_project_code (nullable; unassigned enrolment)
- *   - silent      — active (ts_actual_end IS NULL) but no emission in >24h.
- *                   The "went-silent" anomaly the ADR's detection-based
- *                   P2 defence leans on, surfaced per-row.
+ *   - state       — sending, idle, not-in-use, cannot-send or revoked, decided
+ *                   in the shared projection (instance-projection.ts, #592).
  */
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { requireAuth } from '../../../auth/rbac'
 import { withRequestRls } from '../../../db/request-rls'
+import { requestClock } from '../../../utils/request-clock'
 import {
   instanceMetricColumns,
   instanceProjectionWindow,
@@ -38,17 +38,18 @@ const Query = z.object({
 export default defineEventHandler(async (event) => {
   const session = await requireAuth(event)
   const query = await getValidatedQuery(event, (data) => Query.parse(data))
-  const { monthStartIso, silentCutoffMs } = instanceProjectionWindow(new Date())
+  const window = instanceProjectionWindow(new Date(requestClock(event).now))
 
   const rows = await withRequestRls(event, async (tx) =>
     tx.execute<InstanceMetricRow & Record<string, unknown>>(sql`
       SELECT
         ia.instance_id::text                                        AS instance_id,
         ia.tool                                                     AS tool,
+        ia.display_name                                             AS display_name,
         ia.raw_project_code                                         AS raw_project_code,
         ia.ts_start::text                                           AS ts_start,
         ia.ts_actual_end::text                                      AS ts_actual_end,
-        ${instanceMetricColumns(monthStartIso)}
+        ${instanceMetricColumns(window.monthStartIso)}
       FROM instance_attestation ia
       WHERE ia.teammate_id = ${session.teammateId}::uuid
       ORDER BY ia.ts_start DESC
@@ -57,6 +58,6 @@ export default defineEventHandler(async (event) => {
   )
 
   return {
-    instances: [...rows].map((r) => projectInstanceRow(r, silentCutoffMs)),
+    instances: [...rows].map((r) => projectInstanceRow(r, window)),
   }
 })

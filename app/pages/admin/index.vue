@@ -65,10 +65,6 @@ const { data: diag, error: diagError, refresh: refreshDiag } = useLazyFetch<{ po
   '/api/v1/admin/diagnostics',
   { key: 'admin-overview-diag', server: false, default: () => null, immediate: adminAtSetup },
 )
-const { data: recon, error: reconError, refresh: refreshRecon } = useLazyFetch<{ summary: { total: number } } | null>(
-  '/api/v1/admin/reconciliation/records?limit=1',
-  { key: 'admin-overview-recon', server: false, default: () => null, immediate: adminAtSetup },
-)
 
 // One of busy / error / value per tile — D2, keyed on the ABSENCE of data, not
 // on `pending`. 'na' is the read that was never issued (org-wide admin has no
@@ -89,25 +85,19 @@ const stats = computed(() => [
     key: 'regions',
     label: 'Regions',
     to: '/admin/regions',
-    ...tile(adminAtSetup, regions.value, regionsError.value, (d) => String(d.regions.length)),
+    ...tile(adminAtSetup, regions.value, regionsError.value, (d) => d.regions.length.toLocaleString('en-US')),
   },
   {
     key: 'teammates',
     label: teammatesLabel.value,
     to: '/admin/users',
-    ...tile(!!regionId.value, users.value, usersError.value, (d) => String(d.total)),
-  },
-  {
-    key: 'recon',
-    label: 'Proposed reconciliation deltas',
-    to: '/admin/reconciliation',
-    ...tile(adminAtSetup, recon.value, reconError.value, (d) => String(d.summary.total)),
+    ...tile(!!regionId.value, users.value, usersError.value, (d) => d.total.toLocaleString('en-US')),
   },
   {
     key: 'audit',
     label: 'Audit events · 24h',
     to: '/admin/audit',
-    ...tile(adminAtSetup, audit.value, auditError.value, (d) => String(d.total)),
+    ...tile(adminAtSetup, audit.value, auditError.value, (d) => d.total.toLocaleString('en-US')),
   },
   {
     key: 'postgres',
@@ -128,7 +118,6 @@ const stripBusy = computed(() => stats.value.some((s) => s.state === 'busy'))
 const failed = [
   { label: 'Regions', error: regionsError, refresh: refreshRegions },
   { label: 'Teammates', error: usersError, refresh: refreshUsers },
-  { label: 'Proposed reconciliation deltas', error: reconError, refresh: refreshRecon },
   { label: 'Audit events · 24h', error: auditError, refresh: refreshAudit },
   { label: 'Postgres', error: diagError, refresh: refreshDiag },
 ]

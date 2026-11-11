@@ -202,11 +202,11 @@ describe('/inbox: empty, refused and failed are three answers', () => {
       target_allocation_id: null,
       target_project_code: null,
     } as InboxItem)
-    stubFetch({ data: { items: [item(1), item(2)], total: 73 } })
+    stubFetch({ data: { items: [item(1), item(2)], total: 73, next_cursor: '2026-11-10T00:00:00.000000Z_9a1e0000-0000-4000-8000-000000000002' } })
     const w = await mountPage(InboxPage)
-    expect(w.find('[data-testid="inbox-truncated"]').text()).toBe(
-      'Showing the newest 2 of 73 matching items. Narrow the Category or Severity filter to see older ones.',
-    )
+    expect(w.find('[data-testid="inbox-truncated"]').text()).toBe('Showing the newest 2 of 73 matching items.')
+    // #569: the older ones can be reached, never only "narrow the filter".
+    expect(w.find('[data-testid="inbox-load-more"]').text()).toBe('Load 50 more')
 
     stubFetch({ data: { items: [item(1), item(2)], total: 2 } })
     const all = await mountPage(InboxPage)

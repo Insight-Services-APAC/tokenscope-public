@@ -58,12 +58,15 @@ function compactUsd(v: number): string {
       <div class="min-w-0">
         <div class="text-sm font-semibold text-carbon-1">Spend trend</div>
         <div class="text-[11px] text-carbon-3 truncate">
-          Daily attributed usage by provider<template v-if="windowLabel"> · {{ windowLabel }}</template>
+          Daily attributed usage by provider<template v-if="windowLabel"> · {{ windowLabel }}</template><span
+            class="hidden print:inline"
+            data-testid="regional-trend-mode-print"
+          > · {{ stacked ? 'stacked total' : 'lines by provider' }}</span>
         </div>
       </div>
 
       <div
-        class="inline-flex p-0.5 bg-calm-2 rounded-lg gap-0.5 shrink-0"
+        class="inline-flex p-0.5 bg-calm-2 rounded-lg gap-0.5 shrink-0 print:hidden"
         role="group"
         aria-label="Trend display mode"
       >

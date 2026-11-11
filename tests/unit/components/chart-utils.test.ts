@@ -36,8 +36,8 @@ describe('isoWeekLabel', () => {
 })
 
 describe('shortDay + categoryUnion (sanity)', () => {
-  it('shortDay trims YYYY- from an ISO day, leaves other strings alone', () => {
-    expect(shortDay('2026-07-03')).toBe('07-03')
+  it('shortDay writes an ISO day as words, leaves other strings alone', () => {
+    expect(shortDay('2026-07-03')).toBe('3 Jul')
     expect(shortDay('W27')).toBe('W27')
   })
 

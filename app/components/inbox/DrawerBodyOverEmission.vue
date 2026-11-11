@@ -5,6 +5,7 @@
  * the flag left the teammate's own queue, by their choice or the sweep's.
  */
 import { computed } from 'vue'
+import { fmtUsd } from '../../composables/useFormat'
 
 const props = defineProps<{
   body: Record<string, unknown>
@@ -20,7 +21,7 @@ function number(key: string): number | null {
   return typeof value === 'number' ? value : null
 }
 
-const usd = (n: number | null) => (n === null ? '—' : `$${n.toFixed(2)}`)
+const usd = (n: number | null) => (n === null ? '—' : fmtUsd(n))
 // Computed: the drawer reuses this component when another item is selected.
 const teammate = computed(() => text('teammateName') ?? 'This teammate')
 const tool = computed(() => text('tool'))

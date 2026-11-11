@@ -11,8 +11,9 @@
  * Client-only: the <VChart> lives inside <ClientOnly> and the file is a
  * `.client.vue`, so ECharts never touches `window` during SSR.
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useChartTheme } from './useChartTheme'
+import { useChartPrintFit, type PrintFitChart } from './useChartPrintFit'
 import { categoryUnion, escapeHtml, shortDay, trailingMean } from './chart-utils'
 
 export interface TrendPoint {
@@ -377,12 +378,16 @@ const option = computed<ECOption>(() => {
     series,
   }
 })
+
+const chartRef = ref<PrintFitChart | null>(null)
+useChartPrintFit(chartRef)
 </script>
 
 <template>
   <ClientOnly>
     <template v-if="hasData">
       <VChart
+        ref="chartRef"
         :option="option"
         :style="{ height: `${height}px`, width: '100%' }"
         autoresize

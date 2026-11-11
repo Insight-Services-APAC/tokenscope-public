@@ -83,6 +83,8 @@ export interface FinanceReport {
   }
   exemptGap: FinanceExemptGap
   region: string | null
+  /** The filtered region's display name (null without a filter, or an unknown id). */
+  regionName: string | null
   homingNote: string
 }
 

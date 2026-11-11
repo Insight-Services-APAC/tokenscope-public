@@ -174,7 +174,8 @@ export async function runVelocityWatch(
     await dispatchInbox(db, {
       category: 'velocity-warning',
       severity: 'attention',
-      subject: `${who} weekly token velocity is +${pctRounded}% above typical`,
+      // #587: plain words (was "weekly token velocity").
+      subject: `${who} spent ${pctRounded}% more this week than in a typical week`,
       body: {
         weeklySeries: series.map((n) => roundTo(n, 2)),
         meanUsd: roundTo(meanUsd, 2),

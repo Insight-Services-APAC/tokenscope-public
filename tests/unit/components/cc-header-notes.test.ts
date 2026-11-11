@@ -81,7 +81,7 @@ describe('CcHeaderNotes — design test 24: the least-settled aggregate (r1-M5)'
     expect(anthropic.exists()).toBe(true)
     expect(anthropic.text()).toContain('Anthropic')
     expect(anthropic.text()).toContain('Settling')
-    expect(anthropic.text()).toContain('provisional until 2026-08-30')
+    expect(anthropic.text()).toContain('provisional until 30 Aug 2026')
     const usage = panel.find('[data-testid="cc-notes-settling-usage"]')
     expect(usage.exists()).toBe(true)
     expect(usage.text()).toContain('Usage')

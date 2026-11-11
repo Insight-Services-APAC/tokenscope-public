@@ -8,6 +8,8 @@
  */
 import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { defineComponent, h, nextTick, type Ref } from 'vue'
+import { providePrintFacts, type ReportPrintFacts } from '../../../app/components/reporting/print-facts'
 import ScopeFinanceView from '../../../app/components/reporting/ScopeFinanceView.vue'
 import type { FinanceReport, FinanceDrill } from '../../../app/components/reporting/finance-report-types'
 
@@ -67,6 +69,7 @@ function makeReport(over: Partial<FinanceReport> = {}): FinanceReport {
     copilot: { mode: 'chargeback', pending: false },
     exemptGap: { indicativeUsageUsd: 90, chargebackUsd: 360, gapUsd: -270, copilotChargebackUsd: 300 },
     region: null,
+    regionName: null,
     homingNote: HOMING,
     ...over,
   }
@@ -551,5 +554,30 @@ describe('FinanceBillCompare — a pending provider is shown, not dropped', () =
     // "matched" over $0.00 vs $0.00 is true, vacuous, and reads as a settled month.
     const row = w.find('[data-testid="finance-compare-row"][data-provider="copilot"]')
     expect(row.text()).not.toContain('matched')
+  })
+})
+
+describe('ScopeFinanceView: the printed scope names the filtered region (#583)', () => {
+  async function printedScope(report: FinanceReport) {
+    let holder: Ref<ReportPrintFacts | null> | null = null
+    const Page = defineComponent({
+      setup() {
+        holder = providePrintFacts()
+        return () => h(ScopeFinanceView, { ...baseProps, report, drill: null, isDrill: false, pending: false })
+      },
+    })
+    mount(Page)
+    await nextTick()
+    return holder!.value?.scope
+  }
+
+  it('whole company, a named region, and a region the server could not name', async () => {
+    expect(await printedScope(makeReport())).toBe('Finance, all Business Units')
+    expect(await printedScope(makeReport({ region: '9a1e0000-0000-4000-8000-000000000001', regionName: 'APAC' }))).toBe(
+      'Finance, Business Units in APAC (the bill check is whole-company)',
+    )
+    expect(await printedScope(makeReport({ region: '9a1e0000-0000-4000-8000-000000000001', regionName: null }))).toBe(
+      'Finance, Business Units in the selected region (the bill check is whole-company)',
+    )
   })
 })

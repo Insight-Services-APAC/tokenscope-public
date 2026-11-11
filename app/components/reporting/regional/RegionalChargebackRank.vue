@@ -8,6 +8,10 @@
  * (a cost-centre's per-teammate chargeback lives in the Finance scope, not here) and
  * the explicit "Unallocated" NULL-CoU bucket kept for sum-back honesty — with a
  * quiet remediation link to the reconciliation admin surface (requirement 6).
+ *
+ * "Per-teammate detail lives in Finance" is said only to a reader who HAS the
+ * Finance tab (#585, SPEC 4.7): most viewers of this card do not, and for them
+ * the sentence pointed at a page they cannot open.
  */
 import { computed } from 'vue'
 import UiCard from '../../ui/Card.vue'
@@ -21,8 +25,10 @@ const props = withDefaults(
     rows: { key: string; label: string; value: number }[]
     /** Admin-only "Fix org homing →" (the container decides; fail-closed). */
     canFixHoming?: boolean
+    /** The reader holds the Finance report scope; fail-closed. */
+    canSeeFinance?: boolean
   }>(),
-  { canFixHoming: false },
+  { canFixHoming: false, canSeeFinance: false },
 )
 
 const barRows = computed(() =>
@@ -38,7 +44,10 @@ const hasUnallocated = computed(() => props.rows.some((r) => r.key === UNALLOCAT
       <div class="text-[11px] text-carbon-3">Ranked by chargeback · sums to chargeable</div>
     </div>
     <div class="text-[11px] text-carbon-3 mb-3 flex items-center gap-2 flex-wrap">
-      <span>The real cross-charge homed to each Business Unit (bill lane). Per-teammate detail lives in Finance.</span>
+      <span>
+        The real cross-charge homed to each Business Unit (bill lane).<template v-if="props.canSeeFinance">
+          <span data-testid="regional-chargeback-finance-hint"> Per-teammate detail lives in Finance.</span></template>
+      </span>
       <UnallocatedRemediationLink v-if="hasUnallocated" :can-fix="props.canFixHoming" />
     </div>
 

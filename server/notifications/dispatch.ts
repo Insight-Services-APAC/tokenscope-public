@@ -23,6 +23,7 @@ export type InboxCategory =
   | 'sync-conflict'
   | 'velocity-warning'
   | 'over-budget'
+  | 'budget-nearly-used' // #575: a project's month-to-date spend reached 80% of its budget in force (budget-alert worker); same recipients as over-budget, once per project per month, never after over-budget
   | 'untagged-backlog'
   | 'over-attribution' // reconciled-lane otel spend exceeds the authoritative Anthropic actual (forgery/mis-tag backstop)
   | 'reconciliation-gap' // OTel-attributed vs Anthropic-actuals gap exceeds the alert bar (ADR-0005 §4 safety net; the detection-based P2 defense leans on it)
@@ -167,6 +168,7 @@ function defaultSeverity(category: InboxCategory): 'info' | 'attention' | 'urgen
     case 'quota-request':
       return 'attention'
     case 'quota-request-decided':
+    case 'budget-nearly-used': // a heads-up: nothing is blocked and nothing is over yet
     case 'velocity-warning':
     case 'untagged-backlog':
     default:
@@ -195,6 +197,7 @@ async function resolveRecipients(
 
   switch (input.category) {
     case 'over-budget':
+    case 'budget-nearly-used': // #575: the same people the over-budget alert reaches
       return { recipientIds: await resolveOverBudgetRecipients(db, input.relatedEntityId, input.now) }
     case 'sync-conflict':
     case 'structural-conflict':

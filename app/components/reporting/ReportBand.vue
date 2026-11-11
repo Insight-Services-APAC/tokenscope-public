@@ -64,7 +64,7 @@ defineProps<{
   <section class="space-y-5">
     <div
       v-if="windowLabel"
-      class="flex items-baseline gap-x-3 gap-y-1 flex-wrap pb-2 border-b-2 border-calm"
+      class="flex items-baseline gap-x-3 gap-y-1 flex-wrap pb-2 border-b-2 border-calm print:break-after-avoid"
     >
       <span
         class="text-[17px] font-extrabold tracking-[-0.2px] text-carbon"

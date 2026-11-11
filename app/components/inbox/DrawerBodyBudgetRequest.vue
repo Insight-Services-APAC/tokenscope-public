@@ -6,6 +6,7 @@
  * deciding happens in the project page's Manage drawer (Budget requests), which this links to.
  */
 import { computed } from 'vue'
+import { fmtUsd } from '../../composables/useFormat'
 
 const props = defineProps<{
   category: string
@@ -17,7 +18,7 @@ function text(key: string): string | null {
   return typeof value === 'string' && value !== '' ? value : null
 }
 
-const usd = (v: string | null) => (v === null ? '—' : `$${Number(v).toFixed(2)}`)
+const usd = (v: string | null) => (v === null ? '—' : fmtUsd(v))
 const isDecision = computed(() => props.category === 'quota-request-decided')
 const projectCode = computed(() => text('project_code'))
 const projectName = computed(() => text('project_name') ?? projectCode.value ?? 'the project')

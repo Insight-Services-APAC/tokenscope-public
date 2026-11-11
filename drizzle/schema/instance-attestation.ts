@@ -100,5 +100,11 @@ export const instanceAttestation = pgTable('instance_attestation', {
   // least-recently-read first so its cap and deadline rotate through the fleet.
   // NULL = never attempted by a scheduled tick.
   joinerReadAt: timestamp('joiner_read_at', { withTimezone: true }),
+  // Owner-given device name (mig 0171, #576). DISPLAY ONLY: never matched,
+  // joined, attributed or authorised on, never on the telemetry wire, never in
+  // a report or export. Personal: the 12-month soft purge clears it once the
+  // device has ended, like the other personal columns. Trimmed,
+  // 1 to 40 characters (CHECK in 0171); NULL = no name.
+  displayName: text('display_name'),
   notes: jsonb('notes'),
 })

@@ -2,27 +2,35 @@
  * GET /api/v1/me/inbox — list the authenticated dev's inbox items.
  *
  * Filters: ack_state, category, group (one of the six inbox filter groups,
- * shared/inbox/categories.ts), severity, limit. `ack_state=open`
+ * shared/inbox/categories.ts), severity, limit, cursor (#569: `next_cursor`
+ * from the previous page; the filters must be the same). `total` counts
+ * every match, whatever the cursor. `ack_state=open`
  * shorthand selects unread + read + acknowledged (the unresolved
  * states); `closed` selects dismissed + resolved.
  *
  * Goes through withRequestRls so the inbox_item self-policy fires
  * once Epic 10's non-owner DB role lands.
  */
-import { defineEventHandler, getValidatedQuery } from 'h3'
+import { createError, defineEventHandler, getValidatedQuery } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireAuth } from '../../../../auth/rbac'
 import { allocationScopePredicate } from '../../../../auth/allocation-scope'
 import { withRequestRls } from '../../../../db/request-rls'
 import { InboxListQuery } from '../../../../../shared/schemas/inbox'
-import { isPlatformAdmin } from '../../../../../shared/auth/roles'
+import { isAdminRole, isPlatformAdmin } from '../../../../../shared/auth/roles'
 import {
   INBOX_CATEGORY_GROUPS,
-  KNOWN_INBOX_CATEGORIES,
-  categoriesInGroup,
   inboxCategoryGroup,
   type InboxCategoryGroup,
 } from '../../../../../shared/inbox/categories'
+import {
+  CURSOR_SELECT_SQL,
+  ackStateSql,
+  cursorSql,
+  kindFiltersSql,
+  parseInboxCursor,
+  type InboxCursor,
+} from '../../../../inbox/filters'
 
 interface InboxRow extends Record<string, unknown> {
   id: string
@@ -56,41 +64,27 @@ interface InboxRow extends Record<string, unknown> {
    */
   target_project_code: string | null
   /*
-   * Total rows matched by the filters, computed via COUNT(*) OVER ()
-   * before the LIMIT clause clips the result. Use this for unread-bell
-   * badges and "X of Y" pagination, NOT items.length (which is bounded
-   * by query.limit).
+   * For items where related_entity_kind='instance' (the silent-device alert),
+   * the name the recipient gave that device (#576). Read live, never copied
+   * into the alert body, so renaming shows at once and the 12-month purge is
+   * not outlived. Only when the device is the RECIPIENT's own; null otherwise.
    */
-  total_matched: string
+  target_device_name: string | null
+  /* This row's page cursor (server/inbox/filters.ts); becomes `next_cursor`. */
+  page_cursor: string
 }
 
 export default defineEventHandler(async (event) => {
   const session = await requireAuth(event)
   const query = await getValidatedQuery(event, (data) => InboxListQuery.parse(data))
 
-  let ackStateFilter = sql`TRUE`
-  if (query.ack_state === 'open') {
-    ackStateFilter = sql`ack_state IN ('unread', 'read', 'acknowledged')`
-  } else if (query.ack_state === 'closed') {
-    ackStateFilter = sql`ack_state IN ('dismissed', 'resolved')`
-  } else if (query.ack_state) {
-    ackStateFilter = sql`ack_state = ${query.ack_state}`
+  const ackStateFilter = ackStateSql(query.ack_state)
+  const kindFilters = kindFiltersSql(query)
+  let cursor: InboxCursor | null = null
+  if (query.cursor !== undefined) {
+    cursor = parseInboxCursor(query.cursor)
+    if (!cursor) throw createError({ statusCode: 400, statusMessage: 'Invalid inbox cursor' })
   }
-
-  const categoryFilter = query.category
-    ? sql`AND category = ${query.category}`
-    : sql``
-  // Other also holds any category this build does not know (a newer producer
-  // mid-deploy): the page badges those as Other, so the filter must find them.
-  const inList = (cats: readonly string[]) => sql.join(cats.map((c) => sql`${c}`), sql`, `)
-  const groupFilter = !query.group
-    ? sql``
-    : query.group === 'other'
-      ? sql`AND (i.category IN (${inList(categoriesInGroup('other'))}) OR i.category NOT IN (${inList(KNOWN_INBOX_CATEGORIES)}))`
-      : sql`AND i.category IN (${inList(categoriesInGroup(query.group))})`
-  const severityFilter = query.severity
-    ? sql`AND severity = ${query.severity}`
-    : sql``
 
   // The admin arm of the project page's gate (isProjectAdmin), as SQL operands.
   const adminAnyRegion = isPlatformAdmin(session.role)
@@ -99,7 +93,7 @@ export default defineEventHandler(async (event) => {
       ? session.regionId
       : null
 
-  const { rows, counts } = await withRequestRls(event, async (tx) => ({
+  const { rows, total: totalRows, counts } = await withRequestRls(event, async (tx) => ({
     rows: await tx.execute<InboxRow>(sql`
       SELECT
         i.id::text AS id, i.category, i.severity, i.subject, i.body,
@@ -109,7 +103,8 @@ export default defineEventHandler(async (event) => {
         i.created_at::text AS created_at,
         target_alloc.allocation_id AS target_allocation_id,
         target_proj.code AS target_project_code,
-        COUNT(*) OVER ()::text AS total_matched
+        target_dev.display_name AS target_device_name,
+        ${CURSOR_SELECT_SQL} AS page_cursor
       FROM inbox_item i
       LEFT JOIN LATERAL (
         SELECT al.id::text AS allocation_id
@@ -164,13 +159,30 @@ export default defineEventHandler(async (event) => {
            )
          LIMIT 1
       ) target_proj ON i.related_entity_kind = 'project'
+      LEFT JOIN instance_attestation target_dev
+        ON i.related_entity_kind = 'instance'
+       AND target_dev.instance_id = i.related_entity_id
+       AND target_dev.teammate_id = ${session.teammateId}::uuid
       WHERE i.recipient_teammate_id = ${session.teammateId}::uuid
         AND ${ackStateFilter}
-        ${categoryFilter}
-        ${groupFilter}
-        ${severityFilter}
-      ORDER BY i.created_at DESC
-      LIMIT ${query.limit}
+        ${kindFilters}
+        ${cursorSql(cursor)}
+      ORDER BY i.created_at DESC, i.id DESC
+      -- One row past the page says whether there is a next one.
+      LIMIT ${query.limit + 1}
+    `),
+    /*
+     * Everything the filters match, ignoring the cursor: the "of N" in
+     * "Showing 100 of 187" and the bell's count. A separate count, not
+     * COUNT(*) OVER (), because the window would only count rows past the
+     * cursor.
+     */
+    total: await tx.execute<{ n: string }>(sql`
+      SELECT count(*)::text AS n
+      FROM inbox_item i
+      WHERE i.recipient_teammate_id = ${session.teammateId}::uuid
+        AND ${ackStateFilter}
+        ${kindFilters}
     `),
     /*
      * Items per filter group under the SAME status and severity, ignoring the
@@ -178,23 +190,25 @@ export default defineEventHandler(async (event) => {
      * group reads how much is in it before it is chosen.
      */
     counts: await tx.execute<{ category: string; n: string }>(sql`
-      SELECT category, count(*)::text AS n
-      FROM inbox_item
-      WHERE recipient_teammate_id = ${session.teammateId}::uuid
+      SELECT i.category, count(*)::text AS n
+      FROM inbox_item i
+      WHERE i.recipient_teammate_id = ${session.teammateId}::uuid
         AND ${ackStateFilter}
-        ${severityFilter}
-      GROUP BY category
+        ${kindFiltersSql({ severity: query.severity })}
+      GROUP BY i.category
     `),
   }))
 
   const groupCounts = Object.fromEntries(INBOX_CATEGORY_GROUPS.map((g) => [g, 0])) as Record<InboxCategoryGroup, number>
   for (const r of counts) groupCounts[inboxCategoryGroup(r.category)] += Number(r.n)
 
-  const items = [...rows]
-  // total_matched is the same value on every row (COUNT OVER no-partition);
-  // pull it from the first row, fall back to 0 when no rows matched.
-  const total = items.length === 0 ? 0 : Number(items[0]?.total_matched ?? 0)
+  const hasMore = rows.length > query.limit
+  const page = hasMore ? rows.slice(0, query.limit) : [...rows]
+  const total = Number(totalRows[0]?.n ?? 0)
+  const nextCursor = hasMore ? (page[page.length - 1]?.page_cursor ?? null) : null
   // Strip the helper column from the response shape so callers don't see it.
-  const cleanItems = items.map(({ total_matched: _t, ...rest }) => rest)
-  return { items: cleanItems, total, group_counts: groupCounts }
+  const items = page.map(({ page_cursor: _c, ...rest }) => rest)
+  // viewer_is_admin: whether the drawer may offer an admin page (#573). The
+  // admin middleware's own test (isAdminRole); the pages still gate themselves.
+  return { items, total, next_cursor: nextCursor, group_counts: groupCounts, viewer_is_admin: isAdminRole(session.role) }
 })

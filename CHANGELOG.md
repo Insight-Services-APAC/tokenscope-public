@@ -7,6 +7,35 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## v1.0.8 — 2026-11-11 (snapshot 60dbc8e2)
+
+- Every inbox alert now says what happened, what it means and what to do,
+  with one button to the fix. Select inbox items and mark them read, resolve
+  or dismiss them in one go, or mark every unread item that matches a filter
+  as read. Project managers get a warning at 80% of a budget, with the
+  projected month-end.
+- Name your devices on My account; the name shows wherever the device
+  appears. Worklist sessions show when they ran and on which device. Filter
+  Activity by project and dates. Home shows whether each tool is connected
+  and sending, with Connect only where needed. My account is grouped into
+  Devices, Connect and Tagging, and a read that fails says so with Retry.
+- Admin Projects and Devices search and page through every row. Reports
+  print cleanly: title, period and scope at the top, no navigation, no split
+  cards. Personal charts can show their numbers as a table. Report hints only
+  point at tabs you can open.
+- Printed charts now fit the width of the page, with the last bar and axis
+  labels readable, and section headings stay with their first chart. Settling
+  dates read "1 Dec 2026".
+- Devices you no longer use fold away on My account, with Revoke all, and a
+  warning now means a real fault. Activity on Home and My usage loads faster.
+- My projects: This month or Last month, and ended projects fold away. The
+  worklist folds earlier months and can select them in one go. Activity rows
+  lead with when a session ran.
+- One model name and one date style across the product, plainer wording on My
+  usage, and a new How TokenScope works guide for everyone.
+- Upgrading: the sign-in library is updated, so you may be asked to sign in
+  again once after upgrading.
+
 ## v1.0.7 — 2026-11-10 (snapshot 02bbfe51)
 
 - Sign-in takes you back to the page you opened, not the home page. The sign-in

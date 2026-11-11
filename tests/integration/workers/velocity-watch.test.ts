@@ -241,7 +241,7 @@ describe('runVelocityWatch', () => {
     expect(item.body.currentUsd).toBeCloseTo(145, 2)
     expect(item.body.meanUsd).toBeCloseTo(100, 2)
     expect(item.body.deltaPct).toBeCloseTo(0.45, 2)
-    expect(item.subject).toContain('+45%')
+    expect(item.subject).toContain('45% more this week')
   })
 
   it('does not dispatch when current week is only 10% above mean', async () => {

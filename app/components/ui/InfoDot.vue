@@ -42,7 +42,7 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <span
     ref="root"
-    class="relative inline-flex align-middle"
+    class="relative inline-flex align-middle print:hidden"
     data-testid="info-dot"
     @mouseenter="open = true"
     @mouseleave="open = false"

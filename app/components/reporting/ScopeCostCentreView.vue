@@ -45,6 +45,8 @@ import { buildSurfaceHero } from './build-surface-hero'
 import CcHeaderNotes from './cost-centre/CcHeaderNotes.vue'
 import CcScopeLine from './cost-centre/CcScopeLine.vue'
 import ExportCsvButton from './ExportCsvButton.vue'
+import PrintButton from './PrintButton.vue'
+import { publishPrintFacts, windowFromMeta } from './print-facts'
 import CcKpiTile from './cost-centre/CcKpiTile.vue'
 import CcBudgetTable from './cost-centre/CcBudgetTable.vue'
 import CcProjectTable from './cost-centre/CcProjectTable.vue'
@@ -359,6 +361,19 @@ const drillEmptyCopy = computed(() => {
 const activeMeta = computed(() => (props.isDrill ? props.drill?.meta : props.report?.meta) ?? null)
 const providerStates = computed<ProviderState[]>(() => activeMeta.value?.providerStates ?? [])
 const coverage = computed(() => activeMeta.value?.coverage ?? null)
+
+// The printed header (#583): the drilled Business Unit when drilled, else the
+// list of the ones this reader sees.
+publishPrintFacts(() => {
+  const m = activeMeta.value
+  if (!m) return null
+  return {
+    scope: props.isDrill && props.drill ? props.drill.cc.displayName : BU_LABEL_PLURAL,
+    ...windowFromMeta(m),
+    lens: props.lane === 'chargeback' ? 'chargeback' : 'usage',
+    settling: m.providerStates.map((p) => ({ vendor: p.vendor, state: p.state })),
+  }
+})
 
 // ── Summary strip (whole-scope rollup, computed server-side from the cards) ──
 const summary = computed(() => props.report?.summary ?? null)
@@ -726,7 +741,8 @@ const copilotPartialMonth = computed(() => props.report?.copilotChargebackPartia
 
         <CcBudgetTable :cards="report.cards" :lane="lane" @select="emit('drill', $event)" />
 
-        <div class="flex justify-end pt-2">
+        <div class="flex justify-end gap-2 pt-2 print:hidden">
+          <PrintButton />
           <ExportCsvButton
             endpoint="/api/v1/reports/export"
             :params="exportParams"

@@ -183,7 +183,15 @@ export interface ActivitySessionRow extends ActivityRowBase {
   /** OTel counted these events; a session's token quantity is never unknown. */
   tokens: number
   ts_last: string
+  /** The conversation's first event: a real instant, like `ts_last` (#577). */
+  ts_first: string
   instance_id: string | null
+  /**
+   * The owner's name for that device (#576), display only. Filled on the page
+   * read; NOT a CSV column (ACTIVITY_CSV_COLUMNS), because a device name stays
+   * out of every export. NULL = unnamed or not read.
+   */
+  device_name: string | null
   /** D2a: the conversation spans a project-end boundary. */
   partly_ended: boolean
   ended_project_code: string | null

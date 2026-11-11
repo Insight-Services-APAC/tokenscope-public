@@ -5,10 +5,14 @@
  * the outcome. The decision itself happens on Admin → Project requests.
  */
 import { computed } from 'vue'
+import { fmtUsd } from '../../composables/useFormat'
 
 const props = defineProps<{
   category: string
   body: Record<string, unknown>
+  /* #573: the request link opens an admin page; offered only to an admin (an
+   * item can outlive its recipient's admin role). Absent means no. */
+  viewerIsAdmin?: boolean
 }>()
 
 function text(key: string): string | null {
@@ -23,7 +27,7 @@ const unit = computed(() => text('unitName'))
 const region = computed(() => text('regionCode'))
 const budget = computed(() => {
   const v = Number(text('budgetUsd'))
-  return Number.isFinite(v) && v > 0 ? `$${v.toFixed(2)}` : null
+  return Number.isFinite(v) && v > 0 ? fmtUsd(v) : null
 })
 const approved = computed(() => text('decision') === 'approved')
 const note = computed(() => text('note'))
@@ -44,7 +48,7 @@ const actionHref = computed(() => text('actionHref'))
       <p class="mt-2 text-[12px] text-carbon-3 leading-relaxed">
         Review it on Admin → Project requests, where you can edit the details, set the project code, and approve or reject it.
       </p>
-      <UiButton v-if="actionHref" :to="actionHref" kind="primary" size="sm" class="mt-3" data-testid="project-request-open">
+      <UiButton v-if="actionHref && (viewerIsAdmin || !actionHref.startsWith('/admin'))" :to="actionHref" kind="primary" size="sm" class="mt-3" data-testid="project-request-open">
         Open the request →
       </UiButton>
     </div>

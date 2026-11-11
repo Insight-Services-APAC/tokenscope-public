@@ -145,6 +145,7 @@ function barWidth(usd: string): string {
         :end-day="axis.endDay"
         :partial-day="axis.partialDay"
         :height="150"
+        offer-table
       />
     </UiCard>
 

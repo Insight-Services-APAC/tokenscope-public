@@ -16,6 +16,8 @@ import { computed, onMounted, ref, watch } from 'vue'
 import type { ReportScope } from '#shared/reports/types'
 import { BU_LABEL_PLURAL } from '#shared/reports/vocabulary'
 import { REPORT_ACCESS_PERMISSION_LABELS, type ReportAccessPermission } from '#shared/auth/report-visibility'
+import { providePrintFacts } from '../../components/reporting/print-facts'
+import ReportPrintHeader from '../../components/reporting/ReportPrintHeader.vue'
 
 interface ReportMetaResp {
   scopes: ReportScope[]
@@ -32,6 +34,11 @@ const SCOPE_LABEL: Record<ReportScope, string> = {
   'cost-centre': BU_LABEL_PLURAL,
   finance: 'Finance',
 }
+
+// The printed header (#583): the active scope view publishes its facts here;
+// the time is the server clock's, never the browser's.
+const printFacts = providePrintFacts()
+const { clock } = useServerClock()
 
 const { data: meta, error: metaError } = await useFetch<ReportMetaResp>('/api/v1/reports/meta', {
   key: 'reports-meta',
@@ -138,6 +145,7 @@ const tabModel = computed<string>({
       title="Reporting"
       sub="Across the org — scoped to what you can see."
     />
+    <ReportPrintHeader :facts="printFacts" :as-of="clock?.now ?? null" />
 
     <div
       v-if="visibilityChip"
@@ -154,7 +162,7 @@ const tabModel = computed<string>({
            an ungranted Regional view would only 403-banner. `activeScope` defaults to 'regional'
            when granted=[], so the empty-state gate must sit ahead of the scope render. -->
       <template v-if="hasScopes">
-        <UiTabs v-if="tabs.length" v-model="tabModel" :tabs="tabs" data-testid="reporting-scope-tabs" />
+        <UiTabs v-if="tabs.length" v-model="tabModel" :tabs="tabs" class="print:hidden" data-testid="reporting-scope-tabs" />
 
         <div
           v-if="ungrantedNotice"

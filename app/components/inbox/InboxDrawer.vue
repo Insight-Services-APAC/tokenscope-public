@@ -21,15 +21,21 @@ import UiBadge from '../ui/Badge.vue'
 import DrawerBodyOverBudget from './DrawerBodyOverBudget.vue'
 import DrawerBodyVelocity from './DrawerBodyVelocity.vue'
 import DrawerBodySyncConflict from './DrawerBodySyncConflict.vue'
-import DrawerBodyUntagged from './DrawerBodyUntagged.vue'
 import DrawerBodyPersonalSubscription from './DrawerBodyPersonalSubscription.vue'
 import DrawerBodyOverEmission from './DrawerBodyOverEmission.vue'
 import DrawerBodyProjectRequest from './DrawerBodyProjectRequest.vue'
 import DrawerBodyBudgetRequest from './DrawerBodyBudgetRequest.vue'
-import { categoryBadge, variantForCategory, type InboxItem } from './types'
+import DrawerBodyNearlyUsed from './DrawerBodyNearlyUsed.vue'
+import DrawerBodySections from './DrawerBodySections.vue'
+import { fmtInstant } from '../../composables/useFormat'
+import { categoryBadge, itemSubject, variantForCategory, type InboxItem } from './types'
+import { ADMIN_ROUTED_KINDS, primaryAction } from './drawer-copy'
 
 const props = defineProps<{
   item: InboxItem
+  /* The server's answer to "may this reader open admin pages" (the list
+   * route's `viewer_is_admin`); absent means no. */
+  viewerIsAdmin?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -41,6 +47,19 @@ const emit = defineEmits<{
 }>()
 
 const variant = computed(() => variantForCategory(props.item.category))
+
+/*
+ * The one primary button (#573, drawer-copy.ts). An admin page is offered only
+ * to an admin: an admin-routed alert can outlive its recipient's admin role,
+ * and the page would bounce them home. Without a destination the primary is
+ * Resolve, as before.
+ */
+const primary = computed(() => {
+  const a = primaryAction(props.item)
+  if (!a) return null
+  if (a.to.startsWith('/admin') && !(ADMIN_ROUTED_KINDS.has(props.item.category) && props.viewerIsAdmin)) return null
+  return a
+})
 
 // The drawer is mounted only while an item is open (the parent's v-if), so it
 // is open for its whole lifetime. Shared dialog contract: Escape closes, Tab is
@@ -75,7 +94,7 @@ const severityBadgeKind = computed<
     ref="dialogEl"
     role="dialog"
     aria-modal="true"
-    :aria-label="`Inbox item: ${item.subject}`"
+    :aria-label="`Inbox item: ${itemSubject(item)}`"
     class="fixed top-0 right-0 h-full w-full max-w-[480px] bg-white shadow-[-8px_0_32px_rgba(88,40,115,0.16)] z-50 flex flex-col"
     data-testid="inbox-drawer"
     :data-variant="variant"
@@ -100,10 +119,10 @@ const severityBadgeKind = computed<
         </button>
       </div>
       <h2 class="mt-3 text-lg font-bold tracking-tight text-carbon leading-tight">
-        {{ item.subject }}
+        {{ itemSubject(item) }}
       </h2>
       <div class="mt-2 flex items-center justify-between gap-3 text-xs text-carbon-3">
-        <span>Created {{ new Date(item.created_at).toLocaleString() }}</span>
+        <span data-testid="drawer-created">Created {{ fmtInstant(item.created_at) }}</span>
         <!-- The PROJECT page, not the budget editor: a member who is not the
              manager can open the first and not the second. The server emits the
              code only when this recipient can open the page. -->
@@ -123,14 +142,15 @@ const severityBadgeKind = computed<
       <DrawerBodyOverBudget v-if="variant === 'over-budget'" :body="item.body" />
       <DrawerBodyVelocity v-else-if="variant === 'velocity'" :body="item.body" />
       <DrawerBodySyncConflict v-else-if="variant === 'sync-conflict'" :body="item.body" />
-      <DrawerBodyUntagged v-else-if="variant === 'untagged'" :body="item.body" />
+      <DrawerBodyNearlyUsed v-else-if="variant === 'nearly-used'" :body="item.body" :can-top-up="!!item.target_allocation_id" />
+      <DrawerBodySections v-else-if="variant === 'sections'" :category="item.category" :body="item.body" :device-name="item.target_device_name ?? null" />
       <DrawerBodyPersonalSubscription v-else-if="variant === 'personal-subscription'" :body="item.body" />
       <DrawerBodyOverEmission v-else-if="variant === 'over-emission'" :body="item.body" />
-      <DrawerBodyProjectRequest v-else-if="variant === 'project-request'" :category="item.category" :body="item.body" />
+      <DrawerBodyProjectRequest v-else-if="variant === 'project-request'" :category="item.category" :body="item.body" :viewer-is-admin="viewerIsAdmin" />
       <DrawerBodyBudgetRequest v-else-if="variant === 'budget-request'" :category="item.category" :body="item.body" />
-      <div v-else class="text-sm text-carbon-2 leading-relaxed">
-        Details for this category aren't laid out yet. Use the
-        actions below to acknowledge, resolve, or dismiss.
+      <div v-else class="text-sm text-carbon-2 leading-relaxed" data-testid="drawer-unknown-kind">
+        This alert comes from a newer version of TokenScope than this page.
+        Reload the page to see its details.
       </div>
     </div>
     <footer class="px-6 py-4 border-t border-calm-2 flex items-center justify-end gap-2 flex-wrap">
@@ -144,11 +164,11 @@ const severityBadgeKind = computed<
         Mark read
       </UiButton>
       <UiButton
-        v-if="variant === 'velocity' || variant === 'over-budget'"
+        v-if="variant === 'velocity' || variant === 'over-budget' || variant === 'nearly-used'"
         kind="ghost"
         size="sm"
         data-testid="drawer-action-snooze"
-        title="Clears the bell badge but keeps the item tracked."
+        title="Marks it seen and keeps it open until resolved."
         @click="emit('snooze')"
       >
         Acknowledge
@@ -161,36 +181,30 @@ const severityBadgeKind = computed<
       >
         Dismiss
       </UiButton>
-      <!--
-        Over-budget items get a navigation button instead of an
-        ack-style resolve: clicking "Add top-up" should take the user
-        to the allocator with the top-up form pre-opened, not just
-        clear the bell. The inbox item stops re-firing on its own once
-        the producer sees used <= cap (budget-alert worker).
-
-        Defensive fallback: if target_allocation_id is null (project
-        has no current baseline allocation), fall back to the ack-style
-        Resolve so the button is never inert. Per data-model, an
-        over-budget alert without a baseline should not occur, but the
-        producer is allowed to dispatch on top-up-only coverage too.
-      -->
       <UiButton
-        v-if="variant === 'over-budget' && item.target_allocation_id"
-        :to="`/allocations/${item.target_allocation_id}?focus=topup`"
-        kind="primary"
-        size="sm"
-        data-testid="drawer-action-add-topup"
-      >
-        Add top-up →
-      </UiButton>
-      <UiButton
-        v-else
-        kind="primary"
+        :kind="primary ? 'secondary' : 'primary'"
         size="sm"
         data-testid="drawer-action-resolve"
         @click="emit('resolve')"
       >
         Resolve
+      </UiButton>
+      <!--
+        The one way forward (#573). For a budget alert it is Add top-up (the
+        allocator with the top-up form open), only when this recipient can open
+        the editor; otherwise the header's Open project is the way forward.
+        Resolve stays beside it: no budget alert closes by itself (the worker
+        never resolves one), so after a top-up the reader closes it.
+        Opening the button never resolves the item.
+      -->
+      <UiButton
+        v-if="primary"
+        :to="primary.to"
+        kind="primary"
+        size="sm"
+        :data-testid="primary.label === 'Add top-up' ? 'drawer-action-add-topup' : 'drawer-action-primary'"
+      >
+        {{ primary.label }} →
       </UiButton>
     </footer>
   </aside>

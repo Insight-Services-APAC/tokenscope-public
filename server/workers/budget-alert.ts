@@ -1,6 +1,7 @@
 /*
  * Budget-alert worker — emits `over-budget` inbox items for projects whose
- * MTD attributed cost has exceeded their current baseline+top-up allocation.
+ * MTD attributed cost has exceeded their current baseline+top-up allocation,
+ * and (#575) one `budget-nearly-used` item per project per month at 80%.
  *
  * It calls the SAME `completeProjectSpend` the project page, the /projects
  * cards and the budget editor call, with the same window and the same options,
@@ -32,7 +33,17 @@ export interface BudgetAlertResult {
   projectsScanned: number
   alertsDispatched: number
   skippedExisting: number
+  /** #575: "Budget nearly used" items raised this run (projects at 80% or more, not over). */
+  nearlyUsedDispatched: number
+  nearlyUsedSkippedExisting: number
 }
+
+/*
+ * #575: the share of the budget in force at which a project manager is told,
+ * once a month, before the budget is gone. A fixed rule in code, not a dial
+ * (REMAINING B6): the PO's call on the issue. Nothing is blocked at it.
+ */
+export const BUDGET_NEARLY_USED_AT = 0.8
 
 interface ProjectRow extends Record<string, unknown> {
   project_id: string
@@ -126,13 +137,22 @@ export async function runBudgetAlert(
 
   let alertsDispatched = 0
   let skippedExisting = 0
+  let nearlyUsedDispatched = 0
+  let nearlyUsedSkippedExisting = 0
   const projectsScanned = rows.length
 
   for (const r of rows) {
     const usedUsd = spendByProject.get(r.project_id)?.costUsd ?? 0
     const capUsd = capByProject.get(r.project_id) ?? 0
     if (capUsd <= 0) continue
-    if (usedUsd <= capUsd) continue
+    if (usedUsd <= capUsd) {
+      if (usedUsd >= capUsd * BUDGET_NEARLY_USED_AT) {
+        const sent = await raiseNearlyUsed(db, r, usedUsd, capUsd, now, monthStartIso)
+        if (sent === 'dispatched') nearlyUsedDispatched += 1
+        else if (sent === 'existing') nearlyUsedSkippedExisting += 1
+      }
+      continue
+    }
 
     // Idempotency: skip if ANY recipient has an unresolved over-budget item
     // for this project created since month-start. Tradeoff: per-recipient
@@ -176,7 +196,8 @@ export async function runBudgetAlert(
 
     const dispatched = await dispatchInbox(db, {
       category: 'over-budget',
-      subject: `${r.display_name} is $${overBy.toFixed(0)} over allocation`,
+      // #587: the product's words (budget) and money with thousands separators.
+      subject: `${r.display_name} is $${Math.round(overBy).toLocaleString('en-US')} over budget`,
       body: {
         project: r.project_code,
         usedUsd,
@@ -196,5 +217,64 @@ export async function runBudgetAlert(
     }
   }
 
-  return { projectsScanned, alertsDispatched, skippedExisting }
+  return { projectsScanned, alertsDispatched, skippedExisting, nearlyUsedDispatched, nearlyUsedSkippedExisting }
+}
+
+/*
+ * "Budget nearly used" (#575): once per project per month, to the over-budget
+ * alert's recipients, when month-to-date spend is at 80% or more of the budget
+ * in force and not over it. Never after the over-budget alert: a project that
+ * passed 100% this month (in any state) gets no 80% item, and a project that
+ * jumps from under 80% to over 100% between runs gets the over-budget one only
+ * (the caller takes the over branch first).
+ *
+ * The body is a snapshot of the run that raised it: the drawer draws the pace
+ * line from `dayOfMonth` / `daysInMonth` with the same `projectedMonthEnd` My
+ * projects uses (app/composables/useRagState.ts), so it says what the pace was
+ * when the alert was raised, as of the UTC day the server counted.
+ */
+async function raiseNearlyUsed(
+  db: PostgresJsDatabase<typeof schema>,
+  r: ProjectRow,
+  usedUsd: number,
+  capUsd: number,
+  now: Date,
+  monthStartIso: string,
+): Promise<'dispatched' | 'existing' | 'none'> {
+  const existing = await db.execute<{ id: string }>(sql`
+    SELECT id::text AS id FROM inbox_item
+     WHERE category IN ('budget-nearly-used', 'over-budget')
+       AND related_entity_kind = 'project'
+       AND related_entity_id = ${r.project_id}::uuid
+       AND created_at >= ${monthStartIso}::timestamptz
+     LIMIT 1
+  `)
+  if (existing.length > 0) return 'existing'
+
+  const usedPct = usedUsd / capUsd
+  const dayOfMonth = now.getUTCDate()
+  const daysInMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate()
+  const monthName = new Intl.DateTimeFormat('en-US', { month: 'long', timeZone: 'UTC' }).format(now)
+  // Floor, not round: 79.6% must not read "80%", and 99.7% must not read "100%".
+  const shownPct = Math.floor(usedPct * 100)
+
+  const dispatched = await dispatchInbox(db, {
+    category: 'budget-nearly-used',
+    subject: `${r.display_name} has used ${shownPct}% of its ${monthName} budget`,
+    body: {
+      project: r.project_code,
+      projectName: r.display_name,
+      usedUsd,
+      capUsd,
+      usedPct,
+      thresholdPct: BUDGET_NEARLY_USED_AT,
+      month: monthStartIso.slice(0, 7),
+      dayOfMonth,
+      daysInMonth,
+    },
+    relatedEntityKind: 'project',
+    relatedEntityId: r.project_id,
+    now,
+  })
+  return dispatched.length > 0 ? 'dispatched' : 'none'
 }

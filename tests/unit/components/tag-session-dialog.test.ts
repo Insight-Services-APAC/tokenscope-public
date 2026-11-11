@@ -53,6 +53,11 @@ beforeEach(() => {
 })
 
 describe('TagSessionDialog — single item', () => {
+  it('spend names its unit: "$… · … tokens" (#591)', () => {
+    const w = mountDialog(sessionTarget)
+    expect(w.get('[data-testid="tag-session-spend"]').text()).toMatch(/ · .+ tokens$/)
+  })
+
   it('saves a session through the per-session assign endpoint', async () => {
     const fetchMock = vi.fn().mockResolvedValue({})
     vi.stubGlobal('$fetch', fetchMock)
@@ -133,5 +138,53 @@ describe('TagSessionDialog — bulk', () => {
 
     expect(w.find('[data-testid="tag-error"]').text()).toContain('Not a member')
     expect(w.emitted('saved')).toBeUndefined()
+  })
+})
+
+/*
+ * #577: the dialog says when the session ran and on which device; the session
+ * id stays, demoted below them. Bulk mode is unchanged.
+ */
+describe('TagSessionDialog — when and where (#577)', () => {
+  function inZone(zone: string) {
+    const real = Intl.DateTimeFormat.prototype.resolvedOptions
+    vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockImplementation(function (this: Intl.DateTimeFormat) {
+      return { ...real.call(this), timeZone: zone }
+    })
+  }
+
+  it('shows the span, its length and the device name', async () => {
+    inZone('Australia/Brisbane')
+    const w = mountDialog({
+      ...sessionTarget,
+      instance_id: '9a1e0000-0000-4000-8000-000000000001',
+      device_name: 'Work laptop',
+      first_event: '2026-11-09T04:05:00.000Z',
+      last_event: '2026-11-09T06:40:00.000Z',
+    })
+    await flushPromises()
+    expect(w.find('[data-testid="tag-session-when"]').text()).toBe('Mon 9 Nov, 14:05 to 16:40 · 2 h 35 min')
+    expect(w.find('[data-testid="tag-session-device"]').text()).toBe('Work laptop')
+    expect(w.text()).toContain('conv-1')
+  })
+
+  it('an unnamed device reads as tool and short id, never blank', async () => {
+    const w = mountDialog({ ...sessionTarget, instance_id: '9e8d7c6b-0000-4000-8000-000000000002' })
+    await flushPromises()
+    expect(w.find('[data-testid="tag-session-device"]').text()).toBe('Claude Code · 9e8d7c6b')
+  })
+
+  it('without a start time it says how long ago it last ran instead of inventing a span', async () => {
+    const w = mountDialog(sessionTarget)
+    await flushPromises()
+    expect(w.find('[data-testid="tag-session-when"]').text()).toContain('last activity')
+  })
+
+  it('bulk mode is unchanged: no When or Device rows', async () => {
+    const w = mountDialog(bulkTarget)
+    await flushPromises()
+    expect(w.find('[data-testid="tag-bulk-items"]').exists()).toBe(true)
+    expect(w.find('[data-testid="tag-session-when"]').exists()).toBe(false)
+    expect(w.find('[data-testid="tag-session-device"]').exists()).toBe(false)
   })
 })

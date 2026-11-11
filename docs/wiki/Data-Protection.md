@@ -45,7 +45,7 @@ What TokenScope holds, ranked by sensitivity.
 
 | Data | Class | Where stored | Retention |
 |---|---|---|---|
-| **Identity** — Entra OID, email (`teammate`, `instance_attestation.principal_email`, `teammate_identity_map`) | **PII** | Postgres | ~12 mo active, then soft-purge **[Current]** |
+| **Identity** — Entra OID, email (`teammate`, `instance_attestation.principal_email`, `teammate_identity_map`), the device name its owner sets (`instance_attestation.display_name`) | **PII** | Postgres | ~12 mo active, then soft-purge **[Current]** |
 | **Emit handoff code** (`emit_handoff`, one-time device setup) | Secret | Postgres — **hashed** (HMAC-SHA-256, KV service key) | ~5 min, single-use; raw never stored |
 | **OAuth access and refresh tokens** (`oauth_token`, the device's durable credential) | Secret | Postgres — **hashed** (HMAC-SHA-256, KV service key) | access 30 days; refresh 90 days, renewed while the device is in use; raw never stored |
 | **Org / project metadata** — units, project codes, `raw_project_code`, client-facing name | Confidential (business) | Postgres | life of project (soft-retire) |
@@ -97,12 +97,21 @@ What TokenScope holds, ranked by sensitivity.
 - **The PII is emails and Entra OIDs** — held in `teammate`,
   `teammate_identity_map`, and denormalised onto `instance_attestation`
   (`principal_oid`, `principal_email` for audit display).
+- **A device name is display only.** The name a teammate gives a device on My
+  account (`instance_attestation.display_name`, mig 0171) is shown to them and
+  to admins, never matched or attributed on, never sent on the telemetry wire,
+  and never written into a report or export (the Activity CSV has no device
+  column). Like the device's other personal fields, the purge clears it only
+  once the device has ended; its owner can clear it at any time. Its rename
+  audit event records that a name was set or cleared, not the name, so the
+  audit log cannot keep it past the purge. **[Current]**
 - **`raw_project_code` is audit/display only.** It can embed client identity
   (`PRJ-CLIENTX-RENEWAL`), so the canonical `code_hash` (SHA-256) is the value
   that crosses any AI-coaching boundary — the raw code and client name **never**
   do. **[Current]** for the hashing; the coach itself isn't built (see Planned).
 - **Soft-purge over hard-delete.** A purge clears the PII fields
-  (`principal_email`, `raw_project_code`, notes) and sets `ts_purged`, while
+  (`principal_email`, `claimed_email`, `raw_project_code`, the owner's device
+  name `display_name`, notes) and sets `ts_purged`, while
   *retaining* the row and `instance_id` so the
   `attribution_record → instance_attestation` FK stays valid across the much
   longer finance-audit horizon. Both halves are **[Current]**: the schema

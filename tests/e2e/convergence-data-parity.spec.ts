@@ -92,8 +92,9 @@ test.describe('Convergence — data parity across surfaces', () => {
 
     // Same numbers in the drawer body as the bucket card.
     const drawerBody = page.locator('[data-testid="inbox-drawer"]')
-    await expect(drawerBody).toContainText('$12710.00')
-    await expect(drawerBody).toContainText('$12500.00')
+    // Grouped like every other money figure (#587).
+    await expect(drawerBody).toContainText('$12,710.00')
+    await expect(drawerBody).toContainText('$12,500.00')
     await expect(drawerBody).toContainText('102% used')
   })
 
@@ -119,7 +120,7 @@ test.describe('Convergence — data parity across surfaces', () => {
     await page.goto(`${baseUrl}/inbox`)
     await page.waitForLoadState('networkidle')
     await page
-      .locator('[data-testid^="inbox-row-"]', { hasText: 'over allocation' })
+      .locator('[data-testid^="inbox-row-"]', { hasText: 'over budget' })
       .locator('button')
       .first()
       .click()
@@ -140,7 +141,7 @@ test.describe('Convergence — data parity across surfaces', () => {
     await page.goto(`${baseUrl}/inbox`)
     await page.waitForLoadState('networkidle')
     await page
-      .locator('[data-testid^="inbox-row-"]', { hasText: 'over allocation' })
+      .locator('[data-testid^="inbox-row-"]', { hasText: 'over budget' })
       .locator('button')
       .first()
       .click()
@@ -178,7 +179,7 @@ test.describe('Convergence — data parity across surfaces', () => {
     await signInAs(page, 'manager')
     await page.goto(`${baseUrl}/inbox`)
     await page.waitForLoadState('networkidle')
-    const row = page.locator('[data-testid^="inbox-row-"]', { hasText: 'over allocation' })
+    const row = page.locator('[data-testid^="inbox-row-"]', { hasText: 'over budget' })
     await expect(row).toBeVisible()
     await row.locator('button').first().click()
 
@@ -187,7 +188,7 @@ test.describe('Convergence — data parity across surfaces', () => {
     await expect(page.locator('[data-testid="drawer-action-add-topup"]')).toHaveCount(0)
   })
 
-  test('inbox bell badge reflects actual unread count, not the limit-bounded total', async ({
+  test('inbox bell badge reflects the full unread count, not the limit-bounded total', async ({
     page,
   }) => {
     /*
@@ -199,20 +200,27 @@ test.describe('Convergence — data parity across surfaces', () => {
      * count.
      */
     await signInAs(page, 'developer')
+    // The bell counts UNREAD items (#574). An earlier test in this file opens
+    // one of Priya's items, which marks it read, so the expected figure is
+    // read from the API rather than pinned: what matters is that the badge is
+    // the server's full count, not the limit-bounded page.
+    const inboxResp = await page.request.get(
+      `${baseUrl}/api/v1/me/inbox?ack_state=unread&limit=1`,
+    )
+    const inboxBody = (await inboxResp.json()) as { items: unknown[]; total: number }
+    expect(inboxBody.items.length).toBe(1)
+    expect(inboxBody.total).toBeGreaterThan(1)
+
     // The bell renders count inside a `bg-brand-hunger` span. Wait for
     // it to populate (useFetch resolves after first paint).
     const bellBadge = page.locator(
       '[data-testid="inbox-bell"] span.bg-brand-hunger',
     )
     await expect(bellBadge).toBeVisible()
-    await expect(bellBadge).toHaveText('3')
-
-    // Also verify the API directly: items length is 1 (limit=1), total is 3.
-    const inboxResp = await page.request.get(
-      `${baseUrl}/api/v1/me/inbox?ack_state=open&limit=1`,
+    await expect(bellBadge).toHaveText(String(inboxBody.total))
+    await expect(page.locator('[data-testid="inbox-bell"]')).toHaveAttribute(
+      'aria-label',
+      `Inbox, ${inboxBody.total} unread`,
     )
-    const inboxBody = (await inboxResp.json()) as { items: unknown[]; total: number }
-    expect(inboxBody.items.length).toBe(1)
-    expect(inboxBody.total).toBe(3)
   })
 })

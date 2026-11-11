@@ -121,7 +121,9 @@ const userInitials = computed(() => {
   return ((parts[0]?.[0] ?? '?') + (parts[1]?.[0] ?? '')).toUpperCase()
 })
 
-// The unread-bell count (open = unread+read+acknowledged, i.e. unresolved). A
+// The unread-bell count: UNREAD items only (#574, PO 2026-11-10). It used to
+// count open (unread+read+acknowledged), so "Mark all read" could not move it;
+// the inbox page's Open filter is the worklist, the bell is what is new. A
 // stable `key` lets the surfaces that mutate inbox items (the /inbox page, the
 // homepage drawer) refresh THIS fetch via refreshNuxtData('inbox-open-count')
 // so the badge updates the moment an item is resolved/dismissed — without it the
@@ -134,7 +136,7 @@ const userInitials = computed(() => {
 const { data: inbox, refresh: refreshInboxCount } = useLazyFetch<{
   items: unknown[]
   total: number
-}>('/api/v1/me/inbox?ack_state=open&limit=1', {
+}>('/api/v1/me/inbox?ack_state=unread&limit=1', {
   key: 'inbox-open-count',
   server: false,
   default: () => ({ items: [], total: 0 }),
@@ -235,7 +237,7 @@ const navLinks = computed(() => {
 
 <template>
   <header
-    class="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-brand-harmony/10"
+    class="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-brand-harmony/10 print:hidden"
   >
     <div class="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-10 h-16 flex items-center gap-2 sm:gap-4 lg:gap-8">
       <!-- Logo lockup -->
@@ -309,7 +311,7 @@ const navLinks = computed(() => {
       <NuxtLink
         to="/inbox"
         title="Open inbox"
-        aria-label="Open inbox"
+        :aria-label="unreadCount > 0 ? `Inbox, ${unreadCount} unread` : 'Inbox, no unread items'"
         data-testid="inbox-bell"
         class="relative shrink-0 w-9 h-9 inline-flex items-center justify-center rounded-lg text-carbon-2 hover:bg-brand-harmony-sheer hover:text-brand-harmony transition-colors"
       >
@@ -317,11 +319,16 @@ const navLinks = computed(() => {
           <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
           <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
         </svg>
+        <!-- #588: the badge starts just right of the bell's centre line and sits
+             above it, so the icon stays visible at two and three digits; past
+             99 it reads "99+" (the link's name keeps the real count). -->
         <span
           v-if="unreadCount > 0"
-          class="absolute top-1.5 right-1.5 min-w-[16px] h-4 px-1 rounded-lg bg-brand-hunger text-white text-[10px] font-bold inline-flex items-center justify-center border-2 border-white"
+          class="absolute top-0 left-[calc(50%+4px)] min-w-[16px] h-4 px-1 rounded-lg bg-brand-hunger text-white text-[10px] leading-none font-bold inline-flex items-center justify-center border-2 border-white whitespace-nowrap"
+          aria-hidden="true"
+          data-testid="inbox-bell-badge"
         >
-          {{ unreadCount }}
+          {{ unreadCount > 99 ? '99+' : unreadCount }}
         </span>
       </NuxtLink>
 
@@ -419,6 +426,15 @@ const navLinks = computed(() => {
             @click="menuOpen = false"
           >
             My account · identities
+          </NuxtLink>
+          <NuxtLink
+            to="/help"
+            role="menuitem"
+            data-testid="menu-help"
+            class="block px-3 py-2 text-left text-[13px] font-bold text-carbon hover:bg-brand-harmony-sheer cursor-pointer transition-colors"
+            @click="menuOpen = false"
+          >
+            How TokenScope works
           </NuxtLink>
           <div class="border-t border-calm-2 my-1" />
           <button

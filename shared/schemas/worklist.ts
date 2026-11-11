@@ -94,6 +94,16 @@ export type WorklistBulkBody = z.infer<typeof WorklistBulkBody>
 export interface WorklistSession {
   session_id: string
   instance_id: string | null
+  /** The owner's name for that device (#576), display only; NULL = unnamed. */
+  device_name: string | null
+  /**
+   * When the WHOLE conversation ran (#577): its first and last event across
+   * every ledger row, tagged or not. `first_event` / `last_event` below cover
+   * only the unallocated slice, so a session tagged in its first hour would
+   * otherwise read as starting later than it did.
+   */
+  session_first: string
+  session_last: string
   first_event: string
   last_event: string
   tokens: number

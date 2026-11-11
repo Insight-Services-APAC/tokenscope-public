@@ -26,6 +26,7 @@ const year = new Date().getFullYear()
         {{ slogan }}
       </p>
       <div class="text-[11px] text-carbon-3 flex items-center gap-3">
+        <NuxtLink to="/help" class="font-semibold text-brand-harmony hover:underline" data-testid="footer-help">How TokenScope works</NuxtLink>
         <UiBuildStamp />
         <span>&copy; {{ year }} TokenScope</span>
       </div>

@@ -46,6 +46,7 @@ import {
   type ActivityRow,
   type ActivitySessionRow,
 } from '../../shared/schemas/activity'
+import { ownDeviceNames } from '../utils/device-names'
 
 type Tx = PostgresJsDatabase<Record<string, unknown>>
 
@@ -119,37 +120,43 @@ interface UnionRow extends Record<string, unknown> {
   cost_usd: string
   attributed: boolean
   ts_last: string | null
+  ts_first: string | null
   instance_id: string | null
   partly_ended: boolean | null
   ended_project_code: string | null
   dismissed: boolean | null
 }
 
+/** The page's ranked conversation keys; `legacyIds` are the instance-keyed ones. */
+interface SessionKeys {
+  ids: string[]
+  legacyIds: string[]
+}
+
+function sessionWhere(teammateId: string, f: ActivityFilters): SQL[] {
+  const where: SQL[] = [sql`ar.teammate_id = ${teammateId}::uuid`]
+  if (f.tool) where.push(sql`ar.tool = ${f.tool}`)
+  return where
+}
+
 /**
- * The OTel-observed conversations. Grouped on the shared conversation key, so a
- * subagent never becomes its own row and a legacy instance-keyed conversation
- * still appears. The sort day is the day of the conversation's LAST event —
- * the same instant the row displays, so the order can never look random.
- *
- * TWO PHASES, ONE STATEMENT (docs/design/request-floor-performance.md §F6).
- * The from/to bounds and the keyset cursor compare against MAX(ts_event), so
- * they can only live in HAVING — the per-conversation aggregate is unbounded
- * by construction, over a table RANGE-partitioned on ts_event. Phase 1
- * (`ranked`) therefore ranks conversation keys with the slimmest aggregate
- * that can answer the HAVING + ORDER BY (project joined ONLY when the filter
- * needs p.code; no array_agg sorts), and takes the page's n keys. Phase 2
- * builds the full row shape for only those keys. Both phases apply the SAME
- * WHERE quals and group on the SAME key, and phase 1 ranks on the UNFILTERED
- * per-conversation MAX — identical HAVING semantics — so the output is
- * row-identical to the single-phase aggregate it replaces.
+ * Phase 1: the newest n conversation keys, in list order. `sinceDay` bounds the
+ * rows read; null reads the teammate's whole history.
  */
-function sessionsBranch(teammateId: string, f: ActivityFilters, c: ActivityCursor | null, n: number): SQL {
+async function rankSessionKeysSince(
+  tx: Tx,
+  teammateId: string,
+  f: ActivityFilters,
+  c: ActivityCursor | null,
+  n: number,
+  sinceDay: string | null,
+): Promise<{ id: string; legacy: boolean }[]> {
   const key = conversationKeyExpr('ar')
   const dayExpr = sql`(MAX(ar.ts_event) AT TIME ZONE 'UTC')::date`
   const tsExpr = sql`to_char(MAX(ar.ts_event) AT TIME ZONE 'UTC', ${TS_FORMAT})`
 
-  const where: SQL[] = [sql`ar.teammate_id = ${teammateId}::uuid`]
-  if (f.tool) where.push(sql`ar.tool = ${f.tool}`)
+  const where = sessionWhere(teammateId, f)
+  if (sinceDay) where.push(sql`ar.ts_event >= ${sinceDay}::timestamptz`)
 
   const having: SQL[] = []
   if (f.from) having.push(sql`${dayExpr} >= ${f.from}::date`)
@@ -162,32 +169,106 @@ function sessionsBranch(teammateId: string, f: ActivityFilters, c: ActivityCurso
   if (f.tagged === 'untagged') having.push(sql`bool_or(ar.project_id IS NULL)`)
   if (c) having.push(keysetPredicate(dayExpr, RANK_SESSION, tsExpr, key, c))
 
-  // Phase-2 key filter: the OR-of-two-equalities shape conversation-key.ts
-  // documents, NEVER COALESCE(...) IN (...) — the COALESCE form drags every
-  // row through an expression, while here the claude_session_id arm is
-  // index-servable and the legacy instance_id::text arm (pre-0016 rows only)
-  // stays a filter bounded by the teammate qual. A row belongs to a ranked
-  // key when its claude_session_id hits the set, or (legacy pre-0016 rows
-  // only) when claude_session_id IS NULL and its instance id does — exactly
-  // the rows whose COALESCE key equals that key, so phase 2 regroups the same
-  // populations phase 1 ranked (§F6).
-  const rankedKeyFilter = sql`(ar.claude_session_id IN (SELECT r.id FROM ranked r)
-             OR (ar.claude_session_id IS NULL
-                 AND ar.instance_id::text IN (SELECT r.id FROM ranked r)))`
+  const rows = await tx.execute<{ id: string; legacy: boolean }>(sql`
+    SELECT ${key} AS id, bool_or(ar.claude_session_id IS NULL) AS legacy
+    FROM attribution_record ar
+    ${f.project ? sql`LEFT JOIN project p ON p.id = ar.project_id` : sql``}
+    WHERE ${sql.join(where, sql` AND `)}
+    GROUP BY ${key}
+    ${having.length ? sql`HAVING ${sql.join(having, sql` AND `)}` : sql``}
+    -- The final sort minus its rank leg: rank is constant on this branch,
+    -- so these three legs ARE the full order (§F6).
+    ORDER BY ${dayExpr} DESC, ${tsExpr} DESC, ${key} DESC
+    LIMIT ${n}
+  `)
+  return [...rows]
+}
+
+/** The recent windows tried in turn, before reading the whole history (#593). */
+const RECENT_WINDOW_DAYS = [14, 56] as const
+
+function minusDays(day: string, days: number): string {
+  return new Date(Date.parse(`${day}T00:00:00Z`) - days * 86_400_000).toISOString().slice(0, 10)
+}
+
+/**
+ * Phase 1, reading as little of the history as the answer allows (#593).
+ *
+ * THE WINDOW IS EXACT, NOT AN APPROXIMATION. A conversation with any row inside
+ * the window has its true MAX(ts_event) inside it, because only older rows are
+ * left out; a conversation with no row inside it ends before the window, so it
+ * ranks below every conversation that has one. So a window that yields a full
+ * page holds the same page an unbounded read would give.
+ *
+ * A window short of a full page proves nothing about what lies below it, so the
+ * read widens once and then falls back to the whole history. The one shortcut:
+ * when the `from` bound is inside the window, nothing older could match anyway.
+ *
+ * Project and tagged filters skip the window: their bool_or must see every row
+ * of a conversation, and a window would let a row outside it change the answer.
+ * Without `today` (no request clock) it reads the whole history.
+ */
+async function rankSessionKeys(
+  tx: Tx,
+  teammateId: string,
+  f: ActivityFilters,
+  c: ActivityCursor | null,
+  n: number,
+  today: string | undefined,
+): Promise<SessionKeys> {
+  const needsWholeConversation = Boolean(f.project) || f.tagged === 'tagged' || f.tagged === 'untagged'
+  let ranked: { id: string; legacy: boolean }[] | null = null
+  if (today && !needsWholeConversation) {
+    // Any anchor gives an exact page; the earliest of these gives the smallest read.
+    const anchor = [today, f.to, c?.day].filter((d): d is string => Boolean(d)).sort()[0]!
+    for (const days of RECENT_WINDOW_DAYS) {
+      const sinceDay = minusDays(anchor, days)
+      const rows = await rankSessionKeysSince(tx, teammateId, f, c, n, sinceDay)
+      if (rows.length >= n || (f.from && f.from >= sinceDay)) {
+        ranked = rows
+        break
+      }
+    }
+  }
+  ranked ??= await rankSessionKeysSince(tx, teammateId, f, c, n, null)
+  return { ids: ranked.map((r) => r.id), legacyIds: ranked.filter((r) => r.legacy).map((r) => r.id) }
+}
+
+/**
+ * The OTel-observed conversations. Grouped on the shared conversation key, so a
+ * subagent never becomes its own row and a legacy instance-keyed conversation
+ * still appears. The sort day is the day of the conversation's LAST event —
+ * the same instant the row displays, so the order can never look random.
+ *
+ * TWO PHASES (docs/design/request-floor-performance.md §F6, #593). The from/to
+ * bounds and the keyset cursor compare against MAX(ts_event), so they can only
+ * live in HAVING. Phase 1 (`rankSessionKeys`) ranks conversation keys with the
+ * slimmest aggregate that can answer the HAVING + ORDER BY and takes the page's
+ * n keys. Phase 2 (this statement) builds the full row shape for only those
+ * keys, so each conversation's totals are whole. Both phases apply the same
+ * WHERE quals and group on the same key, so the output is row-identical to the
+ * single aggregate it replaces.
+ */
+function sessionsBranch(teammateId: string, f: ActivityFilters, keys: SessionKeys, n: number): SQL {
+  const key = conversationKeyExpr('ar')
+  const dayExpr = sql`(MAX(ar.ts_event) AT TIME ZONE 'UTC')::date`
+  const tsExpr = sql`to_char(MAX(ar.ts_event) AT TIME ZONE 'UTC', ${TS_FORMAT})`
+
+  const where = sessionWhere(teammateId, f)
+  const idList = sql.join(keys.ids.map((id) => sql`${id}`), sql`, `)
+  // The OR-of-two-equalities shape conversation-key.ts documents, never
+  // COALESCE(...) IN (...). The legacy arm (pre-0016 rows only) is written only
+  // when this page has a legacy conversation: an OR with a cast arm cannot use
+  // the session index, so it would walk all the teammate's rows for nothing.
+  const legacyArm = keys.legacyIds.length
+    ? sql`OR (ar.claude_session_id IS NULL AND ar.instance_id::text IN (${sql.join(
+        keys.legacyIds.map((id) => sql`${id}`),
+        sql`, `,
+      )}))`
+    : sql``
+  const rankedKeyFilter = sql`(ar.claude_session_id IN (${idList}) ${legacyArm})`
 
   return sql`
-    WITH ranked AS (
-      SELECT ${key} AS id
-      FROM attribution_record ar
-      ${f.project ? sql`LEFT JOIN project p ON p.id = ar.project_id` : sql``}
-      WHERE ${sql.join(where, sql` AND `)}
-      GROUP BY ${key}
-      ${having.length ? sql`HAVING ${sql.join(having, sql` AND `)}` : sql``}
-      -- The final sort minus its rank leg: rank is constant on this branch,
-      -- so these three legs ARE the full order (§F6).
-      ORDER BY ${dayExpr} DESC, ${tsExpr} DESC, ${key} DESC
-      LIMIT ${n}
-    )
     SELECT * FROM (
       SELECT
         'session'::text                       AS kind,
@@ -228,6 +309,7 @@ function sessionsBranch(teammateId: string, f: ActivityFilters, c: ActivityCurso
         SUM(ar.cost_usd)::text                AS cost_usd,
         bool_or(ar.project_id IS NOT NULL)    AS attributed,
         ${tsExpr}                             AS ts_last,
+        MIN(ar.ts_event)::text                AS ts_first,
         MAX(ar.instance_id::text)             AS instance_id,
         (bool_or(${endedProjectExpr('p')})
          AND bool_or(NOT (${endedProjectExpr('p')}))) AS partly_ended,
@@ -235,10 +317,9 @@ function sessionsBranch(teammateId: string, f: ActivityFilters, c: ActivityCurso
         NULL::boolean                         AS dismissed
       FROM attribution_record ar
       LEFT JOIN project p ON p.id = ar.project_id
-      -- Same WHERE quals as phase 1 (teammate qual stays: RLS + the
-      -- teammate index), so each ranked key regroups the exact row population
-      -- phase 1 aggregated — every HAVING fact phase 1 established therefore
-      -- still holds and is not re-checked here (§F6).
+      -- The teammate and tool quals of phase 1, WITHOUT its recent window, so
+      -- each ranked key regroups every row of that conversation. Every HAVING
+      -- fact phase 1 established still holds and is not re-checked here (§F6).
       WHERE ${sql.join(where, sql` AND `)}
         AND ${rankedKeyFilter}
       GROUP BY ${key}
@@ -293,6 +374,7 @@ function providerDaysBranch(teammateId: string, f: ActivityFilters, c: ActivityC
       u.cost_usd::text                            AS cost_usd,
       (u.project_id IS NOT NULL)                  AS attributed,
       NULL::text                                  AS ts_last,
+      NULL::text                                  AS ts_first,
       NULL::text                                  AS instance_id,
       NULL::boolean                               AS partly_ended,
       NULL::text                                  AS ended_project_code,
@@ -365,7 +447,9 @@ function toRow(r: UnionRow): ActivityRow {
       // columns. A session's tokens are OTel-observed: always a measurement.
       tokens: Number(r.tokens),
       ts_last: r.ts_last!,
+      ts_first: r.ts_first ?? r.ts_last!,
       instance_id: r.instance_id,
+      device_name: null,
       partly_ended: r.partly_ended ?? false,
       ended_project_code: r.ended_project_code,
     } satisfies ActivitySessionRow
@@ -389,19 +473,30 @@ export async function fetchActivityPage(
   tx: Tx,
   teammateId: string,
   f: ActivityFilters,
-  opts: { limit: number; cursor?: string | null; withBreakdowns?: boolean },
+  opts: {
+    limit: number
+    cursor?: string | null
+    withBreakdowns?: boolean
+    withDeviceNames?: boolean
+    /** The request clock's UTC day; it anchors the recent-window read (#593). */
+    today?: string
+  },
 ): Promise<{ rows: ActivityRow[]; hasMore: boolean; nextCursor: string | null }> {
   const cursor = opts.cursor ? decodeActivityCursor(opts.cursor) : null
   if (opts.cursor && !cursor) throw new Error('activity-list: invalid cursor')
 
   const probe = opts.limit + 1
   const branches: SQL[] = []
-  if (f.kind === 'all' || f.kind === 'session') branches.push(sessionsBranch(teammateId, f, cursor, probe))
+  let sessionKeys: SessionKeys = { ids: [], legacyIds: [] }
+  if (f.kind === 'all' || f.kind === 'session') {
+    sessionKeys = await rankSessionKeys(tx, teammateId, f, cursor, probe, opts.today)
+    if (sessionKeys.ids.length) branches.push(sessionsBranch(teammateId, f, sessionKeys, probe))
+  }
   if (f.kind === 'all' || f.kind === 'provider-day') {
     branches.push(providerDaysBranch(teammateId, f, cursor, probe))
   }
-  // `kind` is a closed enum, so this cannot happen — but an empty UNION would be
-  // a syntax error rather than an empty page, which is a bad way to find out.
+  // No matching conversation and no provider-day branch. An empty UNION would
+  // be a syntax error rather than an empty page.
   if (!branches.length) return { rows: [], hasMore: false, nextCursor: null }
 
   // Each branch carries its OWN ORDER BY + LIMIT (that is what "both sides
@@ -424,10 +519,28 @@ export async function fetchActivityPage(
   if (opts.withBreakdowns) {
     const convIds = page.filter((r) => r.kind === 'session').map((r) => r.id)
     if (convIds.length) {
-      const cells = groupCells(await fetchBreakdownCells(tx, teammateId, convIds))
+      const legacy = new Set(sessionKeys.legacyIds)
+      const cells = groupCells(
+        await fetchBreakdownCells(tx, teammateId, convIds, convIds.filter((id) => legacy.has(id))),
+      )
       for (const r of page) {
         if (r.kind === 'session') Object.assign(r, breakdownFields(cells.get(r.id) ?? []))
       }
+    }
+  }
+
+  /*
+   * The caller's own device names (#576) for the page's sessions. The page read
+   * only: the CSV export never asks, so a name cannot reach a file.
+   */
+  if (opts.withDeviceNames) {
+    const names = await ownDeviceNames(
+      tx,
+      teammateId,
+      page.map((r) => (r.kind === 'session' ? r.instance_id : null)),
+    )
+    for (const r of page) {
+      if (r.kind === 'session' && r.instance_id) r.device_name = names.get(r.instance_id) ?? null
     }
   }
 
@@ -449,6 +562,7 @@ export async function fetchActivityForExport(
   teammateId: string,
   f: ActivityFilters,
   limit: number,
+  today?: string,
 ): Promise<ActivityRow[]> {
   const out: ActivityRow[] = []
   let cursor: string | null = null
@@ -458,6 +572,7 @@ export async function fetchActivityForExport(
     const page: Awaited<ReturnType<typeof fetchActivityPage>> = await fetchActivityPage(tx, teammateId, f, {
       limit: Math.min(step, limit - out.length),
       cursor,
+      today,
     })
     out.push(...page.rows)
     if (!page.hasMore || !page.nextCursor) break

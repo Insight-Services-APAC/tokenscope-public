@@ -24,7 +24,7 @@ describe('ChartsStackedBars format prop', () => {
     const w = mount(ChartsStackedBars, {
       props: { rows: [{ day: today, key: 'opus', value: 12.34 }], windowDays: 7, endDay: today },
     })
-    expect(w.find('title').text()).toContain('— $12.34')
+    expect(w.find('title').text()).toContain(': $12.34')
   })
 
   it('uses a custom formatter when provided', () => {
@@ -47,7 +47,7 @@ describe('ChartsTrendArea format prop', () => {
     const w = mount(ChartsTrendArea, {
       props: { series: [{ day: today, cost_usd: '12.34' }], windowDays: 7, endDay: today },
     })
-    expect(w.find('title').text()).toBe(`${today} — $12.34`)
+    expect(w.find('title').text()).toBe(`${today}: $12.34`)
     // Axis ticks keep the `$` prefix by default.
     expect(w.findAll('text').some((t) => t.text().includes('$'))).toBe(true)
   })
@@ -61,6 +61,6 @@ describe('ChartsTrendArea format prop', () => {
         format: (v: number) => `${v.toFixed(0)} cr`,
       },
     })
-    expect(w.find('title').text()).toBe(`${today} — 12 cr`)
+    expect(w.find('title').text()).toBe(`${today}: 12 cr`)
   })
 })

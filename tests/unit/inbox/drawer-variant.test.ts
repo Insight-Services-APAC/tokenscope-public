@@ -22,8 +22,12 @@ describe('variantForCategory', () => {
     expect(variantForCategory('structural-conflict')).toBe('sync-conflict')
   })
 
-  it('routes untagged-backlog to the untagged body', () => {
-    expect(variantForCategory('untagged-backlog')).toBe('untagged')
+  it('routes untagged-backlog to the sections body (#573: it measures missing telemetry, not untagged sessions)', () => {
+    expect(variantForCategory('untagged-backlog')).toBe('sections')
+  })
+
+  it('routes budget-nearly-used to its own body (#575)', () => {
+    expect(variantForCategory('budget-nearly-used')).toBe('nearly-used')
   })
 
   it('routes escalated over-emission flags to the over-emission body', () => {
@@ -52,9 +56,13 @@ describe('variantForCategory', () => {
     expect(categoryLabel('something-new')).toBe('Notice')
   })
 
-  it('falls back to generic for unknown categories', () => {
-    expect(variantForCategory('connector-health')).toBe('generic')
-    expect(variantForCategory('unknown')).toBe('generic')
-    expect(variantForCategory('')).toBe('generic')
+  it('draws the admin and pipeline kinds from the sections table (#573)', () => {
+    expect(variantForCategory('connector-health')).toBe('sections')
+    expect(variantForCategory('went-silent')).toBe('sections')
+  })
+
+  it('only a category this build does not know is unknown', () => {
+    expect(variantForCategory('unknown')).toBe('unknown')
+    expect(variantForCategory('')).toBe('unknown')
   })
 })

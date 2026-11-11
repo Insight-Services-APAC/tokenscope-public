@@ -37,9 +37,7 @@ try {
   for (const [sel, label] of [
     ['[data-testid="hero-summary"]', 'hero'],
     ['[data-testid="hero-status"]', 'health badge'],
-    ['[data-testid="connect-desktop"]', 'connect claude desktop'],
-    ['[data-testid="connect-claude"]', 'connect claude code cli'],
-    ['[data-testid="connect-copilot"]', 'connect copilot'],
+    ['[data-testid="home-tool-status"]', 'tools status strip'],
     ['[data-testid="project-bucket-list"]', 'project spend list'],
     ['[data-testid="spill-card"]', 'tagged spend card'],
     ['[data-testid="untagged-sessions"]', 'needs-tagging grid'],
@@ -49,26 +47,27 @@ try {
   // project bars present (budgeted projects seeded)
   if ((await count('[data-testid^="usage-bucket-"]')) < 1) throw new Error('[panels] no project buckets')
 
-  // ── connect-client pop-up: open from a head button, assert it renders the
-  //    shared guide, then close via Escape (both buttons use one component) ──
+  // ── connect-client pop-up (#580): Connect is offered on the tools strip only
+  //    for a client that is not connected (or when the check failed). Every one
+  //    offered must open the shared guide and close again. ──
   step = 'connect-dialog'
-  await page.click('[data-testid="connect-claude"]')
-  await must('[data-testid="connect-client-modal"]', 'connect dialog')
-  await must('[data-testid="connect-claude-code"]', 'claude guide in dialog')
-  await page.keyboard.press('Escape')
-  await page.waitForTimeout(150)
-  if (await page.$('[data-testid="connect-client-modal"]')) {
-    const m = await page.$('[data-testid="connect-client-modal"]')
-    if (await m.isVisible()) throw new Error('[connect-dialog] modal still visible after Escape')
+  await page.waitForSelector('[data-testid="home-tool-status"] [data-state]:not([data-state="unknown"])', { timeout: 20000 })
+  const guideFor = {
+    'claude-desktop': 'connect-claude-desktop',
+    'claude-cli': 'connect-claude-code',
+    'copilot-cli': 'connect-copilot-cli',
   }
-  await page.click('[data-testid="connect-desktop"]')
-  await must('[data-testid="connect-claude-desktop"]', 'claude desktop guide in dialog')
-  await page.click('[data-testid="connect-close"]')
-  await page.waitForTimeout(150)
-  await page.click('[data-testid="connect-copilot"]')
-  await must('[data-testid="connect-copilot-cli"]', 'copilot guide in dialog')
-  await page.click('[data-testid="connect-close"]')
-  await page.waitForTimeout(150)
+  for (const [kind, guide] of Object.entries(guideFor)) {
+    const btn = await page.$(`[data-testid="home-tool-connect-${kind}"]`)
+    if (!btn) continue
+    await btn.click()
+    await must('[data-testid="connect-client-modal"]', 'connect dialog')
+    await must(`[data-testid="${guide}"]`, `${kind} guide in dialog`)
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(150)
+    const m = await page.$('[data-testid="connect-client-modal"]')
+    if (m && (await m.isVisible())) throw new Error(`[connect-dialog] modal still visible after Escape (${kind})`)
+  }
 
   // ── recent sessions toggle (collapse + expand) ──
   step = 'recent-toggle'

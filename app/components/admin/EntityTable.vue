@@ -26,6 +26,14 @@
  * a navigation, not a deselection — an admin who selects 12 people, refines the
  * search and then acts must not silently act on fewer than they picked. The
  * selection summary states the total so that is visible rather than surprising.
+ *
+ * ── SERVER PAGING (#582) ───────────────────────────────────────────────────
+ * Set `serverOffset` when the parent searches, filters and pages ON THE SERVER
+ * (Admin → Projects). The table then drops its own search box (the parent puts
+ * its server search in the toolbar slot) and the footer states the window:
+ * "1 to 50 of 120 projects". Without it the search stays client-side over the
+ * loaded rows, and a truncated footer says only those rows were searched; it
+ * never tells the reader to "refine on the server" on a page that cannot.
  */
 import { ref, computed } from 'vue'
 import UiCard from '../ui/Card.vue'
@@ -63,6 +71,14 @@ const props = defineProps<{
    */
   emptyHeadline?: string
   emptySub?: string
+  /** The server offset of `rows[0]`; set it when the parent pages and searches on the server. */
+  serverOffset?: number
+  /*
+   * Let the actions cell wrap onto a second line. Admin → Projects has up to
+   * six actions per row; kept on one line they pushed the column off the right
+   * edge at 1200 px (#582), behind a horizontal scroll nobody noticed.
+   */
+  wrapActions?: boolean
 }>()
 
 const selected = defineModel<string[]>('selected', { default: () => [] })
@@ -136,13 +152,18 @@ function toggleAllVisible() {
 // loaded). Search is client-side over the loaded window only, so when truncated
 // the footer must say so — otherwise "X of {total}" reads as if all {total} rows
 // were searched.
-const truncated = computed(() => props.total != null && props.rows.length < props.total)
+const serverPaged = computed(() => props.serverOffset != null)
+const truncated = computed(() => !serverPaged.value && props.total != null && props.rows.length < props.total)
 const searching = computed(() => query.value.trim().length > 0)
 const footerNote = computed(() => {
   if (props.total == null) return null
   const lbl = slug.value
+  if (serverPaged.value) {
+    const from = (props.serverOffset ?? 0) + 1
+    return `${from} to ${from + props.rows.length - 1} of ${props.total} ${lbl}`
+  }
   if (searching.value && truncated.value)
-    return `${sortedRows.value.length} match in the first ${props.rows.length} of ${props.total} ${lbl} — refine on the server to search the rest.`
+    return `${sortedRows.value.length} match in the first ${props.rows.length} of ${props.total} ${lbl}. Only these were searched.`
   if (searching.value) return `${sortedRows.value.length} of ${props.total} ${lbl} match.`
   if (truncated.value) return `Showing the first ${props.rows.length} of ${props.total} ${lbl}.`
   return null
@@ -153,6 +174,7 @@ const footerNote = computed(() => {
   <UiCard flush :data-testid="`entity-table-${slug}`">
     <div class="px-5 pt-5 pb-3 flex flex-wrap items-center gap-3">
       <input
+        v-if="!serverPaged"
         v-model="query"
         type="search"
         :placeholder="`Search ${slug}…`"
@@ -197,7 +219,7 @@ const footerNote = computed(() => {
     </div>
     <div v-else-if="sortedRows.length === 0" class="border-t border-calm-2 px-5 py-8 text-center text-sm text-carbon-3">
       No {{ slug }} match “{{ query }}”.
-      <span v-if="truncated" class="block text-[11px] mt-1">Only the first {{ rows.length }} of {{ total }} were searched — refine on the server for the rest.</span>
+      <span v-if="truncated" class="block text-[11px] mt-1">Only the first {{ rows.length }} of {{ total }} were searched.</span>
     </div>
     <div v-else class="overflow-x-auto border-t border-calm-2">
       <table class="w-full text-sm">
@@ -261,7 +283,11 @@ const footerNote = computed(() => {
             >
               {{ cellText(row, c) }}
             </td>
-            <td v-if="$slots.rowActions" class="px-5 py-3 text-right whitespace-nowrap">
+            <td
+              v-if="$slots.rowActions"
+              class="px-5 py-3 text-right"
+              :class="wrapActions ? 'min-w-[14rem]' : 'whitespace-nowrap'"
+            >
               <slot name="rowActions" :row="row" />
             </td>
           </tr>

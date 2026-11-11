@@ -17,13 +17,21 @@
  * is: a month of 12 sessions worth $0.52 alongside 10 days worth $168 is the
  * normal shape, and a card that only shows a grand total hides that.
  *
+ * EARLIER MONTHS FOLD AWAY (#596). The lists are all-time and the headline is
+ * this month, so each group is split at the server clock's month: a session by
+ * the UTC day of its last event, a day by its own date. The fold only groups and
+ * offers a selection; nothing is selected, dismissed or hidden because it is old.
+ * Until the clock lands nothing is split, rather than guessing a month.
+ *
  * Selection drives one bulk call (/me/worklist/bulk) for tag / dismiss /
  * restore. Tagging is handed UP to the page, which owns the shared
  * TagSessionDialog; dismiss + restore are posted from here.
  */
 import { computed, ref, watch } from 'vue'
 import UiButton from '../ui/Button.vue'
-import { fmtUsd, fmtTokens, fmtTimeAgo, clientMeta } from '../../composables/useFormat'
+import { fmtUsd, fmtTokens, fmtSessionSpan, clientMeta, parseInstantMs } from '../../composables/useFormat'
+import { useViewerZone } from '../../composables/useViewerZone'
+import { deviceLabel } from '#shared/schemas/device-name'
 import { apiErrorDetail } from '../../composables/useApiError'
 import {
   WORKLIST_LIST_LIMIT,
@@ -70,6 +78,16 @@ const emit = defineEmits<{
   /** A dismiss/restore landed — the page refetches usage + worklist. */
   changed: []
 }>()
+
+// ── When and where a session ran (#577) ──────────────────────────────────────
+// A session is recognised by when it ran and on which device, so the row says
+// both; the session id moves to the tooltip. Instants render in the viewer's
+// zone (UTC until mounted: useViewerZone). Provider-recorded days are untouched.
+const { timeZone, isLocal } = useViewerZone()
+const sessionWhen = (s: WorklistSession) =>
+  fmtSessionSpan(s.session_first, s.session_last, timeZone.value, { utcLabel: !isLocal.value })
+const sessionDevice = (s: WorklistSession) =>
+  s.instance_id ? deviceLabel({ instance_id: s.instance_id, tool: s.tool, display_name: s.device_name }) : null
 
 // ── Selection ────────────────────────────────────────────────────────────────
 // Keyed by kind so a session id and a record id can never collide.
@@ -127,6 +145,65 @@ const smallKeys = computed(() => [
 function selectSmall() {
   selected.value = new Set(smallKeys.value)
 }
+// ── This month, and the fold of earlier months (#596) ───────────────────────
+const { today: serverToday } = useServerClock()
+const currentMonth = computed(() => serverToday.value?.slice(0, 7) ?? null)
+function sessionMonth(s: WorklistSession): string | null {
+  const ms = parseInstantMs(s.session_last)
+  return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 7) : null
+}
+const isEarlierMonth = (month: string | null) => Boolean(month && currentMonth.value && month < currentMonth.value)
+const earlierSessions = computed(() => props.sessions.filter((s) => isEarlierMonth(sessionMonth(s))))
+const earlierDays = computed(() => props.unaccounted.filter((d) => isEarlierMonth(d.day.slice(0, 7))))
+const earlierSet = computed(() => new Set([...earlierSessions.value.map(sKey), ...earlierDays.value.map(dKey)]))
+const sessionsOpen = ref(false)
+const daysOpen = ref(false)
+
+const earlierKeys = computed(() => [...earlierSet.value])
+function selectEarlier() {
+  selected.value = new Set(earlierKeys.value)
+}
+const earlierLabel = computed(() => `Select the ${earlierKeys.value.length} from earlier months`)
+
+// A list at the read cap may hold fewer earlier items than exist, so its count
+// is "of those shown"; the fold says so rather than claim the backlog's size.
+const sessionsAtCap = computed(() => props.sessions.length >= WORKLIST_LIST_LIMIT)
+const daysAtCap = computed(() => props.unaccounted.length >= WORKLIST_LIST_LIMIT)
+const monthLabel = (month: string) =>
+  new Intl.DateTimeFormat('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(Date.parse(`${month}-01T00:00:00Z`))
+const foldLabel = (count: number, cost: number, atCap: boolean) =>
+  `Earlier months · ${count} ${count === 1 ? 'item' : 'items'}${atCap ? ' of those shown' : ''} · ${fmtUsd(cost)}`
+const costOf = (list: { cost_usd: string | number }[]) => list.reduce((a, x) => a + Number(x.cost_usd), 0)
+
+type GroupItem<T> = { kind: 'row'; key: string; row: T } | { kind: 'fold'; key: string } | { kind: 'month'; key: string; label: string }
+
+/** One flat grid per group, so a row renders the same in the open list and the fold. */
+function groupItems<T>(
+  all: T[],
+  earlier: T[],
+  open: boolean,
+  key: (r: T) => string,
+  month: (r: T) => string | null,
+): GroupItem<T>[] {
+  const old = new Set(earlier)
+  const items: GroupItem<T>[] = all.filter((r) => !old.has(r)).map((row) => ({ kind: 'row', key: key(row), row }))
+  if (!earlier.length) return items
+  items.push({ kind: 'fold', key: 'fold' })
+  if (!open) return items
+  let current: string | null = null
+  for (const row of earlier) {
+    const m = month(row)
+    if (m && m !== current) {
+      current = m
+      items.push({ kind: 'month', key: `month-${m}`, label: monthLabel(m) })
+    }
+    items.push({ kind: 'row', key: key(row), row })
+  }
+  return items
+}
+const sessionItems = computed(() => groupItems(props.sessions, earlierSessions.value, sessionsOpen.value, sKey, sessionMonth))
+const dayItems = computed(() => groupItems(props.unaccounted, earlierDays.value, daysOpen.value, dKey, (d: WorklistDay) => d.day.slice(0, 7)))
+
 const smallLabel = computed(() => `Select the ${smallKeys.value.length} under ${fmtUsd(WORKLIST_SMALL_ITEM_USD)}`)
 
 // ── Group subtotals (of what is SHOWN — the month figures are in `summary`) ──
@@ -270,7 +347,7 @@ const showDismissed = ref(false)
 </script>
 
 <template>
-  <UiCard accent="zeal" data-testid="untagged-card" class="mb-4">
+  <UiCard id="worklist" accent="zeal" data-testid="untagged-card" class="mb-4">
     <div class="flex items-baseline gap-3 flex-wrap">
       <!-- HEADING ONLY. Every control below — multi-select, the dismissed count
            and its show link, the sessions vs provider-recorded-days split and
@@ -363,6 +440,15 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
       >
         {{ smallLabel }}
       </button>
+      <button
+        v-if="earlierKeys.length"
+        type="button"
+        class="text-carbon-3 hover:text-brand-harmony underline underline-offset-2"
+        data-testid="worklist-select-earlier"
+        @click="selectEarlier"
+      >
+        {{ earlierLabel }}
+      </button>
 
       <div
         v-if="selectedCount"
@@ -397,45 +483,56 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
         <span class="font-bold uppercase tracking-[1px] text-carbon-2">Sessions</span>
         <span data-testid="sessions-subtotal">{{ sessions.length }} · {{ fmtUsd(sessionsShownCost) }}</span>
         <span v-if="moreSessions">· {{ moreSessions }} more this month not shown</span>
-        <span v-if="olderSessions">· incl. {{ olderSessions }} from earlier months</span>
       </div>
       <div class="grid md:grid-cols-2 gap-2">
+        <template v-for="item in sessionItems" :key="item.key">
+        <button
+          v-if="item.kind === 'fold'"
+          type="button"
+          class="md:col-span-2 text-left text-xs font-semibold text-brand-harmony hover:underline underline-offset-2 py-1"
+          :aria-expanded="sessionsOpen"
+          data-testid="sessions-earlier-toggle"
+          @click="sessionsOpen = !sessionsOpen"
+        >{{ sessionsOpen ? '▾' : '▸' }} {{ foldLabel(earlierSessions.length, costOf(earlierSessions), sessionsAtCap) }}</button>
+        <p
+          v-else-if="item.kind === 'month'"
+          class="md:col-span-2 text-[11px] font-bold uppercase tracking-[1px] text-carbon-3 mt-1"
+          data-testid="sessions-earlier-month"
+        >{{ item.label }}</p>
         <div
-          v-for="s in sessions"
-          :key="s.session_id"
+          v-else
           class="flex items-center gap-2.5 rounded-lg border px-3 py-2.5 transition-colors"
-          :class="isSelected(sKey(s)) ? 'border-brand-harmony bg-brand-harmony-sheer' : 'border-brand-zeal-lite/70 bg-white/70'"
-          :data-testid="`untagged-${s.session_id}`"
+          :class="isSelected(sKey(item.row)) ? 'border-brand-harmony bg-brand-harmony-sheer' : 'border-brand-zeal-lite/70 bg-white/70'"
+          :data-testid="`untagged-${item.row.session_id}`"
         >
           <input
             type="checkbox"
             class="rounded border-calm-2 shrink-0"
-            :checked="isSelected(sKey(s))"
-            :aria-label="`Select session ${s.session_id}`"
-            :data-testid="`select-${s.session_id}`"
-            @change="toggle(sKey(s))"
+            :checked="isSelected(sKey(item.row))"
+            :aria-label="`Select session ${item.row.session_id}`"
+            :data-testid="`select-${item.row.session_id}`"
+            @change="toggle(sKey(item.row))"
           >
-          <Icon :name="clientMeta(s.tool).icon" class="text-base shrink-0" :title="clientMeta(s.tool).name" />
+          <Icon :name="clientMeta(item.row.tool).icon" class="text-base shrink-0" :title="clientMeta(item.row.tool).name" />
           <div class="min-w-0 flex-1">
-            <div class="text-xs text-carbon truncate">
-              <span class="font-semibold">{{ clientMeta(s.tool).name }}</span>
-              <span class="text-carbon-3"> · {{ fmtTimeAgo(s.last_event) }} · {{ fmtTokens(s.tokens) }}</span>
-              <UsageModelBadge :by-model="s.by_model" class="ml-1.5 align-middle" />
+            <div class="text-xs text-carbon truncate" :title="`Session ${item.row.session_id}`">
+              <span class="font-semibold" :data-testid="`untagged-when-${item.row.session_id}`">{{ sessionWhen(item.row) }}</span>
+              <UsageModelBadge :by-model="item.row.by_model" class="ml-1.5 align-middle" />
             </div>
-            <div class="text-[11px] text-carbon-3 mt-0.5">
-              Session <span class="font-mono text-carbon-2">{{ s.session_id.slice(0, 13) }}</span>
+            <div class="text-[11px] text-carbon-3 mt-0.5 truncate" :data-testid="`untagged-device-${item.row.session_id}`">
+              {{ clientMeta(item.row.tool).name }}<template v-if="sessionDevice(item.row)"> · {{ sessionDevice(item.row) }}</template> · {{ fmtTokens(item.row.tokens) }}
             </div>
           </div>
           <span
             class="text-sm font-bold text-carbon shrink-0"
             style="font-variant-numeric: tabular-nums"
-          >{{ fmtUsd(s.cost_usd) }}</span>
+          >{{ fmtUsd(item.row.cost_usd) }}</span>
           <UiButton
             kind="primary"
             size="sm"
             :disabled="busy !== null"
-            :data-testid="`tag-${s.session_id}`"
-            @click="emit('tagSession', s)"
+            :data-testid="`tag-${item.row.session_id}`"
+            @click="emit('tagSession', item.row)"
           >
             Tag
           </UiButton>
@@ -443,13 +540,14 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
             kind="ghost"
             size="sm"
             :disabled="busy !== null"
-            :title="`Dismiss — leave ${fmtUsd(s.cost_usd)} unallocated on your Business Unit`"
-            :data-testid="`dismiss-${s.session_id}`"
-            @click="dismissSession(s)"
+            :title="`Dismiss: leave ${fmtUsd(item.row.cost_usd)} unallocated on your Business Unit`"
+            :data-testid="`dismiss-${item.row.session_id}`"
+            @click="dismissSession(item.row)"
           >
             Dismiss
           </UiButton>
         </div>
+        </template>
       </div>
     </div>
 
@@ -458,14 +556,14 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
       class="text-xs text-carbon-2 mt-3"
       data-testid="worklist-empty"
     >
-      Nothing needs tagging — all your spend is on a project, categorised, or dismissed.
+      Nothing needs tagging: all your spend is on a project, categorised, or dismissed.
     </p>
     <p
       v-else-if="!unaccounted.length && loadUnknown"
       class="text-xs text-carbon-3 mt-3"
       data-testid="worklist-unknown"
     >
-      Couldn't load your worklist, so this list may be incomplete — retry above.
+      Couldn't load your worklist, so this list may be incomplete. Retry above.
     </p>
     <p
       v-else-if="!unaccounted.length"
@@ -483,7 +581,6 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
         <span class="font-bold uppercase tracking-[1px] text-carbon-2">Provider-recorded days</span>
         <span data-testid="days-subtotal">{{ unaccounted.length }} · {{ fmtUsd(daysShownCost) }}</span>
         <span v-if="moreDays">· {{ moreDays }} more this month not shown</span>
-        <span v-if="olderDays">· incl. {{ olderDays }} from earlier months</span>
       </div>
       <p class="text-xs text-carbon-2 mb-2">
         <!--
@@ -495,34 +592,47 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
         Days your provider billed for with nothing recorded on your machine.
       </p>
       <div class="grid md:grid-cols-2 gap-2">
+        <template v-for="item in dayItems" :key="item.key">
+        <button
+          v-if="item.kind === 'fold'"
+          type="button"
+          class="md:col-span-2 text-left text-xs font-semibold text-brand-harmony hover:underline underline-offset-2 py-1"
+          :aria-expanded="daysOpen"
+          data-testid="days-earlier-toggle"
+          @click="daysOpen = !daysOpen"
+        >{{ daysOpen ? '▾' : '▸' }} {{ foldLabel(earlierDays.length, costOf(earlierDays), daysAtCap) }}</button>
+        <p
+          v-else-if="item.kind === 'month'"
+          class="md:col-span-2 text-[11px] font-bold uppercase tracking-[1px] text-carbon-3 mt-1"
+          data-testid="days-earlier-month"
+        >{{ item.label }}</p>
         <div
-          v-for="u in unaccounted"
-          :key="u.id"
+          v-else
           class="flex items-center gap-2.5 rounded-lg border border-dashed px-3 py-2.5 transition-colors"
-          :class="isSelected(dKey(u)) ? 'border-brand-harmony bg-brand-harmony-sheer' : 'border-brand-zeal-lite/90 bg-brand-zeal-lite/15'"
-          :data-testid="`unaccounted-row-${u.id}`"
+          :class="isSelected(dKey(item.row)) ? 'border-brand-harmony bg-brand-harmony-sheer' : 'border-brand-zeal-lite/90 bg-brand-zeal-lite/15'"
+          :data-testid="`unaccounted-row-${item.row.id}`"
         >
           <input
             type="checkbox"
             class="rounded border-calm-2 shrink-0"
-            :checked="isSelected(dKey(u))"
-            :aria-label="`Select ${u.day}`"
-            :data-testid="`select-day-${u.id}`"
-            @change="toggle(dKey(u))"
+            :checked="isSelected(dKey(item.row))"
+            :aria-label="`Select ${item.row.day}`"
+            :data-testid="`select-day-${item.row.id}`"
+            @change="toggle(dKey(item.row))"
           >
-          <Icon :name="clientMeta(u.tool).icon" class="text-base shrink-0" :title="clientMeta(u.tool).name" />
+          <Icon :name="clientMeta(item.row.tool).icon" class="text-base shrink-0" :title="clientMeta(item.row.tool).name" />
           <div class="min-w-0 flex-1">
             <div class="text-xs text-carbon truncate">
-              <span class="font-semibold">{{ u.day }}</span>
+              <span class="font-semibold">{{ item.row.day }}</span>
               <!-- Tokens are elided at 0: the provider's billing API reports cost
                    without a token count for most lanes, so "· 0" is noise, not data. -->
-              <span class="text-carbon-3"> · {{ clientMeta(u.tool).name }}<template v-if="u.tokens"> · {{ fmtTokens(u.tokens) }}</template></span>
+              <span class="text-carbon-3"> · {{ clientMeta(item.row.tool).name }}<template v-if="item.row.tokens"> · {{ fmtTokens(item.row.tokens) }}</template></span>
             </div>
           </div>
           <span
             class="text-sm font-bold text-carbon shrink-0"
             style="font-variant-numeric: tabular-nums"
-          >{{ fmtUsd(u.cost_usd) }}</span>
+          >{{ fmtUsd(item.row.cost_usd) }}</span>
           <!-- The same drill-down affordance a session row carries. The day's
                model mix, token lanes and requests are all recorded by the
                provider; until now the row showed only the dollar figure. -->
@@ -530,8 +640,8 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
             kind="ghost"
             size="sm"
             :disabled="busy !== null"
-            :data-testid="`unaccounted-details-${u.id}`"
-            @click="emit('dayDetail', u)"
+            :data-testid="`unaccounted-details-${item.row.id}`"
+            @click="emit('dayDetail', item.row)"
           >
             Details
           </UiButton>
@@ -539,8 +649,8 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
             kind="primary"
             size="sm"
             :disabled="busy !== null"
-            :data-testid="`unaccounted-tag-${u.id}`"
-            @click="emit('tagDay', u)"
+            :data-testid="`unaccounted-tag-${item.row.id}`"
+            @click="emit('tagDay', item.row)"
           >
             Tag
           </UiButton>
@@ -548,13 +658,14 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
             kind="ghost"
             size="sm"
             :disabled="busy !== null"
-            :title="`Dismiss — leave ${fmtUsd(u.cost_usd)} unallocated on your Business Unit`"
-            :data-testid="`dismiss-day-${u.id}`"
-            @click="dismissDay(u)"
+            :title="`Dismiss: leave ${fmtUsd(item.row.cost_usd)} unallocated on your Business Unit`"
+            :data-testid="`dismiss-day-${item.row.id}`"
+            @click="dismissDay(item.row)"
           >
             Dismiss
           </UiButton>
         </div>
+        </template>
       </div>
     </div>
 
@@ -568,7 +679,7 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
       <div class="flex items-baseline gap-2 mb-2">
         <span class="text-[11px] font-bold uppercase tracking-[1px] text-carbon-2">Dismissed</span>
         <span class="text-[11px] text-carbon-3">
-          still unallocated · charged to your Business Unit<template v-if="dismissedAtCap"> · showing the most recent {{ WORKLIST_LIST_LIMIT }} per kind</template>
+          stays unallocated on your Business Unit<template v-if="dismissedAtCap"> · showing the most recent {{ WORKLIST_LIST_LIMIT }} per kind</template>
         </span>
         <UiButton
           kind="ghost"
@@ -590,7 +701,7 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
         >
           <Icon :name="clientMeta(s.tool).icon" class="text-sm shrink-0 opacity-60" aria-hidden="true" />
           <span class="text-[11px] text-carbon-3 min-w-0 flex-1 truncate">
-            <span class="font-mono">{{ s.session_id.slice(0, 13) }}</span> · {{ fmtTimeAgo(s.last_event) }}
+            <span :title="`Session ${s.session_id}`">{{ sessionWhen(s) }}</span><template v-if="sessionDevice(s)"> · {{ sessionDevice(s) }}</template>
           </span>
           <span class="text-xs text-carbon-2 shrink-0" style="font-variant-numeric: tabular-nums">{{ fmtUsd(s.cost_usd) }}</span>
           <UiButton

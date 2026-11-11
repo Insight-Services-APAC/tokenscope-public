@@ -11,6 +11,7 @@
  * STUBS — T18 pins the wiring, not their internals (which this change may not
  * touch at all — see the diff-guard below).
  */
+import { advisorySentence } from '../../../shared/usage/advisory-copy'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -384,7 +385,7 @@ describe('/usage rebuild — month band + four tiles (T14)', () => {
     expect(card.exists()).toBe(true)
     expect(card.find('[data-stub="window-toggle"]').exists()).toBe(true)
     expect(card.find('[data-testid="stack-toggle"]').exists()).toBe(true)
-    expect(card.text()).toContain('$96.40 of the last 30d is advisory')
+    expect(card.text()).toContain('$96.40 of the last 30 days is indicative')
   })
 
   it('the chip row mounts from the payload operands (D14) and the prose is gone', async () => {
@@ -406,7 +407,7 @@ describe('/usage rebuild — Top models (T16)', () => {
     const w = await mountPage()
     // The ranked bar received ONLY the named models.
     const bars = w.find('[data-testid="ranked-bar-stub"]').text()
-    expect(bars).toBe('claude-opus-5|claude-sonnet-5')
+    expect(bars).toBe('Opus 5|Sonnet 5')
     expect(bars).not.toContain('Copilot day-grain money')
     // The coverage footer prices each reason.
     const footer = w.find('[data-testid="model-split-footer"]').text()
@@ -654,7 +655,7 @@ describe('/usage rebuild — residency + session economics (D19)', () => {
       }),
     )
     expect(w.find('[data-testid="session-economics-early"]').text()).toContain(
-      '2 sessions so far — a distribution needs a few days',
+      '2 sessions so far: a distribution needs a few days',
     )
   })
 })
@@ -770,5 +771,19 @@ describe('worklist contract diff-guard (T18)', () => {
     expect(usage).not.toContain('ChartsDonutChart')
     expect(usage).not.toContain('cache-card')
     expect(usage).not.toContain('aux-card')
+  })
+})
+
+describe('/usage speaks plainly (#600)', () => {
+  it('the advisory sentence is the same words the drawer and project page use', () => {
+    expect(advisorySentence('$1.00', 'the last 30 days')).toBe(
+      "$1.00 of the last 30 days is indicative: worked out from the devices' own reports, and it may differ from what the provider records.",
+    )
+  })
+
+  it('no admin coverage wording reaches this page', () => {
+    const src = readFileSync('app/pages/usage/index.vue', 'utf8')
+    expect(src).not.toMatch(/census|denominator claimed/)
+    expect(src).toContain('Copilot usage may be incomplete')
   })
 })

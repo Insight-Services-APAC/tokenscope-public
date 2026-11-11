@@ -55,11 +55,16 @@ test.describe('Persona landings', () => {
     // removed in the convergence epic.
     await expect(page.locator('main')).not.toContainText('vs last month')
 
-    // Inbox bell shows 3 unread (velocity-warning + untagged-backlog +
-    // over-budget — Priya is CSL-AII's PM, a budget-responsible recipient).
+    // The inbox bell shows Priya's UNREAD count (#574). The seed gives her 3
+    // (velocity-warning + untagged-backlog + over-budget, as CSL-AII's PM);
+    // another spec can open one first, so the figure comes from the server.
+    const unread = (await (
+      await page.request.get(`${baseUrl}/api/v1/me/inbox?ack_state=unread&limit=1`)
+    ).json()) as { total: number }
+    expect(unread.total).toBeGreaterThan(0)
     await expect(
       page.locator('[data-testid="inbox-bell"] span.bg-brand-hunger'),
-    ).toHaveText('3')
+    ).toHaveText(String(unread.total))
   })
 
   test('manager (anil) lands on /rollups WITHOUT a 500', async ({ page }) => {

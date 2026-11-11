@@ -206,7 +206,7 @@ describe('MeHeroTiles — the quota tile states its basis (T14/T15)', () => {
     expect(t.text()).toContain('$100.00') // allowance
     expect(t.text()).toContain('$400.00') // allocations
     expect(t.text()).toContain('day 14 of 31')
-    expect(t.find('[data-testid="quota-exhaustion"]').text()).toContain('~2026-07-18')
+    expect(t.find('[data-testid="quota-exhaustion"]').text()).toContain('around 18 Jul')
     expect(t.find('[data-testid="quota-exhausted"]').exists()).toBe(false)
   })
 

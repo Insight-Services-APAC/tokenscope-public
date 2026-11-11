@@ -46,7 +46,7 @@ const emit = defineEmits<{
 
 <template>
   <div
-    class="flex flex-wrap gap-1.5"
+    class="flex flex-wrap gap-1.5 print:hidden"
     role="group"
     aria-label="Region"
     data-testid="region-select"

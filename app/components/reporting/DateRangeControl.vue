@@ -188,7 +188,7 @@ function disabledReason(key: string): string | undefined {
 
 <template>
   <div
-    class="inline-flex flex-col gap-2"
+    class="inline-flex flex-col gap-2 print:hidden"
     role="group"
     aria-label="Reporting period"
     data-testid="date-range-control"

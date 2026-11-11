@@ -26,6 +26,11 @@ describe('ReportBand', () => {
     expect(w.find('[data-testid="child"]').exists()).toBe(true)
   })
 
+  it('keeps its heading on the same printed page as the first card (#605)', () => {
+    const w = mount(ReportBand, { props: { windowLabel: 'Last 60 days' } })
+    expect(w.find('[data-testid="report-band-window"]').element.parentElement?.className).toContain('print:break-after-avoid')
+  })
+
   it('renders NO note when the caller passes none', () => {
     /*
      * The caller (band-labels.rollingBandNote) returns null in the two cases

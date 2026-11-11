@@ -14,6 +14,10 @@
  * It is pulled OUT of the peer ranking and rendered below as a quiet TO-DO row
  * (muted text + a reduced-opacity fill + a "place these teammates" hint), so the
  * often-largest "APAC (default)" bar never reads as a peer category.
+ *
+ * Only an admin can place anyone (#585), so the hint is a link for an admin who
+ * can open the region's placement list (the container passes `placementHref`)
+ * and plain words for everyone else: "not yet placed in a Business Unit".
  */
 import { computed } from 'vue'
 import UiCard from '../../ui/Card.vue'
@@ -31,6 +35,8 @@ const props = defineProps<{
     /** True when this bucket is the region's `default` BU (unplaced teammates). */
     isDefault: boolean
   }[]
+  /** Admin-only: the region's Teammates tab filtered to unplaced. Null/absent = plain words. */
+  placementHref?: string | null
 }>()
 
 const emit = defineEmits<{ select: [ouId: string] }>()
@@ -83,8 +89,8 @@ function onSelect(row: { label: string; value: number; meta?: unknown }) {
     />
 
     <!-- Default (unplaced) bucket — a to-do, not a peer practice: muted text, a
-         reduced-opacity fill (never a solid magnitude bar), and a "place these
-         teammates" hint. Carries no drill target. -->
+         reduced-opacity fill (never a solid magnitude bar), and a placement
+         hint (a link for an admin, words for everyone else). No drill target. -->
     <div
       v-if="defaultRow"
       class="mt-3 pt-3 border-t border-calm-1"
@@ -97,7 +103,17 @@ function onSelect(row: { label: string; value: number; meta?: unknown }) {
       <div class="mt-1.5 h-2 rounded-full bg-calm-1 overflow-hidden" role="presentation">
         <div class="h-full rounded-full bg-carbon-3/30" :style="{ width: `${defaultPct}%` }" />
       </div>
-      <div class="mt-1 text-[11px] text-carbon-3 italic">unplaced — place these teammates</div>
+      <NuxtLink
+        v-if="placementHref"
+        :to="placementHref"
+        class="mt-1 inline-block text-[11px] font-semibold text-brand-harmony hover:underline"
+        data-testid="regional-practice-place-link"
+      >Not yet placed in a Business Unit: place these teammates →</NuxtLink>
+      <div
+        v-else
+        class="mt-1 text-[11px] text-carbon-3 italic"
+        data-testid="regional-practice-unplaced-note"
+      >not yet placed in a Business Unit</div>
     </div>
 
     <!-- I5 cross-link: this usage ranking's §B sibling is chargeback-by-cost-centre. -->

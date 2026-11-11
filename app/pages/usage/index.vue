@@ -40,6 +40,7 @@ import ModelSplitPanel from '../../components/reporting/ModelSplitPanel.vue'
 import BudgetStateCell from '../../components/reporting/BudgetStateCell.vue'
 import DateRangeControl from '../../components/reporting/DateRangeControl.vue'
 import CcHeaderNotes from '../../components/reporting/cost-centre/CcHeaderNotes.vue'
+import { ADVISORY_INFO, advisorySentence } from '#shared/usage/advisory-copy'
 import InfoDot from '../../components/ui/InfoDot.vue'
 import MeHeroTiles from '../../components/me/MeHeroTiles.vue'
 import ActivityCard from '../../components/me/ActivityCard.vue'
@@ -339,6 +340,11 @@ const stackedRows = computed(() =>
   (data.value?.series_by_model ?? []).map((r) => ({ day: r.day, key: r.model, value: Number(r.cost_usd) })),
 )
 const advisory = computed(() => Number(data.value?.fidelity.advisory_cost_usd ?? 0))
+const copilotCoverageUnknown = computed(() => {
+  const c = data.value?.coverage
+  // Unknown, or known and short of every organisation: both mean usage may be missing.
+  return c?.applicable === true && (c.denominator == null || c.connected < c.denominator)
+})
 
 // ── Context residency + session economics (D19) ──────────────────────────────
 const residency = computed(() => data.value?.context_residency ?? null)
@@ -488,6 +494,11 @@ const copilotHasDetail = computed(() => {
     c.ideActivityExcluded
   )
 })
+/** Zero suggested lines: one sentence instead of two zero ratios (#600). */
+const copilotNoSuggestions = computed(() => {
+  const c = copilotEng.value
+  return c != null && c.locSuggested === 0 && (c.locSuggestedToDelete == null || c.locSuggestedToDelete === 0)
+})
 function fmtLines(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
 }
@@ -587,10 +598,13 @@ function openTagSession(s: WorklistSession) {
   openTag({
     session_id: s.session_id,
     instance_id: s.instance_id,
+    device_name: s.device_name,
     tool: s.tool,
     cost_usd: s.cost_usd,
     tokens: s.tokens,
-    last_event: s.last_event,
+    // When the whole conversation ran (#577), not only its untagged slice.
+    first_event: s.session_first,
+    last_event: s.session_last,
     project_id: null,
     activity: s.activity,
     by_model: s.by_model,
@@ -688,9 +702,17 @@ async function onWorklistChanged() {
       <div class="flex items-center gap-2 flex-wrap" data-testid="me-chip-row">
         <CcHeaderNotes
           :provider-states="data.providerStates ?? []"
-          :coverage="data.coverage ?? null"
+          :coverage="null"
           :lane="resolvedLane"
         />
+        <!-- The report's coverage marker speaks to an admin. Here it says what it
+             means for this person, and only when it applies and is not known. -->
+        <UiBadge
+          v-if="copilotCoverageUnknown"
+          kind="outline"
+          title="TokenScope cannot confirm it sees every GitHub organisation, so some of your Copilot usage may be missing. An admin can fix this."
+          data-testid="me-copilot-coverage"
+        >Copilot usage may be incomplete</UiBadge>
       </div>
 
       <!-- Month band + the four ScopeKpiTile hero (D17, fix 2). -->
@@ -730,7 +752,7 @@ async function onWorklistChanged() {
           <UiEyebrow>
             Daily spend · attributed telemetry · last {{ windowDays }}d
             <InfoDot label="About the daily spend window">
-              Rolls with the days — independent of the month presets above.
+              Rolls with the days, independent of the month presets above.
             </InfoDot>
           </UiEyebrow>
           <UsageWindowToggle v-model="windowDays">
@@ -751,6 +773,7 @@ async function onWorklistChanged() {
           :window-days="windowDays"
           :end-day="chartEndDay"
           :partial-day="chartPartialDay"
+          offer-table
         />
         <ChartsTrendArea
           v-else-if="chartEndDay"
@@ -758,10 +781,12 @@ async function onWorklistChanged() {
           :window-days="windowDays"
           :end-day="chartEndDay"
           :partial-day="chartPartialDay"
-          empty-label="No telemetry-observed spend in this window — provider-recorded days are listed below, not charted here."
+          offer-table
+          empty-label="No telemetry-observed spend in this window: provider-recorded days are listed below, not charted here."
         />
         <p v-if="advisory > 0" class="text-[10px] text-carbon-3 mt-1 text-right">
-          {{ fmtUsd(advisory) }} of the last {{ windowDays }}d is advisory (telemetry-only) spend
+          {{ advisorySentence(fmtUsd(advisory), `the last ${windowDays} days`) }}
+          <InfoDot label="About indicative usage">{{ ADVISORY_INFO }}</InfoDot>
         </p>
       </UiCard>
 
@@ -773,7 +798,7 @@ async function onWorklistChanged() {
           <p class="text-[11px] text-carbon-3 mt-0.5">
             Spend by context-window band
             <InfoDot label="About context-window residency">
-              The provider reports the dimension itself — <code>context_window</code> rides every
+              The provider reports the dimension itself: <code>context_window</code> rides every
               Anthropic row. The larger band bills premium input rates; a fresh session resets the
               window.
             </InfoDot>
@@ -803,7 +828,7 @@ async function onWorklistChanged() {
             <p class="text-[11px] text-carbon-3 mt-3 pt-2 border-t border-calm-2" data-testid="residency-footer">
               <template v-if="residencyPremium && residencyPremium.usd > 0">
                 <b class="text-carbon-2">{{ Math.round(residencyPremium.pct) }}% in {{ residencyPremium.bands }}</b>
-                — the premium band<template v-if="residency.remainder"> · </template>
+                : the premium band<template v-if="residency.remainder"> · </template>
               </template>
               <template v-else-if="!residency.remainder">nearly all in the standard window</template>
               <span v-if="residency.remainder" data-testid="residency-remainder">
@@ -843,12 +868,12 @@ async function onWorklistChanged() {
           -->
           <p v-else class="text-xs text-carbon-3 italic py-6 text-center" data-testid="residency-empty">
             <template v-if="residency?.remainder">
-              Context-window bands aren't available for this window — your Anthropic
+              Context-window bands aren't available for this window: your Anthropic
               spend is counted, it just isn't split by band yet.
             </template>
             <template v-else-if="Number(data?.month?.spend_usd ?? 0) > 0">
               Context-window bands come from Anthropic's billing feed, and none of
-              your spend in this window reached us through it — your spend is
+              your spend in this window reached us through it. Your spend is
               counted in full elsewhere on this page.
             </template>
             <template v-else>No usage in this window.</template>
@@ -860,7 +885,7 @@ async function onWorklistChanged() {
           <p class="text-[11px] text-carbon-3 mt-0.5">
             OTel-observed sessions
             <InfoDot label="About session economics">
-              A provider-recorded day is not a conversation — api-reconciled days carry no session
+              A provider-recorded day is not a conversation: api-reconciled days carry no session
               behind them and are not blended in. This card reads your OTel-observed conversations
               only.
             </InfoDot>
@@ -906,7 +931,7 @@ async function onWorklistChanged() {
             class="text-xs text-carbon-3 italic py-6 text-center"
             data-testid="session-economics-early"
           >
-            {{ econ.sessions }} session{{ econ.sessions === 1 ? '' : 's' }} so far — a distribution
+            {{ econ.sessions }} session{{ econ.sessions === 1 ? '' : 's' }} so far: a distribution
             needs a few days
           </p>
           <p v-else class="text-xs text-carbon-3 italic py-6 text-center" data-testid="session-economics-empty">
@@ -934,7 +959,7 @@ async function onWorklistChanged() {
             <p class="text-[11px] text-carbon-3 mt-1 mb-3">
               Patterns from your own last 28 days
               <InfoDot label="About these insights">
-                Entirely optional and dismissible — never visible to anyone else. Insights stay
+                Entirely optional and dismissible, and never visible to anyone else. Insights stay
                 self-visible; manager depth never sees behavioural findings.
               </InfoDot>
             </p>
@@ -987,7 +1012,7 @@ async function onWorklistChanged() {
           <UiCard v-else data-testid="insights-empty">
             <UiEyebrow>Observed in your usage</UiEyebrow>
             <p class="text-sm text-carbon-2 mt-2">
-              Nothing to flag in your last 28 days — your usage patterns look healthy. The
+              Nothing to flag in your last 28 days: your usage patterns look healthy. The
               <NuxtLink to="/usage/playbook" class="underline">playbook</NuxtLink> is there if you're curious.
             </p>
           </UiCard>
@@ -1000,7 +1025,7 @@ async function onWorklistChanged() {
         <UiEyebrow>
           Where it went
           <InfoDot label="About the against-budget column">
-            The against-budget column is the PROJECT's state — the same figure the PM and the
+            The against-budget column is the PROJECT's state, the same figure the PM and the
             reports project axis see, never your share of it.
           </InfoDot>
         </UiEyebrow>
@@ -1095,7 +1120,7 @@ async function onWorklistChanged() {
            no metric is manufactured to mirror the other column. -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <UiCard data-testid="engagement-claude">
-          <UiEyebrow>Claude — what the spend was</UiEyebrow>
+          <UiEyebrow>Claude: what the spend was</UiEyebrow>
           <template v-if="claudeEng">
             <!--
               A ZERO FROM AN ABSENT LANE IS NOT A MEASUREMENT.
@@ -1127,7 +1152,7 @@ async function onWorklistChanged() {
                    same class as the defect above, inverted. `claudeSurfaces` is
                    the money split, so it is what decides which sentence is true. -->
               <span v-else-if="claudeSurfaces.length" data-testid="engagement-claude-no-sessions">
-                No sessions behind this spend — it arrived as provider-recorded days,
+                No sessions behind this spend: it arrived as provider-recorded days,
                 which carry no session to count.
               </span>
               <span v-else data-testid="engagement-claude-no-spend">
@@ -1161,13 +1186,17 @@ async function onWorklistChanged() {
         </UiCard>
 
         <UiCard data-testid="engagement-copilot">
-          <UiEyebrow>Copilot — what you got for it</UiEyebrow>
+          <UiEyebrow>Copilot: what you got for it</UiEyebrow>
           <!-- `copilotEng &&` is redundant at runtime (copilotHasDetail implies
                it) and required for the compiler to narrow the block below. -->
           <template v-if="copilotEng && copilotHasDetail">
             <p class="text-sm text-carbon-2 mt-2" data-testid="engagement-copilot-lede">
-              <template v-if="copilotEng.interactions != null">{{ copilotEng.interactions }} interactions</template>
-              <template v-if="copilotEng.locKept != null && copilotEng.locSuggested != null">
+              <template v-if="copilotEng.interactions != null">{{ copilotEng.interactions }} {{ copilotEng.interactions === 1 ? 'interaction' : 'interactions' }}</template>
+              <template v-if="copilotNoSuggestions">
+                <template v-if="copilotEng.interactions != null"> · </template>
+                No code suggestions were recorded in this period
+              </template>
+              <template v-else-if="copilotEng.locKept != null && copilotEng.locSuggested != null">
                 <template v-if="copilotEng.interactions != null"> · </template>
                 <b>{{ fmtLines(copilotEng.locKept) }} lines kept</b> of
                 {{ fmtLines(copilotEng.locSuggested) }} suggested<template v-if="copilotEng.keptPct != null"> ({{ Math.round(copilotEng.keptPct) }}%)</template>
@@ -1175,7 +1204,7 @@ async function onWorklistChanged() {
             </p>
             <!-- Deleted-LOC legs render ONLY when the wire sent them (honest numbers). -->
             <p
-              v-if="copilotEng.locDeleted != null && copilotEng.locSuggestedToDelete != null"
+              v-if="!copilotNoSuggestions && copilotEng.locDeleted != null && copilotEng.locSuggestedToDelete != null"
               class="text-[11px] text-carbon-3 mt-1"
               data-testid="engagement-copilot-deleted"
             >
@@ -1261,7 +1290,7 @@ async function onWorklistChanged() {
       <!-- Tagged-by-activity — kept without ruling. -->
       <UiCard v-if="taggedByActivity.length" data-testid="activity-chips">
         <UiEyebrow>By activity · tagged spend</UiEyebrow>
-        <p class="text-[11px] text-carbon-3 mt-0.5">Click a tag to see how it broke down — models, token lanes, and the sessions behind it.</p>
+        <p class="text-[11px] text-carbon-3 mt-0.5">Click a tag to see how it broke down: models, token lanes, and the sessions behind it.</p>
         <div class="flex flex-wrap gap-2 mt-3">
           <button
             v-for="a in taggedByActivity"

@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { commitShape, eslintEntry, isCommit } from '../../../scripts/check-commit-lint.mjs'
-import { CODE_PATHS, codeFingerprint, decide, isPush, pushSkipsReview, reviewedFingerprints } from '../../../scripts/check-external-review.mjs'
+import { CODE_PATHS, codeFingerprint, decide, isPush, newCodeFiles, pushSkipsReview, reviewedFingerprints } from '../../../scripts/check-external-review.mjs'
 
 describe('lint gate: which commands are commits', () => {
   it('matches commits, including chained and env-prefixed ones', () => {
@@ -105,6 +105,127 @@ describe('external-review gate', () => {
   it('root manifests and workflows count as code', () => {
     for (const p of ['package.json', 'package-lock.json', 'nuxt.config.ts', 'Dockerfile', '.github/workflows', '.claude/settings.json']) {
       expect(CODE_PATHS).toContain(p)
+    }
+  })
+
+  /*
+   * Updating a branch from main brings main's merged code in. Compared with the
+   * branch's upstream alone it read as new, and the gate asked for a review of
+   * other PRs' code. Only a file that differs from BOTH the upstream and
+   * origin/main is new.
+   * REVERT: drop the `newCode` check in decide(), or return vsBase alone.
+   */
+  it('only a file main changed and HEAD carries as main has it is not new', () => {
+    const z = (...f: string[]) => f.map((x) => `${x}\0`).join('')
+    const diffs: Record<string, string> = {
+      // HEAD vs the upstream: four code files differ.
+      'origin/feat..HEAD': z('app/a.vue', 'server/b.ts', 'scripts/c.mjs', 'app/revert.vue'),
+      // What main changed since the fork point.
+      'fork..origin/main': z('app/a.vue', 'server/b.ts'),
+      // HEAD vs main: b.ts differs (a hand-resolved conflict), c.mjs is the branch's own.
+      'origin/main..HEAD': z('server/b.ts', 'scripts/c.mjs', 'app/own.vue'),
+    }
+    const git = (args: string[]) => {
+      if (args[0] === 'merge-base') return 'fork'
+      expect(args.slice(0, 5)).toEqual(['diff', '--name-only', '-z', '--no-renames', '--no-relative'])
+      expect(args.slice(args.indexOf('--') + 1).every((p) => p.startsWith(':(top)'))).toBe(true)
+      return diffs[`${args[5]}..${args[6]}`] ?? ''
+    }
+    // a.vue came from main. revert.vue equals main but main never changed it: the branch
+    // reverted its own change, which is its own work and still needs the review.
+    expect(newCodeFiles('origin/feat', git)).toEqual(['server/b.ts', 'scripts/c.mjs', 'app/revert.vue'])
+    // Without an upstream the base IS origin/main: everything that differs is new.
+    expect(newCodeFiles('origin/main', git)).toEqual(['server/b.ts', 'scripts/c.mjs', 'app/own.vue'])
+    // A git error, or no merge base, is "cannot tell", never "nothing new".
+    expect(newCodeFiles('origin/feat', () => { throw new Error('no origin/main') })).toBeNull()
+    expect(newCodeFiles('origin/feat', (a: string[]) => (a[0] === 'merge-base' ? '' : z('app/a.vue')))).toBeNull()
+  })
+
+  it('decide: nothing new is allowed; something new still needs the review; unknown falls back', () => {
+    const base = { command: 'git push', head: 'new', base: 'old', reviewed: new Set<string>() }
+    expect(decide({ ...base, newCode: [] })).toEqual({ allow: true, reason: 'only code already on origin/main' })
+    expect(decide({ ...base, newCode: ['server/b.ts'] }).allow).toBe(false)
+    expect(decide({ ...base, newCode: null }).allow).toBe(false)
+    expect(decide({ ...base, newCode: ['server/b.ts'], reviewed: new Set(['new']) }).allow).toBe(true)
+    // The exemption never lifts a refusal of a form the gate cannot check.
+    expect(decide({ ...base, command: 'cd ../other && git push', newCode: [] }).allow).toBe(false)
+  })
+
+  it('in a real repository: merging main needs no review, an edit on top of it does', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gate-merge-'))
+    const g = (...args: string[]) => {
+      const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' })
+      if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`)
+      return r.stdout.trim()
+    }
+    const write = (p: string, s: string) => {
+      spawnSync('mkdir', ['-p', join(dir, p, '..')])
+      writeFileSync(join(dir, p), s)
+    }
+    try {
+      g('init', '-q', '-b', 'main')
+      g('config', 'user.email', 't@x.test')
+      g('config', 'user.name', 't')
+      write('server/a.ts', 'a1\n')
+      write('app/b.vue', 'b1\n')
+      g('add', '.')
+      g('commit', '-q', '-m', 'base')
+      g('checkout', '-q', '-b', 'feat')
+      write('app/b.vue', 'b-feat\n')
+      g('commit', '-q', '-am', 'feat change')
+      g('update-ref', 'refs/remotes/origin/feat', 'HEAD')
+      g('checkout', '-q', 'main')
+      write('server/a.ts', 'a-main\n')
+      g('commit', '-q', '-am', 'another PR merged')
+      g('update-ref', 'refs/remotes/origin/main', 'HEAD')
+      g('checkout', '-q', 'feat')
+      g('merge', '-q', '--no-edit', 'origin/main')
+      const inRepo = (args: string[]) => g(...args)
+      // server/a.ts came from main; app/b.vue equals the upstream: nothing is new.
+      expect(newCodeFiles('origin/feat', inRepo)).toEqual([])
+      // The script itself (not only the helper) uses it: --status runs the same decision as the hook.
+      g('config', 'remote.origin.url', dir)
+      g('config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*')
+      g('config', 'branch.feat.remote', 'origin')
+      g('config', 'branch.feat.merge', 'refs/heads/feat')
+      const status = () =>
+        spawnSync('node', [join(__dirname, '../../../scripts/check-external-review.mjs'), '--status'], { cwd: dir, encoding: 'utf8' }).stdout
+      expect(status()).toContain('push allowed (only code already on origin/main, against origin/feat)')
+      // --status reports what the hook decides: a push config that would push other refs is refused.
+      g('config', 'push.default', 'matching')
+      expect(status()).toContain('push refused whatever the review')
+      g('config', '--unset', 'push.default')
+      // And the hook itself: silent (allowed) now, a deny once the branch adds code of its own.
+      const hook = () =>
+        spawnSync('node', [join(__dirname, '../../../scripts/check-external-review.mjs'), '--hook'], {
+          cwd: dir,
+          encoding: 'utf8',
+          input: JSON.stringify({ tool_input: { command: 'git push' } }),
+        }).stdout
+      expect(hook()).toBe('')
+      // Run from a subfolder, the root-anchored paths still see the whole tree.
+      const fromApp = (args: string[]) => {
+        const r = spawnSync('git', args, { cwd: join(dir, 'app'), encoding: 'utf8' })
+        if (r.status !== 0) throw new Error(r.stderr)
+        return r.stdout.trim()
+      }
+      write('server/a.ts', 'a-main plus an edit\n')
+      g('commit', '-q', '-am', 'edit after the merge')
+      expect(newCodeFiles('origin/feat', inRepo)).toEqual(['server/a.ts'])
+      expect(newCodeFiles('origin/feat', fromApp)).toEqual(['server/a.ts'])
+      // diff.relative=true would still clip the diff to app/ without --no-relative.
+      g('config', 'diff.relative', 'true')
+      expect(newCodeFiles('origin/feat', fromApp)).toEqual(['server/a.ts'])
+      g('config', '--unset', 'diff.relative')
+      expect(hook()).toContain('"permissionDecision":"deny"')
+      expect(hook()).toContain('new here, not on origin/main: server/a.ts')
+      // Reverting the branch's own change back to main's copy is still the branch's work.
+      g('update-ref', 'refs/remotes/origin/feat', 'HEAD')
+      write('app/b.vue', 'b1\n')
+      g('commit', '-q', '-am', 'revert the feat change')
+      expect(newCodeFiles('origin/feat', inRepo)).toEqual(['app/b.vue'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 

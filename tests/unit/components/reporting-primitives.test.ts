@@ -27,9 +27,21 @@ describe('SettlingStateChip', () => {
     const settling = mount(SettlingStateChip, {
       props: { state: 'settling', horizonDate: '2026-05-31', vendor: 'anthropic' },
     })
-    expect(settling.text()).toContain('provisional until 2026-05-31')
+    expect(settling.text()).toContain('provisional until 31 May 2026')
     expect(settling.text()).toContain('Anthropic')
     for (const w of [est, settling]) expect(w.text().toLowerCase()).not.toContain('finalised')
+  })
+
+  it('writes a raw settlesAt instant as a UTC day, never the ISO string (#605)', () => {
+    const w = mount(SettlingStateChip, { props: { state: 'settling', horizonDate: '2026-12-01T00:00:00.000Z' } })
+    expect(w.text()).toContain('provisional until 1 Dec 2026')
+    expect(w.text()).not.toContain('T00:00')
+  })
+
+  it('says only "provisional" when the settling date is not a real day', () => {
+    const w = mount(SettlingStateChip, { props: { state: 'settling', horizonDate: '2026-02-31' } })
+    expect(w.text()).toContain('provisional')
+    expect(w.text()).not.toContain('until')
   })
 })
 

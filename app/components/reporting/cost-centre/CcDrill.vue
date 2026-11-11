@@ -60,6 +60,7 @@ import {
   type DrillTarget,
 } from '../drill-contract'
 import ExportCsvButton from '../ExportCsvButton.vue'
+import PrintButton from '../PrintButton.vue'
 import CcOverSoftCap from './CcOverSoftCap.vue'
 import TierExposureCard from '../TierExposureCard.vue'
 import { fmtUsd } from '../../../composables/useFormat'
@@ -452,7 +453,8 @@ const zeroBurnTagged = computed(() => hasAllocation.value && props.drill.burnUsd
           :value-column-label="windowLabel"
           :drillable="budgetsDrillable"
         />
-        <div class="flex justify-end">
+        <div class="flex justify-end gap-2 print:hidden">
+          <PrintButton />
           <ExportCsvButton
             endpoint="/api/v1/reports/export"
             :params="budgetsExportParams"
@@ -508,7 +510,7 @@ const zeroBurnTagged = computed(() => hasAllocation.value && props.drill.burnUsd
           :value-column-label="windowLabel"
           :drillable="peopleDrillable"
         />
-        <div class="flex justify-end">
+        <div class="flex justify-end print:hidden">
           <ExportCsvButton
             endpoint="/api/v1/reports/export"
             :params="peopleExportParams"

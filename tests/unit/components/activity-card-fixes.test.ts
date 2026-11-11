@@ -18,6 +18,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { stubActivityCardEnv } from '../../helpers/activity-card-env'
 import ActivityCard from '../../../app/components/me/ActivityCard.vue'
 import type { ActivityListResponse, ActivityRow } from '../../../shared/schemas/activity'
 
@@ -35,7 +36,9 @@ const SESSION: ActivityRow = {
   attributed: true,
   cursor: 'cur-session',
   ts_last: '2026-07-01T11:00:00.000Z',
+  ts_first: '2026-07-01T10:00:00.000Z',
   instance_id: 'inst-1',
+  device_name: null,
   partly_ended: false,
   ended_project_code: null,
 }
@@ -78,7 +81,10 @@ const MOCKS = {
   fmtTimeAgo: () => '2 hours ago',
 }
 
-const mountWith = () => mount(ActivityCard, { props: {}, global: { stubs: STUBS, mocks: MOCKS } })
+const mountWith = () => {
+  stubActivityCardEnv()
+  return mount(ActivityCard, { props: {}, global: { stubs: STUBS, mocks: MOCKS } })
+}
 
 function mountCard(rows: ActivityRow[], over: Partial<ActivityListResponse> = {}) {
   const fetchMock = vi.fn().mockResolvedValue(page(rows, over))

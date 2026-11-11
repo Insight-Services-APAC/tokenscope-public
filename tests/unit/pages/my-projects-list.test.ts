@@ -7,7 +7,7 @@
  *     identity holds by construction — revert the band to any other operand
  *     and this goes red);
  *   - the "$X untagged → worklist" pull-through navigates to /usage;
- *   - the list has NO window control (MTD stays the recorded owner decision);
+ *   - the only window control is This month / Last month (#595, B12 decided);
  *   - ONE pace vocabulary (fix 4): the card pill is budgetPace's word and the
  *     money line carries "on pace for ~$X by {monthEnd}";
  *   - cards order by PACE SEVERITY (the over-budget fact first);
@@ -59,14 +59,21 @@ const STUBS = {
 
 const fmtUsd = (v: string | number) => `$${Number(v).toFixed(2)}`
 
-async function mountPage(projects: ProjectCard[], untaggedUsd = '0.00', query: Record<string, string> = {}) {
+const LAST_OCT = { kind: 'last', month: '2026-07', last_day: '2026-07-31', days_in_month: 31 }
+
+async function mountPage(
+  projects: ProjectCard[],
+  untaggedUsd: string | null = '0.00',
+  query: Record<string, string> = {},
+  period?: typeof LAST_OCT,
+) {
   // Script-scope refs resolve via globalThis; template refs via the instance
   // proxy (mocks). Provide both (the consumption-one-scalar idiom).
   vi.stubGlobal('fmtUsd', fmtUsd)
   vi.stubGlobal('useSession', () => ({ session: ref({ teammateId: 't1' }), ensure: async () => {} }))
   vi.stubGlobal('useRoute', () => ({ query }))
   vi.stubGlobal('useFetch', () => ({
-    data: ref({ projects, total: projects.length, untagged_usd: untaggedUsd }),
+    data: ref({ projects, total: projects.length, untagged_usd: untaggedUsd, period }),
     pending: ref(false),
     error: ref(null),
   }))
@@ -126,10 +133,12 @@ describe('/projects — the headline band (T20, D25)', () => {
     expect(w.find('[data-testid="projects-untagged-pullthrough"]').exists()).toBe(false)
   })
 
-  it('the list has NO window control — MTD is the recorded owner decision', async () => {
+  it('the only window control is This month or Last month, with no custom range (#595)', async () => {
     const w = await mountPage([card()])
     expect(w.find('[data-testid="date-range-control"]').exists()).toBe(false)
     expect(w.find('[data-testid="window-30"]').exists()).toBe(false)
+    expect(w.find('[data-testid="projects-period-current"]').attributes('aria-current')).toBe('true')
+    expect(w.find('[data-testid="projects-period-last"]').exists()).toBe(true)
   })
 })
 
@@ -154,7 +163,7 @@ describe('/projects — ONE pace vocabulary on the cards (fix 4, D15/D26)', () =
     const line = w.find('[data-testid="spend-line-ACME-1"]').text()
     expect(line).toContain('$60.00 of $200.00')
     expect(line).toContain('30% used')
-    expect(line).toContain('on pace for ~$124.00 by Aug 31')
+    expect(line).toContain('on pace for ~$124.00 by 31 Aug')
   })
 
   it('over-budget is the FACT word, and no-budget says so instead of a percent', async () => {
@@ -204,13 +213,87 @@ describe('/projects — velocity stays real, with day-1 honesty (D26)', () => {
     expect(w.find('[data-testid="velocity-note-ACME-1"]').text()).toContain('+33% vs 4-week avg')
   })
 
-  it('no baseline → "velocity needs a baseline — unknown, not quiet"', async () => {
+  it('no baseline → "velocity needs a baseline: unknown, not quiet"', async () => {
     const w = await mountPage([
       card({ velocity: { current_week_usd: '10.00', trailing_mean_usd: '0.00', delta_pct: null, is_flagged: false } }),
     ])
     expect(w.find('[data-testid="velocity-note-ACME-1"]').exists()).toBe(false)
     expect(w.find('[data-testid="velocity-baseline-ACME-1"]').text()).toContain(
-      'velocity needs a baseline — unknown, not quiet',
+      'velocity needs a baseline: unknown, not quiet',
     )
+  })
+})
+
+describe('/projects: ended projects fold away (#594)', () => {
+  const live = (n: number) => card({ id: `l${n}`, code: `LIVE-${n}` })
+  const ended = (n: number, over: Partial<ProjectCard> = {}) =>
+    card({ id: `e${n}`, code: `END-${n}`, ended: true, ended_before_period: true, end_date: '2026-06-30', mtd_cost_usd: '0.00', mine_mtd_usd: '0.00', ...over })
+
+  it('live projects keep cards, the fold counts the rest, the headline says both', async () => {
+    const w = await mountPage([live(1), live(2), live(3), live(4), live(5), ended(1), ended(2), ended(3), ended(4)])
+    for (const n of [1, 2, 3, 4, 5]) expect(w.find(`[data-testid="project-card-LIVE-${n}"]`).exists()).toBe(true)
+    expect(w.find('[data-testid="project-card-END-1"]').exists()).toBe(false)
+    expect(w.find('[data-testid="projects-ended-toggle"]').text()).toContain('Ended projects (4)')
+    expect(w.find('[data-testid="projects-band"]').text()).toContain('5 projects · 4 ended')
+  })
+
+  it('the fold is a real disclosure, and its rows are links with no pace, velocity or spark', async () => {
+    const w = await mountPage([live(1), ended(1)])
+    const toggle = w.find('[data-testid="projects-ended-toggle"]')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    await toggle.trigger('click')
+    const row = w.find('[data-testid="project-ended-END-1"]')
+    expect(row.attributes('href')).toBe('/projects/END-1')
+    expect(row.text()).toContain('ended 30 Jun 2026')
+    expect(row.text()).not.toMatch(/pace|velocity/i)
+  })
+
+  it('an ended project with spend stays listed above the fold, with its figure', async () => {
+    const w = await mountPage([live(1), ended(1, { mtd_cost_usd: '12.40', mine_mtd_usd: '12.40' })])
+    expect(w.find('[data-testid="project-ended-spend-END-1"]').text()).toContain('ended, $12.40 this month')
+    expect(w.find('[data-testid="projects-ended-toggle"]').exists()).toBe(false)
+    expect(w.find('[data-testid="projects-band"]').text()).toContain('across live and ended')
+  })
+
+  it('only ended memberships: the empty state, with the fold under it', async () => {
+    const w = await mountPage([ended(1)])
+    expect(w.find('[data-testid="project-card-END-1"]').exists()).toBe(false)
+    expect(w.find('[data-testid="projects-ended-toggle"]').exists()).toBe(true)
+  })
+})
+
+describe('/projects: Last month has facts only (#595)', () => {
+  const last = (projects: ProjectCard[]) => mountPage(projects, null, { period: 'last' }, LAST_OCT)
+
+  it('no forecast wording anywhere, and the money line is the month\'s fact', async () => {
+    const w = await last([card({ mtd_cost_usd: '150.00', allocation_usd: '200.00' })])
+    expect(w.text()).not.toMatch(/on pace|too early|velocity/i)
+    expect(w.find('[data-testid="spend-line-ACME-1"]').text()).toBe('$150.00 of $200.00 · 75% used')
+  })
+
+  it('the pill uses the fact words and orders over first', async () => {
+    const w = await last([
+      card({ id: 'a', code: 'A', mtd_cost_usd: '10.00', allocation_usd: '200.00' }),
+      card({ id: 'b', code: 'B', mtd_cost_usd: '300.00', allocation_usd: '200.00' }),
+      card({ id: 'c', code: 'C', mtd_cost_usd: '10.00', allocation_usd: '0.00' }),
+    ])
+    expect(w.find('[data-testid="pace-A"]').text()).toBe('Within budget')
+    expect(w.find('[data-testid="pace-B"]').text()).toBe('Over')
+    expect(w.find('[data-testid="pace-C"]').text()).toBe('No budget')
+    const order = w.findAll('[data-testid^="project-card-"]').map((c) => c.attributes('data-testid'))
+    expect(order).toEqual(['project-card-B', 'project-card-A', 'project-card-C'])
+  })
+
+  it('the band names the server\'s month, with no day counter and no worklist link', async () => {
+    const w = await last([card()])
+    const band = w.find('[data-testid="projects-band"]').text()
+    expect(band).toContain('July 2026')
+    expect(band).not.toContain('day ')
+    expect(w.find('[data-testid="projects-untagged-pullthrough"]').exists()).toBe(false)
+  })
+
+  it('a project that ended during the month stays in the grid', async () => {
+    const w = await last([card({ code: 'MID', ended: true, ended_before_period: false, end_date: '2026-07-20' })])
+    expect(w.find('[data-testid="project-card-MID"]').exists()).toBe(true)
   })
 })
