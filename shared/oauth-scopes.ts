@@ -13,8 +13,9 @@ export const OAUTH_SCOPE_LABELS: Record<string, string> = {
   // crossing is ratified and stays; this label is S6's fix for it being
   // undisclosed at consent time. A separate grantable `tokenscope.provision`
   // scope is the correct end state but is a client-contract change (D12, not
-  // this sprint).
-  'tokenscope.read': 'Read your usage, projects, and activity tags — and provision this device to emit its usage',
+  // this sprint). The word "provision" is the disclosure and is pinned by the
+  // S6 test in tests/integration/oauth/oauth-flow.test.ts (#610 kept it).
+  'tokenscope.read': 'Read your usage, projects and activity tags, and provision this device to send its usage',
   'tokenscope.tag': 'Tag your sessions to a budget or activity (no budget changes)',
   'tokenscope.emit': 'Ship usage telemetry from this device',
 }

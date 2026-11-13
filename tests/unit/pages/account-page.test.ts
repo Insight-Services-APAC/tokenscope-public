@@ -339,3 +339,27 @@ describe('My account: devices in use, and the fold (#592)', () => {
     expect(w.find(`[data-testid="instance-fix-${id(5)}"]`).attributes('href')).toBe('#connect-a-tool')
   })
 })
+
+describe('My account: Connections (#617)', () => {
+  const grant = (id: string, last_used_at: string | null) => ({
+    id,
+    client_id: `client-${id}`,
+    client_name: 'TokenScope plugin',
+    client_registered_at: '2026-10-30T00:41:00Z',
+    scopes: ['tokenscope.read'],
+    scope_labels: ['Read your usage'],
+    state: 'active',
+    created_at: '2026-10-30T00:41:00Z',
+    last_used_at,
+    is_emit: false,
+  })
+
+  it('an unused connection reads "last used never", not a lone dash', async () => {
+    const w = mountPage({ '/api/v1/me/grants': { data: { grants: [grant('a', null), grant('b', '2026-11-10T03:00:00Z')] } } })
+    await flushPromises()
+    const text = w.text()
+    expect(text).toContain('last used never')
+    expect(text).not.toMatch(/last used\s*—/)
+    expect(text).toMatch(/last used \d{1,2} Nov 2026/)
+  })
+})

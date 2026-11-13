@@ -23,7 +23,7 @@
  * stacking order, and each day's total, for readers who cannot reach a hover
  * title.
  */
-import { fmtUtcDay } from '../../composables/useFormat'
+import { fmtUsd, fmtUtcDay } from '../../composables/useFormat'
 import { computed, ref } from 'vue'
 import ChartsDayTable from './DayTable.vue'
 import ChartsViewSwitch from './ViewSwitch.vue'
@@ -96,8 +96,8 @@ const props = withDefaults(
   },
 )
 
-// Default preserves the pre-existing `$X.XX` tooltip output byte-for-byte.
-const fmtVal = (v: number) => (props.format ? props.format(v) : `$${v.toFixed(2)}`)
+// The default reads like every other amount on the page: "$1,339.57" (#617).
+const fmtVal = (v: number) => (props.format ? props.format(v) : fmtUsd(v))
 
 const W = 720
 /* `bottom` was 30 to reserve room for the in-SVG day labels. They are HTML now,
@@ -143,6 +143,10 @@ const max = computed(() =>
   niceMax(Math.max(...dense.value.map((d) => [...d.m.values()].reduce((a, b) => a + b, 0)), 0)),
 )
 const hasData = computed(() => max.value > 0 && props.rows.length > 0)
+// Hover labels read like the Table view: "10 Nov", with the year when the chart
+// spans two years (#617). A UTC day bucket, so no zone conversion.
+const spansYears = computed(() => new Set(axis.value.days.map((d) => d.slice(0, 4))).size > 1)
+const hoverDay = (day: string) => fmtUtcDay(day, { year: spansYears.value })
 
 const innerW = computed(() => W - PAD.left - PAD.right)
 const innerH = computed(() => props.height - PAD.top - PAD.bottom)
@@ -247,7 +251,7 @@ const tableValue = (day: string, key: string) => byDay.value.get(day)?.get(key) 
           :fill-opacity="s.day === partialDay ? 0.45 : undefined"
           :data-partial="s.day === partialDay ? 'true' : undefined"
         >
-          <title>{{ s.day }} · {{ display(s.key) }}: {{ fmtVal(s.value) }}</title>
+          <title>{{ hoverDay(s.day) }} · {{ display(s.key) }}: {{ fmtVal(s.value) }}</title>
         </rect>
       </svg>
       <!-- The day labels, in HTML: see the header note on the stretch. -->

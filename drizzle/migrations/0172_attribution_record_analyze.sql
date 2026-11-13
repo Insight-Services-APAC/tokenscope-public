@@ -1,0 +1,16 @@
+-- 0172: planner statistics for attribution_record (#611, #619).
+--
+-- Admin > Diagnostics > Database performance on dev reported 27 of the table's
+-- 32 partitions as never analysed. Autovacuum analyses a partition only once
+-- rows are inserted into it, so most of those are the empty months 0055
+-- pre-created (2025-06 to 2027-12, plus the default). It NEVER analyses the
+-- partitioned parent: that needs an explicit ANALYZE, and without it the
+-- planner has no whole-table statistics for a read spanning many months (the
+-- Activity sessions read, the per-device sums on Home).
+--
+-- ANALYZE on the parent collects the parent's statistics and analyses every
+-- partition too. It reads a sample (not the whole table), takes SHARE UPDATE
+-- EXCLUSIVE (inserts and reads carry on), and changes no data or schema.
+-- The parent's statistics are a one-time snapshot: autovacuum will not refresh
+-- them, so if they matter they need a scheduled ANALYZE (a later decision).
+ANALYZE attribution_record;

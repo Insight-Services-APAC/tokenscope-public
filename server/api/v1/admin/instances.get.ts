@@ -100,7 +100,7 @@ export default defineEventHandler(async (event) => {
         ia.teammate_id::text                                        AS teammate_id,
         t.email                                                     AS teammate_email,
         t.display_name                                              AS teammate_display_name,
-        ${instanceMetricColumns(window.monthStartIso)}
+        ${instanceMetricColumns(window)}
       FROM instance_attestation ia
       JOIN teammate t ON t.id = ia.teammate_id
       WHERE t.region_id = ${region}::uuid

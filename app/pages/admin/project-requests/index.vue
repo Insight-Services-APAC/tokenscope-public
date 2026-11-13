@@ -6,6 +6,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import { BU_LABEL } from '#shared/reports/vocabulary'
+import { fmtInstant } from '../../../composables/useFormat'
 
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
@@ -115,7 +116,7 @@ const fmtUsd = (v: string) => `$${Number(v).toLocaleString('en-US', { maximumFra
             <td class="py-2.5 pr-4 text-carbon-2">{{ r.requester_name ?? r.requester_email }}</td>
             <td class="py-2.5 pr-4 text-carbon-2">{{ r.unit_name }} ({{ r.region_code }})</td>
             <td class="py-2.5 pr-4 text-right font-mono">{{ fmtUsd(r.budget_usd) }}</td>
-            <td class="py-2.5 pr-4 text-carbon-2">{{ new Date(r.created_at).toLocaleDateString() }}</td>
+            <td class="py-2.5 pr-4 text-carbon-2">{{ fmtInstant(r.created_at) }}</td>
             <td class="py-2.5">
               <UiBadge :kind="r.status === 'pending' ? 'rag-amber' : r.status === 'approved' ? 'rag-green' : 'neutral'">
                 {{ STATUS_LABEL[r.status] }}

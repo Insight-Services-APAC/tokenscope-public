@@ -16,6 +16,7 @@
 import { computed, ref } from 'vue'
 import AdminDataTable from '../../components/admin/AdminDataTable.vue'
 import { auditEventLabel } from '#shared/audit/event-label'
+import { fmtInstant } from '../../composables/useFormat'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface AuditEvent extends Record<string, unknown> {
@@ -104,8 +105,9 @@ const columns = [
   { key: 'payload', label: 'Payload' },
 ]
 
+// Seconds stay: they order audit rows within a minute (#633, the PO's call).
 function fmtTs(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' })
+  return fmtInstant(iso, undefined, { seconds: true })
 }
 
 // Typed cast for the slot binding — AdminDataTable's row slot is typed

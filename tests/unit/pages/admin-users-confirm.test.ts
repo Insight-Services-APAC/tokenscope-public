@@ -213,3 +213,24 @@ describe('Teammates: a region move asks first', () => {
     expect(w.find('[data-testid="admin-users-toast-ok"]').text()).toBe('Sam Okafor moved to EMEA.')
   })
 })
+
+describe('Teammates: rows that fit (#637)', () => {
+  it('five columns, the name in bold over the email', async () => {
+    const w = mountPage()
+    await flushPromises()
+    const heads = w.findAll('thead th').map((h) => h.text().trim()).filter(Boolean)
+    expect(heads).toEqual(['Teammate', 'Role', 'Business Unit', 'Last sync', 'Actions'])
+    const cell = w.find(`[data-testid="admin-users-teammate-${SAM}"]`)
+    const lines = cell.findAll('div').map((d) => d.text())
+    expect(lines).toEqual(['Sam Okafor', 'sam.okafor@example.com'])
+  })
+
+  it('a teammate with no name shows the email alone', async () => {
+    const w = mountPage()
+    await flushPromises()
+    usersData.value.users[0]!.displayName = null as unknown as string
+    await flushPromises()
+    const cell = w.find(`[data-testid="admin-users-teammate-${SAM}"]`)
+    expect(cell.findAll('div').map((d) => d.text())).toEqual(['sam.okafor@example.com'])
+  })
+})

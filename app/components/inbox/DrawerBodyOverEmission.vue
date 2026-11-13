@@ -5,7 +5,7 @@
  * the flag left the teammate's own queue, by their choice or the sweep's.
  */
 import { computed } from 'vue'
-import { fmtUsd } from '../../composables/useFormat'
+import { fmtInstant, fmtUsd } from '../../composables/useFormat'
 
 const props = defineProps<{
   body: Record<string, unknown>
@@ -47,7 +47,7 @@ const actionHref = computed(() => text('actionHref'))
         </template>
       </p>
       <p class="mt-2 text-[12px] text-carbon-3 leading-relaxed" data-testid="over-emission-current">
-        Unconfirmed now: {{ usd(currentOverUsd) }}<span v-if="computedAt">, as of {{ new Date(computedAt).toLocaleString() }}</span>.
+        Unconfirmed now: {{ usd(currentOverUsd) }}<span v-if="computedAt">, as of {{ fmtInstant(computedAt) }}</span>.
         It is recomputed as provider data arrives.
       </p>
     </div>

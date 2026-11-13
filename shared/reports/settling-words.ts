@@ -5,6 +5,7 @@
  * reads "Provisional".
  */
 import { isRealUtcDay } from '../schemas/activity'
+import { formatMonthWords } from '../format/month-words'
 import type { SettlingState } from './types'
 
 export function settlingPill(state: SettlingState): string {
@@ -27,7 +28,9 @@ export function settlingPill(state: SettlingState): string {
 export function settlingDay(value: string): string {
   const day = value.slice(0, 10)
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !isRealUtcDay(day)) return ''
-  return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).format(
+  return formatMonthWords(
+    'en-GB',
+    { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' },
     Date.parse(`${day}T00:00:00.000Z`),
   )
 }

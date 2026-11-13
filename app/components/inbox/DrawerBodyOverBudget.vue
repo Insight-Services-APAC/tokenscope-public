@@ -21,6 +21,9 @@ import { fmtUsd } from '../../composables/useFormat'
 
 const props = defineProps<{
   body: Record<string, unknown>
+  /* #642: the item was closed by the period-end sweep or a raised budget, so
+   * advice about acting on it no longer applies and is not shown. */
+  closed?: boolean
 }>()
 
 function num(k: string): number | null {
@@ -63,7 +66,7 @@ const suggestedTopupUsd = overBy !== null ? Math.max(50, Math.ceil(overBy / 10) 
     <div v-else class="text-xs text-carbon-3 italic">
       Consumption numbers not included in this alert; open the project view for live state.
     </div>
-    <div>
+    <div v-if="!closed" data-testid="over-budget-suggested-action">
       <div class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">
         Suggested action
       </div>

@@ -233,9 +233,11 @@ describe('T23 — the page lands scoped, names the centre, and only selects wher
     const w = scoped(THREE_OPTIONS)
     const sel = w.find('[data-testid="cc-scope-selector"]')
     expect(sel.exists()).toBe(true)
+    // #635: two regions, so grouped: the reader's own unit first under "Yours".
     expect(sel.findAll('option').map((o) => o.text().trim())).toEqual([
-      'APAC · CTO', 'AI Apps & Data (yours)', 'EMEA · CTO',
+      'AI Apps & Data', 'APAC · CTO', 'EMEA · CTO',
     ])
+    expect(sel.findAll('optgroup').map((g) => g.attributes('label'))).toEqual(['Yours', 'APAC', 'EMEA'])
     // It is on the centre the reader is ON, not on the server's default.
     expect((sel.element as HTMLSelectElement).value).toBe('cc-1')
   })

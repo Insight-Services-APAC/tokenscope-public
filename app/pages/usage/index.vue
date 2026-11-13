@@ -300,9 +300,10 @@ function monthWord(m: string | null | undefined): string {
   if (!m) return ''
   const [y, mm] = m.split('-')
   if (!y || !mm) return m
-  return new Date(Number(y), Number(mm) - 1, 1).toLocaleString(undefined, {
+  return new Date(Date.UTC(Number(y), Number(mm) - 1, 1)).toLocaleString(undefined, {
     month: 'long',
     year: 'numeric',
+    timeZone: 'UTC',
   })
 }
 const windowLabel = computed(() => {
@@ -325,9 +326,10 @@ const monthEndLabel = computed(() => {
   if (!w?.is_month || !w.month || !(w.days_in_month ?? 0)) return null
   const [y, mm] = w.month.split('-')
   if (!y || !mm) return null
-  return new Date(Number(y), Number(mm) - 1, w.days_in_month!).toLocaleString(undefined, {
+  return new Date(Date.UTC(Number(y), Number(mm) - 1, w.days_in_month!)).toLocaleString(undefined, {
     month: 'long',
     day: 'numeric',
+    timeZone: 'UTC',
   })
 })
 

@@ -9,7 +9,8 @@
  */
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import UiButton from '../ui/Button.vue'
-import { fmtUsd } from '../../composables/useFormat'
+import { fmtInstant, fmtUsd } from '../../composables/useFormat'
+import { budgetPeriodWords } from '#shared/budgets/period-words'
 
 export interface TopupRow {
   id: string
@@ -18,6 +19,9 @@ export interface TopupRow {
   created_at: string | null
   actor_display_name: string | null
   reason: string | null
+  /* #633: the period, parsed by the server; the browser never reads the range text. */
+  effective_from?: string | null
+  effective_to?: string | null
 }
 
 const props = withDefaults(
@@ -49,34 +53,56 @@ const emit = defineEmits<{
 const expanded = ref(props.initiallyExpanded)
 const sectionRef = ref<HTMLElement | null>(null)
 
-onMounted(() => {
-  if (!props.initiallyExpanded) return
-  // Wait for the form to mount (v-if=expanded), then scroll the section
-  // into view and focus the amount input. Used when ?focus=topup is in
-  // the URL.
+/*
+ * Used when ?focus=topup is in the URL: once the form is on screen, scroll the
+ * section into view and focus the amount input. The form waits for the server
+ * clock (#633), so this runs when the form first renders, whether the clock was
+ * ready at mount or arrives later (Copilot, PR 639).
+ */
+let deepLinkFocused = false
+function focusDeepLink() {
+  if (!props.initiallyExpanded || deepLinkFocused || !serverToday.value || !expanded.value) return
   void nextTick(() => {
+    // This component's own input, and the flag only once it is focused, so a
+    // cancel while the clock was pending cannot spend the deep link.
+    const amount = sectionRef.value?.querySelector<HTMLInputElement>('[data-testid="topup-amount"]')
+    if (!amount) return
+    deepLinkFocused = true
     sectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    const amount = document.querySelector<HTMLInputElement>('[data-testid="topup-amount"]')
-    amount?.focus()
+    amount.focus()
   })
-})
+}
+onMounted(focusDeepLink)
+watch(expanded, focusDeepLink)
+/*
+ * #633: the default period is the SERVER's current UTC month (first day to the
+ * first day of the next), never the browser's clock (CLAUDE.md "The clock").
+ * The form opens only once the clock has answered; until then it says so.
+ */
+const { today: serverToday, error: clockError, refresh: refreshClock } = useServerClock()
+function defaultFromIso(): string {
+  const t = serverToday.value
+  return t ? `${t.slice(0, 7)}-01` : ''
+}
+function defaultToIso(): string {
+  const t = serverToday.value
+  if (!t) return ''
+  const y = Number(t.slice(0, 4))
+  const m = Number(t.slice(5, 7))
+  return m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`
+}
 const form = ref({
   budget_usd: '',
   effective_from: defaultFromIso(),
   effective_to: defaultToIso(),
   reason: '',
 })
-
-function defaultFromIso(): string {
-  const d = new Date()
-  d.setUTCDate(1)
-  return d.toISOString().slice(0, 10)
-}
-function defaultToIso(): string {
-  const d = new Date()
-  d.setUTCMonth(d.getUTCMonth() + 1, 1)
-  return d.toISOString().slice(0, 10)
-}
+// Fill the defaults when the clock answers, unless the person already chose dates.
+watch(serverToday, () => {
+  if (!form.value.effective_from) form.value.effective_from = defaultFromIso()
+  if (!form.value.effective_to) form.value.effective_to = defaultToIso()
+  focusDeepLink()
+})
 
 const canSubmit = computed(() => {
   return (
@@ -110,9 +136,9 @@ watch(
   },
 )
 
-function fmtDate(iso: string | null): string {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })
+/* The top-up's period in UTC days: "1 to 31 Oct 2026". Absent bounds (an older server) show nothing. */
+function periodWords(t: TopupRow): string | null {
+  return t.effective_from || t.effective_to ? budgetPeriodWords(t.effective_from, t.effective_to) : null
 }
 </script>
 
@@ -130,8 +156,29 @@ function fmtDate(iso: string | null): string {
       </UiButton>
     </header>
 
+    <!-- The clock read failed: say so and offer a retry; the form stays
+         hidden until the server has answered (Copilot, PR 639). -->
+    <div
+      v-if="expanded && !serverToday && clockError"
+      class="border border-brand-hunger/40 bg-brand-hunger-sheer rounded-lg p-4 mb-3 text-xs text-brand-heart flex items-center justify-between gap-3"
+      role="alert"
+      data-testid="topup-clock-error"
+    >
+      <span>We couldn't get the current month from the server, so the top-up form can't open yet.</span>
+      <UiButton kind="secondary" size="sm" type="button" data-testid="topup-clock-retry" @click="refreshClock()">
+        Try again
+      </UiButton>
+    </div>
+    <div
+      v-else-if="expanded && !serverToday"
+      class="border border-calm-2 rounded-lg p-4 mb-3 text-xs text-carbon-3"
+      role="status"
+      data-testid="topup-form-waiting"
+    >
+      Getting the current month from the server…
+    </div>
     <form
-      v-if="expanded"
+      v-else-if="expanded"
       class="border border-calm-2 rounded-lg p-4 mb-3 bg-brand-harmony-sheer/40 space-y-3"
       data-testid="topup-form"
       @submit.prevent="submit"
@@ -158,7 +205,7 @@ function fmtDate(iso: string | null): string {
           >
         </label>
         <label class="text-xs">
-          <span class="block text-carbon-3 font-bold uppercase tracking-[1px] mb-1">To</span>
+          <span class="block text-carbon-3 font-bold uppercase tracking-[1px] mb-1">Until (UTC, not included)</span>
           <input
             v-model="form.effective_to"
             type="date"
@@ -184,7 +231,7 @@ function fmtDate(iso: string | null): string {
         data-testid="topup-error"
         role="alert"
       >
-        Top-up failed — {{ submitError }}
+        Top-up failed: {{ submitError }}
       </div>
       <div class="flex justify-end gap-2 pt-1">
         <UiButton kind="ghost" size="sm" type="button" @click="expanded = false">Cancel</UiButton>
@@ -204,13 +251,13 @@ function fmtDate(iso: string | null): string {
       <li
         v-for="t in topups"
         :key="t.id"
-        class="grid grid-cols-[100px_1fr_100px] items-center gap-3 px-4 py-3 border-b border-calm-2 last:border-b-0 bg-white"
+        class="grid grid-cols-[150px_1fr_100px] items-center gap-3 px-4 py-3 border-b border-calm-2 last:border-b-0 bg-white"
       >
-        <span class="text-xs text-carbon-3 font-mono">{{ fmtDate(t.created_at) }}</span>
+        <span class="text-xs text-carbon-2" data-testid="topup-period">{{ periodWords(t) ?? '—' }}</span>
         <div class="text-sm text-carbon">
           {{ t.reason ?? '—' }}
           <div class="text-[11px] text-carbon-3">
-            Added by {{ t.actor_display_name ?? 'system' }}
+            Added by {{ t.actor_display_name ?? 'system' }}<template v-if="t.created_at">, {{ fmtInstant(t.created_at) }}</template>
           </div>
         </div>
         <span class="text-right text-sm font-bold text-rag-green" style="font-variant-numeric: tabular-nums">

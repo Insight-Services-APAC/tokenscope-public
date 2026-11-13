@@ -24,6 +24,10 @@ import { resolveServerClock, type ServerClock } from '../../shared/reports/clock
 export interface StubbedServerClock {
   /** Mutable, so a test can land the clock AFTER mount and assert the transition. */
   value: Ref<ServerClock | null>
+  /** The clock read's failure, if a test sets one (#612). */
+  error: Ref<Error | null>
+  /** Calls to the clock's refresh (a Retry). */
+  refresh: ReturnType<typeof vi.fn>
 }
 
 /**
@@ -35,10 +39,14 @@ export function stubServerClock(at: string | ServerClock | null = '2026-08-15T12
   const initial =
     at == null ? null : typeof at === 'string' ? resolveServerClock(new Date(at)) : at
   const value = ref<ServerClock | null>(initial)
+  const error = ref<Error | null>(null)
+  const refresh = vi.fn(async () => {})
   vi.stubGlobal('useServerClock', () => ({
     clock: computed(() => value.value),
     today: computed(() => value.value?.today ?? null),
     settledThrough: computed(() => value.value?.settledThrough ?? null),
+    error,
+    refresh,
   }))
-  return { value }
+  return { value, error, refresh }
 }

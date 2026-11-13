@@ -35,16 +35,22 @@ const known = computed(() => applicable.value && props.coverage!.denominator != 
 const pill = computed(() => {
   if (!applicable.value) return ''
   if (known.value) return 'Coverage known'
-  return props.coverage!.stale ? 'Coverage stale' : 'Coverage unknown'
+  return props.coverage!.stale ? 'Coverage out of date' : 'Coverage unknown'
 })
 
+/*
+ * #634: plain words. The stale sentence names where the count is refreshed:
+ * the Recheck button on Admin, Providers (app/pages/admin/reconciliation.vue,
+ * providers tab), which the route lets only the Admin role press
+ * (server/api/v1/admin/reconciliation/github/coverage-recheck.post.ts).
+ */
 const descriptor = computed(() => {
   const c = props.coverage
   if (!c || !applicable.value) return ''
-  if (known.value) return `covers ${c.connected} of ${c.denominator} GitHub orgs`
+  if (known.value) return `Covers ${c.connected} of ${c.denominator} GitHub organisations.`
   return c.stale
-    ? 'a GitHub enterprise census has expired — recheck to restore the denominator'
-    : 'a GitHub enterprise census is unavailable or capped — no denominator claimed'
+    ? 'The count of GitHub organisations is out of date. An admin can refresh it under Admin, Providers.'
+    : "We could not count this company's GitHub organisations, so we cannot say how many of them this figure covers."
 })
 </script>
 

@@ -256,6 +256,6 @@ describe('T28 — the 30/90 rolling view returns (D28)', () => {
      */
     const card = (await mountPage(payload())).find('[data-testid="burn-card"]')
     expect(card.text()).toContain('trailing 30d')
-    expect(card.text()).toContain('Rolls with the days — independent of the month presets above.')
+    expect(card.text()).toContain('Rolls with the days, whatever month is chosen above.')
   })
 })

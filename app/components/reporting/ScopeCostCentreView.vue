@@ -577,7 +577,7 @@ const copilotPartialMonth = computed(() => props.report?.copilotChargebackPartia
         v-if="isDrill && (trend || trendPending || trendError)"
         :window-label="trendWindowLabel"
         basis="rolling · daily · through the last settled day"
-        note="Does not sum into the month above — a rolling frame and a calendar month are different windows."
+        note="This is a rolling window, so it does not add up to the calendar month above."
         data-testid="cc-band-rolling"
       >
         <UiFetchErrorBanner v-if="trendError" :error="trendError" />

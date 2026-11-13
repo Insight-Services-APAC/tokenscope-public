@@ -946,6 +946,8 @@ export interface CostCentreScopeOption {
   id: string
   displayName: string
   regionCode: string
+  /** #635: the region's display name ("North America"), for the picker's group headers. */
+  regionName?: string
   /** True when the reader holds an active `cou_owner` grant on this centre. */
   owned: boolean
 }

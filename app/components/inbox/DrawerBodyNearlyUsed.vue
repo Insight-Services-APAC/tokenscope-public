@@ -13,6 +13,7 @@
 import UiPbar from '../ui/Pbar.vue'
 import UiBadge from '../ui/Badge.vue'
 import { fmtUsd } from '../../composables/useFormat'
+import { formatMonthWords } from '#shared/format/month-words'
 import {
   PACE_MIN_DAYS,
   budgetPace,
@@ -28,6 +29,9 @@ const props = defineProps<{
    * allocation link only then). The alert also reaches contributors, who
    * cannot add a top-up. */
   canTopUp?: boolean
+  /* #642: the item was closed by the period-end sweep or a raised budget, so
+   * advice about acting on it no longer applies and is not shown. */
+  closed?: boolean
 }>()
 
 function num(k: string): number | null {
@@ -52,7 +56,9 @@ const projected =
 const monthEnd = (() => {
   const m = typeof props.body.month === 'string' ? /^(\d{4})-(\d{2})/.exec(props.body.month) : null
   if (!m || daysInMonth === null) return null
-  return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(
+  return formatMonthWords(
+    'en-GB',
+    { day: 'numeric', month: 'short', timeZone: 'UTC' },
     new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, daysInMonth)),
   )
 })()
@@ -80,7 +86,7 @@ const monthEnd = (() => {
       </p>
       <p class="mt-2 text-[11px] text-carbon-3">These figures are from when the alert was sent. The project page shows today's.</p>
     </div>
-    <div>
+    <div v-if="!closed">
       <h3 class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">What you can do</h3>
       <p v-if="canTopUp" class="text-sm text-carbon-2 leading-relaxed" data-testid="nearly-used-can-top-up">
         Add a top-up, or look at what is driving the spend on the project page. Members can also ask you for more budget.
@@ -90,7 +96,7 @@ const monthEnd = (() => {
         the project's manager decides.
       </p>
     </div>
-    <div>
+    <div v-if="!closed">
       <h3 class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">What happens if you do nothing</h3>
       <p class="text-sm text-carbon-2 leading-relaxed">
         Nothing is blocked. Budgets here are for reporting. You will get an "Over budget" alert if spend goes

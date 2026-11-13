@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
 import AttributionStallBanner from '../../../app/components/ui/AttributionStallBanner.vue'
+import { fmtInstant } from '../../../app/composables/useFormat'
 
 const SINCE = '2026-08-19T09:41:00.000Z'
 
@@ -18,9 +19,10 @@ describe('UiAttributionStallBanner', () => {
     // The instant renders in the viewer's zone (clock-and-day-boundary.md), so
     // pin the frame around it rather than a zone-dependent literal.
     expect(banner.text()).toMatch(
-      /^Attribution has not landed data since .+ — recent spend may be missing from these figures\.$/,
+      /^Attribution has not landed data since .+\. Recent spend may be missing from these figures\.$/,
     )
-    expect(banner.text()).toContain(new Date(SINCE).toLocaleString())
+    // #633: the product's instant style, in the viewer's zone.
+    expect(banner.text()).toContain(fmtInstant(SINCE))
     // Announced to assistive tech without stealing focus.
     expect(banner.attributes('role')).toBe('status')
   })

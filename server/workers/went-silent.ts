@@ -113,7 +113,8 @@ export async function runWentSilent(
     const dispatched = await dispatchInbox(db, {
       category: WENT_SILENT_CATEGORY,
       severity: 'attention',
-      subject: `TokenScope emission stopped for ${who}${projectSuffix} — emit credential rejected`,
+      // #634: plain words, no dash.
+      subject: `${who}'s device${projectSuffix} cannot send usage: its sign-in was rejected`,
       body: {
         instanceId: r.instance_id,
         teammate: who,

@@ -54,7 +54,7 @@ const regionCode = computed(() => settings.value?.region?.code ?? null)
     <UiPageHead
       eyebrow="Policies"
       title="Detection thresholds"
-      sub="The live-detection dials — velocity-spike and reconciliation gap/epsilon/lag. A region override shadows the platform default."
+      sub="When TokenScope raises an alert. Spending fast can be set per region; the other values are read company-wide."
     />
     <UiFetchErrorBanner v-if="governanceError" :error="governanceError" label="detection thresholds" @retry="refreshGovernance" />
     <AdminPageSkeleton v-else-if="governance == null" :rows="5" :toolbar="false" />

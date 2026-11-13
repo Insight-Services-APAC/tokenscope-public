@@ -26,6 +26,7 @@ import AdminPageSkeleton from '../../components/admin/AdminPageSkeleton.vue'
 // registered before the bounds fix shipped may still carry control/bidi
 // characters, so this strips them defensively wherever the name is displayed.
 import { sanitizeClientNameForDisplay } from '#shared/schemas/oauth'
+import { fmtInstant } from '../../composables/useFormat'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface Teammate extends Record<string, unknown> {
@@ -163,7 +164,7 @@ function grantBadge(g: GrantRow): { kind: 'hunger' | 'rag-amber' | 'rag-green'; 
   }
 }
 function fmtTs(v: string | null): string {
-  return v ? new Date(v).toLocaleString() : '—'
+  return fmtInstant(v)
 }
 </script>
 
@@ -270,7 +271,7 @@ function fmtTs(v: string | null): string {
                   <li v-for="(label, i) in g.scope_labels" :key="i" class="text-[11px] text-carbon-3">· {{ label }}</li>
                 </ul>
                 <div class="text-[11px] text-carbon-3 mt-1">
-                  connected {{ fmtTs(g.created_at) }} · last used {{ fmtTs(g.last_used_at) }}
+                  connected {{ fmtTs(g.created_at) }} · last used {{ g.last_used_at ? fmtTs(g.last_used_at) : 'never' }}
                 </div>
               </div>
               <UiButton

@@ -296,3 +296,65 @@ describe('5. both the list and force-end follow the region the teammate sits in 
     expect([...rows][0]!.ended).toBe(true)
   })
 })
+
+/*
+ * #619: `last_emission` reads the not-in-use window first and the whole history
+ * only when that finds nothing. The value must not move: the latest row wins
+ * whether it is recent, only old, or absent, on both routes, and the state
+ * badge follows.
+ */
+describe('6. last_emission is the latest row, whichever window holds it (#619)', () => {
+  const DAY = 24 * 60 * 60_000
+  async function land(instanceId: string, tsEvent: Date): Promise<void> {
+    await t.client.unsafe(`
+      INSERT INTO attribution_record
+        (instance_id, teammate_id, region_id, org_unit_id, tool, model, token_type,
+         tokens, cost_usd, fidelity_tier, cost_basis, ts_event)
+      VALUES ('${instanceId}','${devAId}','${regionAId}','${ouAId}','claude-code','opus-5','input',
+              100, 1.25, 'exact', 'rate_card', '${tsEvent.toISOString()}')`)
+  }
+  let oldOnly: string
+  let oldAndRecent: string
+  let never: string
+  const oldest = new Date(Date.now() - 120 * DAY)
+  const old = new Date(Date.now() - 90 * DAY)
+  const recent = new Date(Date.now() - 2 * DAY)
+
+  beforeAll(async () => {
+    oldOnly = randomUUID()
+    oldAndRecent = randomUUID()
+    never = randomUUID()
+    const longAgo = new Date(Date.now() - 200 * DAY)
+    await t.db.insert(schema.instanceAttestation).values(
+      [oldOnly, oldAndRecent, never].map((id, i) => ({
+        instanceId: id, principalOid: 'inst-oid-dev-a', teammateId: devAId, tool: 'claude-code',
+        sessionTokenHash: `h-619-${i}`, regionId: regionAId, orgUnitId: ouAId, attestationState: 'unassigned' as const, tsStart: longAgo,
+      })),
+    )
+    await land(oldOnly, oldest)
+    await land(oldOnly, old)
+    await land(oldAndRecent, old)
+    await land(oldAndRecent, recent)
+  })
+
+  type Row = { instance_id: string; last_emission: string | null; state: string }
+  const byId = (rows: Row[], id: string) => rows.find((r) => r.instance_id === id)!
+
+  for (const [route, handler, session] of [
+    ['me/instances', meInstances, devA],
+    ['admin/instances', adminInstances, adminA],
+  ] as const) {
+    it(`${route}: old usage only, old and recent, and none`, async () => {
+      const out = await call<{ instances: Row[] }>(handler, ev({ session: session(), query: { limit: '500' } }))
+      // Only rows older than 30 days: the full-history read gives the newest of them.
+      expect(Date.parse(byId(out.instances, oldOnly).last_emission!)).toBe(old.getTime())
+      expect(byId(out.instances, oldOnly).state).toBe('not-in-use')
+      // A row inside the window: it is the latest, old rows do not shadow it.
+      expect(Date.parse(byId(out.instances, oldAndRecent).last_emission!)).toBe(recent.getTime())
+      expect(byId(out.instances, oldAndRecent).state).toBe('idle')
+      // No rows at all.
+      expect(byId(out.instances, never).last_emission).toBeNull()
+      expect(byId(out.instances, never).state).toBe('not-in-use')
+    })
+  }
+})

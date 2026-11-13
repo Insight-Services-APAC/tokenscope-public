@@ -129,10 +129,10 @@ describe('/allocations: empty, refused and failed are three answers', () => {
   })
 
   it.each([
-    ['platform-admin', 'Showing projects across all regions (org-wide).'],
+    ['platform-admin', 'Projects across all regions.'],
     // C20: a Region admin is clamped to their own region (allocation-scope.ts).
-    ['admin', 'Showing every project in your region.'],
-    ['manager', 'Showing the projects in your part of the org.'],
+    ['admin', 'Every project in your region.'],
+    ['manager', 'The projects in your part of the org.'],
   ])('the scope note for %s matches the server\'s scope', async (role, note) => {
     stubSession(role)
     stubFetch({ data: { allocations: [] } })

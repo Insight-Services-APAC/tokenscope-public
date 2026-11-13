@@ -27,15 +27,14 @@ import { computed } from 'vue'
 import type { ServerClock } from '#shared/reports/clock'
 
 /*
- * THREE READS, BECAUSE THREE ARE READ. This returned a `now` / `ready` / `error`
- * / `refresh` facade as well; nothing in `app/**` ever consumed one (external
- * review). A composable that publishes an error channel no caller handles reads
- * as "failure is dealt with somewhere" when it is not — the honest shape is the
- * one the callers actually use, and the null-until-it-lands contract above is
- * how a caller detects the un-landed clock (`clock.value == null`).
+ * THE READS CALLERS USE. `clock` / `today` / `settledThrough` for everyone, and
+ * `error` / `refresh` for a caller whose read waits on the clock and must say so
+ * when the clock fails (#612: the Admin overview's audit tile read "..." forever
+ * because nothing could see a failed or un-landed clock). The null-until-it-lands
+ * contract above is how a caller detects the un-landed clock (`clock.value == null`).
  */
 export function useServerClock() {
-  const { data } = useFetch<ServerClock>('/api/v1/clock', {
+  const { data, error, refresh } = useFetch<ServerClock>('/api/v1/clock', {
     key: 'server-clock',
     // A clock must not be answered from a cache, on either side of the wire.
     retry: false,
@@ -47,5 +46,5 @@ export function useServerClock() {
   /** The last COMPLETE UTC day. THE axis edge. */
   const settledThrough = computed<string | null>(() => clock.value?.settledThrough ?? null)
 
-  return { clock, today, settledThrough }
+  return { clock, today, settledThrough, error, refresh }
 }

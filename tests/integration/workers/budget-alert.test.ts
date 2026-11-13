@@ -239,6 +239,9 @@ describe('runBudgetAlert', () => {
     expect(sample.category).toBe('over-budget')
     expect(sample.subject).toContain('BA-OVER')
     expect(sample.subject).toContain('$50')
+    // #630: the subject names its month, and the body carries it.
+    expect(sample.subject).toBe('Project BA-OVER is $50 over its May budget')
+    expect((sample.body as unknown as { month: string }).month).toBe('2026-05')
     expect(sample.body.project).toBe('BA-OVER')
     expect(sample.body.usedUsd).toBe(150)
     expect(sample.body.capUsd).toBe(100)
@@ -800,12 +803,36 @@ describe('runBudgetAlert', () => {
     expect(Number(over!.c)).toBeGreaterThanOrEqual(1)
   })
 
-  it('NEARLY USED: never after the over-budget alert, even when spend falls back under the cap', async () => {
+  it('NEARLY USED: never after the over-budget alert while the budget is the same, even when spend falls back under the cap', async () => {
     const projectId = await createProject('BA-NEAR-AFTER')
     await createBaselineAllocation(projectId, '100.00')
     await recordSpend(projectId, '120.00', new Date('2026-05-10T10:00:00Z'))
     await runBudgetAlert(t.db, { now: NOW })
-    // A $40 top-up brings the budget in force to $140: spend is 86% of it.
+    // A spend correction (a provisional row) leaves the confirmed figure at 85%
+    // of an UNCHANGED $100 budget: the over-budget item still suppresses.
+    await t.client`UPDATE attribution_record SET identity_state = 'provisional'
+      WHERE project_id = ${projectId}::uuid`
+    await recordSpend(projectId, '85.00', new Date('2026-05-11T10:00:00Z'))
+    await runBudgetAlert(t.db, { now: new Date('2026-05-16T12:00:00Z') })
+    expect(await nearlyRows(projectId)).toHaveLength(0)
+    // Nor does a correction close the over-budget item: the budget did not move.
+    const [open] = await t.client<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid
+         AND ack_state IN ('unread', 'read', 'acknowledged')`
+    expect(Number(open!.c)).toBeGreaterThanOrEqual(1)
+  })
+
+  /*
+   * #631 changes the rule this used to pin ("never after the over-budget alert,
+   * even after a top-up"): a raised budget is a new question, so its 80% is told
+   * once. A $40 top-up takes the budget in force to $140 with $120 spent (86%).
+   */
+  it('NEARLY USED: a top-up past the overrun closes the over-budget item and raises one 80% item for the new budget', async () => {
+    const projectId = await createProject('BA-NEAR-RAISED')
+    await createBaselineAllocation(projectId, '100.00')
+    await recordSpend(projectId, '120.00', new Date('2026-05-10T10:00:00Z'))
+    await runBudgetAlert(t.db, { now: NOW })
     await t.db.insert(schema.allocation).values({
       scopeType: 'project',
       scopeId: projectId,
@@ -815,7 +842,11 @@ describe('runBudgetAlert', () => {
       auditEventId: await newAuditId(),
     })
     await runBudgetAlert(t.db, { now: new Date('2026-05-16T12:00:00Z') })
-    expect(await nearlyRows(projectId)).toHaveLength(0)
+    const near = await nearlyRows(projectId)
+    expect(near).toHaveLength(1)
+    expect(near[0]!.body.capUsd).toBe(140)
+    await runBudgetAlert(t.db, { now: new Date('2026-05-16T13:00:00Z') })
+    expect(await nearlyRows(projectId)).toHaveLength(1)
   })
 
   it('NEARLY USED: a project with no budget gets nothing', async () => {
@@ -826,3 +857,201 @@ describe('runBudgetAlert', () => {
   })
 })
 
+/*
+ * #631: alerts follow the budget. The issue's acceptance, on an injected clock:
+ * over at $1,000, top up to $1,500, the next run closes the item; spend passes
+ * $1,500, the next run raises one new item naming $1,500; a further run none.
+ */
+describe('runBudgetAlert: alerts follow the budget (#631)', () => {
+  const overRows = (projectId: string) => t.client<
+    { ack_state: string; subject: string; body: Record<string, unknown> }[]
+  >`
+    SELECT DISTINCT ON (created_at, subject) ack_state, subject, body::jsonb AS body
+      FROM inbox_item
+     WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid
+     ORDER BY created_at, subject`
+
+  it('a top-up closes the item; a new overrun of the raised budget is told once', async () => {
+    const projectId = await createProject('BA-RAISE')
+    await createBaselineAllocation(projectId, '1000.00')
+    await recordSpend(projectId, '1013.00', new Date('2026-05-05T10:00:00Z'))
+    await runBudgetAlert(t.db, { now: new Date('2026-05-06T12:00:00Z') })
+    let rows = await overRows(projectId)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.subject).toBe('Project BA-RAISE is $13 over its May budget')
+
+    await t.db.insert(schema.allocation).values({
+      scopeType: 'project',
+      scopeId: projectId,
+      budgetUsd: '500.00',
+      effective: '[2026-05-10T00:00:00+00,2026-06-01T00:00:00+00)',
+      allocationKind: 'top-up',
+      auditEventId: await newAuditId(),
+    })
+    // A reader acknowledged it before the top-up: the system close has no actor.
+    await t.client`UPDATE inbox_item SET ack_state = 'acknowledged', ack_by = ${priyaId}::uuid
+      WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    const closing = await runBudgetAlert(t.db, { now: new Date('2026-05-10T12:00:00Z') })
+    expect(closing.budgetRaisedClosed).toBeGreaterThanOrEqual(1)
+    const [actor] = await t.client<{ ack_by: string | null }[]>`
+      SELECT ack_by::text AS ack_by FROM inbox_item
+       WHERE category = 'over-budget' AND related_entity_id = ${projectId}::uuid`
+    expect(actor!.ack_by).toBeNull()
+    rows = await overRows(projectId)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.ack_state).toBe('resolved')
+    expect(rows[0]!.body).toMatchObject({ closed_reason: 'budget-raised', closed_cap_usd: 1500 })
+
+    await recordSpend(projectId, '500.00', new Date('2026-05-11T10:00:00Z'))
+    await runBudgetAlert(t.db, { now: new Date('2026-05-12T12:00:00Z') })
+    rows = await overRows(projectId)
+    expect(rows).toHaveLength(2)
+    expect(rows[1]!.ack_state).toBe('unread')
+    expect(rows[1]!.body.capUsd).toBe(1500)
+    expect(rows[1]!.subject).toBe('Project BA-RAISE is $13 over its May budget')
+
+    await runBudgetAlert(t.db, { now: new Date('2026-05-12T13:00:00Z') })
+    expect(await overRows(projectId)).toHaveLength(2)
+  })
+
+  it('a top-up still closes the alert when the project\'s spend has since fallen to nothing', async () => {
+    const projectId = await createProject('BA-RAISE-ZERO')
+    await createBaselineAllocation(projectId, '100.00')
+    await recordSpend(projectId, '150.00', new Date('2026-05-05T10:00:00Z'))
+    await runBudgetAlert(t.db, { now: new Date('2026-05-06T12:00:00Z') })
+    expect((await overRows(projectId))[0]!.ack_state).toBe('unread')
+    // A correction takes every confirmed row out of the figure, then a top-up lands.
+    await t.client`UPDATE attribution_record SET identity_state = 'provisional' WHERE project_id = ${projectId}::uuid`
+    await t.db.insert(schema.allocation).values({
+      scopeType: 'project',
+      scopeId: projectId,
+      budgetUsd: '100.00',
+      effective: '[2026-05-07T00:00:00+00,2026-06-01T00:00:00+00)',
+      allocationKind: 'top-up',
+      auditEventId: await newAuditId(),
+    })
+    await runBudgetAlert(t.db, { now: new Date('2026-05-08T12:00:00Z') })
+    const rows = await overRows(projectId)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.ack_state).toBe('resolved')
+    expect(rows[0]!.body).toMatchObject({ closed_reason: 'budget-raised', closed_cap_usd: 200 })
+  })
+
+  it('an item with no capUsd counts as the same budget: never closed by a top-up, still suppresses', async () => {
+    const projectId = await createProject('BA-LEGACY')
+    await createBaselineAllocation(projectId, '100.00')
+    await t.db.insert(schema.allocation).values({
+      scopeType: 'project',
+      scopeId: projectId,
+      budgetUsd: '50.00',
+      effective: '[2026-05-10T00:00:00+00,2026-06-01T00:00:00+00)',
+      allocationKind: 'top-up',
+      auditEventId: await newAuditId(),
+    })
+    await recordSpend(projectId, '160.00', new Date('2026-05-05T10:00:00Z'))
+    await t.client`
+      INSERT INTO inbox_item (recipient_teammate_id, category, severity, subject, body,
+                              related_entity_kind, related_entity_id, created_at)
+      VALUES (${priyaId}::uuid, 'over-budget', 'attention', 'Project BA-LEGACY is $10 over budget',
+              '{"project":"BA-LEGACY"}'::jsonb, 'project', ${projectId}::uuid, '2026-05-06T12:00:00Z')`
+    await runBudgetAlert(t.db, { now: NOW })
+    const rows = await overRows(projectId)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.ack_state).toBe('unread')
+  })
+})
+
+/*
+ * #630: alerts about a period close when the period is over, after 7 days'
+ * grace. Items are planted with their real created_at; the sweep runs inside
+ * runBudgetAlert, on the run's injected clock.
+ */
+describe('runBudgetAlert: alerts close when their period is over (#630)', () => {
+  async function plant(
+    category: string,
+    createdAt: string,
+    opts: { body?: Record<string, unknown>; ackState?: string } = {},
+  ): Promise<string> {
+    const [row] = await t.client<{ id: string }[]>`
+      INSERT INTO inbox_item (recipient_teammate_id, category, severity, subject, body, ack_state, created_at)
+      VALUES (${priyaId}::uuid, ${category}, 'attention', ${`planted ${category}`},
+              ${JSON.stringify(opts.body ?? {})}::jsonb, ${opts.ackState ?? 'unread'}, ${createdAt}::timestamptz)
+      RETURNING id::text AS id`
+    return row!.id
+  }
+  const stateOf = async (id: string) => {
+    const [row] = await t.client<{ ack_state: string; ack_at: string | null; ack_by: string | null; body: Record<string, unknown> }[]>`
+      SELECT ack_state, ack_at::text AS ack_at, ack_by::text AS ack_by, body::jsonb AS body FROM inbox_item WHERE id = ${id}::uuid`
+    return row!
+  }
+
+  it('an item raised 3 days before month end is open on the 2nd and closed on the 5th', async () => {
+    const id = await plant('over-budget', '2026-07-28T12:00:00Z', { body: { month: '2026-07' } })
+    await runBudgetAlert(t.db, { now: new Date('2026-08-02T12:00:00Z') })
+    expect((await stateOf(id)).ack_state).toBe('unread')
+
+    const res = await runBudgetAlert(t.db, { now: new Date('2026-08-05T12:00:00Z') })
+    expect(res.periodEndedClosed).toBeGreaterThanOrEqual(1)
+    const closed = await stateOf(id)
+    expect(closed.ack_state).toBe('resolved')
+    expect(closed.ack_at).not.toBeNull()
+    expect(closed.ack_by).toBeNull()
+    expect(closed.body).toMatchObject({ month: '2026-07', closed_reason: 'period-ended', closed_month: '2026-07' })
+  })
+
+  it('closes each monthly category, taking the month from created_at when the body has none', async () => {
+    const ids = await Promise.all(
+      ['budget-nearly-used', 'untagged-backlog', 'over-attribution', 'reconciliation-gap'].map((c) =>
+        plant(c, '2026-09-10T08:00:00Z', { ackState: c === 'over-attribution' ? 'acknowledged' : 'read' }),
+      ),
+    )
+    // A reader acknowledged one before the sweep: the system close has no actor.
+    await t.client`UPDATE inbox_item SET ack_by = ${priyaId}::uuid WHERE id = ANY(${ids}::uuid[])`
+    await runBudgetAlert(t.db, { now: new Date('2026-10-20T12:00:00Z') })
+    for (const id of ids) {
+      const row = await stateOf(id)
+      expect(row.ack_state).toBe('resolved')
+      expect(row.ack_by).toBeNull()
+      expect(row.body).toMatchObject({ closed_reason: 'period-ended', closed_month: '2026-09' })
+    }
+  })
+
+  it('leaves this month alone, and never touches categories with their own ending', async () => {
+    const current = await plant('over-budget', '2026-10-02T08:00:00Z')
+    const others = await Promise.all(
+      [
+        'project-request',
+        'quota-request',
+        'went-silent',
+        'sync-conflict',
+        'copilot-bill-unclassified',
+        'copilot-bill-unsettled',
+        'project-ending-soon',
+      ].map((c) => plant(c, '2026-06-01T08:00:00Z')),
+    )
+    await runBudgetAlert(t.db, { now: new Date('2026-10-20T12:00:00Z') })
+    expect((await stateOf(current)).ack_state).toBe('unread')
+    for (const id of others) expect((await stateOf(id)).ack_state).toBe('unread')
+  })
+
+  it('does not reopen or rewrite a dismissed item', async () => {
+    const id = await plant('over-budget', '2026-06-03T08:00:00Z', { ackState: 'dismissed' })
+    await runBudgetAlert(t.db, { now: new Date('2026-10-20T12:00:00Z') })
+    const row = await stateOf(id)
+    expect(row.ack_state).toBe('dismissed')
+    expect(row.body.closed_reason).toBeUndefined()
+  })
+
+  it('a spending-fast item closes once its ISO week is over and 7 days have passed', async () => {
+    // Wednesday 7 Oct 2026; its week starts Monday 5 Oct.
+    const id = await plant('velocity-warning', '2026-10-07T09:00:00Z')
+    // Monday 12 Oct: a new week, but only 5 days old.
+    await runBudgetAlert(t.db, { now: new Date('2026-10-12T09:00:00Z') })
+    expect((await stateOf(id)).ack_state).toBe('unread')
+    // Thursday 15 Oct: past the week and the grace.
+    await runBudgetAlert(t.db, { now: new Date('2026-10-15T09:00:00Z') })
+    const row = await stateOf(id)
+    expect(row.ack_state).toBe('resolved')
+    expect(row.body).toMatchObject({ closed_reason: 'period-ended', closed_week_start: '2026-10-05' })
+  })
+})

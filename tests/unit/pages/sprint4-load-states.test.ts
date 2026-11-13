@@ -86,11 +86,11 @@ afterEach(() => {
 })
 
 describe('/allocations/{id}: not found, refused and failed are different answers', () => {
-  it('a 404 is "Allocation not found"', async () => {
+  it('a 404 is "Budget not found"', async () => {
     stubCommon()
     stubFetch({ error: NOT_FOUND })
     const w = await mountPage(AllocationPage)
-    expect(w.find('[data-testid="alloc-not-found"]').text()).toContain('Allocation not found.')
+    expect(w.find('[data-testid="alloc-not-found"]').text()).toContain('Budget not found.')
     expect(w.find('[data-testid="alloc-refused"]').exists()).toBe(false)
     expect(w.find('[data-testid="alloc-failed"]').exists()).toBe(false)
   })
@@ -100,7 +100,7 @@ describe('/allocations/{id}: not found, refused and failed are different answers
     stubFetch({ error: FORBIDDEN })
     const w = await mountPage(AllocationPage)
     expect(w.find('[data-testid="alloc-refused"]').text()).toContain("You don't have access to this budget.")
-    expect(w.text()).not.toContain('Allocation not found')
+    expect(w.text()).not.toContain('Budget not found')
   })
 
   it('another refusal quotes the server\'s reason', async () => {
@@ -108,7 +108,7 @@ describe('/allocations/{id}: not found, refused and failed are different answers
     stubFetch({ error: BAD_REQUEST })
     const w = await mountPage(AllocationPage)
     expect(w.find('[data-testid="alloc-refused"]').text()).toContain('Reason given: The id is not a budget.')
-    expect(w.text()).not.toContain('Allocation not found')
+    expect(w.text()).not.toContain('Budget not found')
   })
 
   it.each([['a 5xx', SERVER_ERROR], ['no answer', NETWORK]])('%s is an error with a working Retry', async (_name, err) => {
@@ -116,11 +116,11 @@ describe('/allocations/{id}: not found, refused and failed are different answers
     const refresh = stubFetch({ error: err })
     const w = await mountPage(AllocationPage)
     expect(w.find('[data-testid="alloc-failed"]').text()).toContain("This budget didn't load.")
-    expect(w.text()).not.toContain('Allocation not found')
+    expect(w.text()).not.toContain('Budget not found')
     await w.find('[data-testid="alloc-retry"]').trigger('click')
     expect(refresh).toHaveBeenCalled()
     // While the retry runs the page says it is loading, not the old failure.
-    expect(w.text()).toContain('Loading allocation')
+    expect(w.text()).toContain('Loading budget')
     expect(w.find('[data-testid="alloc-failed"]').exists()).toBe(false)
   })
 })

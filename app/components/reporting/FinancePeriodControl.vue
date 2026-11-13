@@ -16,6 +16,7 @@
 import { computed } from 'vue'
 import { useReportState } from '../../composables/useReportState'
 import { lastCompleteMonth } from './period-presets'
+import { monthShort as monthWord } from '#shared/format/month-words'
 
 const rs = useReportState()
 
@@ -37,7 +38,7 @@ function monthLong(m: string): string {
   return d.toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })
 }
 function monthShort(m1: number): string {
-  return new Date(Date.UTC(2000, m1 - 1, 1)).toLocaleString('en-US', { month: 'short', timeZone: 'UTC' })
+  return monthWord(m1) ?? String(m1)
 }
 
 // ── Complete months: last 12, newest first ───────────────────────────────────

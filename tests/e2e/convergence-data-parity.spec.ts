@@ -120,7 +120,7 @@ test.describe('Convergence — data parity across surfaces', () => {
     await page.goto(`${baseUrl}/inbox`)
     await page.waitForLoadState('networkidle')
     await page
-      .locator('[data-testid^="inbox-row-"]', { hasText: 'over budget' })
+      .locator('[data-testid^="inbox-row-"]', { hasText: /over its \w+ budget/ })
       .locator('button')
       .first()
       .click()
@@ -141,7 +141,7 @@ test.describe('Convergence — data parity across surfaces', () => {
     await page.goto(`${baseUrl}/inbox`)
     await page.waitForLoadState('networkidle')
     await page
-      .locator('[data-testid^="inbox-row-"]', { hasText: 'over budget' })
+      .locator('[data-testid^="inbox-row-"]', { hasText: /over its \w+ budget/ })
       .locator('button')
       .first()
       .click()
@@ -179,7 +179,7 @@ test.describe('Convergence — data parity across surfaces', () => {
     await signInAs(page, 'manager')
     await page.goto(`${baseUrl}/inbox`)
     await page.waitForLoadState('networkidle')
-    const row = page.locator('[data-testid^="inbox-row-"]', { hasText: 'over budget' })
+    const row = page.locator('[data-testid^="inbox-row-"]', { hasText: /over its \w+ budget/ })
     await expect(row).toBeVisible()
     await row.locator('button').first().click()
 

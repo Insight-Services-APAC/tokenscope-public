@@ -43,5 +43,7 @@ export const workerRun = pgTable(
   (t) => [
     index('worker_run_name_started_idx').on(t.workerName, t.startedAt.desc()),
     index('worker_run_started_at_idx').on(t.startedAt),
+    // The stuck-run sweep's lookup (0175, #623): only rows still running.
+    index('worker_run_running_started_idx').on(t.startedAt).where(sql`status = 'running'`),
   ],
 )

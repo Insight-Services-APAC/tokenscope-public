@@ -81,3 +81,26 @@ describe('reapStaleWorkerRuns (ING-7)', () => {
     expect(rows.find((r) => r.worker_name === 'budget-alert')!.status).toBe('success')
   })
 })
+
+describe('worker_run_running_started_idx (#623)', () => {
+  it("the sweep's predicate can be served by the partial index alone", async () => {
+    const reserved = await t.client.reserve()
+    try {
+      await reserved`BEGIN`
+      // A test table is too small for the planner to prefer an index on cost;
+      // this shows the partial index fits the sweep's predicate. The plan on
+      // real data is checked on dev (Diagnostics timings in the PR).
+      await reserved`SET LOCAL enable_seqscan = off`
+      const plan = (
+        await reserved.unsafe(`EXPLAIN UPDATE worker_run SET status = 'failure'
+          WHERE status = 'running' AND started_at < NOW() - INTERVAL '120 minutes'`)
+      )
+        .map((r) => String((r as Record<string, unknown>)['QUERY PLAN']))
+        .join('\n')
+      expect(plan).toMatch(/worker_run_running_started_idx/)
+    } finally {
+      await reserved`ROLLBACK`.catch(() => undefined)
+      reserved.release()
+    }
+  })
+})

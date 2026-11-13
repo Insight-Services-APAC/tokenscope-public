@@ -143,7 +143,7 @@ const tabModel = computed<string>({
     <UiPageHead
       eyebrow="Reporting"
       title="Reporting"
-      sub="Across the org — scoped to what you can see."
+      sub="The parts of the company you can see."
     />
     <ReportPrintHeader :facts="printFacts" :as-of="clock?.now ?? null" />
 

@@ -93,11 +93,13 @@ describe('AdminGovernanceDialsSection', () => {
   it('renders a row per dial with label, explanation and platform value', () => {
     const wrapper = mountRegionAdmin()
     expect(wrapper.find('[data-testid="settings-governance-dials"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('Velocity spike threshold')
-    expect(wrapper.text()).toContain('current week vs 4-week mean')
-    expect(wrapper.text()).toContain('OTel-vs-actuals gap worker alert fraction')
-    expect(wrapper.text()).toContain('Reconciliation matched-band in USD')
-    expect(wrapper.text()).toContain('Reconciliation walk-back lag buffer (hours)')
+    // #636: plain labels, each traced to the code that reads the dial.
+    expect(wrapper.text()).toContain('Spending fast: how much above a typical week')
+    expect(wrapper.text()).toContain('average of their last four weeks. 0.25 means 25% more.')
+    expect(wrapper.text()).toContain('Usage not recorded: share that raises an alert')
+    expect(wrapper.text()).toContain('Amounts treated as equal (USD)')
+    expect(wrapper.text()).toContain('A difference of this amount or less')
+    expect(wrapper.text()).toContain('Wait before comparing (hours)')
     expect(
       wrapper.find('[data-testid="governance-platform-reconciliation.lag_buffer_hours"]').text(),
     ).toBe('24')

@@ -312,8 +312,9 @@ const indicativeNote = computed(() => {
   // A table where EVERY row is indicative can say so of every figure; a mixed one
   // must not, because the badged rows beside them are a different kind of dollar.
   return n === props.rows.length
-    ? 'Every figure here is attributed usage — indicative, not a billed charge.'
-    : 'Rows carrying no badge are attributed usage — indicative, not a billed charge.'
+    // #634: the usage lens values usage at our rate card (shared/usage/lens.ts).
+    ? 'Every figure here is usage valued at our rate card. It is not a charge.'
+    : 'Rows with no badge are usage valued at our rate card. They are not a charge.'
 })
 
 // ── Usage provenance (requirement 4) ──────────────────────────────────────────

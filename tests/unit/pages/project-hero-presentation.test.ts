@@ -253,7 +253,7 @@ describe('/projects/{code} — the month-on-month appears ONCE (T11)', () => {
     const burn = w.find('[data-testid="tile-burn-per-day"]')
     expect(burn.find('[data-testid="kpi-delta"]').exists()).toBe(false)
     expect(burn.find('[data-testid="kpi-delta-empty"]').text()).toBe(
-      'same change as spend — the day counts cancel',
+      'Changes by the same amount as spend, because both periods have the same number of days.',
     )
   })
 

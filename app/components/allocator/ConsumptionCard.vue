@@ -66,7 +66,7 @@ const overByUsd = computed(() => Math.max(0, props.usedUsd - props.totalUsd))
       v-if="reconciledUsd > 0"
       class="text-[11px] text-carbon-3 mt-1"
       data-testid="consumption-reconciled-share"
-      title="Reconciled from provider usage rather than emitted telemetry — counted in full, and the same figure the project page shows."
+      title="Reconciled from provider usage rather than emitted telemetry: counted in full, and the same figure the project page shows."
     >
       incl. {{ fmtUsd(reconciledUsd) }} reconciled from provider usage
     </div>
@@ -77,7 +77,7 @@ const overByUsd = computed(() => Math.max(0, props.usedUsd - props.totalUsd))
       data-testid="consumption-over-banner"
     >
       <span class="font-bold">${{ overByUsd.toFixed(2) }} over.</span>
-      Project is over allocation. Add a top-up below, or talk to the team —
+      Project is over budget. Add a top-up below, or talk to the team.
       TokenScope won't block sessions.
     </div>
   </UiCard>

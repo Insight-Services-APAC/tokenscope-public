@@ -43,7 +43,7 @@ const emit = defineEmits<{
         </button>
       </span>
       <span v-if="devs.length === 0" class="text-xs text-carbon-3 italic py-1">
-        No developers assigned yet — add one below.
+        No developers assigned yet. Add one below.
       </span>
     </div>
   </div>

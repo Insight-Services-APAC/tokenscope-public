@@ -18,7 +18,7 @@
  * window — a fact about the rows on screen, not a threshold (D5).
  */
 import { computed, onMounted, ref } from 'vue'
-import { fmtDurationMs } from '../../composables/useFormat'
+import { fmtDurationMs, fmtInstant } from '../../composables/useFormat'
 import type { WorkerRunDetailData } from './WorkerRunDetail.vue'
 
 /** A row of GET /api/v1/admin/worker-runs?worker=<name>. */
@@ -40,8 +40,6 @@ const props = withDefaults(defineProps<{
   /** Run detail is platform-admin only (GET worker-runs/[id]). */
   canOpenDetail?: boolean
 }>(), { limit: 30, canOpenDetail: true })
-
-const EM_DASH = '—'
 
 const runs = ref<WorkerRunRow[] | null>(null)
 const listError = ref<unknown>(null)
@@ -86,7 +84,7 @@ function statusKind(s: string): BadgeKind {
 }
 /** An instant, not a day bucket — viewer's zone (CLAUDE.md, the clock). */
 function fmtStamp(iso: string | null): string {
-  return iso ? new Date(iso).toLocaleString() : EM_DASH
+  return fmtInstant(iso)
 }
 function msTitle(ms: number | null): string {
   return ms === null ? 'No duration recorded for this run' : `${ms.toLocaleString()} ms`

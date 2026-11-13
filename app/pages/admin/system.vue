@@ -125,15 +125,18 @@ const flagBadge = (v: boolean) =>
         <dl class="space-y-3 text-sm">
           <div>
             <dt class="text-carbon-2 mb-1">Tenant ID</dt>
-            <dd class="font-mono text-xs text-carbon break-all">{{ data.entra.tenantId || '—' }}</dd>
+            <dd v-if="data.entra.tenantId" class="font-mono text-xs text-carbon break-all">{{ data.entra.tenantId }}</dd>
+            <dd v-else class="text-xs text-carbon-3 italic" data-testid="entra-not-set">Not set in this deployment</dd>
           </div>
           <div>
             <dt class="text-carbon-2 mb-1">Client ID</dt>
-            <dd class="font-mono text-xs text-carbon break-all">{{ data.entra.clientId || '—' }}</dd>
+            <dd v-if="data.entra.clientId" class="font-mono text-xs text-carbon break-all">{{ data.entra.clientId }}</dd>
+            <dd v-else class="text-xs text-carbon-3 italic">Not set in this deployment</dd>
           </div>
           <div>
             <dt class="text-carbon-2 mb-1">Redirect URI</dt>
-            <dd class="font-mono text-xs text-carbon break-all">{{ data.entra.redirectUri || '—' }}</dd>
+            <dd v-if="data.entra.redirectUri" class="font-mono text-xs text-carbon break-all">{{ data.entra.redirectUri }}</dd>
+            <dd v-else class="text-xs text-carbon-3 italic">Not set in this deployment</dd>
           </div>
         </dl>
         <p class="text-[11px] text-carbon-3 mt-4 leading-relaxed italic">
@@ -238,14 +241,16 @@ const flagBadge = (v: boolean) =>
         </p>
       </UiCard>
 
-      <!-- Features -->
-      <UiCard accent="hunger" class="lg:col-span-2" data-testid="admin-settings-features">
+      <!-- Features: only when there are flags (#636); no placeholder card. -->
+      <UiCard
+        v-if="Object.keys(data.features).length > 0"
+        accent="hunger"
+        class="lg:col-span-2"
+        data-testid="admin-settings-features"
+      >
         <UiEyebrow>Features</UiEyebrow>
         <h2 class="text-lg font-bold text-carbon mt-1 mb-4">Feature flags</h2>
-        <p v-if="Object.keys(data.features).length === 0" class="text-sm text-carbon-3 italic">
-          No feature flags wired yet. This panel is a placeholder for a later slice.
-        </p>
-        <dl v-else class="space-y-2 text-sm">
+        <dl class="space-y-2 text-sm">
           <div v-for="(v, k) in data.features" :key="k" class="flex items-center justify-between">
             <dt class="text-carbon-2 font-mono text-xs">{{ k }}</dt>
             <dd><UiBadge :kind="v ? 'rag-green' : 'neutral'">{{ v ? 'on' : 'off' }}</UiBadge></dd>

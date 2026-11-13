@@ -640,17 +640,28 @@ describe('H33 — allocation list paging is deterministic under equal budgets', 
         effective: `[2028-0${i + 1}-01T00:00:00Z,2028-0${i + 2}-01T00:00:00Z)`, allocationKind: 'top-up', auditEventId: evt!.id,
       })
     }
-    type Page = { allocations: Array<{ id: string; budget_usd: string }>; total: number }
+    // #632: the list pages by whole PROJECTS (limit/offset count projects,
+    // `total` is projects, `total_lines` lines). The H33 guarantee stands at
+    // that grain: walking the pages repeats no line and skips none, in the
+    // same total order as one big page.
+    type Page = {
+      allocations: Array<{ id: string; scope_id: string; budget_usd: string; effective_from: string | null }>
+      total: number
+      total_lines: number
+    }
     const first = (await allocationsList(ev({ method: 'GET', path: '/x?limit=200&offset=0', session: finops() }))) as Page
+    expect(first.total).toBeLessThanOrEqual(200)
     const seen: string[] = []
     for (let off = 0; off < first.total; off += 2) {
       const page = (await allocationsList(ev({ method: 'GET', path: `/x?limit=2&offset=${off}`, session: finops() }))) as Page
       seen.push(...page.allocations.map((a) => a.id))
     }
-    expect(new Set(seen).size).toBe(first.total)
+    expect(new Set(seen).size).toBe(first.total_lines)
     expect(seen).toEqual(first.allocations.map((a) => a.id))
-    const tied = first.allocations.filter((a) => a.budget_usd === '4242.00').map((a) => a.id)
+    // Equal budgets within one project: newest period first, all six together.
+    const tied = first.allocations.filter((a) => a.scope_id === p!.id)
     expect(tied).toHaveLength(6)
-    expect(tied).toEqual([...tied].sort())
+    const froms = tied.map((a) => a.effective_from!)
+    expect(froms).toEqual([...froms].sort().reverse())
   })
 })

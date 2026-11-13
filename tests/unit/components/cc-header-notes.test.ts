@@ -28,7 +28,7 @@ import type { CostCentreReport } from '../../../app/components/reporting/cost-ce
 import type { ProviderState, ReportCoverageMeta } from '#shared/reports/types'
 
 const COVERAGE_UNKNOWN_SENTENCE =
-  'a GitHub enterprise census is unavailable or capped — no denominator claimed'
+  "We could not count this company's GitHub organisations, so we cannot say how many of them this figure covers."
 
 function provider(
   vendor: string,

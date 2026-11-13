@@ -29,7 +29,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import UiButton from '../ui/Button.vue'
-import { fmtUsd, fmtTokens, fmtSessionSpan, clientMeta, parseInstantMs } from '../../composables/useFormat'
+import { fmtUsd, fmtTokens, fmtSessionSpan, fmtUtcDay, clientMeta, parseInstantMs } from '../../composables/useFormat'
 import { useViewerZone } from '../../composables/useViewerZone'
 import { deviceLabel } from '#shared/schemas/device-name'
 import { apiErrorDetail } from '../../composables/useApiError'
@@ -155,6 +155,15 @@ function sessionMonth(s: WorklistSession): string | null {
 const isEarlierMonth = (month: string | null) => Boolean(month && currentMonth.value && month < currentMonth.value)
 const earlierSessions = computed(() => props.sessions.filter((s) => isEarlierMonth(sessionMonth(s))))
 const earlierDays = computed(() => props.unaccounted.filter((d) => isEarlierMonth(d.day.slice(0, 7))))
+/**
+ * A provider day as "10 Nov" (#610), with the year when it is not the server's
+ * year, or while the server's year is not known (two years' days must never
+ * read alike). A UTC day, never converted.
+ */
+function dayLabel(day: string): string {
+  const year = serverToday.value?.slice(0, 4)
+  return fmtUtcDay(day, { year: !year || day.slice(0, 4) !== year })
+}
 const earlierSet = computed(() => new Set([...earlierSessions.value.map(sKey), ...earlierDays.value.map(dKey)]))
 const sessionsOpen = ref(false)
 const daysOpen = ref(false)
@@ -616,14 +625,14 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
             type="checkbox"
             class="rounded border-calm-2 shrink-0"
             :checked="isSelected(dKey(item.row))"
-            :aria-label="`Select ${item.row.day}`"
+            :aria-label="`Select ${dayLabel(item.row.day)}`"
             :data-testid="`select-day-${item.row.id}`"
             @change="toggle(dKey(item.row))"
           >
           <Icon :name="clientMeta(item.row.tool).icon" class="text-base shrink-0" :title="clientMeta(item.row.tool).name" />
           <div class="min-w-0 flex-1">
             <div class="text-xs text-carbon truncate">
-              <span class="font-semibold">{{ item.row.day }}</span>
+              <span class="font-semibold">{{ dayLabel(item.row.day) }}</span>
               <!-- Tokens are elided at 0: the provider's billing API reports cost
                    without a token count for most lanes, so "· 0" is noise, not data. -->
               <span class="text-carbon-3"> · {{ clientMeta(item.row.tool).name }}<template v-if="item.row.tokens"> · {{ fmtTokens(item.row.tokens) }}</template></span>
@@ -722,7 +731,7 @@ class="flex flex-wrap gap-x-6 gap-y-1 mt-1.5 text-[12px]"
         >
           <Icon :name="clientMeta(u.tool).icon" class="text-sm shrink-0 opacity-60" aria-hidden="true" />
           <span class="text-[11px] text-carbon-3 min-w-0 flex-1 truncate">
-            {{ u.day }} · {{ clientMeta(u.tool).name }}
+            {{ dayLabel(u.day) }} · {{ clientMeta(u.tool).name }}
           </span>
           <span class="text-xs text-carbon-2 shrink-0" style="font-variant-numeric: tabular-nums">{{ fmtUsd(u.cost_usd) }}</span>
           <UiButton

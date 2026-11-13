@@ -82,7 +82,7 @@ const settlingWord = computed<string | null>(() => {
 const coverageWord = computed<string | null>(() => {
   const c = props.coverage
   if (!c || c.applicable !== true || c.denominator != null) return null
-  return c.stale ? 'Coverage stale' : 'Coverage unknown'
+  return c.stale ? 'Coverage out of date' : 'Coverage unknown'
 })
 
 /*

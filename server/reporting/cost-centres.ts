@@ -131,6 +131,8 @@ export interface CostCentreRef {
  * through, so a shared field would have to be faked there.
  */
 export interface VisibleCostCentre extends CostCentreRef {
+  /* #635: the region's display name, for the picker's group headers. */
+  regionName?: string
   /**
    * True when the caller holds an active `cou_owner` grant on this unit — the
    * OWNERSHIP half of the visibility disjunction, reported rather than
@@ -207,10 +209,12 @@ export async function fetchVisibleCostCentres(
     display_name: string
     region_id: string
     region_code: string
+    region_name: string
     owned: boolean
   }>(sql`
     SELECT ou.id::text AS id, ou.code, ou.display_name,
            ou.region_id::text AS region_id, r.code AS region_code,
+           r.display_name AS region_name,
            ${ownerClause} AS owned
     FROM org_unit ou JOIN region r ON r.id = ou.region_id
     WHERE ou.is_cost_owning_unit = TRUE AND ou.retired_at IS NULL
@@ -222,6 +226,7 @@ export async function fetchVisibleCostCentres(
     displayName: r.display_name,
     regionId: r.region_id,
     regionCode: r.region_code,
+    regionName: r.region_name,
     owned: r.owned === true,
   }))
 }
@@ -241,6 +246,7 @@ export function costCentreScope(ccs: VisibleCostCentre[]): CostCentreScope {
     id: c.id,
     displayName: c.displayName,
     regionCode: c.regionCode,
+    ...(c.regionName ? { regionName: c.regionName } : {}),
     owned: c.owned,
   }))
   const landing = ccs.find((c) => c.owned) ?? ccs[0] ?? null

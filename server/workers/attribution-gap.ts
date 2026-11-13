@@ -137,7 +137,7 @@ function gapSelect(opts: GapOpts) {
      GROUP BY sa.instance_id, sa.teammate_id, t.email, sa.last_bearer_at
      -- STARVED: the join side has fallen days behind the emit side. The INNER
      -- JOIN above already requires it to have attributed before (the regression
-     -- shape) — a never-attributed instance is not distinguishable here from one
+     -- shape); a never-attributed instance is not distinguishable here from one
      -- that has simply never spent.
     HAVING sa.last_bearer_at - MAX(ar.ts_event) > (${gapHours} * INTERVAL '1 hour')
   `
@@ -274,7 +274,8 @@ export async function runAttributionGap(
       // rather than only in the dispatcher's switch. (Equivalent-mutant by design:
       // removing it changes nothing, which is the point.)
       severity: 'urgent',
-      subject: `Device is emitting but its spend is not being attributed (${days}d behind)`,
+      // #634: plain words.
+      subject: `A device is sending usage that is not reaching reports (${days} day${days === 1 ? '' : 's'} behind)`,
       body: {
         instance_id: inst.instanceId,
         teammate: inst.email,
@@ -285,7 +286,7 @@ export async function runAttributionGap(
         summary:
           'This device minted an ingest credential recently (so it is running and exporting) but its most recent attributed spend is days older. Emission auth is healthy; the loss is between ingest and attribution_record.',
         hint:
-          'Go to Admin → Diagnostics → Attribution gaps. Press "Diagnose" on the device FIRST: it reports whether its telemetry is in ingest at all for the window, which is what separates a joiner fault (ours — recoverable by re-reading) from a client fault (theirs — nothing to re-read, check the reported plugin/CLI versions). If it is ours, use the re-read control on the same card; the runbook is docs/development/joiner-dead-zone-recovery.md. Azure accepting an export (HTTP 204) does NOT mean it was attributed.',
+          'Go to Admin → Diagnostics → Attribution gaps. Press "Diagnose" on the device FIRST: it reports whether its telemetry is in ingest at all for the window, which is what separates a joiner fault (ours: recoverable by re-reading) from a client fault (theirs: nothing to re-read, check the reported plugin/CLI versions). If it is ours, use the re-read control on the same card; the runbook is docs/development/joiner-dead-zone-recovery.md. Azure accepting an export (HTTP 204) does NOT mean it was attributed.',
         detectedAt: now.toISOString(),
       },
       relatedEntityKind: 'instance',

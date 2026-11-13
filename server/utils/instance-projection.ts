@@ -43,16 +43,38 @@ export { INSTANCE_STATES, type InstanceState }
  * The per-instance metric columns (last_emission, spend_usd_mtd), as a SQL
  * fragment selecting against the `ia` alias of instance_attestation. `monthStartIso`
  * bounds the MTD spend sum. Embed verbatim in either endpoint's SELECT list.
+ *
+ * #619: `last_emission` looks in the not-in-use window first and reads the whole
+ * history only when that finds nothing. `attribution_record` is partitioned by
+ * month on `ts_event`, so the bounded MAX reads one or two partitions where the
+ * unbounded one read every partition the device ever wrote to. COALESCE
+ * evaluates its second argument only when the first is NULL, and a device with
+ * a row in the window has its latest row there, so the value is the same either
+ * way.
+ *
+ * Index (migrations 0173, 0174): `attribution_record_instance_ts` on
+ * (instance_id, ts_event) INCLUDE (cost_usd). The latest row is then one probe
+ * per partition, and the month's spend a range scan over the device's rows of
+ * the month, where both used to find the device's rows through an index with
+ * no ts_event. (Index-only where the visibility map allows; with RLS on, the
+ * policies' columns still need the table.)
  */
-export function instanceMetricColumns(monthStartIso: string): SQL {
+export function instanceMetricColumns(w: { monthStartIso: string; notInUseCutoffMs: number }): SQL {
+  const recentIso = new Date(w.notInUseCutoffMs).toISOString()
   return sql`
-    (SELECT MAX(ar.ts_event)::text
-       FROM attribution_record ar
-      WHERE ar.instance_id = ia.instance_id)                   AS last_emission,
+    COALESCE(
+      (SELECT MAX(ar.ts_event)
+         FROM attribution_record ar
+        WHERE ar.instance_id = ia.instance_id
+          AND ar.ts_event >= ${recentIso}::timestamptz),
+      (SELECT MAX(ar.ts_event)
+         FROM attribution_record ar
+        WHERE ar.instance_id = ia.instance_id)
+    )::text                                                     AS last_emission,
     COALESCE((SELECT SUM(ar.cost_usd)
        FROM attribution_record ar
       WHERE ar.instance_id = ia.instance_id
-        AND ar.ts_event >= ${monthStartIso}::timestamptz), 0)::text AS spend_usd_mtd,
+        AND ar.ts_event >= ${w.monthStartIso}::timestamptz), 0)::text AS spend_usd_mtd,
     ${openBearerFailureExists(sql`ia.instance_id`)}             AS cannot_send
   `
 }

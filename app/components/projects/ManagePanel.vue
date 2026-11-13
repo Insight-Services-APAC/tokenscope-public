@@ -16,6 +16,8 @@
 import { computed, ref, watch } from 'vue'
 import type { BudgetRequestRow } from '#shared/schemas/project-budget'
 import { apiErrorDetail, isConfirmedRejection } from '../../composables/useApiError'
+import { fmtInstant } from '../../composables/useFormat'
+import { formatMonthWords } from '#shared/format/month-words'
 
 const props = defineProps<{
   projectId: string
@@ -151,9 +153,7 @@ watch(endDay, () => {
   confirmingEarly.value = false
 })
 const fmtDay = (day: string) =>
-  new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).format(
-    new Date(`${day}T00:00:00Z`),
-  )
+  formatMonthWords('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }, new Date(`${day}T00:00:00Z`))
 
 // ── Members ─────────────────────────────────────────────────────────────────
 interface Member {
@@ -502,7 +502,7 @@ export type ManageTab = 'requests' | 'budget' | 'end-date' | 'members'
         >
           <div class="text-sm text-carbon">
             <strong>{{ who(r) }}</strong> asked for <strong>{{ fmtUsd(r.amount_usd) }}</strong> more
-            <span class="text-[11px] text-carbon-3">· {{ new Date(r.created_at).toLocaleString() }}</span>
+            <span class="text-[11px] text-carbon-3">· {{ fmtInstant(r.created_at) }}</span>
           </div>
           <p class="text-[12px] text-carbon-2 mt-1 whitespace-pre-line">“{{ r.reason }}”</p>
           <div class="mt-2 flex items-end gap-2 flex-wrap">

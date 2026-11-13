@@ -20,6 +20,9 @@ import { fmtUsd } from '../../composables/useFormat'
 
 const props = defineProps<{
   body: Record<string, unknown>
+  /* #642: the item was closed by the period-end sweep or a raised budget, so
+   * advice about acting on it no longer applies and is not shown. */
+  closed?: boolean
 }>()
 
 function series(): number[] | null {
@@ -104,7 +107,7 @@ const strokeColor =
         This is a heads-up, not a limit. Nothing is blocked and no budget changes.
       </p>
     </div>
-    <div>
+    <div v-if="!closed">
       <h3 class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">What to do</h3>
       <p class="text-sm text-carbon-2 leading-relaxed" data-testid="velocity-todo">
         Look at what changed this week in My usage. A new long-running task or a switch to a

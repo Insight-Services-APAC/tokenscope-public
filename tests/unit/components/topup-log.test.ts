@@ -8,9 +8,19 @@
  * payload; submit is disabled when budget is invalid or the date
  * range is degenerate.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import TopupLog, { type TopupRow } from '../../../app/components/allocator/TopupLog.vue'
+import { stubServerClock } from '../../helpers/server-clock'
+import { resolveServerClock } from '../../../shared/reports/clock'
+
+beforeEach(() => {
+  stubServerClock('2026-10-15T12:00:00Z')
+})
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 const sampleTopup: TopupRow = {
   id: 't1',
@@ -19,9 +29,77 @@ const sampleTopup: TopupRow = {
   created_at: '2026-05-15T10:00:00Z',
   actor_display_name: 'Anil Verma',
   reason: 'Q2 scope extension',
+  effective_from: '2026-05-01T00:00:00.000Z',
+  effective_to: '2026-06-01T00:00:00.000Z',
 }
 
 describe('TopupLog', () => {
+  // #633: the period is UTC days; the end is the last day included.
+  it('shows each top-up\'s period in UTC days and when it was added', () => {
+    const wrapper = mount(TopupLog, { props: { topups: [sampleTopup] } })
+    expect(wrapper.find('[data-testid="topup-period"]').text()).toBe('1 to 31 May 2026')
+    expect(wrapper.text()).toContain('Added by Anil Verma, ')
+    expect(wrapper.text()).not.toMatch(/\+00|\[/)
+  })
+
+  // #633: the default period is the server's month, not the browser's.
+  it('defaults the new top-up to the server\'s current UTC month', async () => {
+    const wrapper = mount(TopupLog, { props: { topups: [] } })
+    await wrapper.find('[data-testid="topup-toggle"]').trigger('click')
+    expect((wrapper.find('[data-testid="topup-from"]').element as HTMLInputElement).value).toBe('2026-10-01')
+    expect((wrapper.find('[data-testid="topup-to"]').element as HTMLInputElement).value).toBe('2026-11-01')
+    expect(wrapper.text()).toContain('Until (UTC, not included)')
+  })
+
+  it('a deep link focuses the amount once the clock arrives after mount (Copilot, PR 639)', async () => {
+    const clock = stubServerClock(null)
+    const wrapper = mount(TopupLog, { props: { topups: [], initiallyExpanded: true }, attachTo: document.body })
+    await nextTick()
+    expect(wrapper.find('[data-testid="topup-amount"]').exists()).toBe(false)
+    clock.value.value = resolveServerClock(new Date('2026-10-15T12:00:00Z'))
+    await nextTick()
+    await nextTick()
+    await nextTick()
+    const amount = wrapper.find('[data-testid="topup-amount"]')
+    expect(amount.exists()).toBe(true)
+    expect(document.activeElement).toBe(amount.element)
+    wrapper.unmount()
+  })
+
+  it('cancelling while the clock is pending does not spend the deep link', async () => {
+    const clock = stubServerClock(null)
+    const wrapper = mount(TopupLog, { props: { topups: [], initiallyExpanded: true }, attachTo: document.body })
+    await wrapper.find('[data-testid="topup-toggle"]').trigger('click') // cancel
+    clock.value.value = resolveServerClock(new Date('2026-10-15T12:00:00Z'))
+    await nextTick()
+    await nextTick()
+    await wrapper.find('[data-testid="topup-toggle"]').trigger('click') // reopen
+    await nextTick()
+    await nextTick()
+    const amount = wrapper.find('[data-testid="topup-amount"]')
+    expect(amount.exists()).toBe(true)
+    expect(document.activeElement).toBe(amount.element)
+    wrapper.unmount()
+  })
+
+  it('a failed clock read says so and offers a retry, keeping the form hidden', async () => {
+    const clock = stubServerClock(null)
+    clock.error.value = new Error('clock down')
+    const wrapper = mount(TopupLog, { props: { topups: [], initiallyExpanded: true } })
+    expect(wrapper.find('[data-testid="topup-form"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="topup-clock-error"]').exists()).toBe(true)
+    await wrapper.find('[data-testid="topup-clock-retry"]').trigger('click')
+    expect(clock.refresh).toHaveBeenCalled()
+  })
+
+  it('opens the form only once the server clock has answered', async () => {
+    stubServerClock(null)
+    const wrapper = mount(TopupLog, { props: { topups: [] } })
+    await wrapper.find('[data-testid="topup-toggle"]').trigger('click')
+    expect(wrapper.find('[data-testid="topup-form"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="topup-form-waiting"]').exists()).toBe(true)
+  })
+
   it('renders top-up rows without Edit/Delete controls', () => {
     const wrapper = mount(TopupLog, { props: { topups: [sampleTopup] } })
     const html = wrapper.html()

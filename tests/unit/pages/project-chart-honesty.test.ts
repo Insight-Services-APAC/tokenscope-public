@@ -344,8 +344,9 @@ describe('T-C — advisory spend: NULL is not a measured zero', () => {
     const el = w.find('[data-testid="burn-advisory"]')
     expect(el.text()).toContain('$318.90')
     // The basis is a SERVER field, not adjacency: the aggregate has no identity
-    // axis, so this is not a subset of the bars it sits under.
-    expect(el.attributes('title')).toContain('no identity axis')
+    // axis, so this is not a subset of the bars it sits under (#634: plain words).
+    expect(el.attributes('title')).toContain('does not record who each session belongs to')
+    expect(el.attributes('title')).toContain('not part of the bars above')
   })
 })
 

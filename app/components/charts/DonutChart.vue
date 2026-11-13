@@ -56,7 +56,7 @@ const arcs = computed(() => {
         :stroke-dasharray="a.dash" :stroke-dashoffset="a.offset"
         transform="rotate(-90 80 80)"
       >
-        <title>{{ a.title ?? `${a.label} — ${Math.round(a.frac * 100)}%` }}</title>
+        <title>{{ a.title ?? `${a.label}: ${Math.round(a.frac * 100)}%` }}</title>
       </circle>
       <text x="80" y="78" text-anchor="middle" class="fill-carbon" font-size="16" font-weight="700">
         {{ centerLabel }}

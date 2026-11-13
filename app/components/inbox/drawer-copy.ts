@@ -15,6 +15,7 @@
  * or "$0.00".
  */
 import { fmtInstant, fmtUsd } from '../../composables/useFormat'
+import { formatMonthWords } from '#shared/format/month-words'
 import { coverageStateWords } from '#shared/inbox/coverage-states'
 import type { KnownInboxCategory } from '#shared/inbox/categories'
 import type { InboxItem } from './types'
@@ -131,7 +132,7 @@ function utcDay(raw: string | null): string {
   if (!m) return MISSING
   const d = new Date(`${m[1]}T00:00:00Z`)
   if (Number.isNaN(d.getTime())) return MISSING
-  return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).format(d)
+  return formatMonthWords('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }, d)
 }
 /** A month key ('2026-11' or '2026-11-01') as "November 2026", in UTC. */
 function utcMonth(raw: string | null): string {

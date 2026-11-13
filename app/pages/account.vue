@@ -42,6 +42,7 @@ import {
 import { useConnectConfig } from '../composables/useConnectConfig'
 import { useViewerZone } from '../composables/useViewerZone'
 import { fmtTimeAgo, fmtUsd, parseInstantMs } from '../composables/useFormat'
+import { formatMonthWords } from '#shared/format/month-words'
 import AccountReadState from '../components/account/ReadState.vue'
 
 // ── Instants (a link made, a device connected) render in the viewer's zone.
@@ -52,16 +53,16 @@ function fmtTs(v: string | null): string {
   if (!v) return '—'
   const t = parseInstantMs(v)
   if (!Number.isFinite(t)) return '—'
-  const s = new Intl.DateTimeFormat('en-GB', {
+  const s = formatMonthWords('en-GB', {
     day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: timeZone.value,
-  }).format(t)
+  }, t)
   return isLocal.value ? s : `${s} UTC`
 }
 function fmtDay(v: string | null): string {
   if (!v) return '—'
   const t = parseInstantMs(v)
   if (!Number.isFinite(t)) return '—'
-  return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: timeZone.value }).format(t)
+  return formatMonthWords('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: timeZone.value }, t)
 }
 
 // ── Identities ───────────────────────────────────────────────────────────────
@@ -976,7 +977,7 @@ const sections = computed(() => [
                   </ul>
                   <div class="text-[11px] text-carbon-3 mt-1">
                     connected {{ fmtTs(g.created_at) }} ·
-                    last used {{ fmtTs(g.last_used_at) }}
+                    last used {{ g.last_used_at ? fmtTs(g.last_used_at) : 'never' }}
                   </div>
                 </div>
                 <UiButton

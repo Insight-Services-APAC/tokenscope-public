@@ -76,22 +76,35 @@ const emit = defineEmits<{ saved: []; retryRegions: [] }>()
 // that we don't know yet still render (label = key) so a new dial is never
 // invisible in the editor.
 const DIAL_META: Record<string, { label: string; explanation: string }> = {
+  /*
+   * #636: each sentence is traced to the code that reads the dial (rule 17):
+   *   velocity.spike_threshold: server/workers/velocity-watch.ts (this week
+   *     above the mean of the four before by more than the fraction; per region);
+   *   reconciliation.gap_threshold: server/workers/reconciliation.ts (month to
+   *     date, (Anthropic - recorded) / Anthropic, either direction; company-wide);
+   *   reconciliation.epsilon_usd: server/reconciliation/engine.ts (|delta| <=
+   *     epsilon is a match);
+   *   reconciliation.lag_buffer_hours: server/reconciliation/engine.ts (a
+   *     shortfall is "settled" only once the day ended this many hours ago).
+   */
   'velocity.spike_threshold': {
-    label: 'Velocity spike threshold',
+    label: 'Spending fast: how much above a typical week',
     explanation:
-      'Velocity spike flag — current week vs 4-week mean, as a fraction (0.25 = +25%)',
+      "Alert a person when this week's spend is this far above the average of their last four weeks. 0.25 means 25% more.",
   },
   'reconciliation.gap_threshold': {
-    label: 'Reconciliation gap threshold',
-    explanation: 'OTel-vs-actuals gap worker alert fraction',
+    label: 'Usage not recorded: share that raises an alert',
+    explanation:
+      'Alert a person when this share of what Anthropic reports for them this month has no recorded session, or when their recorded sessions exceed it by this share. 0.2 means 20%.',
   },
   'reconciliation.epsilon_usd': {
-    label: 'Reconciliation epsilon (USD)',
-    explanation: 'Reconciliation matched-band in USD',
+    label: 'Amounts treated as equal (USD)',
+    explanation: "A difference of this amount or less between our figure and the provider's counts as a match.",
   },
   'reconciliation.lag_buffer_hours': {
-    label: 'Reconciliation lag buffer (hours)',
-    explanation: 'Reconciliation walk-back lag buffer (hours)',
+    label: 'Wait before comparing (hours)',
+    explanation:
+      'Providers report late. Where our figure is above the provider\'s, a day is treated as final only once it ended this many hours ago.',
   },
   'placement.default_unit_warn_threshold': {
     label: 'Catch-all unit warning (people)',

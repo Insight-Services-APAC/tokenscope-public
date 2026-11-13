@@ -63,6 +63,7 @@ import type {
   ReportsProjectChargebackResponse,
 } from '#shared/reports/project-chargeback'
 import { PROJECT_LENS_COPY, type SpendLens } from '#shared/usage/lens'
+import { formatMonthWords } from '#shared/format/month-words'
 import type {
   ActivitySlice,
   MemberContribution,
@@ -615,9 +616,7 @@ const windowNoun = computed(() => {
 const monthEndLabel = computed(() => {
   const w = data.value?.window
   if (!w) return 'month end'
-  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(
-    new Date(Date.parse(`${w.to}T00:00:00Z`)),
-  )
+  return formatMonthWords('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }, new Date(Date.parse(`${w.to}T00:00:00Z`)))
 })
 
 // ── ONE pace vocabulary (D15/fix 4), re-derived from the page window ────────
@@ -643,7 +642,7 @@ const leadSub = computed(() => {
   const w = data.value?.window
   if (!w) return undefined
   if (!(allocationUsd.value > 0)) return 'no budget set'
-  if (!w.is_month) return `of ${fmtUsd(allocationUsd.value)}/month — no pace for a custom range`
+  if (!w.is_month) return `of ${fmtUsd(allocationUsd.value)} a month. Pace is shown for whole months only.`
   return `${usedPct.value}% of ${fmtUsd(allocationUsd.value)}`
 })
 
@@ -737,7 +736,7 @@ const spendDelta = computed(() => moneyDelta(data.value?.hero.deltas.spend_pct))
  * explicitly permits ("a named reason when the delta is withheld"). Taking the
  * other base is a server change, not a presentation one, and this slice is a fix.
  */
-const BURN_DELTA_WITHHELD = 'same change as spend — the day counts cancel'
+const BURN_DELTA_WITHHELD = 'Changes by the same amount as spend, because both periods have the same number of days.'
 const untaggedDelta = computed(() => moneyDelta(data.value?.hero.deltas.untagged_pct))
 // A COUNT delta is absolute ("↑2", not "↑13% of a headcount").
 const membersDelta = computed(() => {
@@ -872,7 +871,7 @@ const burnAdvisoryUncoveredDays = computed(
  */
 const ADVISORY_BASIS_NOTE: Record<string, string> = {
   'otel-aggregate-all-identities':
-    'Counted from the telemetry rollup, which has no identity axis — so it spans every identity on this project, including provisional ones, and is not a subset of the bars above.',
+    'Counted from the telemetry summary, which does not record who each session belongs to. It covers everyone on this project, including devices not yet confirmed to a person, so it is not part of the bars above.',
 }
 const burnAdvisoryNote = computed(() =>
   burnBlock.value ? (ADVISORY_BASIS_NOTE[burnBlock.value.advisory_basis] ?? null) : null,
@@ -1101,8 +1100,8 @@ const memberIngestOnlyTools = computed(
                   class="text-[11px] text-carbon-3"
                   data-testid="proj-provisional-withheld"
                 >
-                  {{ fmtUsd(data.lane_coverage.provisional_withheld_usd) }} held back — device
-                  bindings not yet confirmed, so it can't be pinned to a person here.
+                  {{ fmtUsd(data.lane_coverage.provisional_withheld_usd) }} held back: the devices
+                  are not yet confirmed to a person, so it can't be shown against one here.
                 </p>
               </template>
             </ScopeKpiTile>
@@ -1149,7 +1148,7 @@ const memberIngestOnlyTools = computed(
             <UiEyebrow>
               Daily burn · stacked by model · trailing {{ stackWindowDays }}d
               <InfoDot label="About the daily burn window">
-                Rolls with the days — independent of the month presets above.
+                Rolls with the days, whatever month is chosen above.
               </InfoDot>
             </UiEyebrow>
             <UsageWindowToggle v-model="burnWindowDays" />
@@ -1190,7 +1189,7 @@ const memberIngestOnlyTools = computed(
             class="text-[10px] text-carbon-3 italic mt-1 text-right"
             data-testid="burn-advisory-unavailable"
           >
-            Advisory (telemetry-only) spend isn't available for this window — the rollup has
+            Advisory (telemetry-only) spend isn't available for this window: the summary has
             no row for it yet. Not zero: unmeasured.
           </p>
         </UiCard>
@@ -1213,7 +1212,7 @@ const memberIngestOnlyTools = computed(
               :key="s.label"
               class="block h-full"
               :style="{ width: `${(s.pct * 100).toFixed(1)}%`, background: s.color }"
-              :title="`${s.label} — ${fmtUsd(s.usd)}`"
+              :title="`${s.label}: ${fmtUsd(s.usd)}`"
             />
           </div>
           <div class="flex flex-wrap gap-x-4 gap-y-1 mt-2">
@@ -1248,7 +1247,7 @@ const memberIngestOnlyTools = computed(
           <p class="text-[11px] text-carbon-3 mb-3">
             Contribution only
             <InfoDot label="About the team table">
-              Contribution only — usage-pattern insights stay on each member's own My usage page.
+              Contribution only. Usage-pattern insights stay on each member's own My usage page.
             </InfoDot>
           </p>
           <div class="overflow-x-auto">
@@ -1290,8 +1289,8 @@ const memberIngestOnlyTools = computed(
             class="text-sm text-carbon-3 italic py-4"
             data-testid="team-owner-aggregate-note"
           >
-            {{ data.team.member_count }} member{{ data.team.member_count === 1 ? '' : 's' }} —
-            the per-person breakdown is visible to the project team, not observers.
+            {{ data.team.member_count }} member{{ data.team.member_count === 1 ? '' : 's' }}.
+            The per-person breakdown is visible to the project team, not observers.
           </p>
           <p v-else-if="!data.team.members.length" class="text-sm text-carbon-3 italic py-4">No spend in this window yet.</p>
         </UiCard>
@@ -1310,12 +1309,12 @@ const memberIngestOnlyTools = computed(
               ({{ memberIngestOnlyTools.join(', ') }})</template>.
           </p>
           <p class="text-[11px] text-carbon-3 mt-1">
-            Real spend, counted in company and Business Unit totals — but it is untaggable at
+            Real spend, counted in company and Business Unit totals, but it cannot be tagged at
             source, so no project budget on any view includes it. It is not missing, and it is
             not zero.
           </p>
           <p class="text-[11px] text-carbon-3 mt-1" data-testid="lane-excluded-non-additive">
-            This is each member's own total, not this project's share — the same spend appears
+            This is each member's own total, not this project's share. The same spend appears
             in full on every project they're on, so don't add it up across projects.
           </p>
         </UiCard>
@@ -1325,7 +1324,7 @@ const memberIngestOnlyTools = computed(
           <UiEyebrow>
             Untagged pressure
             <InfoDot label="About untagged pressure">
-              Members' unallocated sessions that may belong here — everyone re-tags their own
+              Members' unallocated sessions that may belong here. Everyone re-tags their own
               from their worklist. Nudge, don't chase.
             </InfoDot>
           </UiEyebrow>
@@ -1408,14 +1407,14 @@ const memberIngestOnlyTools = computed(
         from Reports · {{ reportsPayload.scope.src }} · {{ reportsWindowWord }}
         <InfoDot label="What the drill carried">
           The entry scope and window ride the link and this page echoes them, so going back restores
-          the report you came from exactly — even after a refresh or on a shared link.
+          the report you came from exactly, even after a refresh or on a shared link.
         </InfoDot>
       </p>
 
       <UiPageHead
         eyebrow="Reports"
         :title="reportsPayload.project.display_name ?? reportsPayload.project.code"
-        :sub="`${reportsPayload.project.code} · reports depth — you are not a member; admitted by your reports grant`"
+        :sub="`${reportsPayload.project.code} · You are not a member: you can see this through your report access.`"
       />
       <ReportPrintHeader :facts="printFacts" :as-of="serverClock?.now ?? null" />
 

@@ -38,6 +38,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { z } from 'zod'
 import { conversationKeyExpr } from '../db/conversation-key'
 import { endedProjectExpr } from '../db/project-predicates'
+import { timePhase } from '../observability/request-timing'
 import { breakdownFields, fetchBreakdownCells, groupCells } from './breakdowns'
 import {
   isRealUtcDay,
@@ -184,8 +185,13 @@ async function rankSessionKeysSince(
   return [...rows]
 }
 
-/** The recent windows tried in turn, before reading the whole history (#593). */
-const RECENT_WINDOW_DAYS = [14, 56] as const
+/**
+ * The recent windows tried in turn, before reading the whole history (#593).
+ * #611: 3 days first. A busy teammate fills a page well inside 3 days, and phase
+ * 1 aggregates every row in its window, so the first window sets the cost of the
+ * common page. A quiet teammate pays one more small read before the 14-day one.
+ */
+const RECENT_WINDOW_DAYS = [3, 14, 56] as const
 
 function minusDays(day: string, days: number): string {
   return new Date(Date.parse(`${day}T00:00:00Z`) - days * 86_400_000).toISOString().slice(0, 10)
@@ -248,8 +254,13 @@ async function rankSessionKeys(
  * keys, so each conversation's totals are whole. Both phases apply the same
  * WHERE quals and group on the same key, so the output is row-identical to the
  * single aggregate it replaces.
+ *
+ * NOT FOLDED WITH THE CELLS (#611). PR 622 read the page's rows once in a CTE
+ * and built both these totals and fetchBreakdownCells' model cells from it. On
+ * dev that one statement took about 480 ms against about 300 + 115 for the two
+ * separate reads, so the cells are read apart again (`act-breakdowns`).
  */
-function sessionsBranch(teammateId: string, f: ActivityFilters, keys: SessionKeys, n: number): SQL {
+function sessionsStatement(teammateId: string, f: ActivityFilters, keys: SessionKeys, n: number): SQL {
   const key = conversationKeyExpr('ar')
   const dayExpr = sql`(MAX(ar.ts_event) AT TIME ZONE 'UTC')::date`
   const tsExpr = sql`to_char(MAX(ar.ts_event) AT TIME ZONE 'UTC', ${TS_FORMAT})`
@@ -327,6 +338,24 @@ function sessionsBranch(teammateId: string, f: ActivityFilters, keys: SessionKey
     ORDER BY s.sort_day DESC, s.sort_rank DESC, s.sort_ts DESC, s.id DESC
     LIMIT ${n}
   `
+}
+
+/**
+ * The two branches' rows in the one list order. Each branch arrives already in
+ * that order, and a session and a provider day never tie: on one day their
+ * ranks differ. So a stable sort on day then rank interleaves them exactly as
+ * the single ORDER BY over their UNION did, without comparing ids in JS (whose
+ * order could differ from the database's collation).
+ */
+function mergeBranches(sessions: UnionRow[], days: UnionRow[], n: number): UnionRow[] {
+  return [...sessions, ...days]
+    .sort((a, b) => {
+      const da = a.sort_day.slice(0, 10)
+      const db = b.sort_day.slice(0, 10)
+      if (da !== db) return da < db ? 1 : -1
+      return Number(b.sort_rank) - Number(a.sort_rank)
+    })
+    .slice(0, n)
 }
 
 /**
@@ -413,7 +442,9 @@ function providerDaysBranch(teammateId: string, f: ActivityFilters, c: ActivityC
        WHERE d.teammate_id = u.teammate_id AND d.day = u.day AND d.tool = u.tool
     ) api ON TRUE
     WHERE ${sql.join(where, sql` AND `)}
-    ORDER BY u.day DESC, u.id DESC
+    -- The id leg as TEXT, as the keyset predicate and the list's sort compare
+    -- it: this branch's order is now the list's order within a day (#611).
+    ORDER BY u.day DESC, u.id::text DESC
     LIMIT ${n}
   `
 }
@@ -486,42 +517,41 @@ export async function fetchActivityPage(
   if (opts.cursor && !cursor) throw new Error('activity-list: invalid cursor')
 
   const probe = opts.limit + 1
-  const branches: SQL[] = []
-  let sessionKeys: SessionKeys = { ids: [], legacyIds: [] }
+  let sessions: UnionRow[] = []
+  let days: UnionRow[] = []
+  let legacyIds: string[] = []
   if (f.kind === 'all' || f.kind === 'session') {
-    sessionKeys = await rankSessionKeys(tx, teammateId, f, cursor, probe, opts.today)
-    if (sessionKeys.ids.length) branches.push(sessionsBranch(teammateId, f, sessionKeys, probe))
+    const sessionKeys = await timePhase('act-rank', () =>
+      rankSessionKeys(tx, teammateId, f, cursor, probe, opts.today),
+    )
+    legacyIds = sessionKeys.legacyIds
+    if (sessionKeys.ids.length) {
+      sessions = [
+        ...(await timePhase('act-sessions', () =>
+          tx.execute<UnionRow>(sessionsStatement(teammateId, f, sessionKeys, probe)),
+        )),
+      ]
+    }
   }
   if (f.kind === 'all' || f.kind === 'provider-day') {
-    branches.push(providerDaysBranch(teammateId, f, cursor, probe))
+    // A statement of its own (it was the other half of a UNION), so its time is
+    // named apart from the sessions' (#611). The route's repeatable-read
+    // transaction gives both statements one snapshot, as the UNION had.
+    days = [...(await timePhase('act-days', () => tx.execute<UnionRow>(providerDaysBranch(teammateId, f, cursor, probe))))]
   }
-  // No matching conversation and no provider-day branch. An empty UNION would
-  // be a syntax error rather than an empty page.
-  if (!branches.length) return { rows: [], hasMore: false, nextCursor: null }
 
-  // Each branch carries its OWN ORDER BY + LIMIT (that is what "both sides
-  // bounded" means), and Postgres requires a branch so shaped to be
-  // parenthesised before it can take part in a UNION.
-  const union = sql.join(
-    branches.map((b) => sql`(${b})`),
-    sql` UNION ALL `,
-  )
-  const raw = await tx.execute<UnionRow>(sql`
-    SELECT * FROM (${union}) x
-    ORDER BY x.sort_day DESC, x.sort_rank DESC, x.sort_ts DESC, x.id DESC
-    LIMIT ${probe}
-  `)
-
-  const all = [...raw]
+  const all = mergeBranches(sessions, days, probe)
   const hasMore = all.length > opts.limit
   const page = all.slice(0, opts.limit).map(toRow)
 
   if (opts.withBreakdowns) {
     const convIds = page.filter((r) => r.kind === 'session').map((r) => r.id)
     if (convIds.length) {
-      const legacy = new Set(sessionKeys.legacyIds)
+      const legacy = new Set(legacyIds)
       const cells = groupCells(
-        await fetchBreakdownCells(tx, teammateId, convIds, convIds.filter((id) => legacy.has(id))),
+        await timePhase('act-breakdowns', () =>
+          fetchBreakdownCells(tx, teammateId, convIds, convIds.filter((id) => legacy.has(id))),
+        ),
       )
       for (const r of page) {
         if (r.kind === 'session') Object.assign(r, breakdownFields(cells.get(r.id) ?? []))
@@ -534,10 +564,12 @@ export async function fetchActivityPage(
    * only: the CSV export never asks, so a name cannot reach a file.
    */
   if (opts.withDeviceNames) {
-    const names = await ownDeviceNames(
-      tx,
-      teammateId,
-      page.map((r) => (r.kind === 'session' ? r.instance_id : null)),
+    const names = await timePhase('act-names', () =>
+      ownDeviceNames(
+        tx,
+        teammateId,
+        page.map((r) => (r.kind === 'session' ? r.instance_id : null)),
+      ),
     )
     for (const r of page) {
       if (r.kind === 'session' && r.instance_id) r.device_name = names.get(r.instance_id) ?? null

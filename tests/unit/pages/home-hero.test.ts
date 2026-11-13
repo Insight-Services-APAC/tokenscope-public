@@ -30,6 +30,7 @@ import HomePage from '../../../app/pages/index.vue'
 import LensDisclosure from '../../../app/components/me/LensDisclosure.vue'
 // Real, not stubbed: the freshness copy is the assertion in the last block.
 import UiFreshness from '../../../app/components/ui/Freshness.vue'
+import { stubServerClock } from '../../helpers/server-clock'
 
 const COST_CENTRE = 'APAC · CTO'
 const CHARGEABLE = '5.12'
@@ -213,7 +214,7 @@ const FORMAT_MOCKS = {
 /** Whatever the page passed as `query` to the home endpoint (expected: nothing). */
 let sentQuery: unknown
 
-async function mountPage(patch: (f: Deep) => void = () => {}) {
+async function mountPage(patch: (f: Deep) => void = () => {}, reads: Record<string, unknown> = {}) {
   for (const [k, v] of Object.entries(FORMAT_MOCKS)) vi.stubGlobal(k, v)
   vi.stubGlobal('useSession', () => ({
     session: ref({ teammateId: 't1', displayName: 'Priya Nair' }),
@@ -221,6 +222,7 @@ async function mountPage(patch: (f: Deep) => void = () => {}) {
   }))
   vi.stubGlobal('usePersonalLens', () => ref('usage'))
   vi.stubGlobal('useRefreshOnVisible', () => {})
+  stubServerClock('2026-11-11T10:00:00Z')
   const fixture = baseFixture() as unknown as Deep
   patch(fixture)
   sentQuery = undefined
@@ -228,7 +230,7 @@ async function mountPage(patch: (f: Deep) => void = () => {}) {
     const isHome = url.startsWith('/api/v1/me/home')
     if (isHome) sentQuery = opts?.query
     return {
-      data: ref(isHome ? fixture : (opts?.default?.() ?? {})),
+      data: ref(isHome ? fixture : url in reads ? reads[url] : (opts?.default?.() ?? {})),
       refresh: vi.fn(),
       pending: ref(false),
       error: ref(null),
@@ -904,5 +906,16 @@ describe('dashboard — the onboarding CTA is an OTel-emission question', () => 
       f.surfaces = []
     })
     expect(w.find('[data-testid="onboarding-cta"]').exists()).toBe(false)
+  })
+})
+
+describe('over-emission flags (#617)', () => {
+  it('reads the day as "10 Nov" and the sentence without an em dash', async () => {
+    const flag = { id: 'f1', day: '2026-11-10', tool: 'claude-code', otel_usd: '12.00', api_usd: '9.00', over_usd: '3.00', sessions: [] }
+    const w = await mountPage(() => {}, { '/api/v1/me/over-emission': { flags: [flag] } })
+    const text = w.find('[data-testid="over-emission-flag-f1"]').text().replace(/\s+/g, ' ')
+    expect(text).toContain('10 Nov: your tools reported $12.00 and the provider bill is $9.00, so $3.00 is uncorroborated.')
+    expect(text).not.toContain('2026-11-10')
+    expect(text).not.toContain('—')
   })
 })

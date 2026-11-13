@@ -8,19 +8,42 @@
  * Content is sourced from AGENTS.md §Domain model + docs/design/admin-ia.md —
  * keep them in sync.
  */
+import { nextTick, onMounted, ref, watch } from 'vue'
+
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 const { roleDisplay } = useAdminAccess()
 
-// Grouped for scannability. `id` matches the AdminHelpLink `anchor` prop.
+// Grouped for scannability. `id` matches the AdminHelpLink `anchor` prop: the
+// ids are an interface (the "?" links across admin point at them) and stay.
 const roles = [
-  { id: 'platform-admin', term: 'Admin', enum: 'platform-admin', body: 'The one admin role. Administers every region: satisfies every gate, with unbounded data scope.' },
-  { id: 'region-admin', term: 'Region admin (retired)', enum: 'admin', body: 'No longer granted: there is one admin role, Admin. Anyone who still holds it administers ONE region — its teammates, Business Units, projects and connectors — and cannot see or change other regions.' },
-  { id: 'global-finance', term: 'Global finance (retired)', enum: 'global-finops', body: 'Retired 2026-09-05. It was the cross-region finance super-role, but it held the whole org-wide ADMIN surface rather than just reports — so it was withdrawn and its reach folded into Admin. Company-wide report access is now granted per person with a report-access grant, which needs no role at all. Kept in the enum for historical records only; it grants nothing.' },
-  { id: 'manager-role', term: 'Manager (role)', enum: 'manager', body: 'The RBAC role for a team/practice lead. Distinct from a project manager assignment and from the Entra manager chain (below).' },
-  { id: 'developer', term: 'Developer', enum: 'developer', body: 'The default role. May also hold Business Unit ownership — that is a relationship, not a role (see Business Unit owner).' },
-  { id: 'finance-retired', term: 'Finance (retired)', enum: 'finance', body: 'A RETIRED role that is never assigned to anyone. It is kept in the enum only so historical data still parses. You may still see the raw value "finance" in old logs, audit rows or API payloads — it is NOT the same as Global finance. It is never offered when assigning a role.' },
+  { id: 'platform-admin', term: 'Admin', body: 'The one admin role. Administers every region: passes every check, and sees every region\'s data.' },
+  { id: 'manager-role', term: 'Manager (role)', body: 'The role for a team or practice lead. Distinct from a project manager assignment and from the Entra manager chain (below).' },
+  { id: 'developer', term: 'Developer', body: 'The default role. May also own a Business Unit: that is a relationship, not a role (see Business Unit owner).' },
 ]
+
+/*
+ * #636: the three retired roles sit in a closed fold at the end of Roles, one
+ * sentence each. A link to one of their anchors opens the fold and scrolls to
+ * the entry, so no "?" link lands on nothing.
+ */
+const retiredRoles = [
+  { id: 'region-admin', term: 'Region admin', body: 'No longer given. People who still hold it administer one region.' },
+  { id: 'global-finance', term: 'Global finance', body: 'Retired on 5 Sep 2026. Company-wide report access is now given per person under Report access.' },
+  { id: 'finance-retired', term: 'Finance', body: 'Never assigned. You may still see the value in old audit rows.' },
+]
+const retiredIds = new Set(retiredRoles.map((r) => r.id))
+const retiredOpen = ref(false)
+const route = useRoute()
+async function openForHash(hash: string | undefined) {
+  const id = (hash ?? '').replace(/^#/, '')
+  if (!retiredIds.has(id)) return
+  retiredOpen.value = true
+  await nextTick()
+  document.getElementById(id)?.scrollIntoView({ block: 'start' })
+}
+onMounted(() => openForHash(route.hash))
+watch(() => route.hash, (h) => openForHash(h))
 
 const ownership = [
   { id: 'cost-centre-owner', term: 'Business Unit owner', body: 'A person who can SEE a Business Unit’s spend and budget (the P&L view). Assigned per Business Unit on a region’s page ("Owners"). It is a relationship, not a role — a plain Developer can be a Business Unit owner. It does not change what they can administer.' },
@@ -53,7 +76,7 @@ const emission = [
     />
 
     <p class="text-sm text-carbon-2 mb-8 leading-relaxed">
-      Several admin terms look alike but mean different things — an
+      Several admin terms look alike but mean different things: an
       <strong>owner</strong> is not a <strong>leader</strong>, and “manager”
       has three senses. This is the canonical reference; the “?” links across
       the admin area point here.
@@ -64,13 +87,26 @@ const emission = [
       <p class="text-sm text-carbon-3 mb-4">Who can administer what. One role per teammate.</p>
       <dl class="grid gap-3">
         <div v-for="r in roles" :id="r.id" :key="r.id" class="p-4 rounded-lg border border-calm-2 scroll-mt-24" :data-testid="`term-${r.id}`">
-          <dt class="flex items-center gap-2 mb-1">
-            <span class="text-sm font-bold text-carbon">{{ r.term }}</span>
-            <code class="text-[10px] px-1.5 py-0.5 rounded bg-calm-1 text-carbon-3">{{ r.enum }}</code>
-          </dt>
+          <dt class="text-sm font-bold text-carbon mb-1">{{ r.term }}</dt>
           <dd class="text-sm text-carbon-2 leading-relaxed m-0">{{ r.body }}</dd>
         </div>
       </dl>
+      <details
+        class="mt-3 rounded-lg border border-calm-2 group"
+        :open="retiredOpen"
+        data-testid="retired-roles"
+        @toggle="retiredOpen = ($event.target as HTMLDetailsElement).open"
+      >
+        <summary class="cursor-pointer px-4 py-3 text-sm font-bold text-carbon-2 hover:text-brand-harmony">
+          Retired roles ({{ retiredRoles.length }})
+        </summary>
+        <dl class="grid gap-2 px-4 pb-4">
+          <div v-for="r in retiredRoles" :id="r.id" :key="r.id" class="scroll-mt-24" :data-testid="`term-${r.id}`">
+            <dt class="text-sm font-bold text-carbon">{{ r.term }}</dt>
+            <dd class="text-sm text-carbon-2 leading-relaxed m-0">{{ r.body }}</dd>
+          </div>
+        </dl>
+      </details>
     </section>
 
     <section aria-labelledby="h-ownership" class="mb-10">

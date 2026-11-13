@@ -4,6 +4,7 @@
  * unit-testable without mounting the component.
  */
 import { coverageOrgGapSubject } from '#shared/inbox/coverage-states'
+import { fmtUsd, fmtUtcDay } from '../../composables/useFormat'
 
 export interface InboxItem {
   id: string
@@ -114,3 +115,38 @@ export function itemSubject(item: Pick<InboxItem, 'category' | 'subject' | 'body
 
 /** The words a person reads for a category: shared/inbox/categories.ts (#546). */
 export { inboxCategoryLabel as categoryLabel, inboxCategoryBadge as categoryBadge } from '#shared/inbox/categories'
+
+/*
+ * How an item the WORKER closed ended (#630, #631), in the words the drawer and
+ * the Closed list show. Null for an item a person closed, or one still open.
+ *
+ *   - 'period-ended': the alert's month or ISO week is over (plus 7 days'
+ *     grace, server/notifications/period-close.ts). The server stamps the
+ *     period it was about; both are UTC provider periods, so they are
+ *     formatted in UTC and never converted.
+ *   - 'budget-raised': a top-up raised the budget past the one the alert was
+ *     raised against and the project is inside it (server/workers/budget-alert.ts).
+ *     No date: the worker reads the budget as a sum, not the top-up's start.
+ */
+export function closedNote(item: Pick<InboxItem, 'ack_state' | 'body'>): string | null {
+  if (item.ack_state !== 'resolved') return null
+  const b = item.body ?? {}
+  if (b.closed_reason === 'period-ended') {
+    if (typeof b.closed_week_start === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(b.closed_week_start)) {
+      return `Closed automatically: the week of ${fmtUtcDay(b.closed_week_start, { year: true })} is over.`
+    }
+    if (typeof b.closed_month === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(b.closed_month)) {
+      const month = new Intl.DateTimeFormat('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' })
+        .format(Date.parse(`${b.closed_month}-01T00:00:00Z`))
+      return `Closed automatically: ${month} is over.`
+    }
+    return 'Closed automatically: the period it was about is over.'
+  }
+  if (b.closed_reason === 'budget-raised') {
+    const cap = typeof b.closed_cap_usd === 'number' ? b.closed_cap_usd : Number(b.closed_cap_usd)
+    return Number.isFinite(cap)
+      ? `Closed automatically: the budget was raised to ${fmtUsd(cap, { whole: true })} and the project is inside it.`
+      : 'Closed automatically: the budget was raised and the project is inside it.'
+  }
+  return null
+}

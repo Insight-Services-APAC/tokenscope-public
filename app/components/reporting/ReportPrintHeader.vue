@@ -9,6 +9,7 @@
  */
 import { computed } from 'vue'
 import { LENS_WORD, printPeriod, settlingLine, type ReportPrintFacts } from './print-facts'
+import { fmtInstant } from '../../composables/useFormat'
 
 const props = defineProps<{
   facts: ReportPrintFacts | null
@@ -18,7 +19,7 @@ const props = defineProps<{
 
 const asOfText = computed(() =>
   props.asOf
-    ? new Date(props.asOf).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+    ? fmtInstant(props.asOf)
     : null,
 )
 const settling = computed(() => (props.facts ? settlingLine(props.facts.settling) : ''))

@@ -149,11 +149,28 @@ describe('ActivityCard — one list, two kinds', () => {
     // A session is an instant: rendered in the viewer's zone.
     expect(wrapper.find(`[data-testid="activity-when-${SESSION.id}"]`).text()).toBe('2 hours ago')
 
-    // A provider-recorded day is a bucket: the date, and nothing else.
+    // A provider-recorded day is a bucket: the date, and nothing else ("28 Jun"
+    // in the server's year, #617).
     const dayCell = wrapper.find(`[data-testid="activity-when-${PROVIDER_DAY.id}"]`).text()
-    expect(dayCell).toBe('2026-06-28')
+    expect(dayCell).toBe('28 Jun')
     expect(dayCell).not.toContain(':') // no 00:00, no time of any kind
     expect(dayCell).not.toContain('ago')
+  })
+
+  it('a provider-recorded day reads "28 Jun" in the server\'s year, with the year otherwise (#617)', async () => {
+    const same = mountCard([PROVIDER_DAY], {}, { today: '2026-11-11' })
+    await flushPromises()
+    expect(same.wrapper.find(`[data-testid="activity-when-${PROVIDER_DAY.id}"]`).text()).toBe('28 Jun')
+    same.wrapper.unmount()
+
+    const later = mountCard([PROVIDER_DAY], {}, { today: '2027-01-02' })
+    await flushPromises()
+    expect(later.wrapper.find(`[data-testid="activity-when-${PROVIDER_DAY.id}"]`).text()).toBe('28 Jun 2026')
+    later.wrapper.unmount()
+
+    const noClock = mountCard([PROVIDER_DAY], {}, { today: null })
+    await flushPromises()
+    expect(noClock.wrapper.find(`[data-testid="activity-when-${PROVIDER_DAY.id}"]`).text()).toBe('28 Jun 2026')
   })
 
   it('a TAGGED provider-recorded day is on the list, showing its project', async () => {

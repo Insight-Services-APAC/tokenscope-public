@@ -11,6 +11,7 @@
 
 import { toolLabel } from '#shared/usage/surface'
 import { githubSurfaceAdapter } from '#shared/usage/github-surface'
+import { formatMonthWords } from '#shared/format/month-words'
 
 const EM_DASH = '—'
 
@@ -94,16 +95,23 @@ export function parseInstantMs(raw: string | null | undefined): number {
 /**
  * An INSTANT as the product writes one: "10 Nov 2026, 08:10" (#587), in
  * `timeZone` when given, else the browser's own zone. Only for a real moment;
- * a UTC day bucket is a date and never goes through here.
+ * a UTC day bucket is a date and never goes through here. `seconds` adds them
+ * ("10 Nov 2026, 08:10:42") where order within a minute matters: the audit log
+ * (#633, the PO's call).
  */
-export function fmtInstant(iso: string | null | undefined, timeZone?: string): string {
+export function fmtInstant(
+  iso: string | null | undefined,
+  timeZone?: string,
+  opts: { seconds?: boolean } = {},
+): string {
   if (!iso) return EM_DASH
   const t = parseInstantMs(iso)
   if (!Number.isFinite(t)) return EM_DASH
-  return new Intl.DateTimeFormat('en-GB', {
+  return formatMonthWords('en-GB', {
     day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    ...(opts.seconds ? { second: '2-digit' as const } : {}),
     ...(timeZone ? { timeZone } : {}),
-  }).format(t)
+  }, t)
 }
 
 /*
@@ -115,7 +123,7 @@ export function fmtInstant(iso: string | null | undefined, timeZone?: string): s
  * Never used for a provider-recorded day: that is a bare UTC date with no time.
  */
 function zoneParts(t: number, timeZone: string) {
-  const day = new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone }).format(t)
+  const day = formatMonthWords('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone }, t)
   const time = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone }).format(t)
   const key = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone }).format(t)
   return { day: day.replace(',', ''), time, key }
@@ -152,12 +160,12 @@ export function fmtUtcDay(day: string | null | undefined, opts: { year?: boolean
   if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return day
   const ms = Date.parse(`${iso}T00:00:00Z`)
   if (!Number.isFinite(ms)) return day
-  return new Intl.DateTimeFormat('en-GB', {
+  return formatMonthWords('en-GB', {
     day: 'numeric',
     month: 'short',
     ...(opts.year ? { year: 'numeric' as const } : {}),
     timeZone: 'UTC',
-  }).format(ms)
+  }, ms)
 }
 
 /** How long a session ran, rounded to the minute: "2 h 35 min", "35 min". */

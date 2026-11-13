@@ -18,10 +18,13 @@ import { requireAuth } from '../../../auth/rbac'
 import { withRequestRls } from '../../../db/request-rls'
 import { fetchActivityPage } from '../../../usage/activity-list'
 import { requestClock } from '../../../utils/request-clock'
+import { timePhase } from '../../../observability/request-timing'
 import { ActivityListQuery, type ActivityListResponse } from '#shared/schemas/activity'
 
 export default defineEventHandler(async (event): Promise<ActivityListResponse> => {
-  const session = await requireAuth(event)
+  // #611: each phase is named in Server-Timing (`ph-…`), so dev shows where the
+  // first page's time goes rather than a single db total.
+  const session = await timePhase('auth', () => requireAuth(event))
   const { cursor, limit, ...filters } = await getValidatedQuery(event, (d) =>
     ActivityListQuery.parse(d),
   )

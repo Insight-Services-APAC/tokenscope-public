@@ -8,7 +8,7 @@
  * days this chart draws (the settled run, then the still-filling day labelled
  * in words) with the same values, for readers who cannot reach a hover title.
  */
-import { fmtUtcDay } from '../../composables/useFormat'
+import { fmtUsd, fmtUtcDay } from '../../composables/useFormat'
 import { computed, ref } from 'vue'
 import ChartsDayTable from './DayTable.vue'
 import ChartsViewSwitch from './ViewSwitch.vue'
@@ -55,10 +55,11 @@ const props = withDefaults(
 
 const view = ref<'chart' | 'table'>('chart')
 
-// Defaults reproduce the pre-existing output byte-for-byte per render site.
+// The axis default reproduces the pre-existing output. A point (hover label and
+// the Table view) reads like every other amount on the page: "$1,339.57" (#617).
 const fmtAxis = (v: number) =>
   props.format ? props.format(v) : v >= 10 ? `$${Math.round(v)}` : `$${v.toFixed(2)}`
-const fmtPoint = (v: number) => (props.format ? props.format(v) : `$${v.toFixed(2)}`)
+const fmtPoint = (v: number) => (props.format ? props.format(v) : fmtUsd(v))
 
 const W = 720
 const PAD = { top: 10, right: 8, bottom: 22, left: 46 }
@@ -126,6 +127,10 @@ const gridLines = computed(() => [0.25, 0.5, 0.75, 1].map((f) => ({ f, yv: y(max
 // The table reads the chart's own run: the settled days, then the admitted
 // partial day. A value map, not a re-derivation, so the two cannot disagree.
 const tableDays = computed(() => [...dense.value.map((d) => d.day), ...(partial.value ? [partial.value.day] : [])])
+// Hover labels read like the Table view: "10 Nov", with the year when the chart
+// spans two years (#617). A UTC day bucket, so no zone conversion.
+const spansYears = computed(() => new Set(tableDays.value.map((d) => d.slice(0, 4))).size > 1)
+const hoverDay = (day: string) => fmtUtcDay(day, { year: spansYears.value })
 const tableValue = computed(() => {
   const m = new Map(dense.value.map((d) => [d.day, d.value]))
   if (partial.value) m.set(partial.value.day, partial.value.value)
@@ -162,7 +167,7 @@ const xLabels = computed(() => {
       <path :d="linePath" fill="none" stroke="var(--brand-harmony)" stroke-width="2" />
       <g v-for="(d, i) in dense" :key="d.day">
         <circle v-if="d.value > 0" :cx="x(i)" :cy="y(d.value)" r="2.5" fill="var(--brand-harmony)">
-          <title>{{ d.day }}: {{ fmtPoint(d.value) }}</title>
+          <title>{{ hoverDay(d.day) }}: {{ fmtPoint(d.value) }}</title>
         </circle>
       </g>
       <!-- The still-filling day: hollow, faded, OFF the line (D4). It is not
@@ -185,7 +190,7 @@ const xLabels = computed(() => {
           stroke="var(--brand-harmony)" stroke-width="1.5" stroke-opacity="0.55"
           stroke-linecap="round"
         />
-        <title>{{ partial.day }}: {{ fmtPoint(partial.value) }} · still accruing</title>
+        <title>{{ hoverDay(partial.day) }}: {{ fmtPoint(partial.value) }} · still accruing</title>
       </g>
       <text
         v-for="l in xLabels"

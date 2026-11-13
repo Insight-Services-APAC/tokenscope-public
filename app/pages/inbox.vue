@@ -17,7 +17,7 @@ import InboxFilterBar, {
 } from '../components/inbox/InboxFilterBar.vue'
 import InboxDrawer from '../components/inbox/InboxDrawer.vue'
 import { apiErrorDetail, isConfirmedRejection } from '../composables/useApiError'
-import { categoryBadge, itemSubject, type InboxItem } from '../components/inbox/types'
+import { categoryBadge, closedNote, itemSubject, type InboxItem } from '../components/inbox/types'
 import { inboxAckStateLabel, inboxEntityLabel, type InboxCategoryGroup } from '#shared/inbox/categories'
 import { INBOX_BULK_MAX_IDS } from '#shared/schemas/inbox'
 
@@ -265,7 +265,7 @@ async function ack(id: string, newState: InboxItem['ack_state']): Promise<boolea
       body: { ack_state: newState },
     })
   } catch (err) {
-    flashToast('err', apiErrorDetail(err, 'Inbox update failed — try again.'))
+    flashToast('err', apiErrorDetail(err, 'Inbox update failed. Try again.'))
     consola.warn('inbox: ack failed', { id, newState, err })
     return false
   }
@@ -642,6 +642,14 @@ function severityIconColor(sev: string): string {
                 </div>
                 <div class="text-[11px] text-carbon-3 mt-1">
                   <template v-if="inboxEntityLabel(item.related_entity_kind)">{{ inboxEntityLabel(item.related_entity_kind) }} · </template>{{ inboxAckStateLabel(item.ack_state) }}
+                </div>
+                <!-- #630 / #631: how an item the worker closed ended. -->
+                <div
+                  v-if="closedNote(item)"
+                  class="text-[11px] text-carbon-3 mt-0.5"
+                  data-testid="inbox-row-closed-note"
+                >
+                  {{ closedNote(item) }}
                 </div>
               </div>
               <UiBadge kind="neutral">{{ categoryBadge(item.category) }}</UiBadge>

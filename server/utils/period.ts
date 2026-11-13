@@ -42,6 +42,20 @@ export function nextMonthStartIso(now: Date = new Date()): string {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString()
 }
 
+/**
+ * Truncate a `Date` to the start (Monday 00:00 UTC) of its ISO week.
+ *
+ * `Date#getUTCDay()` returns 0 for Sunday; for ISO weeks Monday is day 1 and
+ * Sunday is day 7. `(day + 6) % 7` maps Mon->0 ... Sun->6, the offset to
+ * subtract. Shared by velocity-watch (its window) and the period-close sweep
+ * (#630), so "this week" is computed one way.
+ */
+export function isoWeekStartUtc(d: Date): Date {
+  const day = d.getUTCDay()
+  const offset = (day + 6) % 7
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - offset, 0, 0, 0, 0))
+}
+
 /** A half-open `[startIso, endIso)` UTC instant range. */
 export interface IsoWindow {
   /** Inclusive lower bound. */

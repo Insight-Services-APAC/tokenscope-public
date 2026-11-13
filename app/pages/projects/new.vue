@@ -117,7 +117,7 @@ const canSubmit = computed(() => {
 
 const crumbs = computed<Crumb[]>(() =>
   isAdmin.value
-    ? [{ label: 'Allocations', to: '/allocations' }, { label: 'New project' }]
+    ? [{ label: 'Project budgets', to: '/allocations' }, { label: 'New project' }]
     : [{ label: 'My projects', to: '/projects' }, { label: 'New project' }],
 )
 
@@ -189,7 +189,7 @@ async function submit() {
           as a code already taken, and nothing is created twice.
         </template>
         <template v-else>
-          Could not create project — {{ submitError }} Nothing was created; fix the form and try again.
+          Could not create project: {{ submitError }} Nothing was created; fix the form and try again.
         </template>
       </div>
 
@@ -256,7 +256,7 @@ async function submit() {
                 v-model="wbsCode"
                 type="text"
                 maxlength="64"
-                placeholder="e.g. 1.2.3 — finance-system correlation"
+                placeholder="e.g. 1.2.3, the finance system's code"
                 class="w-full px-3 py-2 text-sm border border-calm-2 rounded-md font-mono focus:border-brand-harmony"
                 data-testid="new-project-wbs"
               >

@@ -17,7 +17,7 @@
  *     This component displays a record; it does not validate one.
  */
 import { computed } from 'vue'
-import { fmtDurationMs } from '../../composables/useFormat'
+import { fmtDurationMs, fmtInstant } from '../../composables/useFormat'
 
 /** The GET /api/v1/admin/worker-runs/{id} response. */
 export interface WorkerRunDetailData {
@@ -124,7 +124,7 @@ const durationLabel = computed(() => {
 
 /** An instant, not a day bucket — rendered in the viewer's zone (CLAUDE.md, the clock). */
 function fmtStamp(iso: string | null): string {
-  return iso ? new Date(iso).toLocaleString() : EM_DASH
+  return fmtInstant(iso)
 }
 
 const hasResult = computed(

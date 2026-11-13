@@ -7,6 +7,24 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## v1.0.9 — 2026-11-13 (snapshot 2edd6abb)
+
+- Inbox alerts about a month or week close by themselves, with a note, once
+  that period is over and the alert is at least a week old. Budget alerts follow a raised budget: a top-up closes the
+  over-budget alert it answers, and a second overrun raises a new one. A
+  closed alert no longer suggests what to do.
+- Project budgets: one readable line per project, dates in words, and earlier
+  budgets folded away. The budget editor shows the project's real status and
+  its region's name, in plain words, with top-ups by period.
+- One date and money style across admin, budgets and reporting
+  ("12 Nov 2026, 19:05"), and "Sep" everywhere. Plainer words on the project
+  page, the playbook and alert titles.
+- Admin: the Business Unit picker groups units by region, Teammates rows fit
+  the screen, and the reference pages lose their placeholders and internal
+  wording.
+- Activity on Home and My usage, and the device list on Home, load faster.
+  The admin overview's Audit events tile no longer stays busy.
+
 ## v1.0.8 — 2026-11-11 (snapshot 60dbc8e2)
 
 - Every inbox alert now says what happened, what it means and what to do,

@@ -104,7 +104,7 @@ describe('the `indicative` caveat is the CARD’s, once — never a pill per row
       headlineUsd: 20,
     })
     expect(w.find('[data-testid="drivers-indicative-note"]').text()).toBe(
-      'Every figure here is attributed usage — indicative, not a billed charge.',
+      'Every figure here is usage valued at our rate card. It is not a charge.',
     )
   })
 
@@ -116,7 +116,7 @@ describe('the `indicative` caveat is the CARD’s, once — never a pill per row
       headlineUsd: 20,
     })
     expect(w.find('[data-testid="drivers-indicative-note"]').text()).toBe(
-      'Rows carrying no badge are attributed usage — indicative, not a billed charge.',
+      'Rows with no badge are usage valued at our rate card. They are not a charge.',
     )
   })
 

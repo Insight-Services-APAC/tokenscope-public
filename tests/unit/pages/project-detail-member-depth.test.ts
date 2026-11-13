@@ -340,14 +340,14 @@ describe('/projects/[code] — hero tiles (T21, fix 2)', () => {
     const reasons = w.findAll('[data-testid="kpi-delta-empty"]').map((n) => n.text())
     expect(reasons).toHaveLength(4)
     expect(w.find('[data-testid="tile-burn-per-day"] [data-testid="kpi-delta-empty"]').text()).toBe(
-      'same change as spend — the day counts cancel',
+      'Changes by the same amount as spend, because both periods have the same number of days.',
     )
-    for (const r of reasons.filter((t) => !t.startsWith('same change as spend'))) {
+    for (const r of reasons.filter((t) => !t.startsWith('Changes by the same amount as spend'))) {
       expect(r).toBe('no month-on-month for a custom range')
     }
     expect(w.find('[data-testid="proj-pace-pill"]').exists()).toBe(false)
     expect(w.find('[data-testid="tile-spend-vs-budget"]').text()).toContain(
-      'no pace for a custom range',
+      'Pace is shown for whole months only.',
     )
   })
 
@@ -379,9 +379,9 @@ describe('/projects/[code] — hero tiles (T21, fix 2)', () => {
     const reasons = w.findAll('[data-testid="kpi-delta-empty"]').map((n) => n.text())
     expect(reasons).toHaveLength(4)
     expect(w.find('[data-testid="tile-burn-per-day"] [data-testid="kpi-delta-empty"]').text()).toBe(
-      'same change as spend — the day counts cancel',
+      'Changes by the same amount as spend, because both periods have the same number of days.',
     )
-    for (const r of reasons.filter((t) => !t.startsWith('same change as spend'))) {
+    for (const r of reasons.filter((t) => !t.startsWith('Changes by the same amount as spend'))) {
       expect(r).toBe('too early to compare')
     }
   })

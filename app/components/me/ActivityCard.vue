@@ -94,6 +94,13 @@ const fromDay = ref<string>(qs('activity_from'))
 const toDay = ref<string>(qs('activity_to'))
 const { today: serverToday } = useServerClock()
 
+// A provider-recorded day is a UTC day bucket: "10 Nov", with the year when it
+// is not the server's year or the clock has not landed (#617, as the worklist).
+function dayLabel(day: string): string {
+  const year = serverToday.value?.slice(0, 4)
+  return fmtUtcDay(day, { year: !year || day.slice(0, 4) !== year })
+}
+
 /** A field error instead of a request the server would refuse (no 400 page). */
 const dayError = computed<string | null>(() => {
   if (fromDay.value && !isRealUtcDay(fromDay.value)) return 'From is not a real date.'
@@ -591,7 +598,7 @@ function retag(r: ActivityRow) {
             -->
             <td class="px-6 py-3 text-carbon-2 text-[12px]" :data-testid="`activity-when-${r.id}`">
               <template v-if="r.kind === 'session'">{{ fmtTimeAgo(r.ts_last) }}</template>
-              <template v-else>{{ r.day }}</template>
+              <template v-else>{{ dayLabel(r.day) }}</template>
             </td>
             <!-- "not reported" ≠ 0: some providers count credits, not tokens. -->
             <td

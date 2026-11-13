@@ -29,6 +29,7 @@ import type { Session } from '../../../server/utils/auth'
 import listHandler from '../../../server/api/v1/me/activity.get'
 import exportHandler from '../../../server/api/v1/me/activity/export.get'
 import type { ActivityListResponse, ActivityRow } from '../../../shared/schemas/activity'
+import { breakdownFields, fetchBreakdownCells, groupCells } from '../../../server/usage/breakdowns'
 
 let t: TestDb
 let devId = ''
@@ -336,6 +337,47 @@ beforeAll(async () => {
   // its conversation key is the INSTANCE id (conversation-key.ts).
   await ar3(null, 50, 10, 600n, '6.000000')
   await ar3(null, 50, 11, 50n, '0.500000')
+  // #611: one conversation across two tools, two models, two token types, an
+  // advisory (tier-2) row and a row priced by no rate card, so the page's cells
+  // have every column to get wrong. Day 60 is outside every window above.
+  const mix = (tool: string, model: string, tokenType: string, tokens: bigint, cost: string, tier: string, carded: boolean) =>
+    t.db.insert(schema.attributionRecord).values({
+      instanceId: inst3,
+      claudeSessionId: 'conv-mix',
+      teammateId: dev3Id,
+      projectId: null,
+      regionId,
+      orgUnitId: ouId,
+      costOwningUnitId: null,
+      tool,
+      model,
+      tokenType,
+      tokens,
+      costUsd: cost,
+      rateCardId: carded ? rc!.id : null,
+      rateCardVersion: carded ? rc!.version : null,
+      fidelityTier: tier,
+      costBasis: carded ? 'estimated' : 'provider-reported',
+      tsEvent: new Date(DAY0 + 60 * 86_400_000 + (10 + Number(tokens % 10n)) * 3_600_000),
+    })
+  await mix('claude-code', 'claude-sonnet-4-6', 'input', 1000n, '1.000000', 'tier-1', true)
+  await mix('claude-code', 'claude-sonnet-4-6', 'output', 201n, '2.000000', 'tier-2', true)
+  await mix('claude-code', 'claude-opus-4-6', 'input', 302n, '3.000000', 'tier-1', true)
+  await mix('copilot-cli', 'gpt-5', 'output', 403n, '4.000000', 'tier-1', false)
+  // #611: three provider-recorded days on ONE day (day 70, outside every window
+  // above), so the within-day id order the provider-days statement now supplies
+  // is exercised. Random ids: the test asserts the order, not a fixed sequence.
+  for (const [i, tool] of ['copilot-cli', 'copilot-agent', 'claude-code'].entries()) {
+    await t.db.insert(schema.unaccountedUsage).values({
+      teammateId: dev3Id,
+      regionId,
+      orgUnitId: ouId,
+      day: dayIso(70),
+      tool,
+      costUsd: (1 + i).toFixed(6),
+      tokens: BigInt(10 * (i + 1)),
+    })
+  }
 }, 180_000)
 
 afterAll(async () => {
@@ -796,5 +838,79 @@ describe('F6 — the legacy instance-keyed conversation survives the key filter'
     // withBreakdowns rides the SAME key shape through fetchBreakdownCells, so
     // the legacy conversation's model mix must be populated, not empty.
     expect((legacy as unknown as { models: string[] }).models).toEqual(['claude-sonnet-4-6'])
+  })
+})
+
+/*
+ * #611 — the page's model and token-type cells. PR 622 folded them into the
+ * sessions statement and #611's next step reads them apart again; either way the
+ * oracle is fetchBreakdownCells run directly: every session row on every page
+ * must carry exactly what it gives.
+ */
+describe('#611 — the session rows\' cells match fetchBreakdownCells', () => {
+  type WithCells = ActivityRow & { models: string[]; by_model: unknown; by_token_type: unknown; advisory_cost_usd: string }
+  const fields = (r: ActivityRow) => {
+    const w = r as WithCells
+    return { models: w.models, by_model: w.by_model, by_token_type: w.by_token_type, advisory_cost_usd: w.advisory_cost_usd }
+  }
+  async function expectOracle(teammateId: string, rows: ActivityRow[], legacyIds: string[] = []) {
+    const sessions = rows.filter((r) => r.kind === 'session')
+    expect(sessions.length).toBeGreaterThan(0)
+    const ids = sessions.map((r) => r.id)
+    const cells = groupCells(await fetchBreakdownCells(t.db, teammateId, ids, legacyIds.filter((id) => ids.includes(id))))
+    for (const r of sessions) expect(fields(r), r.id).toEqual(breakdownFields(cells.get(r.id) ?? []))
+  }
+
+  it('fetchBreakdownCells returns its cells in a fixed order (conversation, model, token type)', async () => {
+    const all = await walkAll3(2, 'kind=session')
+    const ids = all.filter((r) => r.kind === 'session').map((r) => r.id)
+    const cells = await fetchBreakdownCells(t.db, dev3Id, ids, [inst3].filter((id) => ids.includes(id)))
+    expect(cells.length).toBeGreaterThan(3)
+    const keys = cells.map((c) => `${c.conversation_id}|${c.model}|${c.token_type}`)
+    // Sorted by the database itself, so the check holds under any collation.
+    const sorted = await t.client<{ k: string }[]>`
+      SELECT k FROM unnest(${t.client.array(cells.map((c) => [c.conversation_id, c.model, c.token_type].join('|')))}::text[]) AS u(k)
+       ORDER BY split_part(k, '|', 1), split_part(k, '|', 2), split_part(k, '|', 3)`
+    expect(keys).toEqual(sorted.map((r) => r.k))
+  })
+
+  it('a conversation over two tools and models: whole-conversation cells, with and without a tool filter', async () => {
+    const all = await walkAll3(2, 'kind=session')
+    await expectOracle(dev3Id, all, [inst3])
+    const mixAll = all.find((r) => r.id === 'conv-mix') as WithCells
+    // Sonnet and Opus tie at $3.00; the tie breaks on tokens (1201 against 302).
+    expect(mixAll.models).toEqual(['gpt-5', 'claude-sonnet-4-6', 'claude-opus-4-6'])
+    expect(mixAll.advisory_cost_usd).toBe('2.00')
+
+    // The tool filter narrows the TOTALS to that tool's rows; the cells stay the
+    // whole conversation's, as fetchBreakdownCells always gave them.
+    const code = await walkAll3(2, 'tool=claude-code')
+    await expectOracle(dev3Id, code, [inst3])
+    const mixCode = code.find((r) => r.id === 'conv-mix') as WithCells
+    expect(mixCode.tokens).toBe(1503)
+    expect(mixCode.cost_usd).toBe('6.00')
+    expect(mixCode.models).toContain('gpt-5')
+    expect((await walkAll3(2, 'kind=session&tool=copilot-cli')).map((r) => r.id)).toEqual(['conv-mix'])
+  })
+
+  it('provider days on one day page in descending text-id order, none skipped or repeated', async () => {
+    const day70 = (rows: ActivityRow[]) => rows.filter((r) => r.kind === 'provider-day' && r.day === dayIso(70))
+    const one = day70(await walkAll3(1, 'kind=provider-day'))
+    expect(one).toHaveLength(3)
+    const ids = one.map((r) => r.id)
+    expect(new Set(ids).size).toBe(3)
+    // UUID text: fixed hyphen positions and lowercase hex, so JS string order is the database's.
+    expect(ids).toEqual([...ids].sort().reverse())
+    // The mixed list (sessions and days merged in JS) keeps the same day-70 order at every page size.
+    for (const size of [1, 2, 100]) expect(day70(await walkAll3(size)).map((r) => r.id)).toEqual(ids)
+  })
+
+  it('the main fixture: every page of the mixed list', async () => {
+    await expectOracle(devId, await walkAll(5))
+  })
+
+  it('the export carries no cells and the same rows as the page', async () => {
+    const lines = (await csv('kind=session')).trim().split('\n').slice(1)
+    expect(lines.map((l) => l.split(',')[1])).toEqual((await walkAll(100, 'kind=session')).map((r) => r.id))
   })
 })

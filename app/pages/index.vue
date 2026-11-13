@@ -24,6 +24,7 @@ import HomeToolStatusStrip from '../components/home/ToolStatusStrip.vue'
 import type { TagTarget as DialogTagTarget } from '../components/home/TagSessionDialog.vue'
 import { budgetPace, budgetPaceKind, budgetPaceLabel, projectedMonthEnd, type BudgetPace } from '../composables/useRagState'
 import { useConnectConfig } from '../composables/useConnectConfig'
+import { fmtUtcDay } from '../composables/useFormat'
 
 interface Bucket {
   project_code: string
@@ -345,6 +346,13 @@ const { data: overEmission, refresh: refreshOverEmission, error: overEmissionErr
   { default: () => ({ flags: [] }), lazy: true },
 )
 const overEmissionFlags = computed(() => overEmission.value?.flags ?? [])
+// A flag's day is a UTC day bucket: "10 Nov", with the year when it is not the
+// server's year or the clock has not landed (#617, as the worklist).
+const { today: serverToday } = useServerClock()
+function flagDay(day: string): string {
+  const year = serverToday.value?.slice(0, 4)
+  return fmtUtcDay(day, { year: !year || day.slice(0, 4) !== year })
+}
 const { data: myProjects, refresh: refreshMyProjects, error: myProjectsError } = useFetch<{ projects: { id: string; code: string; display_name: string; type: string }[] }>(
   '/api/v1/me/projects',
   { default: () => ({ projects: [] }), lazy: true },
@@ -493,8 +501,9 @@ const monthLabel = computed(() => {
   if (!m) return ''
   const [y, mm] = m.split('-')
   if (!y || !mm) return m
-  const d = new Date(Number(y), Number(mm) - 1, 1)
-  return d.toLocaleString(undefined, { month: 'long', year: 'numeric' })
+  // A provider month: built and formatted in UTC (#633), never the browser's zone.
+  const d = new Date(Date.UTC(Number(y), Number(mm) - 1, 1))
+  return d.toLocaleString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' })
 })
 
 // The month's LAST day, for the pace-over row's "on pace for ~$X by <date>"
@@ -506,8 +515,8 @@ const monthEndLabel = computed(() => {
   if (!m || !(daysInMonth.value > 0)) return ''
   const [y, mm] = m.split('-')
   if (!y || !mm) return ''
-  const d = new Date(Number(y), Number(mm) - 1, daysInMonth.value)
-  return d.toLocaleString(undefined, { month: 'long', day: 'numeric' })
+  const d = new Date(Date.UTC(Number(y), Number(mm) - 1, daysInMonth.value))
+  return d.toLocaleString(undefined, { month: 'long', day: 'numeric', timeZone: 'UTC' })
 })
 
 /*
@@ -1167,10 +1176,10 @@ const softCapTickPct = computed(() =>
           <div class="flex items-start justify-between gap-3 flex-wrap">
             <div class="text-sm text-carbon">
               <Icon :name="clientMeta(f.tool).icon" class="text-base align-middle mr-1" :title="clientMeta(f.tool).name" />
-              <span class="font-bold">{{ f.day }}</span>:
-              your tools reported <span class="font-semibold">{{ fmtUsd(f.otel_usd) }}</span>,
-              the provider bill is <span class="font-semibold">{{ fmtUsd(f.api_usd) }}</span> —
-              <span class="font-bold text-rag-amber">{{ fmtUsd(f.over_usd) }}</span> is uncorroborated.
+              <span class="font-bold">{{ flagDay(f.day) }}</span>:
+              your tools reported <span class="font-semibold">{{ fmtUsd(f.otel_usd) }}</span>
+              and the provider bill is <span class="font-semibold">{{ fmtUsd(f.api_usd) }}</span>,
+              so <span class="font-bold text-rag-amber">{{ fmtUsd(f.over_usd) }}</span> is uncorroborated.
             </div>
             <div class="flex items-center gap-2 shrink-0">
               <UiButton

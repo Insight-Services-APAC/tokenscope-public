@@ -44,7 +44,7 @@ describe('CoverageMarker', () => {
     expect(marker.exists()).toBe(true)
     expect(marker.attributes('data-known')).toBe('true')
     expect(marker.text()).toContain('12')
-    expect(marker.text()).toContain('15')
+    expect(marker.text()).toContain('Covers 12 of 15 GitHub organisations.')
   })
 
   it('an UNKNOWN denominator (census unavailable) never claims a ratio', () => {
@@ -59,7 +59,8 @@ describe('CoverageMarker', () => {
     const marker = w.find('[data-testid="coverage-marker"]')
     expect(marker.attributes('data-known')).toBe('false')
     expect(marker.text()).not.toMatch(/\d+\s*of\s*\d+/)
-    expect(marker.text().toLowerCase()).toContain('unknown')
+    expect(marker.text()).toContain('Coverage unknown')
+    expect(marker.text()).toContain("We could not count this company's GitHub organisations")
   })
 
   it('a STALE census never claims complete — names staleness, not a fabricated ratio', () => {
@@ -74,6 +75,7 @@ describe('CoverageMarker', () => {
     const marker = w.find('[data-testid="coverage-marker"]')
     expect(marker.attributes('data-known')).toBe('false')
     expect(marker.text()).not.toMatch(/\d+\s*of\s*\d+/)
-    expect(marker.text().toLowerCase()).toContain('stale')
+    expect(marker.text()).toContain('Coverage out of date')
+    expect(marker.text()).toContain('An admin can refresh it under Admin, Providers.')
   })
 })

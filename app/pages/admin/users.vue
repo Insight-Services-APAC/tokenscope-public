@@ -29,6 +29,7 @@ import { focusIfLost } from '../../utils/focus-fallback'
 // (Rollup runs from `.nuxt/dist/server/_nuxt/`, not the source path).
 import { ROLE_CAPABILITIES, SELECTABLE_ROLES, roleLabel, roleWithArticle, type Role } from '#shared/auth/roles'
 import { BU_LABEL } from '#shared/reports/vocabulary'
+import { fmtInstant } from '../../composables/useFormat'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface UserRow extends Record<string, unknown> {
@@ -462,19 +463,19 @@ async function revokeSessions(row: UserRow) {
   }
 }
 
+// #637: one Teammate column (name over email) frees the width that kept
+// Actions off screen at 1200 px.
 const columns = [
-  { key: 'email', label: 'Email', cellClass: 'font-medium' },
-  { key: 'displayName', label: 'Name' },
+  { key: 'teammate', label: 'Teammate', cellClass: 'font-medium' },
   { key: 'role', label: 'Role' },
   { key: 'orgUnitName', label: BU_LABEL },
   { key: 'lastSyncAt', label: 'Last sync' },
   { key: 'actions', label: 'Actions' },
 ]
 
+// An instant, so the viewer's zone; minutes are enough for a sync time (#633).
 function fmtTs(v: string | null): string {
-  if (!v) return '—'
-  // An instant, so the viewer's zone; minutes are enough for a sync time.
-  return new Date(v).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+  return fmtInstant(v)
 }
 
 // Typed cast for the slot binding — AdminDataTable's row slot is
@@ -588,11 +589,16 @@ function roleOptionsFor(current: string): Role[] {
           :data-testid="`admin-users-row-${asUserRow(row).id}`"
           class="hover:bg-brand-harmony-sheer/30"
         >
-          <!-- Long emails and names truncate (full text on hover) so the six
-               columns fit the card at 1440 and 1024 wide; the card scrolls
-               sideways only below that. -->
-          <td class="px-5 py-3 text-sm text-carbon font-medium max-w-[240px] truncate" :title="asUserRow(row).email">{{ asUserRow(row).email }}</td>
-          <td class="px-5 py-3 text-sm text-carbon max-w-[180px] truncate" :title="asUserRow(row).displayName ?? undefined">{{ asUserRow(row).displayName ?? '—' }}</td>
+          <!-- #637: one Teammate cell, the name in bold over the email in small
+               grey (the email alone when there is no name). Both truncate,
+               with the full text on hover, so the five columns fit at 1200 px. -->
+          <td class="px-5 py-3 text-sm max-w-[260px]" :data-testid="`admin-users-teammate-${asUserRow(row).id}`">
+            <template v-if="asUserRow(row).displayName?.trim()">
+              <div class="font-bold text-carbon truncate" :title="asUserRow(row).displayName ?? undefined">{{ asUserRow(row).displayName }}</div>
+              <div class="text-[11px] text-carbon-3 truncate" :title="asUserRow(row).email">{{ asUserRow(row).email }}</div>
+            </template>
+            <div v-else class="font-medium text-carbon truncate" :title="asUserRow(row).email">{{ asUserRow(row).email }}</div>
+          </td>
           <td class="px-5 py-3 text-sm">
             <div class="flex items-center gap-2">
               <select
@@ -693,7 +699,7 @@ function roleOptionsFor(current: string): Role[] {
     <div v-if="(data?.total ?? 0) > LIMIT" class="mt-4 flex items-center justify-end gap-3">
       <UiButton kind="ghost" size="sm" :disabled="offset === 0" @click="prevPage">← Prev</UiButton>
       <span class="text-xs text-carbon-3">
-        {{ offset + 1 }}–{{ Math.min(offset + LIMIT, data?.total ?? 0) }} of {{ data?.total }}
+        {{ offset + 1 }} to {{ Math.min(offset + LIMIT, data?.total ?? 0) }} of {{ data?.total }}
       </span>
       <UiButton kind="ghost" size="sm" :disabled="offset + LIMIT >= (data?.total ?? 0)" @click="nextPage">Next →</UiButton>
     </div>

@@ -34,6 +34,7 @@ import * as schema from '../../../drizzle/schema'
 import { WORKER_RLS_STARTUP_OPTIONS } from '../../../server/db/worker-db'
 import { createDbClient } from '../../../drizzle/connect'
 import { closeDispatchLockPool } from '../../../server/workers/dispatch-lock'
+import { applyConcurrentPerPartition, parseConcurrentPerPartition } from '../../../drizzle/concurrent-index'
 
 const MIGRATIONS_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -58,7 +59,24 @@ async function runMigrations(client: ReturnType<typeof postgres>): Promise<void>
   const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.sql')).sort()
   for (const file of files) {
     const body = await readFile(join(MIGRATIONS_DIR, file), 'utf8')
-    await client.unsafe(body)
+    // A concurrent-index-per-partition file is a template, not SQL: build it the
+    // way drizzle/migrate.ts does, on one reserved session (lock_timeout is a
+    // session setting).
+    const concurrent = parseConcurrentPerPartition(file, body)
+    if (!concurrent) {
+      await client.unsafe(body)
+      continue
+    }
+    const session = await client.reserve()
+    try {
+      await applyConcurrentPerPartition(session, file, concurrent, {
+        lockTimeout: '0',
+        restoreLockTimeout: '0',
+        log: () => undefined,
+      })
+    } finally {
+      session.release()
+    }
   }
 }
 

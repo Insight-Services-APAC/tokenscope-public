@@ -33,6 +33,7 @@ import AdminDataTable from '../../components/admin/AdminDataTable.vue'
 import { deviceToolName } from '#shared/schemas/device-name'
 import { INSTANCE_STATES, INSTANCE_STATE_BADGE, INSTANCE_STATE_LABEL, type InstanceState } from '#shared/schemas/device-name'
 import { ADMIN_LIST_SEARCH_MAX } from '#shared/schemas/admin-list-search'
+import { fmtInstant, fmtUsd } from '../../composables/useFormat'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface InstanceRow extends Record<string, unknown> {
@@ -177,7 +178,7 @@ function asRow(row: Record<string, unknown>): InstanceRow {
   return row as unknown as InstanceRow
 }
 function fmtTs(v: string | null): string {
-  return v ? new Date(v).toLocaleString() : '—'
+  return fmtInstant(v)
 }
 </script>
 
@@ -268,7 +269,7 @@ function fmtTs(v: string | null): string {
             >{{ asRow(row).display_name }}</div>
           </td>
           <td class="px-5 py-3 text-sm text-carbon-2">{{ deviceToolName(asRow(row).tool) }}</td>
-          <td class="px-5 py-3 text-sm text-carbon font-mono">${{ asRow(row).spend_usd_mtd }}</td>
+          <td class="px-5 py-3 text-sm text-carbon font-mono">{{ fmtUsd(asRow(row).spend_usd_mtd) }}</td>
           <td class="px-5 py-3 text-sm text-carbon-3">{{ fmtTs(asRow(row).last_emission) }}</td>
           <td class="px-5 py-3 text-sm">
             <UiBadge :kind="INSTANCE_STATE_BADGE[asRow(row).state]">{{ INSTANCE_STATE_LABEL[asRow(row).state] }}</UiBadge>

@@ -16,7 +16,10 @@ import * as schema from '../../../drizzle/schema'
 import { injectTestSession } from '../../helpers/auth'
 import type { Session } from '../../../server/utils/auth'
 import listHandler from '../../../server/api/v1/me/activity.get'
-import type { ActivityListResponse, ActivityRow } from '../../../shared/schemas/activity'
+import { fetchActivityPage } from '../../../server/usage/activity-list'
+import { PgDialect } from 'drizzle-orm/pg-core'
+import type { SQL } from 'drizzle-orm'
+import { ActivityFilterQuery, type ActivityListResponse, type ActivityRow } from '../../../shared/schemas/activity'
 
 const TODAY = '2026-09-30'
 /** No day on the clock: the module then reads the whole history. */
@@ -27,7 +30,7 @@ const daysAgo = (d: number) => new Date(NOON - d * 86_400_000)
 let t: TestDb
 let regionId = ''
 let ouId = ''
-const people: Record<'full' | 'widen' | 'fallback' | 'legacy', string> = { full: '', widen: '', fallback: '', legacy: '' }
+const people: Record<'tight' | 'full' | 'widen' | 'fallback' | 'legacy', string> = { tight: '', full: '', widen: '', fallback: '', legacy: '' }
 let rc: { id: string; version: number }
 
 function sessionOf(teammateId: string): Session {
@@ -139,7 +142,17 @@ beforeAll(async () => {
   const [card] = await t.db.select({ id: schema.rateCard.id, version: schema.rateCard.version }).from(schema.rateCard).limit(1)
   rc = card!
 
-  // A full page inside 14 days, one conversation straddling the window's edge
+  // #611: a full page inside the first, 3-day window, one conversation
+  // straddling its edge (a row 10 days back), and older ones below.
+  const tight = await person('tight')
+  const tightRows = [
+    ...Array.from({ length: 30 }, (_, i) => rec(tight, `tight-${i}`, daysAgo(0.05 * i))),
+    rec(tight, 'tight-straddle', daysAgo(10), { cost: '4.000000', model: 'claude-opus-4-1' }),
+    rec(tight, 'tight-straddle', daysAgo(0.5)),
+    ...Array.from({ length: 5 }, (_, i) => rec(tight, `tight-old-${i}`, daysAgo(20 + i))),
+  ]
+
+  // A full page inside 14 days but not inside 3, one conversation straddling the window's edge
   // (a row 60 days back that the window leaves out), and older ones below.
   const full = await person('full')
   const fullRows = [
@@ -174,7 +187,7 @@ beforeAll(async () => {
     rec(legacy, 'legacy-neighbour', daysAgo(1)),
   ]
 
-  await t.db.insert(schema.attributionRecord).values([...fullRows, ...widenRows, ...fallbackRows, ...legacyRows])
+  await t.db.insert(schema.attributionRecord).values([...tightRows, ...fullRows, ...widenRows, ...fallbackRows, ...legacyRows])
 }, 180_000)
 
 afterAll(async () => {
@@ -182,6 +195,40 @@ afterAll(async () => {
 }, 30_000)
 
 describe('Activity recent window (#593)', () => {
+  it('a full page inside the first window equals the whole-history page, on every page (#611)', async () => {
+    const windowed = await walk(people.tight, TODAY, 25)
+    expect(windowed).toEqual(await walk(people.tight, NO_WINDOW, 25))
+    expect(windowed).toHaveLength(36)
+    const straddle = windowed.find((r) => r.id === 'tight-straddle')!
+    expect(Number(straddle.cost_usd)).toBe(5)
+    if (straddle.kind === 'session') expect(Date.parse(straddle.ts_first)).toBe(daysAgo(10).getTime())
+  })
+
+  it('a busy teammate\'s first page ranks inside the 3-day window, in one read (#611)', async () => {
+    // Equality alone would pass with any window or none, so this records the
+    // ranking statements the page actually runs and their window bound.
+    const dialect = new PgDialect()
+    const ranks: unknown[][] = []
+    await t.db.transaction(async (tx) => {
+      const recording = new Proxy(tx, {
+        get(target, prop, receiver) {
+          if (prop !== 'execute') return Reflect.get(target, prop, receiver)
+          return (q: SQL) => {
+            const { sql: text, params } = dialect.sqlToQuery(q)
+            if (text.includes('AS legacy')) ranks.push(params)
+            return target.execute(q)
+          }
+        },
+      })
+      await fetchActivityPage(recording as typeof tx, people.tight, ActivityFilterQuery.parse({}), {
+        limit: 25,
+        today: TODAY,
+      })
+    })
+    expect(ranks).toHaveLength(1)
+    expect(ranks[0]).toContain('2026-09-27')
+  })
+
   it('a full page inside the window equals the whole-history page, on every page', async () => {
     const windowed = await walk(people.full, TODAY, 25)
     expect(windowed).toEqual(await walk(people.full, NO_WINDOW, 25))

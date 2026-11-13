@@ -6,7 +6,7 @@
  * else lives in the persistent sidebar — this page deliberately does NOT
  * re-list it.
  */
-import { computed } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { useAdminAccess } from '../../composables/useAdminAccess'
 import OrgSetupHomeCard from '../../components/admin/OrgSetupHomeCard.vue'
 
@@ -46,7 +46,15 @@ const { data: regions, error: regionsError, refresh: refreshRegions } = useLazyF
 // browser-computed cutoff would let a skewed clock ask for a window the server
 // is not serving. The URL is empty until the clock lands; the watch issues the
 // request then, and the tile reads busy in the meantime.
-const { clock } = useServerClock()
+//
+// #612: the clock usually lands in the server-rendered payload, so `since24h`
+// already has its value at setup and never CHANGES; a `watch: [since24h]` option
+// therefore never fired and the tile read "..." for good. The watch below is
+// registered in `onMounted` (client only, as `server: false` asks) with
+// `immediate`, so it issues the read whether the clock is already here or lands
+// later. A failed clock read shows the tile's error state, and Retry re-reads
+// the clock.
+const { clock, error: clockError, refresh: refreshClock } = useServerClock()
 const since24h = computed(() => {
   const now = clock.value?.now
   return now ? new Date(new Date(now).getTime() - 24 * 60 * 60 * 1000).toISOString() : ''
@@ -58,9 +66,23 @@ const { data: audit, error: auditError, refresh: refreshAudit } = useLazyFetch<{
     server: false,
     default: () => null,
     immediate: false,
-    watch: [since24h],
+    watch: false,
   },
 )
+onMounted(() => {
+  watch(
+    since24h,
+    (since) => {
+      if (since && adminAtSetup) void refreshAudit()
+    },
+    { immediate: true },
+  )
+})
+// The tile's failure: its own read, or the clock it waits on (only while the clock is absent).
+const auditTileError = computed(() => auditError.value ?? (since24h.value ? null : clockError.value ?? null))
+function retryAudit() {
+  return since24h.value ? refreshAudit() : refreshClock()
+}
 const { data: diag, error: diagError, refresh: refreshDiag } = useLazyFetch<{ postgres: { reachable: boolean } } | null>(
   '/api/v1/admin/diagnostics',
   { key: 'admin-overview-diag', server: false, default: () => null, immediate: adminAtSetup },
@@ -97,7 +119,7 @@ const stats = computed(() => [
     key: 'audit',
     label: 'Audit events · 24h',
     to: '/admin/audit',
-    ...tile(adminAtSetup, audit.value, auditError.value, (d) => d.total.toLocaleString('en-US')),
+    ...tile(adminAtSetup, audit.value, auditTileError.value, (d) => d.total.toLocaleString('en-US')),
   },
   {
     key: 'postgres',
@@ -118,7 +140,7 @@ const stripBusy = computed(() => stats.value.some((s) => s.state === 'busy'))
 const failed = [
   { label: 'Regions', error: regionsError, refresh: refreshRegions },
   { label: 'Teammates', error: usersError, refresh: refreshUsers },
-  { label: 'Audit events · 24h', error: auditError, refresh: refreshAudit },
+  { label: 'Audit events · 24h', error: auditTileError, refresh: retryAudit },
   { label: 'Postgres', error: diagError, refresh: refreshDiag },
 ]
 const failedReads = computed(() => failed.filter((r) => r.error.value))

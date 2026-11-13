@@ -13,6 +13,8 @@ const props = defineProps<{
   body: Record<string, unknown>
   /** The recipient's name for the alert's device, when it has one (#576). */
   deviceName?: string | null
+  /* #642: closed by the period-end sweep, so "What to do" no longer applies. */
+  closed?: boolean
 }>()
 
 const copy = computed(() =>
@@ -22,7 +24,7 @@ const copy = computed(() =>
 
 <template>
   <section v-if="copy" class="space-y-5" data-testid="drawer-sections">
-    <div v-for="s in copy.sections" :key="s.heading">
+    <div v-for="s in copy.sections.filter((x) => !closed || x.heading !== 'What to do')" :key="s.heading">
       <h3 class="text-[11px] font-bold uppercase tracking-[1.2px] text-carbon-3 mb-2">
         {{ s.heading }}
       </h3>

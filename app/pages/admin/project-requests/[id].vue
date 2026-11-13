@@ -12,6 +12,7 @@ import { useAdminAccess } from '../../../composables/useAdminAccess'
 import { useBusinessUnits, utcMidnight } from '../../../composables/useProjectFormOptions'
 import { mutationErrorDetail } from '../../../composables/useApiError'
 import { BU_LABEL } from '#shared/reports/vocabulary'
+import { fmtInstant } from '../../../composables/useFormat'
 
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
@@ -183,7 +184,7 @@ const labelClass = 'block text-carbon-3 font-bold uppercase tracking-[1px] mb-1'
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div class="text-sm text-carbon-2 leading-relaxed">
             <strong class="text-carbon">{{ req.requester_name ?? req.requester_email }}</strong> asked on
-            {{ new Date(req.created_at).toLocaleString() }}:
+            {{ fmtInstant(req.created_at) }}:
             <p class="mt-1 whitespace-pre-line text-carbon" data-testid="project-request-justification">{{ req.justification }}</p>
           </div>
           <UiBadge :kind="pending ? 'rag-amber' : req.status === 'approved' ? 'rag-green' : 'neutral'" data-testid="project-request-status">
@@ -193,7 +194,7 @@ const labelClass = 'block text-carbon-3 font-bold uppercase tracking-[1px] mb-1'
         <p v-if="!pending" class="mt-3 text-xs text-carbon-3" data-testid="project-request-decided">
           <template v-if="req.status === 'withdrawn'">Withdrawn by the requester</template>
           <template v-else>Decided by {{ req.decided_by_name ?? 'an admin' }}</template>
-          <template v-if="req.decided_at"> on {{ new Date(req.decided_at).toLocaleString() }}</template>.
+          <template v-if="req.decided_at"> on {{ fmtInstant(req.decided_at) }}</template>.
           <template v-if="req.decision_note"> “{{ req.decision_note }}”</template>
           <NuxtLink v-if="req.created_project_code" :to="`/projects/${encodeURIComponent(req.created_project_code)}`" class="ml-1 text-brand-harmony hover:underline">
             Open {{ req.created_project_code }} →

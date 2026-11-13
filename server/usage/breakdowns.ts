@@ -140,6 +140,9 @@ export async function fetchBreakdownCells(
       AND (ar.claude_session_id IN (${inList})
            ${legacyArm})
     GROUP BY ${conversationKeyExpr('ar')}, ar.model, ar.token_type
+    -- A fixed order: the pivots keep input order between models that tie on
+    -- cost and tokens, so without it the badge could change with the plan.
+    ORDER BY 1, ar.model, ar.token_type
   `)
   return [...rows].map((r) => ({
     conversation_id: r.conversation_id,

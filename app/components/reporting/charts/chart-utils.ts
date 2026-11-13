@@ -8,6 +8,7 @@
  * come from our own formatters and are safe.
  */
 import { fmtUtcDay } from '../../../composables/useFormat'
+import { formatMonthWords } from '#shared/format/month-words'
 
 export function escapeHtml(s: string): string {
   return String(s)
@@ -136,5 +137,5 @@ export function isoWeekLabel(isoWeek: string): string {
   const jan4Dow = (jan4.getUTCDay() + 6) % 7 // 0 = Monday
   const week1Monday = jan4.getTime() - jan4Dow * 86_400_000
   const monday = new Date(week1Monday + (Number(m[2]) - 1) * 7 * 86_400_000)
-  return monday.toLocaleString('en-US', { day: '2-digit', month: 'short', timeZone: 'UTC' })
+  return formatMonthWords('en-US', { day: '2-digit', month: 'short', timeZone: 'UTC' }, monday)
 }

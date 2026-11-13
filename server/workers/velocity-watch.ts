@@ -30,6 +30,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import { sql } from 'drizzle-orm'
 import type * as schema from '../../drizzle/schema'
 import { dispatchInbox } from '../notifications/dispatch'
+import { isoWeekStartUtc } from '../utils/period'
 import {
   GOV_VELOCITY_SPIKE_THRESHOLD,
   loadGovernanceSettingResolver,
@@ -194,21 +195,6 @@ export async function runVelocityWatch(
     alertsDispatched,
     skippedExisting,
   }
-}
-
-/**
- * Truncate a `Date` to the start (Monday 00:00 UTC) of its ISO week.
- *
- * `Date#getUTCDay()` returns 0 for Sunday — for ISO weeks Monday is day
- * 1 and Sunday is day 7. The expression `(day + 6) % 7` maps Mon→0,
- * Tue→1, ..., Sun→6, which is the offset we need to subtract.
- */
-function isoWeekStartUtc(d: Date): Date {
-  const day = d.getUTCDay()
-  const offset = (day + 6) % 7
-  return new Date(
-    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - offset, 0, 0, 0, 0),
-  )
 }
 
 function addWeeksUtc(d: Date, weeks: number): Date {

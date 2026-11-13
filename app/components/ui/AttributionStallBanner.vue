@@ -10,12 +10,14 @@
  *
  * Constraints:
  *  - the message shape is the design's, verbatim: "Attribution has not landed
- *    data since <time> — recent spend may be missing from these figures.";
+ *    data since <time>. Recent spend may be missing from these figures."
+ *    (#610: a full stop where the design had an em dash);
  *  - `since` is an INSTANT, so it renders in the viewer's local zone
  *    (clock-and-day-boundary.md: instants render local; day buckets never
  *    convert).
  */
 import { computed } from 'vue'
+import { fmtInstant } from '../../composables/useFormat'
 
 const props = defineProps<{
   /** The `attribution_stall` payload leg; null/absent = no stall, render nothing. */
@@ -23,7 +25,7 @@ const props = defineProps<{
 }>()
 
 const sinceLabel = computed(() =>
-  props.stall ? new Date(props.stall.since).toLocaleString() : '',
+  props.stall ? fmtInstant(props.stall.since) : '',
 )
 </script>
 
@@ -36,7 +38,7 @@ const sinceLabel = computed(() =>
   >
     <span class="inline-block w-2 h-2 rounded-full bg-rag-amber shrink-0" aria-hidden="true" />
     <span>
-      Attribution has not landed data since {{ sinceLabel }} — recent spend may be missing from
+      Attribution has not landed data since {{ sinceLabel }}. Recent spend may be missing from
       these figures.
     </span>
   </div>

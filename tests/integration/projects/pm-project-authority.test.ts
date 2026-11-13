@@ -267,6 +267,47 @@ describe('GET /allocations/{id}: siblings are the displayed period’s only', ()
   })
 })
 
+describe('GET /allocations/{id}: the editor reads the region name and the project state (#640)', () => {
+  type Focused = { region_code: string; region_name: string; project_end_date: string | null; project_ended: boolean }
+  async function editorFor(code: string, endDate: string | null) {
+    const id = await mkProject(code)
+    await assign(id, PM_DEV, 'manager')
+    if (endDate) await t.client`UPDATE project SET end_date = ${endDate}::timestamptz WHERE id = ${id}::uuid`
+    const [evt] = await t.client<{ id: string }[]>`
+      INSERT INTO audit_event (event_type, subject_kind, subject_id, payload)
+      VALUES ('allocation-created', 'project', ${id}::uuid, '{}'::jsonb) RETURNING id::text AS id`
+    const [a] = await t.client<{ id: string }[]>`
+      INSERT INTO allocation (scope_type, scope_id, budget_usd, effective, allocation_kind, audit_event_id)
+      VALUES ('project', ${id}::uuid, 100, '[2026-06-01T00:00:00Z,2099-01-01T00:00:00Z)'::tstzrange, 'baseline', ${evt!.id}::uuid)
+      RETURNING id::text AS id`
+    const out = (await call(allocationGet as Handler, as(PM_DEV), { id: a!.id }, undefined, 'GET')) as { focused: Focused }
+    return out.focused
+  }
+
+  it('an open-ended project: the region name, no end date, not ended', async () => {
+    expect(await editorFor('PMA-640A', null)).toMatchObject({
+      region_code: 'pma',
+      region_name: 'PMA',
+      project_end_date: null,
+      project_ended: false,
+    })
+  })
+
+  it('a future end date is sent as a UTC instant and the project is not ended', async () => {
+    expect(await editorFor('PMA-640B', '2099-06-30T00:00:00Z')).toMatchObject({
+      project_end_date: '2099-06-30T00:00:00Z',
+      project_ended: false,
+    })
+  })
+
+  it('a past end date: ended', async () => {
+    expect(await editorFor('PMA-640C', '2026-01-31T00:00:00Z')).toMatchObject({
+      project_end_date: '2026-01-31T00:00:00Z',
+      project_ended: true,
+    })
+  })
+})
+
 describe('project page payload: viewer.can_manage drives the Manage section', () => {
   it('true for the project’s PM, false for a plain member', async () => {
     const page = (who: string) =>

@@ -19,6 +19,8 @@ import TopupLog, { type TopupRow } from '../../components/allocator/TopupLog.vue
 import ConsumptionCard from '../../components/allocator/ConsumptionCard.vue'
 import type { Crumb } from '../../components/ui/Breadcrumb.vue'
 import { apiErrorDetail, isConfirmedRejection } from '../../composables/useApiError'
+import { fmtInstant } from '../../composables/useFormat'
+import { projectState, regionWords } from '../../components/allocator/project-state'
 
 interface FocusedAlloc {
   id: string
@@ -38,6 +40,9 @@ interface FocusedAlloc {
   project_code: string | null
   project_display_name: string | null
   region_code: string | null
+  region_name?: string | null
+  project_end_date?: string | null
+  project_ended?: boolean
   cou_code: string | null
   cou_display_name: string | null
 }
@@ -199,13 +204,21 @@ const consumptionReconciledUsd = computed(() =>
 
 const crumbs = computed<Crumb[]>(() => {
   const focused = data.value?.focused
-  const list: Crumb[] = [
-    { label: 'Reporting', to: '/reporting?scope=region' },
-    { label: 'Allocations', to: '/allocations' },
-  ]
-  if (focused?.project_display_name) {
-    list.push({ label: focused.project_display_name })
+  /*
+   * #632: the project page is the place every reader of this editor can open
+   * (a project manager who is neither a manager nor a report viewer cannot
+   * open /allocations or Reporting), so the trail runs through it.
+   */
+  const list: Crumb[] = [{ label: 'My projects', to: '/projects' }]
+  const name = focused?.project_display_name ?? focused?.project_code
+  if (name) {
+    list.push(
+      focused?.project_code
+        ? { label: name, to: `/projects/${encodeURIComponent(focused.project_code)}` }
+        : { label: name },
+    )
   }
+  list.push({ label: 'Budget' })
   return list
 })
 
@@ -423,16 +436,32 @@ async function saveSplit() {
   }
 }
 
+/*
+ * #632: every event reads as words. Unknown keys fall back to sentence case
+ * ("project-updated" -> "Project updated"), never the raw key.
+ */
 function humaniseEventType(eventType: string): string {
   switch (eventType) {
     case 'allocation-created':
-      return 'Allocation created'
+      return 'Budget created'
     case 'allocation-updated':
       return 'Budget updated'
     case 'allocation-topup-added':
       return 'Top-up added'
-    default:
-      return eventType
+    case 'project-updated':
+      return 'Project updated'
+    case 'project-member-added':
+    case 'project-member-removed':
+    case 'project-member-role-changed':
+    case 'project-manager-granted':
+    case 'project-manager-revoked':
+      return 'Members changed'
+    case 'allocation-split-set':
+      return 'Developer split set'
+    default: {
+      const words = eventType.replace(/[-_]+/g, ' ').trim()
+      return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Change'
+    }
   }
 }
 </script>
@@ -440,12 +469,16 @@ function humaniseEventType(eventType: string): string {
 <template>
   <div v-if="!pending && data" class="max-w-[1440px] mx-auto px-10 py-8 pb-20">
     <UiPageHead
-      eyebrow="Allocation editor"
-      :title="data.focused.project_display_name ?? data.focused.project_code ?? 'Allocation'"
-      :sub="`${data.focused.region_code ?? '—'} · ${data.focused.cou_display_name ?? data.focused.cou_code ?? '—'}`"
+      eyebrow="Budget editor"
+      :title="data.focused.project_display_name ?? data.focused.project_code ?? 'Budget'"
+      :sub="`${regionWords(data.focused)} · ${data.focused.cou_display_name ?? data.focused.cou_code ?? '—'}`"
     >
       <template #actions>
-        <UiBadge kind="rag-green">Onboarded</UiBadge>
+        <UiBadge
+          v-if="projectState(data.focused).badge"
+          :kind="projectState(data.focused).badge!.kind"
+          data-testid="alloc-project-state"
+        >{{ projectState(data.focused).badge!.label }}</UiBadge>
         <NuxtLink to="/allocations">
           <UiButton kind="secondary" size="sm">Cancel</UiButton>
         </NuxtLink>
@@ -453,7 +486,7 @@ function humaniseEventType(eventType: string): string {
           kind="primary"
           size="sm"
           :disabled="!canSave"
-          :title="!canSave && !saving ? 'Fix the form first — budget must be positive and From must precede To.' : undefined"
+          :title="!canSave && !saving ? 'Fix the form first: the budget must be positive and From must come before Until.' : undefined"
           data-testid="alloc-save"
           @click="save"
         >
@@ -475,7 +508,7 @@ function humaniseEventType(eventType: string): string {
       class="mb-5 px-4 py-3 rounded-md bg-brand-hunger-sheer border border-brand-hunger/40 text-sm text-brand-heart"
       data-testid="save-error"
     >
-      Save failed — {{ saveError }}
+      Save failed: {{ saveError }}
     </div>
 
     <div class="grid grid-cols-1 lg:grid-cols-[1.6fr_1fr] gap-6">
@@ -487,7 +520,7 @@ function humaniseEventType(eventType: string): string {
         </UiCard>
 
         <UiCard>
-          <div class="text-sm font-bold text-carbon mb-3">Budget and effective period</div>
+          <div class="text-sm font-bold text-carbon mb-3">Budget and period</div>
           <div class="grid grid-cols-3 gap-4">
             <label class="text-xs">
               <span class="block text-carbon-3 font-bold uppercase tracking-[1px] mb-1">
@@ -511,7 +544,7 @@ function humaniseEventType(eventType: string): string {
               >
             </label>
             <label class="text-xs">
-              <span class="block text-carbon-3 font-bold uppercase tracking-[1px] mb-1">To</span>
+              <span class="block text-carbon-3 font-bold uppercase tracking-[1px] mb-1">Until (UTC, not included)</span>
               <input
                 v-model="toIso"
                 type="date"
@@ -592,7 +625,7 @@ function humaniseEventType(eventType: string): string {
             {{ splitError }}
           </div>
           <div v-if="data.devs.length === 0" class="text-xs text-carbon-3 italic">
-            No developers assigned yet — add some above to set per-developer caps.
+            No developers assigned yet. Add some above to set per-developer caps.
           </div>
           <div v-else class="space-y-2">
             <div
@@ -722,15 +755,15 @@ function humaniseEventType(eventType: string): string {
             </div>
             <div class="flex justify-between">
               <dt class="text-carbon-3">Region</dt>
-              <dd class="text-carbon">{{ data.focused.region_code ?? '—' }}</dd>
+              <dd class="text-carbon" data-testid="alloc-region">{{ regionWords(data.focused) }}</dd>
             </div>
             <div class="flex justify-between">
               <dt class="text-carbon-3">Business Unit</dt>
               <dd class="text-carbon">{{ data.focused.cou_display_name ?? '—' }}</dd>
             </div>
             <div class="flex justify-between">
-              <dt class="text-carbon-3">Onboarded</dt>
-              <dd><UiBadge kind="rag-green">Onboarded</UiBadge></dd>
+              <dt class="text-carbon-3">Status</dt>
+              <dd class="text-carbon" data-testid="alloc-project-status">{{ projectState(data.focused).status }}</dd>
             </div>
             <div class="flex justify-between">
               <dt class="text-carbon-3">Assigned devs</dt>
@@ -747,9 +780,9 @@ function humaniseEventType(eventType: string): string {
             No audit-trail entries yet.
           </div>
           <ul v-else class="space-y-3 text-xs">
-            <li v-for="e in data.audit" :key="e.id" class="grid grid-cols-[90px_1fr] gap-3">
-              <span class="text-carbon-3 font-mono">
-                {{ new Date(e.ts_recorded).toLocaleDateString(undefined, { month: 'short', day: '2-digit' }) }}
+            <li v-for="e in data.audit" :key="e.id" class="grid grid-cols-[130px_1fr] gap-3">
+              <span class="text-carbon-3" data-testid="audit-when">
+                {{ fmtInstant(e.ts_recorded) }}
               </span>
               <div>
                 <div class="text-carbon font-semibold">{{ humaniseEventType(e.event_type) }}</div>
@@ -762,7 +795,7 @@ function humaniseEventType(eventType: string): string {
     </div>
   </div>
   <div v-else-if="pending" class="max-w-[1440px] mx-auto px-10 py-16 text-center text-carbon-3 text-sm" role="status">
-    Loading allocation…
+    Loading budget…
   </div>
   <div v-else-if="loadState === 'forbidden' || loadState === 'refused'" class="max-w-[1440px] mx-auto px-10 py-16 text-center" data-testid="alloc-refused" role="alert">
     <div class="text-lg font-bold text-carbon">
@@ -775,7 +808,7 @@ function humaniseEventType(eventType: string): string {
       <template v-else>Reason given: {{ refusedDetail }}.</template>
     </p>
     <NuxtLink to="/allocations" class="inline-block mt-4 text-sm font-bold text-brand-harmony hover:underline">
-      ← Back to allocations
+      ← Back to project budgets
     </NuxtLink>
   </div>
   <div v-else-if="loadState === 'failed'" class="max-w-[1440px] mx-auto px-10 py-16 text-center" data-testid="alloc-failed" role="alert">
@@ -789,12 +822,12 @@ function humaniseEventType(eventType: string): string {
     </UiButton>
   </div>
   <div v-else class="max-w-[1440px] mx-auto px-10 py-16 text-center" data-testid="alloc-not-found">
-    <div class="text-lg font-bold text-carbon">Allocation not found.</div>
+    <div class="text-lg font-bold text-carbon">Budget not found.</div>
     <p class="text-sm text-carbon-2 mt-2">
       It may have been removed or you don't have permission to view it.
     </p>
     <NuxtLink to="/allocations" class="inline-block mt-4 text-sm font-bold text-brand-harmony hover:underline">
-      ← Back to allocations
+      ← Back to project budgets
     </NuxtLink>
   </div>
 </template>

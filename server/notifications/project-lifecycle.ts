@@ -77,7 +77,8 @@ export async function notifyProjectEndingSoon(
   const name = p?.name ?? 'A project you work on'
   const dispatched = await dispatchInbox(db, {
     category: 'project-ending-soon',
-    subject: `${name} ends in ${opts.daysRemaining} day${opts.daysRemaining === 1 ? '' : 's'} — re-tag soon`,
+    // #634: plain words, no dash.
+    subject: `${name} ends in ${opts.daysRemaining} day${opts.daysRemaining === 1 ? '' : 's'}. Move your sessions to another project soon.`,
     body: {
       project: p?.code,
       projectId: opts.projectId,
@@ -105,7 +106,7 @@ export async function notifyProjectEndedRetag(
   const name = p?.name ?? 'A project'
   const dispatched = await dispatchInbox(db, {
     category: 'project-ended-retag',
-    subject: `${name} has ended — re-tag your recent spend`,
+    subject: `${name} has ended. Move your recent spend to another project.`,
     body: { project: p?.code, projectId: opts.projectId, reason: 'ended-spill' },
     relatedEntityKind: 'project',
     relatedEntityId: opts.projectId,

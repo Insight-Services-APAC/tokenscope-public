@@ -17,6 +17,7 @@ import { isPlatformAdmin } from '../../../../shared/auth/roles'
 import { withRequestRls } from '../../../db/request-rls'
 import { requireUuidParam } from '../../../utils/require-uuid-param'
 import { parseTstzrangeText } from '../../../utils/allocation-validation'
+import { endedProjectExpr } from '../../../db/project-predicates'
 
 interface FocusedRow extends Record<string, unknown> {
   id: string
@@ -32,6 +33,9 @@ interface FocusedRow extends Record<string, unknown> {
   project_display_name: string | null
   allocation_mode: string | null
   region_code: string | null
+  region_name: string | null
+  project_end_date: string | null
+  project_ended: boolean
   cou_code: string | null
   cou_display_name: string | null
 }
@@ -105,6 +109,9 @@ export default defineEventHandler(async (event) => {
                p.display_name AS project_display_name,
                p.allocation_mode AS allocation_mode,
                r.code AS region_code,
+               r.display_name AS region_name,
+               to_char(p.end_date AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS project_end_date,
+               ${endedProjectExpr('p')} AS project_ended,
                cou.code AS cou_code,
                cou.display_name AS cou_display_name
         FROM allocation a
@@ -267,12 +274,22 @@ export default defineEventHandler(async (event) => {
         project_display_name: focusedRow.project_display_name,
         allocation_mode: focusedRow.allocation_mode,
         region_code: focusedRow.region_code,
+        // #640: the editor shows the region's name and the project's real
+        // lifecycle state (ended, ending on a date, or open-ended).
+        region_name: focusedRow.region_name,
+        project_end_date: focusedRow.project_end_date,
+        project_ended: focusedRow.project_ended === true,
         cou_code: focusedRow.cou_code,
         cou_display_name: focusedRow.cou_display_name,
       },
       siblings: [...siblings],
       devs: [...devs],
-      topups: [...topups],
+      // #633: each top-up's period parsed here too, so the log shows UTC days
+      // without the browser reading the range text.
+      topups: [...topups].map((tu) => {
+        const b = parseTstzrangeText(tu.effective)
+        return { ...tu, effective_from: b.from, effective_to: b.to }
+      }),
       per_dev_caps: [...perDevCaps],
       audit: [...audit],
     }

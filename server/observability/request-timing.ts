@@ -39,12 +39,35 @@ export interface RequestTimingStore {
   stmts: number
   /** performance.now() at store creation; `app;dur` measures from here. */
   startedAt: number
+  /**
+   * Named phases a handler marked with {@link timePhase} (#611), in order:
+   * wall time and the statements settled inside each. Written as
+   * `ph-<name>;dur=<ms>;desc="<stmts>"`. Never any SQL text.
+   */
+  phases?: { name: string; ms: number; stmts: number }[]
 }
 
 export const requestTimingStorage = new AsyncLocalStorage<RequestTimingStore>()
 
 export function createRequestTimingStore(): RequestTimingStore {
   return { dbMs: 0, stmts: 0, startedAt: performance.now() }
+}
+
+/**
+ * Time one named phase of a request for Server-Timing (#611). With no store
+ * (tests, workers, NUXT_SERVER_TIMING=off) it is a plain call. A phase name is
+ * a fixed label from the caller's code, never data.
+ */
+export async function timePhase<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const store = requestTimingStorage.getStore()
+  if (!store) return fn()
+  const t0 = performance.now()
+  const s0 = store.stmts
+  try {
+    return await fn()
+  } finally {
+    ;(store.phases ??= []).push({ name, ms: performance.now() - t0, stmts: store.stmts - s0 })
+  }
 }
 
 type AnyFn = (...args: unknown[]) => unknown
@@ -213,4 +236,7 @@ export function writeServerTiming(event: H3Event): void {
     event,
     `db;dur=${store.dbMs.toFixed(1)}, stmts;desc="${store.stmts}", app;dur=${appMs.toFixed(1)}`,
   )
+  for (const p of store.phases ?? []) {
+    appendServerTiming(event, `ph-${p.name};dur=${p.ms.toFixed(1)};desc="${p.stmts}"`)
+  }
 }

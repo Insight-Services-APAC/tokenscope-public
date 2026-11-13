@@ -22,6 +22,7 @@ import type { UnhomedCause } from '#shared/usage/unhomed-causes'
 // The role vocabulary, shared with the report-visibility policy pane rather than
 // re-typed here — see PERSONA_LABEL below.
 import { REPORT_VISIBILITY_PERSONAS } from '#shared/auth/report-visibility'
+import { fmtInstant } from '../../composables/useFormat'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 /**
@@ -314,8 +315,7 @@ const queuesUnavailable = computed(() =>
 )
 
 function fmtTs(v: string | null): string {
-  if (!v) return '—'
-  return new Date(v).toLocaleString()
+  return fmtInstant(v)
 }
 
 function fmtAge(min: number | null): string {

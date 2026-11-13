@@ -20,6 +20,8 @@
 
 import AdminResultToast from '../../../components/admin/AdminResultToast.vue'
 import { useResultToast } from '../../../composables/useResultToast'
+import { fmtInstant } from '../../../composables/useFormat'
+import { formatMonthWords } from '#shared/format/month-words'
 import { computed, ref, watch, type ComponentPublicInstance } from 'vue'
 import { consola } from 'consola'
 import AdminTabs, { type AdminTab } from '../../../components/admin/AdminTabs.vue'
@@ -476,9 +478,8 @@ const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD
 const spendWindowLabel = computed(() => {
   const start = teammates.value?.spend_window?.start
   if (!start) return 'Claude spend'
-  return `Claude spend · ${new Date(start).toLocaleDateString(undefined, { month: 'short', year: 'numeric', timeZone: 'UTC' })}`
+  return `Claude spend · ${formatMonthWords('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' }, new Date(start))}`
 })
-const shortDate = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
 const teammateColumns = computed(() => [
   { key: 'display_name', label: 'Name', sortable: true },
   { key: 'email', label: 'Email', sortable: true },
@@ -495,8 +496,9 @@ const teammateColumns = computed(() => [
     render: (row: Record<string, unknown>) => {
       const at = row.directory_captured_at
       if (!at) return 'never'
-      const d = new Date(String(at))
-      return Number.isNaN(d.getTime()) ? 'never' : shortDate.format(d)
+      // An instant (when the directory was read): the viewer's zone, #633.
+      const shown = fmtInstant(String(at))
+      return shown === '—' ? 'never' : shown
     },
   },
   {
@@ -1003,7 +1005,7 @@ async function refreshAfterPlacement() {
              the money is Claude's only. -->
         <p class="w-full text-[11px] text-carbon-3 m-0 leading-relaxed" data-testid="teammates-column-caveats">
           Department and Company are a <strong>snapshot</strong> taken the last time a
-          placement run looked this person up — the “Directory as of” column dates it.
+          placement run looked this person up; the “Directory as of” column dates it.
           Spend is <strong>Claude only</strong>: Copilot is billed pooled per Business Unit,
           so it has no per-teammate figure and a Copilot-only teammate reads $0.00.
         </p>

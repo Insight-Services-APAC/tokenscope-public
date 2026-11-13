@@ -21,6 +21,7 @@ import {
   wrapAppHandlerWithTiming,
   writeServerTiming,
   appendServerTiming,
+  timePhase,
 } from '../../../server/observability/request-timing'
 import { withReportCache, resetReportCache } from '../../../server/reporting/report-cache'
 
@@ -152,6 +153,39 @@ describe('writeServerTiming — the beforeResponse write', () => {
     store.stmts = 1
     requestTimingStorage.run(store, () => writeServerTiming(event))
     expect(timing(headers)).toMatch(/^cache;desc=hit, db;dur=1\.[01], stmts;desc="1", app;dur=/)
+  })
+})
+
+describe('timePhase: named phases ride Server-Timing (#611)', () => {
+  it('records each phase in order, with the statements settled inside it', async () => {
+    const { event, headers } = fakeEvent()
+    const store = createRequestTimingStore()
+    await requestTimingStorage.run(store, async () => {
+      await timePhase('auth', async () => {
+        store.stmts += 2
+      })
+      const v = await timePhase('act-rows', async () => {
+        store.stmts += 1
+        return 42
+      })
+      expect(v).toBe(42)
+      writeServerTiming(event)
+    })
+    expect(timing(headers)).toMatch(
+      /^db;dur=0\.0, stmts;desc="3", app;dur=\d+\.\d, ph-auth;dur=\d+\.\d;desc="2", ph-act-rows;dur=\d+\.\d;desc="1"$/,
+    )
+  })
+
+  it('records a phase that throws, and rethrows', async () => {
+    const store = createRequestTimingStore()
+    await requestTimingStorage.run(store, async () => {
+      await expect(timePhase('act-rank', async () => { throw new Error('boom') })).rejects.toThrow('boom')
+    })
+    expect(store.phases?.map((p) => p.name)).toEqual(['act-rank'])
+  })
+
+  it('with no store it is a plain call and records nothing', async () => {
+    expect(await timePhase('auth', async () => 'ok')).toBe('ok')
   })
 })
 

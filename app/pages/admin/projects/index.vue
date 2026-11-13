@@ -291,8 +291,16 @@ async function remove(row: ProjectRow) {
       title="Projects"
       sub="Projects in this region. Create projects, edit budgets and owners, manage members."
     >
-      <template v-if="isOrgWide" #actions>
-        <div>
+      <template #actions>
+        <!-- #632: the way in to the project budgets list. -->
+        <NuxtLink
+          to="/allocations"
+          class="text-sm font-bold text-brand-harmony hover:underline whitespace-nowrap self-center"
+          data-testid="admin-projects-budgets-link"
+        >
+          Project budgets →
+        </NuxtLink>
+        <div v-if="isOrgWide">
           <select
             v-model="viewRegionId"
             :disabled="!regionsData"

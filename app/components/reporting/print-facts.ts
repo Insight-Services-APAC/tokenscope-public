@@ -17,6 +17,7 @@
  */
 import { inject, onBeforeUnmount, provide, shallowRef, watchEffect, type InjectionKey, type Ref } from 'vue'
 import { settlingPill } from '#shared/reports/settling-words'
+import { monthShort } from '#shared/format/month-words'
 import { vendorLabel, type SettlingState } from '#shared/reports/types'
 
 export type PrintLens = 'usage' | 'chargeback'
@@ -78,7 +79,6 @@ export function billMonthsWindow(meta: { month: string; range?: { from: string; 
   }
 }
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 /**
  * The period the way the rest of the app writes dates, from two inclusive UTC
@@ -89,7 +89,7 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 export function printPeriod(from: string, to: string): string {
   const parse = (d: string) => {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d)
-    return m ? { y: m[1]!, mo: MONTHS[Number(m[2]) - 1] ?? m[2]!, d: String(Number(m[3])) } : null
+    return m ? { y: m[1]!, mo: monthShort(Number(m[2])) ?? m[2]!, d: String(Number(m[3])) } : null
   }
   const a = parse(from)
   const b = parse(to)

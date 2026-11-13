@@ -28,6 +28,7 @@ import BackfillDialog, {
 import { apiErrorDetail } from '../../composables/useApiError'
 import { useModalA11y } from '../../composables/useModalA11y'
 import { UI_TRIGGERABLE_WORKER_NAMES, UI_MONEY_WORKER_NAMES } from '#shared/workers/ui-triggerable'
+import { fmtInstant } from '../../composables/useFormat'
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 // No `await ensure()`: the `admin` middleware guarantees the session before
@@ -79,7 +80,7 @@ watch(
 
 // ---- formatting helpers ----
 function fmtTs(v: string | null): string {
-  return v ? new Date(v).toLocaleString() : '—'
+  return fmtInstant(v)
 }
 function fmtDur(ms: number | null): string {
   if (ms == null) return '—'

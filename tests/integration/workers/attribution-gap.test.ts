@@ -223,7 +223,7 @@ describe('runAttributionGap — alerting lifecycle', () => {
     expect(String(item.body.hint)).toMatch(/Attribution gaps/)
     // The counter-intuitive fact that caused the outage must survive in the alert.
     expect(String(item.body.hint)).toMatch(/204/)
-    expect(item.subject).toMatch(/not being attributed/)
+    expect(item.subject).toMatch(/^A device is sending usage that is not reaching reports \(\d+ days? behind\)$/)
     // The two timestamps that let an operator bound the loss window without
     // opening a console, plus when we noticed (distinct from when it started).
     expect(String(item.body.last_bearer_at)).toMatch(/^\d{4}-\d{2}-\d{2}/)

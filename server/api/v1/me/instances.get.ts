@@ -49,7 +49,7 @@ export default defineEventHandler(async (event) => {
         ia.raw_project_code                                         AS raw_project_code,
         ia.ts_start::text                                           AS ts_start,
         ia.ts_actual_end::text                                      AS ts_actual_end,
-        ${instanceMetricColumns(window.monthStartIso)}
+        ${instanceMetricColumns(window)}
       FROM instance_attestation ia
       WHERE ia.teammate_id = ${session.teammateId}::uuid
       ORDER BY ia.ts_start DESC

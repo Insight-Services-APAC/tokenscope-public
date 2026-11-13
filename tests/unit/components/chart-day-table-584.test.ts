@@ -62,6 +62,16 @@ describe('ChartsStackedBars: Chart / Table (#584)', () => {
     const partial = w.get(`[data-testid="chart-day-row-${TODAY}"]`)
     expect(partial.text()).toContain('still filling')
     expect(w.findAll('[data-testid="chart-day-partial"]')).toHaveLength(1)
+    // #610: a day reads like the chart's axis, "7 Nov", not the ISO date.
+    expect(w.findAll('tbody th').map((h) => h.text())).toEqual(['7 Nov', '8 Nov', '9 Nov', '10 Nov (still filling)'])
+  })
+
+  it('a table that spans a new year carries the year on every day (#610)', async () => {
+    const w = mount(ChartsTrendArea, {
+      props: { series: [{ day: '2026-12-31', cost_usd: '1.00' }], windowDays: 2, endDay: '2027-01-01', partialDay: null, offerTable: true },
+    })
+    await showTable(w)
+    expect(w.findAll('tbody th').map((h) => h.text())).toEqual(['31 Dec 2026', '1 Jan 2027'])
   })
 
   it('one column per band with a value, and each day total matches the bar', async () => {

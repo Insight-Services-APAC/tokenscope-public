@@ -282,7 +282,7 @@ function detectCacheWriteChurn(cells: InsightCell[]): Finding | null {
       t.cacheWrite / 1_000_000,
     )}M tokens to cache but read back only ${Math.round(
       t.cacheRead / 1_000_000,
-    )}M over the last 28 days — paying to cache context that is rarely re-used. Carrying context across unrelated tasks is the usual cause.`,
+    )}M over the last 28 days, so you pay to cache context that is rarely re-used. Carrying context across unrelated tasks is the usual cause.`,
     evidence: {
       cache_write_tokens: t.cacheWrite,
       cache_read_tokens: t.cacheRead,
@@ -355,7 +355,7 @@ function detectFrontierOverreliance(
     group: 'tool-mastery',
     headline: `${Math.round(
       share * 100,
-    )}% of your classified spend runs on frontier-tier models. Many routine tasks tolerate a workhorse-tier model at a fraction of the token cost — worth a try where the task allows.`,
+    )}% of your classified spend runs on frontier-tier models. Many routine tasks work well on a workhorse-tier model at a fraction of the token cost: worth a try where the task allows.`,
     evidence: {
       frontier_spend_usd: usd(frontier),
       classified_spend_usd: usd(classified),
@@ -389,7 +389,7 @@ function detectModelConcentration(cells: InsightCell[]): Finding | null {
     group: 'tool-mastery',
     headline: `${Math.round(share * 100)}% of your spend goes to a single model (${topModel}) across only ${byModel.size} distinct model${
       byModel.size === 1 ? '' : 's'
-    }. Different tasks benefit from different models — the playbook's routing lever has examples.`,
+    }. Different tasks benefit from different models; the playbook's routing lever has examples.`,
     evidence: {
       top_model: topModel,
       top_share: Number(share.toFixed(4)),
@@ -507,7 +507,7 @@ function detectToolSurfaceBloat(cells: SignalCell[]): Finding | null {
     id: 'tool-surface-bloat',
     severity: 'low',
     group: 'tool-mastery',
-    headline: `Your sessions carry a large tool surface — on average ${parts.join(
+    headline: `Your sessions carry a large tool surface: on average ${parts.join(
       ' and ',
     )} are advertised to the model. Every tool's schema is re-sent as input on each request; curating to the handful you actually use trims that overhead on every turn.`,
     evidence: {
@@ -540,7 +540,7 @@ function detectContextSaturation(cells: SignalCell[]): Finding | null {
     id: 'context-saturation',
     severity: 'low',
     group: 'context-management',
-    headline: `Your sessions regularly run near the context ceiling — peaking at ${maxPct}% of the window with a ${Math.round(
+    headline: `Your sessions regularly run near the context ceiling, peaking at ${maxPct}% of the window with a ${Math.round(
       avgPct,
     )}% average. Compacting or clearing before it fills avoids paying to re-read a bloated context (and the auto-compaction churn that follows).`,
     evidence: {
@@ -567,7 +567,7 @@ function detectTurnChurn(cells: SignalCell[]): Finding | null {
       turns.avg,
     )} iterations (peaking at ${Math.round(
       turns.max,
-    )}). Tighter, more specific prompts — or planning the change before executing — reach the same outcome in fewer paid round-trips.`,
+    )}). Tighter, more specific prompts, or planning the change before executing, reach the same outcome in fewer paid round-trips.`,
     evidence: {
       avg_turn_count: Number(turns.avg.toFixed(1)),
       max_turn_count: turns.max,

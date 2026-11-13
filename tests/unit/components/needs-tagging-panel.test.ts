@@ -268,6 +268,9 @@ describe('NeedsTaggingPanel — dismissed drawer', () => {
     await toggle.trigger('click')
     expect(w.find('[data-testid="dismissed-section"]').text()).toContain('stays unallocated on your Business Unit')
     expect(w.find('[data-testid="dismissed-conv-old"]').exists()).toBe(true)
+    // A dismissed provider-recorded day reads "1 Jul", never ISO (#617).
+    expect(w.find('[data-testid="dismissed-day-day-9"]').text()).toContain('1 Jul · ')
+    expect(w.find('[data-testid="dismissed-day-day-9"]').text()).not.toContain('2026-07-01')
   })
 
   it('restores one item, and all of them', async () => {
@@ -387,13 +390,35 @@ describe('HomeNeedsTaggingPanel — when and where a session ran (#577)', () => 
     expect(w.find('[data-testid="untagged-device-conv-night"]').text()).toContain('Claude Code · 9e8d7c6b')
   })
 
-  it('a provider-recorded day row is unchanged: a UTC date, never a time', async () => {
+  it('a provider-recorded day row reads "24 Jul" (#610): the UTC day, never converted, never a time', async () => {
     inZone(BNE)
     const w = mountPanel({ sessions: [named] })
     await flushPromises()
-    const text = w.find('[data-testid="select-day-day-1"]').element.parentElement!.textContent ?? ''
-    expect(text).toContain('2026-07-24')
-    expect(text).not.toMatch(/2026-07-24[^\n]*\d{2}:\d{2}/)
+    const box = w.find('[data-testid="select-day-day-1"]')
+    const text = box.element.parentElement!.textContent ?? ''
+    expect(text).toContain('24 Jul · ')
+    expect(text).not.toContain('2026-07-24')
+    expect(text).not.toMatch(/\d{2}:\d{2}/)
+    expect(box.attributes('aria-label')).toBe('Select 24 Jul')
+  })
+
+  it('a provider-recorded day carries its year while the server clock has not landed (#610)', async () => {
+    inZone(BNE)
+    stubServerClock(null)
+    const w = mountPanel({ sessions: [named] })
+    await flushPromises()
+    expect(w.find('[data-testid="select-day-day-1"]').attributes('aria-label')).toBe('Select 24 Jul 2026')
+  })
+
+  it('a provider-recorded day from an earlier year carries its year (#610)', async () => {
+    inZone(BNE)
+    stubServerClock('2027-01-03T12:00:00Z')
+    const w = mountPanel({ sessions: [named] })
+    await flushPromises()
+    await w.find('[data-testid="days-earlier-toggle"]').trigger('click')
+    const box = w.find('[data-testid="select-day-day-1"]')
+    expect(box.element.parentElement!.textContent).toContain('24 Jul 2026 · ')
+    expect(box.attributes('aria-label')).toBe('Select 24 Jul 2026')
   })
 })
 

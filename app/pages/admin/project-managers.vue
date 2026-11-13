@@ -9,6 +9,7 @@ import { ref } from 'vue'
 import TeammatePicker, { type PickedTeammate } from '../../components/projects/TeammatePicker.vue'
 import { useAdminAccess } from '../../composables/useAdminAccess'
 import { apiErrorDetail } from '../../composables/useApiError'
+import { fmtInstant } from '../../composables/useFormat'
 
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
@@ -134,7 +135,7 @@ async function revoke(g: Grant) {
             </div>
             <div class="text-[11px] text-carbon-3">
               {{ g.email }}<template v-if="g.region_code"> · {{ g.region_code }}</template>
-              · added {{ new Date(g.granted_at).toLocaleDateString() }}<template v-if="g.granted_by_name"> by {{ g.granted_by_name }}</template>
+              · added {{ fmtInstant(g.granted_at) }}<template v-if="g.granted_by_name"> by {{ g.granted_by_name }}</template>
               <template v-if="g.note"> · {{ g.note }}</template>
             </div>
           </div>

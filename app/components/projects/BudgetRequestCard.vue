@@ -9,6 +9,7 @@
 import { computed, ref } from 'vue'
 import type { BudgetRequestRow } from '#shared/schemas/project-budget'
 import { isConfirmedRejection, mutationErrorDetail } from '../../composables/useApiError'
+import { fmtInstant } from '../../composables/useFormat'
 
 const props = defineProps<{
   projectId: string
@@ -121,7 +122,7 @@ const STATUS_WORD: Record<string, string> = {
             v-if="r.status === 'approved' && r.approved_amount_usd && r.approved_amount_usd !== r.amount_usd"
           > ({{ fmtUsd(r.approved_amount_usd) }} added)</template>
           <template v-if="r.decision_note"> · “{{ r.decision_note }}”</template>
-          <span class="text-carbon-3"> · asked {{ new Date(r.created_at).toLocaleDateString() }}</span>
+          <span class="text-carbon-3"> · asked {{ fmtInstant(r.created_at) }}</span>
         </span>
         <UiButton
           v-if="r.status === 'pending'"

@@ -24,6 +24,7 @@ import { cutoverStatusLabel, type CutoverStatusKey } from '#shared/governance/cu
 import { toolLabel } from '#shared/usage/surface'
 import { unmatchedSourceLabel } from '#shared/governance/unmatched-source'
 import { focusIfLost } from '../../../utils/focus-fallback'
+import { fmtInstant } from '../../../composables/useFormat'
 
 definePageMeta({ layout: 'admin', middleware: 'admin' })
 
@@ -599,11 +600,11 @@ async function triggerRepull() {
              no figures. Rendering its zero defaults as "attributed $0.00" would
              be a fabricated number rather than a missing one. -->
         <p v-if="period.snapshotVersion === 0">
-          Recorded {{ new Date(period.closedAt).toLocaleString() }}, without figures (recorded
+          Recorded {{ fmtInstant(period.closedAt) }}, without figures (recorded
           before TokenScope kept them).
         </p>
         <p v-else>
-          Recorded {{ new Date(period.closedAt).toLocaleString() }}:
+          Recorded {{ fmtInstant(period.closedAt) }}:
           attributed {{ money(period.snapshot.attributedUsd) }} ·
           chargeable {{ money(period.snapshot.chargeableUsd) }}
         </p>

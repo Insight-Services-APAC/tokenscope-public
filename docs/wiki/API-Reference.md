@@ -189,7 +189,7 @@ refusal, which does not say which.
 
 | Method | Path | Auth gate | Purpose |
 |---|---|---|---|
-| GET | `/api/v1/allocations` | `manager`/`admin`/`platform-admin` | List allocations in the caller's scope. |
+| GET | `/api/v1/allocations` | `manager`/`admin`/`platform-admin` | List budget lines in the caller's scope, paged by whole projects (`limit`/`offset` count projects; `total` projects, `total_lines` lines). Ordered by project name, newest period first. Each line carries `effective_from`/`effective_to`, `is_current` and the project's `project_budget_now` (the budget in force, as the project page shows it). |
 | POST | `/api/v1/allocations` | org role in scope, or a current PM of `project_id`, + CSRF | Create the baseline budget pool (first allocation flips the project `is_onboarded`); overlapping baseline period returns a clean 409. Any other caller gets 403. |
 | GET | `/api/v1/allocations/{id}` | org role in scope, or a current PM of the allocation's project | Focused row plus siblings, project metadata, assigned devs, top-up history, and last-5 audit trail. Siblings are the project's other pool rows (no `teammate_id`) whose period overlaps the focused row's. Out of scope reads as 404. |
 | PATCH | `/api/v1/allocations/{id}` | org role in scope, or a current PM of the allocation's project, + CSRF | Edit a pool or top-up row (writes row plus audit event). A per-developer cap row is refused (400): caps are written only through `/split`. Changing a pool baseline's period moves the caps that share its old period to the new one. Out of scope reads as 404. |

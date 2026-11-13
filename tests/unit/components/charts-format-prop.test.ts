@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 /*
  * Additive `format` prop on ChartsStackedBars / ChartsTrendArea. The contract:
- * WITHOUT `format` the original `$X.XX` output is byte-identical (no existing
- * call site changes); WITH `format` the `$`-hardwire is retired.
+ * WITHOUT `format` a point reads as the app's money format ("$12.34",
+ * "$1,339.57" since #617); WITH `format` the `$`-hardwire is retired.
  */
 import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
@@ -27,6 +27,13 @@ describe('ChartsStackedBars format prop', () => {
     expect(w.find('title').text()).toContain(': $12.34')
   })
 
+  it('the default groups thousands like the rest of the page: $1,339.57 (#617)', () => {
+    const w = mount(ChartsStackedBars, {
+      props: { rows: [{ day: today, key: 'opus', value: 1339.57 }], windowDays: 7, endDay: today },
+    })
+    expect(w.find('title').text()).toContain(': $1,339.57')
+  })
+
   it('uses a custom formatter when provided', () => {
     const w = mount(ChartsStackedBars, {
       props: {
@@ -47,7 +54,8 @@ describe('ChartsTrendArea format prop', () => {
     const w = mount(ChartsTrendArea, {
       props: { series: [{ day: today, cost_usd: '12.34' }], windowDays: 7, endDay: today },
     })
-    expect(w.find('title').text()).toBe(`${today}: $12.34`)
+    // The hover day reads "4 Aug", like the Table view (#617).
+    expect(w.find('title').text()).toBe('4 Aug: $12.34')
     // Axis ticks keep the `$` prefix by default.
     expect(w.findAll('text').some((t) => t.text().includes('$'))).toBe(true)
   })
@@ -61,6 +69,6 @@ describe('ChartsTrendArea format prop', () => {
         format: (v: number) => `${v.toFixed(0)} cr`,
       },
     })
-    expect(w.find('title').text()).toBe(`${today}: 12 cr`)
+    expect(w.find('title').text()).toBe('4 Aug: 12 cr')
   })
 })

@@ -1,0 +1,17 @@
+-- migrate: concurrent-index-per-partition attribution_record
+-- 0173: (instance_id, ts_event) INCLUDE (cost_usd) on every partition (#619, #611).
+--
+-- Home's devices read (server/utils/instance-projection.ts) asks, per device,
+-- for its latest row (MAX ts_event) and this month's spend (SUM cost_usd since
+-- the month began). The only index leading with instance_id has no ts_event, so
+-- each answer reads every row the device wrote in the window, from the heap.
+-- With this index the latest row is one index probe and the month's spend is
+-- an index-only range scan. PO decision on #611: build it, concurrently and per
+-- monthly partition, after ANALYZE alone (0172) left /me/instances at 800 to
+-- 1060 ms on dev.
+--
+-- Not a transaction: the runner builds it CONCURRENTLY on each partition in
+-- turn (drizzle/migrate.ts), so inserts carry on throughout. 0174 creates the
+-- parent index and attaches these, which makes it valid and gives every
+-- partition created later the index automatically.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS {partition}_instance_ts ON {partition} (instance_id, ts_event) INCLUDE (cost_usd);

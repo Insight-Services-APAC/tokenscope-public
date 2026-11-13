@@ -33,7 +33,7 @@ const detail = computed(() => {
     data-testid="fetch-error-banner"
   >
     <span>
-      Couldn't load {{ label ?? 'this data' }} — the figures shown may be missing or stale.
+      Couldn't load {{ label ?? 'this data' }}. The figures shown may be missing or stale.
       <span v-if="detail" class="text-brand-heart">({{ detail }})</span>
     </span>
     <UiButton kind="secondary" size="sm" data-testid="fetch-error-retry" @click="emit('retry')">

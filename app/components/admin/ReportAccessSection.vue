@@ -42,6 +42,7 @@ import {
   REPORT_ACCESS_PERMISSION_DESCRIPTIONS,
   type ReportAccessPermission,
 } from '#shared/auth/report-visibility'
+import { fmtInstant } from '../../composables/useFormat'
 
 export interface ReportAccessGrantRow extends Record<string, unknown> {
   id: string
@@ -92,7 +93,7 @@ const columns: AdminColumn[] = [
 ]
 
 function fmtTs(iso: string): string {
-  return new Date(iso).toLocaleString()
+  return fmtInstant(iso)
 }
 /** `asRow(row).expires_at` calls `asRow` fresh each read, so TS can't narrow
  *  the nullable across a ternary's condition and its true-branch — narrow

@@ -70,6 +70,38 @@ const label = computed(
 const regionCode = computed(() => selected.value?.regionCode ?? null)
 // Counted off the options, never off a grant flag — one control, one rule.
 const showSelector = computed(() => options.value.length > 1)
+
+/*
+ * #635: about 50 units across 4 regions read as one flat list, and "Finance"
+ * in two regions was two identical lines. When the options span more than one
+ * region they are grouped: the reader's own unit first under "Yours", then one
+ * group per region in the server's order (region, then name), headed by the
+ * region's display name. One region: the flat list, as before.
+ */
+interface OptionGroup {
+  id: string
+  label: string
+  options: CostCentreScope['options']
+}
+const groups = computed<OptionGroup[] | null>(() => {
+  const opts = options.value
+  if (new Set(opts.map((o) => o.regionCode)).size <= 1) return null
+  const out: OptionGroup[] = []
+  const owned = opts.filter((o) => o.owned)
+  if (owned.length > 0) out.push({ id: 'yours', label: 'Yours', options: owned })
+  const byRegion = new Map<string, OptionGroup>()
+  for (const o of opts) {
+    if (o.owned) continue
+    let g = byRegion.get(o.regionCode)
+    if (!g) {
+      g = { id: `region-${o.regionCode}`, label: o.regionName ?? o.regionCode.toUpperCase(), options: [] }
+      byRegion.set(o.regionCode, g)
+      out.push(g)
+    }
+    g.options.push(o)
+  }
+  return out
+})
 </script>
 
 <template>
@@ -87,9 +119,16 @@ const showSelector = computed(() => options.value.length > 1)
       :value="selected?.id ?? props.scope?.defaultCcId ?? ''"
       @change="emit('select', ($event.target as HTMLSelectElement).value)"
     >
-      <option v-for="o in options" :key="o.id" :value="o.id">
-        {{ o.displayName }}{{ o.owned ? ' (yours)' : '' }}
-      </option>
+      <template v-if="groups">
+        <optgroup v-for="g in groups" :key="g.id" :label="g.label" :data-testid="`cc-scope-group-${g.id}`">
+          <option v-for="o in g.options" :key="o.id" :value="o.id">{{ o.displayName }}</option>
+        </optgroup>
+      </template>
+      <template v-else>
+        <option v-for="o in options" :key="o.id" :value="o.id">
+          {{ o.displayName }}{{ o.owned ? ' (yours)' : '' }}
+        </option>
+      </template>
     </select>
 
     <!-- ONE OPTION IS NOT A SELECTOR, IT IS A LABEL. -->
